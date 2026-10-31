@@ -165,3 +165,4 @@ def test_a_count_said_in_markdown_is_read() -> None:
     assert explain.counts("I made **12 `tape_page` calls**, one per page.") == [12]
     assert explain.counts("I made **12** tool calls.") == [12]
     assert explain.counts("on October 30, 2 calls") == [2]
+    assert explain.counts("fetched at 21:01:16 UTC\n\nThe tool output said") == []  # a time
