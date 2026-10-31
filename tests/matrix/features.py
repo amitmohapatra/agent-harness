@@ -168,6 +168,23 @@ async def ask(w: World) -> None:
     assert o.answer == "Done. shirt in size L", o.answer
 
 
+async def ask_user_tool(w: World) -> None:
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "2026-11-05"
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("ask_user", {"question": "Which day?", "kind": "date"})]
+    o = (await w.go([ask_user()], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.props == {"kind": "date", "options": []}, asked
+    assert asked.question == "Which day? (a date, YYYY-MM-DD)"  # what plain chat reads
+    assert asked.expects == {"type": "string", "format": "date"}
+    assert o.answer == "Done. 2026-11-05", o.answer
+
+
 async def reject(w: World) -> None:
     d = Desk()
 
@@ -943,6 +960,14 @@ FEATURES: Final[list[Feature]] = [
         "explicit (current().ask in a tool)",
         ask,
         way2=way2.ask,
+    ),
+    Feature(
+        "F36u",
+        "ask_user: the model asks a structured question (a date), the answer is its result",
+        "F36 (backlog: a structured ask_user)",
+        "tools=[ask_user()]",
+        ask_user_tool,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(
         "F04",

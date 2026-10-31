@@ -3,7 +3,10 @@ run, and any client that reconnects to it later.
 
 Every run served here gets a buffer of its translated events, numbered from 0 across all its
 attempts (a resumed run keeps counting), so a client that lost its connection asks for what
-came after the last number it saw. Bounded both ways: a run keeps its last
+came after the last number it saw. An event derived from the one before it (the activity line
+after a tool's result) shares that event's number: the numbers stay those of the harness's
+events, never past their positions in agent-runs' log, so a reconnect that reaches another
+replica repeats events but never skips one. Bounded both ways: a run keeps its last
 :data:`MAX_EVENTS_PER_RUN` events, and past :data:`MAX_RUNS` runs the least recently used
 finished run is forgotten. Publishing is O(1).
 """
@@ -24,20 +27,26 @@ MAX_RUNS: Final = 256
 class RunBuffer:
     """One run's events, and the readers waiting on the next one."""
 
-    __slots__ = ("_changed", "events", "finished", "published", "user")
+    __slots__ = ("_changed", "appended", "events", "finished", "published", "user")
 
     def __init__(self, user: str) -> None:
         self.user = user
-        self.events: deque[AGUIEvent] = deque(maxlen=MAX_EVENTS_PER_RUN)
-        #: how many events were ever published: the next event's number
+        #: the last events, each with its number
+        self.events: deque[tuple[int, AGUIEvent]] = deque(maxlen=MAX_EVENTS_PER_RUN)
+        #: the next event's number (a derived event takes none of its own)
         self.published = 0
+        #: how many events were ever appended, derived ones included
+        self.appended = 0
         self.finished = False
         self._changed = asyncio.Event()
 
-    def publish(self, event: AGUIEvent, *, final: bool = False) -> None:
-        """Append an event (also after the run finished: a late warning is kept)."""
-        self.events.append(event)
-        self.published += 1
+    def publish(self, event: AGUIEvent, *, final: bool = False, derived: bool = False) -> None:
+        """Append an event (also after the run finished: a late warning is kept); a
+        ``derived`` one under the number of the event before it."""
+        number = self.published - 1 if derived else self.published
+        self.events.append((number, event))
+        self.appended += 1
+        self.published += not derived
         self.finished = self.finished or final
         self._changed.set()
         self._changed = asyncio.Event()
@@ -55,12 +64,14 @@ class RunBuffer:
     async def read(self, after: int) -> AsyncIterator[tuple[int, AGUIEvent]]:
         """``(number, event)`` for every event numbered above ``after``, live until the run
         finishes. Events that fell out of the buffer are skipped, not invented."""
-        next_number = after + 1
+        index = 0  # the next event's place among all those ever appended
         while True:
-            oldest = self.published - len(self.events)
-            for number in range(max(next_number, oldest), self.published):
-                yield number, self.events[number - oldest]
-            next_number = max(next_number, self.published)
+            oldest = self.appended - len(self.events)
+            for place in range(max(index, oldest), self.appended):
+                number, event = self.events[place - oldest]
+                if number > after:
+                    yield number, event
+            index = max(index, self.appended)
             if self.finished:
                 return
             await self._changed.wait()
