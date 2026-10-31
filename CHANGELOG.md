@@ -49,7 +49,8 @@ own model work follows the harness's configuration.
   the answer goes back to the server when the run resumes, on both MCP protocol eras
   (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
 - MCP resources: an `mcp(...)` server that has resources gets `<server>-read_resource`, its
-  description the map of what there is (resources and templates, at most 20); it reads one by
+  description the map of what there is (resources and templates, at most 20, with the server's
+  `lastModified`); it reads one by
   its URI (a binary one described) or, given none, lists them all as rows. A large resource is
   kept, paged and queried as any large result (`tools/resources.py`;
   [tools.md](docs/tools.md#a-servers-resources-mcp-resources)).

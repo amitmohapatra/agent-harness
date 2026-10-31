@@ -61,8 +61,8 @@ An `mcp(...)` server that says it has resources (its `resources` capability) and
 one gets one more tool, `<server>-read_resource` (`tools/resources.py`), a read:
 
 - its description is the map of what there is: one line per resource (URI, name, description,
-  type) and template (its `{placeholders}` to fill in), at most 20, then a line saying there is
-  more;
+  type, when the server says it last changed: `lastModified`) and template (its
+  `{placeholders}` to fill in), at most 20, then a line saying there is more;
 - `read_resource(uri=...)` reads one resource: its text, a binary one described (its type and
   size), a template's URI with its placeholders filled in; an unknown URI is an error the model
   reads;
@@ -71,8 +71,9 @@ one gets one more tool, `<server>-read_resource` (`tools/resources.py`), a read:
 What it reads is a tool result like any other, with no store of its own: governed, journaled,
 and a large one kept in the run, previewed, paged with `read_file` and queried with
 `query_result` ([below](#large-results)) — a CSV resource of 20,000 rows is counted and summed
-in SQL, on every adapter that keeps results. The listing is read again with the tools (every
-`TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
+in SQL, on every adapter that keeps results. Its data is live ([freshness](#values-that-change-freshness)):
+replayed on a later turn it is a dated snapshot. The listing is read again with the tools
+(every `TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
 none.
 
 ## Tool choice: what helps the model pick the right tool

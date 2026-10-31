@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import Annotations
 
 server = MCPServer("Docs")
 
@@ -25,6 +26,7 @@ if not os.environ.get("NONE"):
         name="handbook",
         description="How the team works",
         mime_type="text/markdown",
+        annotations=Annotations(last_modified="2026-10-30T09:00:00Z"),
     )
     def handbook() -> str:
         return "# Handbook\nShip on Tuesdays."

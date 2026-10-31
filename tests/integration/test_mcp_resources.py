@@ -47,7 +47,8 @@ async def test_the_read_tool_maps_the_servers_resources(harness: Harness) -> Non
     spec = seen["spec"]
     assert spec.side_effects == "read" and spec.idempotent and spec.server == "docs"
     assert spec.description.splitlines()[1:] == [
-        "- docs://handbook: handbook, How the team works (text/markdown)",
+        "- docs://handbook: handbook, How the team works "
+        "(text/markdown; modified 2026-10-30T09:00:00Z)",
         "- data://stock.csv: stock (text/csv)",
         "- docs://logo.png: logo (image/png)",
         "- docs://pages/{page}: page, A page by its number (text/plain; fill in {page})",
@@ -69,6 +70,7 @@ async def test_the_read_tool_maps_the_servers_resources(harness: Harness) -> Non
         "name": "handbook",
         "description": "How the team works",
         "mime_type": "text/markdown",
+        "last_modified": "2026-10-30T09:00:00Z",
     }
 
 

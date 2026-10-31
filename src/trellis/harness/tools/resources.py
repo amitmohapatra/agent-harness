@@ -6,7 +6,9 @@ it names none.
 
 What it reads is a tool result like any other: governed (a read), journaled, and — over what
 the model reads as it is — kept in the run, previewed and paged with ``read_file``, its rows
-queried with ``query_result`` (``tools.results``): no store of its own. A listing is rows (one
+queried with ``query_result`` (``tools.results``): no store of its own. Its data is live (the
+default freshness, ``tools.base``): replayed on a later turn it is a dated snapshot, and the
+server's ``lastModified`` is said with each resource. A listing is rows (one
 per resource), so a long one is kept and queried the same way."""
 
 from __future__ import annotations
@@ -56,16 +58,32 @@ def described(server: str, resources: list[Any], templates: list[Any], *, more: 
 
 
 def _about(item: Any, fill: list[str]) -> str:
-    """A resource's or template's name, description and type, as one line says them."""
+    """A resource's or template's name, description, type and when it last changed (the
+    server's ``lastModified``), as one line says them."""
     said = ", ".join(p for p in (item.title or item.name, item.description) if p)
-    kind = "; ".join(p for p in (item.mime_type, f"fill in {' '.join(fill)}" if fill else "") if p)
+    changed = modified(item)
+    kind = "; ".join(
+        p
+        for p in (
+            item.mime_type,
+            f"modified {changed}" if changed else "",
+            f"fill in {' '.join(fill)}" if fill else "",
+        )
+        if p
+    )
     return f"{said} ({kind})" if kind else said
+
+
+def modified(item: Any) -> str | None:
+    """When the server says a resource last changed (its annotations' ``lastModified``)."""
+    return getattr(getattr(item, "annotations", None), "last_modified", None)
 
 
 def row(item: Any) -> dict[str, Any]:
     """A resource or template as a listing's row (what it does not say left out)."""
     keys = ("uri", "uri_template", "name", "title", "description", "mime_type", "size")
     found = {key: getattr(item, key, None) for key in keys}
+    found["last_modified"] = modified(item)
     return {key: value for key, value in found.items() if value not in (None, "")}
 
 
