@@ -48,10 +48,19 @@ own model work follows the harness's configuration.
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
   and got them wrong.
+- A Docker sandbox's anonymous volumes (an image's `VOLUME`) are removed with it: before, each
+  run of such an image left one volume behind (50 runs, 50 volumes; now none).
+
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
   (`clients.memory.recorded_output`).
+
+### Changed
+
+- The note the model gets when memory holds nothing (or only part) for the question says
+  what an honest answer does: name the detail it does not have, and offer to look it up or
+  ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
 
 ### Added
 
@@ -118,6 +127,20 @@ own model work follows the harness's configuration.
 - A conformance suite over every registered route, auth strategy and profile against stubs of
   OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
   a Google token refresh and an AWS SigV4 signature recomputed from the specification.
+
+### Removed
+
+- `automatic.ToolSelection`, `react.defaults_on` and the `benchmark.cost` variant
+  `main+selector`: a harness fallback to LangChain's `LLMToolSelectorMiddleware` when memory
+  gave no hints, which ADR 0003 §6 rules out (one owner of tool narrowing: memory's hints). A
+  team adds `LLMToolSelectorMiddleware` through `ReAct(middleware=)` itself.
+
+### Changed
+
+- A model call's HTTP status is retryable exactly when it is in bifrost-sdk's `RETRYABLE`
+  (408, 409, 425, 429, 500, 502, 503, 504), the set the gateway client and the memory service
+  use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
+  425 is now retryable; 501, 505 and the other 5xx are not.
 
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
