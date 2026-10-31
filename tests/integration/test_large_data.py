@@ -127,6 +127,29 @@ async def test_a_result_cut_to_fit_the_window_says_where_the_rest_is(harness: Ha
     assert shown | rows_read(script.pages) == {s for s, _, _ in SKUS[:2_000]}
 
 
+async def test_a_long_text_cut_to_fit_the_window_is_offered_read_file(harness: Harness) -> None:
+    """Not a table (no delimiter: nothing for ``query_result``), so nothing is kept until the
+    cut: the cut keeps it and offers ``read_file`` with it."""
+    text = "\n".join(
+        f"note {n}: {s} has {u} units on hand" for n, (s, u, _) in enumerate(SKUS[:1_200])
+    )
+
+    @tool(side_effects="read")
+    def notes() -> str:
+        """Twelve hundred stock notes, as text."""
+        return text
+
+    script = Reader(("notes", {}))
+    model = ScriptedChat(script=script)
+    target = ReAct(system_prompt="s", model=model, context_window=8_192, max_steps=40)
+    result = await arm(harness.wrap(target, id="notes-cut"), [notes]).run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    told = last(model.requests[1])
+    assert "characters cut to fit the window" in told and NEXT.search(told), told[-2_000:]
+    assert "read_file" in names(model.requests[1])
+    assert "query_result" not in names(model.requests[1])
+
+
 # --------------------------------------------------------------------------- aggregation (D2)
 @pytest.mark.parametrize(
     "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
