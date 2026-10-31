@@ -137,7 +137,10 @@ async def test_a_deleted_file_cannot_be_compared(
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id=next(IDS)), [inventory])
     assert (await agent.run("compare", user="u", thread="t")).status is RunStatus.SUCCESS
     told = str(model.requests[1]["messages"][-1]["content"])
-    assert told == stored.MISSING.format(path=path)
+    made = (
+        "saved 2026-10-01 09:00 UTC by query_result from inventory fetched 2026-10-01 09:00 UTC"
+    )
+    assert told == stored.GONE.format(path=path, made=made), told
 
 
 async def test_another_users_file_cannot_be_queried(

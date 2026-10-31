@@ -194,6 +194,13 @@ keeps no journal, so the record is the file's own.
   CSV is read as it is and Excel as CSV rows (the `xlsx` extra), paged as any kept result.
   The first page starts with how the file was made, from its record. `/files` lists the files
   of every chat, newest first.
+- **`query_result`** takes a kept file's path: the file is loaded from the store as the table
+  `result` (Excel through openpyxl; CSV and JSON as any result), beside this run's results by
+  their tools' names, with no copy kept in the run. One query compares an earlier file with
+  today's data (`... FROM result f JOIN inventory i ON i.sku = f.sku WHERE f.stock <> i.stock`).
+  Its answer first says where each table's rows come from: the file (saved when, by what, from
+  which results fetched when) and this run's results it names (fetched when). A comparison
+  saved with `save_as` records both sources.
 - A path never names a tenant or a user: another user's file is not found. A deleted file
   whose record is left is listed as deleted, and reading it says so and how it was made.
 - The note gives the run's start time, so an answer dates this run's results against the

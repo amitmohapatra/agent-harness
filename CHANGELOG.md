@@ -59,6 +59,10 @@ own model work follows the harness's configuration.
   user (`Runtime.save_file`), in a run with no tool that runs code (`tools.export.runs_code`);
   each adapter offers the run's own variant (about 50 tokens more, and none where
   `query_result` is not offered). Excel needs the new `xlsx` extra (openpyxl).
+- `query_result(file_path="/files/<run>/<name>")` loads a file kept for the user from the store
+  as the table `result` (Excel too), beside the run's own results: one query compares an earlier
+  file with today's data, and its answer says where each table's rows come from and when they
+  were fetched.
 - Files kept for the user are read back by later runs, within the run's tenant and user: each
   file has a record beside it (`.<name>.json`: the run, what made it, the query and the results
   it read with their fetch times, the run's tool calls); a run of a chat with files is told of
