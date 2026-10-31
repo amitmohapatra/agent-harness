@@ -135,9 +135,24 @@ def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
     return ["line"], [[line] for line in lines]
 
 
-def columns_of(text: str) -> list[str]:
+#: A table given as rows (a kept Excel file's: ``tools.stored``): its columns and its rows.
+Table = tuple[list[str], list[list[Any]]]
+
+
+def columns_of(text: str | Table) -> list[str]:
     """The columns a kept result's table has (as :func:`query` names them)."""
-    return column_names(rows_of(text)[0])
+    return column_names(_rows(text)[0])
+
+
+def _rows(text: str | Table) -> Table:
+    return rows_of(text) if isinstance(text, str) else text
+
+
+def _size(text: str | Table) -> int:
+    """What a table takes to load, in characters (a table given as rows: its cells' text)."""
+    if isinstance(text, str):
+        return len(text)
+    return sum(len(str(v)) for row in text[1] for v in row)
 
 
 def tables(runtime: Any) -> dict[str, str]:
@@ -190,12 +205,57 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     sql = str(args["sql"]).strip().rstrip(";")
     if len(sql) > SQL_CHARS:
         return f"Error: the query is longer than {SQL_CHARS} characters"
-    if args.get("save_as") is None:
-        return await run(str(args["file_path"]), sql, (), text)
-    return await _save(runtime, args, sql, text)
+    path = "/" + str(args["file_path"]).lstrip("/")
+    record: dict[str, Any] | None = None
+    if text is None and _stored(path):
+        found = await _kept_file(path)
+        if isinstance(found, str):
+            return found
+        text, record = found
+    if args.get("save_as") is not None:
+        return await _save(runtime, args, sql, text, record)
+    answer = await run(path, sql, (), text)
+    if record is None or answer.startswith("Error"):
+        return answer
+    return f"{_told(runtime, path, record, sql)}\n{answer}"
 
 
-async def _save(runtime: Any, args: dict[str, Any], sql: str, text: str | None) -> str:
+def _stored(path: str) -> bool:
+    from trellis.harness.tools import stored  # noqa: PLC0415 - it reads the results' pages
+
+    return stored.is_stored(path)
+
+
+async def _kept_file(path: str) -> tuple[str | Table, dict[str, Any]] | str:
+    """A file kept for the user (``tools.stored``), loaded from the store: its table and its
+    record, or what is wrong."""
+    from trellis.harness.tools import stored  # noqa: PLC0415
+
+    return await stored.table(path)
+
+
+def _told(runtime: Any, path: str, record: dict[str, Any], sql: str) -> str:
+    """Where a query over a kept file read its rows: the file — when it was saved, by what,
+    from what fetched when (its record) — and each of this run's results it names, fetched
+    when: what a comparison of the two cites."""
+    from trellis.harness.tools import stored  # noqa: PLC0415
+
+    said = [f"{TABLE} is {path} ({stored.made(record)})"]
+    said.extend(
+        f"{s['table']} is this run's {s['tool']} result, fetched {stored.when(s['fetched_at'])}"
+        for s in _sources(runtime, path, sql)
+        if s["table"] != TABLE
+    )
+    return "; ".join(said) + "."
+
+
+async def _save(
+    runtime: Any,
+    args: dict[str, Any],
+    sql: str,
+    text: str | Table | None,
+    record: dict[str, Any] | None = None,
+) -> str:
     """``query_result`` with ``save_as``: the query's every row kept as a file for the user
     (``Runtime.save_file``), its name ``file_name`` with the format's extension; what was kept,
     and its first :data:`SAVED_ROWS` rows — or why nothing was."""
@@ -212,7 +272,7 @@ async def _save(runtime: Any, args: dict[str, Any], sql: str, text: str | None) 
     if isinstance(found, str):
         return found
     data, count, shown = found
-    made = {"sql": sql, "from": _sources(runtime, str(args["file_path"]), sql)}
+    made = {"sql": sql, "from": _sources(runtime, str(args["file_path"]), sql, record)}
     stored = await runtime.save_file(name, data, source=QUERY_RESULT, made=made)
     return (
         f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
@@ -220,14 +280,19 @@ async def _save(runtime: Any, args: dict[str, Any], sql: str, text: str | None) 
     )
 
 
-def _sources(runtime: Any, file_path: str, sql: str) -> list[dict[str, Any]]:
+def _sources(
+    runtime: Any, file_path: str, sql: str, record: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """The results a query read — the file asked about, and each other result the run keeps
     whose table the query names — each as its table, the tool it came from and when it was
-    fetched (``results.keep``), for how a file it made was made (``FileStore.record``)."""
+    fetched (``results.keep``), for how a file it made was made (``FileStore.record``); a file
+    kept for the user (its ``record``) as its path and when it was saved."""
     path = "/" + file_path.lstrip("/")
     named = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql)
     tools, times = getattr(runtime, "kept_from", {}), getattr(runtime, "kept_at", {})
-    found = []
+    found: list[dict[str, Any]] = []
+    if record is not None:
+        found.append({"table": TABLE, "path": path, "fetched_at": record.get("saved_at")})
     for kept, table in tables(runtime).items():
         if kept == path or table in named:
             fetched = times.get(kept)
@@ -241,10 +306,13 @@ def _sources(runtime: Any, file_path: str, sql: str) -> list[dict[str, Any]]:
     return found
 
 
-def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], str] | str:
+def loadable(
+    file_path: str, text: str | Table | None = None
+) -> tuple[dict[str, str | Table], str] | str:
     """What a query of ``file_path`` loads — the run's saved results by table name (the file
     asked about among them, given as ``text`` when it is no result the run keeps: a file Deep
-    Agents saved) — and the file's own table; or why there is nothing to load."""
+    Agents saved, a file kept for the user, read from the store) — and the file's own table;
+    or why there is nothing to load."""
     path = "/" + file_path.lstrip("/")
     runtime = current()
     kept = runtime.replay.journal.results if runtime is not None else {}
@@ -253,10 +321,10 @@ def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], s
         text = kept.get(path)
     if text is None or runtime is None:
         return f"Error: File '{path}' not found"
-    texts = {named[p]: kept[p] for p in named}
+    texts: dict[str, str | Table] = {named[p]: kept[p] for p in named}
     if path not in named:
-        texts[f"{TABLE}_file"] = text  # a file Deep Agents saved: queried as ``result``
-    if sum(map(len, texts.values())) > LOAD_CHARS:
+        texts[f"{TABLE}_file"] = text  # a file Deep Agents saved, a kept one: ``result``
+    if sum(map(_size, texts.values())) > LOAD_CHARS:
         return (
             f"Error: this run's saved results are more than {LOAD_CHARS} characters, more than a "
             "query here loads: filter on the tool's side, or compute in a sandbox"
@@ -268,7 +336,7 @@ async def run(
     file_path: str,
     sql: str,
     params: Sequence[Any] = (),
-    text: str | None = None,
+    text: str | Table | None = None,
     *,
     save: str | None = None,
 ) -> Any:
@@ -309,7 +377,7 @@ class _Call:
 
 
 def _answer(
-    texts: Mapping[str, str],
+    texts: Mapping[str, str | Table],
     own: str,
     sql: str,
     params: Sequence[Any],
@@ -394,7 +462,9 @@ def _csv(names: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
     return out.getvalue().rstrip("\n")
 
 
-def _loaded(db: sqlite3.Connection, texts: Mapping[str, str], own: str, deadline: float) -> None:
+def _loaded(
+    db: sqlite3.Connection, texts: Mapping[str, str | Table], own: str, deadline: float
+) -> None:
     """``db`` (in memory) holding each of ``texts`` as a table (by its name), the view
     :data:`TABLE` on ``own``, read-only from then on (the authorizer); its tables' pages at most
     :data:`DB_BYTES`, its sorts' and joins' memory :data:`TEMP_CACHE_BYTES`; its
@@ -517,9 +587,10 @@ AGGREGATES: Final[tuple[tuple[str, int, type], ...]] = (
 )
 
 
-def _table(db: sqlite3.Connection, name: str, text: str) -> None:
-    """``text`` as the table ``name``: typed columns (see the module), its rows."""
-    columns, rows = rows_of(text)
+def _table(db: sqlite3.Connection, name: str, text: str | Table) -> None:
+    """``text`` (or a table's rows) as the table ``name``: typed columns (see the module), its
+    rows."""
+    columns, rows = _rows(text)
     names = column_names(columns)
     kinds = [_kind([r[n] for r in rows]) for n in range(len(names))]
     typed = ", ".join(f'"{n}" {k}' for n, k in zip(names, kinds, strict=True))

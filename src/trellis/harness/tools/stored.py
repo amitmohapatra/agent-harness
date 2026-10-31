@@ -67,16 +67,19 @@ class Kept:
     record: dict[str, Any]
 
     def line(self) -> str:
-        """The file in one line: its path, size, when and by what it was saved, and from what
-        results fetched when."""
-        made = self.record
-        said = f"- {self.path} ({self.size} bytes; saved {when(made.get('saved_at'))}"
-        said += f" by {made.get('source') or 'an unknown tool'}"
-        sources = ", ".join(
-            f"{s.get('tool') or s.get('path')} fetched {when(s.get('fetched_at'))}"
-            for s in made.get("from") or ()
-        )
-        return f"{said} from {sources})" if sources else f"{said})"
+        """The file in one line: its path, size, and how it was made (:func:`made`)."""
+        return f"- {self.path} ({self.size} bytes; {made(self.record)})"
+
+
+def made(record: dict[str, Any]) -> str:
+    """How a kept file was made, from its record, in a few words: when and by what it was
+    saved, and from what results fetched when."""
+    said = f"saved {when(record.get('saved_at'))} by {record.get('source') or 'an unknown tool'}"
+    sources = ", ".join(
+        f"{s.get('tool') or s.get('path')} fetched {when(s.get('fetched_at'))}"
+        for s in record.get("from") or ()
+    )
+    return f"{said} from {sources}" if sources else said
 
 
 def is_stored(path: str) -> bool:
