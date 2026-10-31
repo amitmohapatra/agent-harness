@@ -42,6 +42,7 @@ from trellis.harness.a2a.translate import (
     update_for,
     value_part,
 )
+from trellis.harness.conversation import Mode
 from trellis.harness.identity import IdentityRefused
 from trellis.runs import ConflictError, NotFoundError
 
@@ -99,15 +100,18 @@ class RunExecutor(AgentExecutor):
         )
         await self.tasks.opened(task_id)
         payload = _payload(context.message)
+        mode = _mode(context.message)
         agent = self.agent
         record = await agent._opened(
-            payload, user=user, thread=context_id, tenant=tenant, run_id=task_id
+            payload, user=user, thread=context_id, tenant=tenant, run_id=task_id, mode=mode
         )
         await self._stream(
             event_queue,
             task_id,
             context_id,
-            agent._events(lambda listen: pipeline.attempt(agent, record, payload, listener=listen)),
+            agent._events(
+                lambda listen: pipeline.attempt(agent, record, payload, listener=listen, mode=mode)
+            ),
         )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -253,6 +257,18 @@ def _payload(message: Message | None) -> Any:
     """What the agent is asked: the message's text, or its data when it carries none."""
     text, data = text_and_data(message)
     return text or data or ""
+
+
+def _mode(message: Message | None) -> Mode:
+    """What the message does while another run of its context works: the message's
+    ``metadata.mode`` (``queue``, the default; ``interrupt``; ``steer``)."""
+    given = message.metadata["mode"] if message is not None and "mode" in message.metadata else None
+    try:
+        return Mode(given or Mode.QUEUE)
+    except ValueError as exc:
+        raise InvalidRequestError(
+            message=f"metadata.mode is queue, interrupt or steer, not {given!r}"
+        ) from exc
 
 
 def _decision(reason: InterruptReason, message: Message | None) -> tuple[InterruptDecision, Any]:

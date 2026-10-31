@@ -264,6 +264,8 @@ a function target.
 | `context` | the pushed memory context (`None` without memory) |
 | `memory` | the memory SDK's verbs in the run's scope (needs memory) |
 | `idempotency_key` | inside a tool call: that call's key, the same in every attempt |
+| `call_id` | inside a tool call: the id its `TOOL_CALL_*` events carry |
+| `state` | the front end's shared state (AG-UI `state`); assign a new value to change it, streamed as `STATE_DELTA`/`STATE_SNAPSHOT` ([surfaces.md](surfaces.md#ag-ui-agentserve_chatapp--pathagui-identitynone)) |
 | `remaining()` | the seconds the code may still take, or `None` |
 | `uses(feature)` | whether the run has that part on (`without=`) |
 | `await tools.call(tool, **args)` | a tool call through the harness: a tool of the run by name, or a tool itself (`tool(fn)`, `mcp(...)`, `a2a(url)`...: it joins the run first) |
