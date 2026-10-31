@@ -218,7 +218,6 @@ def _middleware(
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         ours.HarnessTools(),
-        *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps, scoped=scoped),
@@ -597,21 +596,8 @@ SET_BY: Final = {
 HARNESS_TOOLS: Final = "HarnessTools"
 
 
-#: The default middleware a measurement turns off (:func:`defaults_off`), by name, and the
-#: middleware it turns on that a default leaves out (:func:`defaults_on`).
+#: The default middleware a measurement turns off (:func:`defaults_off`), by name.
 _OFF: ContextVar[frozenset[str]] = ContextVar("trellis_react_off", default=frozenset())
-_ON: ContextVar[frozenset[str]] = ContextVar("trellis_react_on", default=frozenset())
-
-
-@contextlib.contextmanager
-def defaults_on(*names: str) -> Iterator[None]:
-    """``ReAct`` graphs built inside add the middleware ``names`` the defaults leave out
-    (``ToolSelection``): a measurement of what it is worth, as :func:`defaults_off`."""
-    token = _ON.set(frozenset(names))
-    try:
-        yield
-    finally:
-        _ON.reset(token)
 
 
 @contextlib.contextmanager
