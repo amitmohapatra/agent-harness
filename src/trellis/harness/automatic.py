@@ -18,11 +18,6 @@ model calls are what they were before any of these existed (the tools, the instr
     the graph's state, so the run's journal keeps them (a pause, a crash, another worker), each
     at most :data:`MAX_FILE_CHARS` and all of a run's at most :data:`MAX_RUN_CHARS`.
 
-* **Many tools and no tool hints** — :class:`ToolSelection` (off unless a measurement turns it
-  on: ``react.defaults_on``): LangChain's ``LLMToolSelectorMiddleware`` picks the tools that
-  fit, by one model call of its own, when the run has no hints from memory (off, unreachable
-  or cold) and a call offers more than :data:`SELECT_ABOVE` tools.
-
 * **A wide task** — :class:`Delegation`: on a large model (:func:`model_tier`) with a known
   window of :data:`MIN_WINDOW` or more, a request of :data:`WIDE_ITEMS` independent items of
   one kind or more (:func:`wide`: a list of them, or "each / every / compare" over them; not
@@ -39,14 +34,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from deepagents.backends import StateBackend
 from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.utils import file_data_to_string
 from langchain.agents.middleware import (
     AgentMiddleware,
-    LLMToolSelectorMiddleware,
     ModelRequest,
     ModelResponse,
 )
@@ -129,40 +123,6 @@ def without_tools(request: ModelRequest[Any], names: Collection[str]) -> ModelRe
     """The request without the tools ``names`` (the same request when it offers none)."""
     kept = [t for t in request.tools if _named(t) not in names]
     return request if len(kept) == len(request.tools) else request.override(tools=kept)
-
-
-# --------------------------------------------------------------------------- tool selection
-#: The tools a call offers past which :class:`ToolSelection` selects, and how many it keeps.
-SELECT_ABOVE: Final = 20
-SELECT_KEEP: Final = 10
-
-
-class ToolSelection(AgentMiddleware):
-    """LangChain's ``LLMToolSelectorMiddleware`` (its own model call picks at most ``keep``
-    tools that fit the request; a reply it cannot read offers every tool), used only when the
-    run has no tool hints — memory off, unreachable or cold — and a call offers more than
-    ``above`` tools; the tools the run already used are kept."""
-
-    def __init__(self, *, above: int = SELECT_ABOVE, keep: int = SELECT_KEEP) -> None:
-        super().__init__()
-        self.above = above
-        self.keep = keep
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        runtime = current()
-        hinted = runtime is not None and runtime.offered is not None
-        if hinted or len(request.tools) <= self.above:
-            return await handler(request)
-        used = sorted(runtime.used) if runtime is not None else []
-        selector = LLMToolSelectorMiddleware(
-            max_tools=self.keep, always_include=used, on_parsing_failure="all"
-        )
-        # it calls the handler with the tools it picked, and returns its reply
-        return cast("ModelResponse[Any]", await selector.awrap_model_call(request, handler))
 
 
 # --------------------------------------------------------------------------- the budget

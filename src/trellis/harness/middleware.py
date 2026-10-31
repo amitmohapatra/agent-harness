@@ -66,6 +66,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
+from bifrost_sdk import RETRYABLE
 from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -164,8 +165,6 @@ FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 HANDLER: Final = "awrap_model_call_handler"
 #: The state key of :class:`StepLimit`: the model calls of this invocation.
 STEPS: Final = "trellis_steps"
-#: The openai client's statuses a call may pass after (its own retry rule).
-RETRYABLE_STATUS: Final = frozenset({408, 409, 429})
 
 
 # --------------------------------------------------------------------------- tools
@@ -866,8 +865,9 @@ async def _limited(runtime: Runtime | None, seconds: float | None) -> AsyncItera
 
 def model_error(exc: Exception, timeout: float | None = None) -> Exception:
     """A failed model call as the harness reports it: out of time, or the openai client's
-    error, as a :class:`ModelError` that says whether a retry may pass (the client's own rule:
-    no answer, a timeout, 408, 409, 429, 5xx); anything else as it is."""
+    error, as a :class:`ModelError` that says whether a retry may pass (no answer, a timeout,
+    or a status in bifrost-sdk's ``RETRYABLE``, the set the gateway client and the memory
+    service retry on); anything else as it is."""
     if isinstance(exc, TimeoutError):
         within = "" if timeout is None else f" within {timeout:g}s"
         return ModelTimeout(
@@ -883,7 +883,7 @@ def model_error(exc: Exception, timeout: float | None = None) -> Exception:
         return ModelError(f"the model call failed: {exc}", source="langgraph", retryable=True)
     if isinstance(exc, openai.APIStatusError):
         status = exc.status_code
-        retryable = status in RETRYABLE_STATUS or status >= 500
+        retryable = status in RETRYABLE  # bifrost-sdk's: the one set every model call retries on
         return ModelError(
             f"the model call failed ({status}): {exc.message}",
             source="langgraph",
