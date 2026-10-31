@@ -43,6 +43,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- Forget by chat: `memory_forget` of what the user said ("forget my address"), which the memory
+  service refuses an agent, asks a person through the approval path (the run pauses as any
+  call that asks does) and, approved, forgets it as the user; rejected, the model reads why.
+  A memory the agent wrote is forgotten at once, as before. Needs the memory service to name
+  the memory it refuses (`details.memory_id`); an older one's refusal stays the error it was.
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

@@ -99,7 +99,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | Prompt injection in tool results and the memory context | **later** (by the user's decision) | audit J2 |
 | PII detection in memory and run records | **later** (by the user's decision) | audit J3 |
-| "Forget that" said in chat | later | audit H4 |
+| "Forget that" said in chat | done: `memory_forget` of the user's own statement asks a person, then forgets it as the user (`harness._forgotten`); the service names the memory it refuses (memory `-forgetid`) | audit H4 |
 
 ## Resume plan
 

@@ -86,7 +86,7 @@ the last listing stands, and a run when they were never listed goes without them
 | `memory_search(query, kinds?, time_from?, time_to?, k?)` | memories, documents and — `kinds: ["message"]` — what was said: this conversation's messages first, then the same user's earlier conversations' (never another user's), each with its `thread_id` ([past conversations](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/guide/04-retrieval.md#past-conversations)); `kinds: ["episode"]` finds which earlier conversation, one summary each |
 | `memory_remember(...)` | store a memory verbatim |
 | `memory_update(id, content)` | replace a memory (an `[m1]` handle from the context works) |
-| `memory_forget(id)` | forget one |
+| `memory_forget(id)` | forget one: a memory the agent wrote at once; what the user said ("forget my address"), which the service refuses an agent, after a person approves it (the run pauses on an approval, as any call that asks does), then as the user |
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
 | `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the tools it returns (`{tools: [{name, confidence, next?, args?, missing?}], plan?}`) to the model |
 
