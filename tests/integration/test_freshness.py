@@ -230,7 +230,10 @@ def test_an_age_is_said_as_a_person_says_it(seconds: float, said: str) -> None:
 
 
 async def test_a_live_tool_whose_value_is_out_of_date_stays_offered_when_hints_narrow(
-    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    narrowing: None,
 ) -> None:
     """The tool hints narrow the second turn to another tool: the live tool whose earlier value
     is out of date is offered all the same — the model can fetch it again."""

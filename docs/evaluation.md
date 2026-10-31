@@ -351,7 +351,7 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 | Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
 | Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |
 
-Memory is off (the tool hints, which narrow a run from five tools, need the memory service),
+Memory is off (the tool hints, which narrow a run from 30 tools, need the memory service),
 and so are the run store and tracing: the benchmark reads and writes no service's data.
 
 ### The baseline, measured
