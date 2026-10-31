@@ -214,7 +214,9 @@ async def table(path: str) -> tuple[Table | str, dict[str, Any]] | str:
         return found
     data, name, record = found
     try:
-        return (_sheet(data) if name.lower().endswith(XLSX) else data.decode()), record
+        if name.lower().endswith(XLSX):  # parsed in a thread: the event loop never waits on it
+            return await asyncio.to_thread(_sheet, data), record
+        return data.decode(), record
     except (ValueError, KeyError, ImportError, OSError, zipfile.BadZipFile) as exc:
         return f"Error: {path} is no table: {type(exc).__name__}: {exc}"
 
