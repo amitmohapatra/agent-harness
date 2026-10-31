@@ -48,6 +48,11 @@ own model work follows the harness's configuration.
   form with the server's schema (a `format: date` field a date picker), a link a choice — and
   the answer goes back to the server when the run resumes, on both MCP protocol eras
   (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
+- MCP resources: an `mcp(...)` server that has resources gets `<server>-read_resource`, its
+  description the map of what there is (resources and templates, at most 20); it reads one by
+  its URI (a binary one described) or, given none, lists them all as rows. A large resource is
+  kept, paged and queried as any large result (`tools/resources.py`;
+  [tools.md](docs/tools.md#a-servers-resources-mcp-resources)).
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

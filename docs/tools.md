@@ -11,7 +11,7 @@ catalog.
 | Where from | Tools | Side effects |
 |---|---|---|
 | **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does. Code Mode is for the gateway's servers | the server's annotations, as above |
+| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does; a server's resources are read with one tool, `<server>-read_resource` ([MCP resources](#a-servers-resources-mcp-resources)). Code Mode is for the gateway's servers | the server's annotations, as above |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `call_timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, call_timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `call_timeout` seconds per exchange | `"write"` |
 | a wrapped agent, in a `ReAct`'s `subagents=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
@@ -54,6 +54,26 @@ the server is answered at once. On the MCP protocol of 2026-07-28 the question c
 the call's result and the call is made again with the answer; before it, the server's question
 is a request of its own that names no call, so a question that comes while several calls to
 the same server are under way is refused, the server told why.
+
+### A server's resources: MCP resources
+
+An `mcp(...)` server that says it has resources (its `resources` capability) and lists at least
+one gets one more tool, `<server>-read_resource` (`tools/resources.py`), a read:
+
+- its description is the map of what there is: one line per resource (URI, name, description,
+  type) and template (its `{placeholders}` to fill in), at most 20, then a line saying there is
+  more;
+- `read_resource(uri=...)` reads one resource: its text, a binary one described (its type and
+  size), a template's URI with its placeholders filled in; an unknown URI is an error the model
+  reads;
+- `read_resource()` with no URI lists every resource and template (every page), as rows.
+
+What it reads is a tool result like any other, with no store of its own: governed, journaled,
+and a large one kept in the run, previewed, paged with `read_file` and queried with
+`query_result` ([below](#large-results)) — a CSV resource of 20,000 rows is counted and summed
+in SQL, on every adapter that keeps results. The listing is read again with the tools (every
+`TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
+none.
 
 ## Tool choice: what helps the model pick the right tool
 

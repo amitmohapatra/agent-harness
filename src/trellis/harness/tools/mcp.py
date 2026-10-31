@@ -42,8 +42,10 @@ from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.asking import RunCancelled
 from trellis.harness.runtime import current
+from trellis.harness.tools import resources
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, data_of
 from trellis.harness.tools.elicit import elicited
+from trellis.harness.tools.pages import MAX_PAGES
 
 if TYPE_CHECKING:
     from mcp import Client
@@ -173,7 +175,58 @@ class MCPSource:
             for t in listed
             if t.annotations is not None
         }
-        return [self._tool(server, t) for t in listed]
+        tools = [self._tool(server, t) for t in listed]
+        has = getattr(client.server_capabilities, "resources", None) is not None
+        if has and resources.READ not in {t.name for t in listed}:
+            reader = await self._reader(client, server)
+            if reader is not None:
+                tools.append(reader)
+                self.annotations[reader.name] = {"readOnlyHint": True, "idempotentHint": True}
+        return tools
+
+    async def _reader(self, client: Client, server: str) -> Tool | None:
+        """The read tool of a server that has resources (``tools.resources``): its description
+        from the first page of each listing; ``None`` when the server lists none."""
+        listed = await client.list_resources()
+        templates = await client.list_resource_templates()
+        if not listed.resources and not templates.resource_templates:
+            return None
+        more = bool(listed.next_cursor or templates.next_cursor)
+        spec = ToolSpec(
+            name=f"{server}-{resources.READ}",
+            description=resources.described(
+                server, listed.resources, templates.resource_templates, more=more
+            ),
+            input_schema=resources.SCHEMA,
+            source="mcp",
+            server=server,
+            side_effects="read",
+            idempotent=True,
+        )
+        return Tool(spec, self._read, timeout=self.timeout, feature="mcp")
+
+    async def _read(self, args: dict[str, Any]) -> Any:
+        """A resource's text by its URI; every resource and template, as rows, without one."""
+        uri = args.get("uri")
+        if uri:
+            return resources.text_of(await self._request(lambda c: c.read_resource(uri)))
+        return await self._request(self._every)
+
+    async def _every(self, client: Client) -> list[dict[str, Any]]:
+        """Every resource and template the server lists (every page, up to ``MAX_PAGES``)."""
+        rows: list[dict[str, Any]] = []
+        for listing, field_name in (
+            (client.list_resources, "resources"),
+            (client.list_resource_templates, "resource_templates"),
+        ):
+            cursor = None
+            for _ in range(MAX_PAGES):
+                page = await listing(cursor=cursor)
+                rows.extend(resources.row(item) for item in getattr(page, field_name))
+                cursor = page.next_cursor
+                if not cursor:
+                    break
+        return rows
 
     def _tool(self, server: str, listed: Any) -> Tool:
         annotations = listed.annotations
@@ -195,6 +248,16 @@ class MCPSource:
         return Tool(spec, run, timeout=self.timeout, feature="mcp")
 
     async def _call(self, name: str, args: dict[str, Any]) -> Any:
+        result = await self._request(lambda client: client.call_tool(name, args))
+        if result.is_error:
+            said = [c.text for c in result.content if getattr(c, "type", None) == "text"]
+            raise ToolError("\n".join(said) or f"{name} failed")
+        return answer_of(result)
+
+    async def _request(self, made: Callable[[Client], Awaitable[Any]]) -> Any:
+        """One request through the connection, the questions the server asks in it answered
+        (:class:`_Call`): an error the server answers is the model's to read, a connection
+        that broke is opened again at the next request (and a read is tried again)."""
         from mcp import MCPError  # noqa: PLC0415 - the mcp extra
         from mcp.types import CONNECTION_CLOSED  # noqa: PLC0415
 
@@ -202,7 +265,7 @@ class MCPSource:
         call = _Call()
         self._calls.add(call)
         try:
-            result = await call.answering(client.call_tool(name, args))
+            return await call.answering(made(client))
         except Exception as exc:
             if is_pause_signal(exc) or isinstance(exc, RunCancelled):
                 raise  # the server asked, and the person answers later
@@ -214,10 +277,6 @@ class MCPSource:
             ) from exc
         finally:
             self._calls.discard(call)
-        if result.is_error:
-            said = [c.text for c in result.content if getattr(c, "type", None) == "text"]
-            raise ToolError("\n".join(said) or f"{name} failed")
-        return answer_of(result)
 
     def _own_name(self, client: Client) -> str:
         info = client.server_info

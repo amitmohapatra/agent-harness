@@ -24,6 +24,7 @@ def listed(name: str) -> Any:
 class FakeClient:
     def __init__(self, info: Any = None, answer: Any = None, raises: Exception | None = None):
         self.server_info = info
+        self.server_capabilities = SimpleNamespace(resources=None)
         self.answer = answer
         self.raises = raises
         self.cursors: list[Any] = []

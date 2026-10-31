@@ -70,7 +70,8 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Clarifying questions (ask vs guess) | in flight: `claude/cool-maxwell-w5avo8-reactnative` (#58, `ask_user` arms) | audit F |
 | AG-UI frontend tools: `RunAgentInput.tools` is parsed but never used. Offer the client's tools to the model. On a call, stream `TOOL_CALL` events and pause through the existing interrupt and resume path, then continue when the client returns the tool's result. Test it with a fake AG-UI client | next | `src/trellis/harness/agui/events.py` (`tools` is declared, and nothing reads it) |
 | MCP elicitation: an `mcp(...)` server's question in a call pauses the run as `ask` does (a choice, or a form with the server's schema) and the answer goes back to the server | exists (`claude/cool-maxwell-w5avo8-mcpclient`) | `tools/elicit.py`; matrix F18e; `tests/integration/test_mcp_elicitation.py` (both protocol eras) |
-| MCP resources: a server's resources readable by the model | next | the MCP SDK's `list_resources`, `read_resource` |
+| MCP resources: a server's resources readable by the model | exists (`claude/cool-maxwell-w5avo8-mcpresources`): one read tool whose description maps them; a large one kept and queried as any result | `tools/resources.py`; matrix F18r; `tests/integration/test_mcp_resources.py` |
+| MCP resources in the data map (ADR 0006 §1): the map is not built yet; today the read tool's description is the map | later: with the data map | [ADR 0006](../adr/0006-what-the-model-gets.md) |
 | MCP tasks (a long call polled for its result): the official SDK has no client for them (2.2 and 2.3 leave `tasks/*` out; 2026-07-28 makes them an extension the SDK does not ship) | later: when the SDK ships it | `mcp_types.methods` ("tasks/* deliberately absent") |
 | A structured `ask_user` (on #58) with optional `options[]`, `date`, `date_range` and `number`, so a UI shows dropdowns and pickers and plain chat shows text | next | #58 |
 
