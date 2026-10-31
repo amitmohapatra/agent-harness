@@ -74,13 +74,16 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
    Claude, its `transcripts`) is kept per conversation in this process (`Agent.sessions`,
    bounded at 128 conversations: a session's transcripts can be large). The conversation's next turn starts with it in its journal, through the
    same path a resume after a pause takes, but it sends its own prompt rather than the "goes on"
-   prompt. That session then owns the history (point 1 reads nothing). When the session cannot
+   prompt. That session then owns the history: point 1 reads nothing, and with memory on, memory's
+   window is not rendered beside it (`Agent.window` returns `Window.NONE`). When the session cannot
    be resumed, the existing warning fires and a new session starts.
 
 ## Consequences
 
 * With memory off, a follow-up now has its conversation on every adapter. With memory on,
-  what a run receives is unchanged (the tests that pin it pass as they were).
+  a continued session's turn no longer gets memory's window of the same turns beside it
+  (`test_a_continued_session_with_memory_on_gets_no_memory_window_beside_it`); every other
+  run receives what it did.
 * The kept session is in-process, as `Turns` is. A turn that a different worker or process
   runs starts a new session with the run store's turns (memory off) or memory's window
   (memory on). The durable owner remains the framework's own durable store.
