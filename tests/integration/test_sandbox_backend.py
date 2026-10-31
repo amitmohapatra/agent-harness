@@ -146,6 +146,10 @@ async def test_react_runs_its_commands_in_the_sandbox_governed_and_recorded(
     assert [c["tool"] for c in called] == ["execute"]  # through the bridge: governed, recorded
     assert "42" in str(called[0]["output"])
     assert "execute" in set(model.requests[0]["tools"])  # the agent's from the start
+    assert model.described[0]["execute"].endswith(
+        "Its environment: Python 3.12.7; installed: numpy 2.1.0, openpyxl 3.1.5. It has no "
+        "network: nothing else can be installed."
+    )
     assert provider.commands == ["echo 42"]
     assert ("delete", provider.made()[0]) in provider.calls  # the run's end deleted it
     result = await agent.run("again", user="u")
@@ -205,3 +209,21 @@ async def test_a_result_the_run_keeps_is_a_file_in_its_sandbox_for_code(harness:
 
     assert (await harness.wrap(work, id="kept-in-box").run("go", user="u")).answer == "done"
     assert seen == ["sku,stock\nSKU-1,4"] * 2
+
+
+async def test_execute_keeps_its_own_description_when_the_card_cannot_be_read(
+    harness: Harness,
+) -> None:
+    provider = FakeSandboxes()
+    made = provider.create
+
+    async def no_probe(ref: Any, spec: Any) -> Any:
+        if "trellis.probe" in ref.labels:
+            raise ToolError("the image is gone", source="tools")
+        return await made(ref, spec)
+
+    provider.create = no_probe  # type: ignore[method-assign]
+    model = ScriptedChatModel(turns=[("execute", {"command": "echo 42"}), "42"])
+    agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="coder")
+    assert (await agent.run("6*7?", user="u")).answer == "42"
+    assert "Its environment" not in model.described[0]["execute"]

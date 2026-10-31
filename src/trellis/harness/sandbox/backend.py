@@ -19,6 +19,7 @@ The harness runs graphs asynchronously: the synchronous operations raise.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from deepagents.backends.protocol import (
@@ -28,6 +29,7 @@ from deepagents.backends.protocol import (
     FileUploadResponse,
 )
 from deepagents.backends.sandbox import BaseSandbox
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
@@ -105,6 +107,34 @@ class SandboxBackend(BaseSandbox):
         raise ConfigurationError(ASYNC_ONLY)
 
 
+#: Deep Agents' tool that runs a command on its backend.
+EXECUTE: Final = "execute"
+
+
+class SandboxCard(AgentMiddleware):
+    """``ReAct(backend=sandbox())``: Deep Agents' ``execute`` described with the sandbox's
+    environment card (``SandboxSource.card``: its Python and installed distributions), so the
+    model's first script uses what is there. Deep Agents' ``custom_tool_descriptions`` is fixed
+    when the graph is built, before the card can be read; this sets it on each request."""
+
+    def __init__(self, source: Any) -> None:
+        super().__init__()
+        self.source = source
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        found = [t for t in request.tools if getattr(t, "name", None) == EXECUTE]
+        card = await self.source.card() if found and current() is not None else ""
+        if not card:  # not read (no daemon): Deep Agents' own description
+            return await handler(request)
+        described = found[0].model_copy(update={"description": f"{found[0].description}\n\n{card}"})
+        tools = [described if t is found[0] else t for t in request.tools]
+        return await handler(request.override(tools=tools))
+
+
 def _running(backend: SandboxBackend) -> Runtime:
     """The run calling the backend, with the backend's sandbox among its sources (so its end,
     and its pause, find it: ``sandbox.ended``, ``sandbox.paused``)."""
@@ -130,4 +160,4 @@ def _error_of(exc: ToolError) -> FileOperationError:
     return "invalid_path"
 
 
-__all__ = ["SandboxBackend"]
+__all__ = ["SandboxBackend", "SandboxCard"]

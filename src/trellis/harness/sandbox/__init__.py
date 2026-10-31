@@ -38,9 +38,12 @@ The provider is the one given (``sandbox(provider)``), else Docker (:class:`Dock
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 import re
 import time
+import uuid
 import weakref
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
@@ -84,6 +87,22 @@ NAME_CHARS: Final = 63
 #: How often a process deletes, in the background, a tenant's sandboxes whose runs ended
 #: without deleting them (the first time it makes one, then at most this often).
 REAP_SECONDS: Final = 600.0
+#: What the environment card is read with, in a sandbox made for it alone: the Python version,
+#: then each installed distribution as ``name==version`` (the standard library's
+#: ``importlib.metadata``; pip's own tools left out).
+PROBE: Final = (
+    'python3 -c "import sys, importlib.metadata as m; '
+    "print(sys.version.split()[0]); "
+    "print(' '.join(sorted({d.metadata['Name'].lower() + '==' + d.version "
+    "for d in m.distributions() if d.metadata['Name'] "
+    "and d.metadata['Name'].lower() not in ('pip', 'setuptools', 'wheel')})))\""
+)
+#: The most a probe may take, in seconds (its sandbox made, the script run).
+PROBE_SECONDS: Final = 60.0
+#: The most distributions the card names; the rest are counted.
+CARD_PACKAGES: Final = 80
+#: The label of a sandbox made only to read the environment card.
+PROBE_LABEL: Final = "trellis.probe"
 
 
 class SandboxSource:
@@ -132,6 +151,39 @@ class SandboxSource:
         self._reaped: LRU[str, float] = LRU()
         #: the kept results each attempt has written into its sandbox (:meth:`with_results`)
         self._written: weakref.WeakKeyDictionary[Runtime, set[str]] = weakref.WeakKeyDictionary()
+        #: the environment card, once read (:meth:`card`); ``""`` when none could be
+        self._card: str | None = None
+        self._probing = asyncio.Lock()
+
+    async def card(self) -> str:
+        """What the sandbox's image holds, for the model to write code that runs there the
+        first time: its Python version and installed distributions, and — with no network —
+        that nothing else can be installed. Read once per process, in a sandbox made for it
+        alone and deleted at once; ``""`` when it cannot be read (no daemon: said once in the
+        log; an image without Python: said in the card)."""
+        async with self._probing:
+            if self._card is None:
+                self._card = await self._probed()
+            return self._card
+
+    async def _probed(self) -> str:
+        provider = self.provider_for()
+        ref = SandboxRef(
+            provider=provider.name,
+            id=f"trellis-probe-{uuid.uuid4().hex[:16]}",
+            labels={PROBE_LABEL: "1"},
+        )
+        try:
+            async with asyncio.timeout(PROBE_SECONDS):
+                box = await provider.create(ref, self.spec.model_copy(update={"files": {}}))
+                try:
+                    found = await box.exec(PROBE, timeout=PROBE_SECONDS)
+                finally:
+                    await provider.delete(ref)
+        except Exception as exc:
+            log.warning("the sandbox's environment card was not read: %s", exc)
+            return ""
+        return card_of(found, offline=self.spec.network == "none")
 
     def tools(self) -> SandboxTools:
         """The sandbox as three harness tools (:data:`EXEC`, :data:`READ`, :data:`WRITE`), a
@@ -254,7 +306,14 @@ class SandboxTools:
         self.source = source
 
     async def resolve(self) -> list[Tool]:
-        return list(self.source._tools)
+        """The three tools, ``sandbox_exec`` described with the environment card
+        (:meth:`SandboxSource.card`)."""
+        run, *rest = self.source._tools
+        card = await self.source.card()
+        if not card:
+            return [run, *rest]
+        described = run.spec.model_copy(update={"description": f"{run.spec.description} {card}"})
+        return [dataclasses.replace(run, spec=described), *rest]
 
 
 def sandbox(
@@ -274,6 +333,23 @@ def sandbox(
     if image is not None:
         given = given.model_copy(update={"image": image})
     return SandboxSource(provider, given, call_timeout)
+
+
+def card_of(found: ExecResult, *, offline: bool) -> str:
+    """The environment card a probe's output makes (:data:`PROBE`): ``Python <version>; installed:
+    name version, ...`` — at most :data:`CARD_PACKAGES` named, the rest counted — and, with no
+    network, that nothing else can be installed."""
+    lines = found.stdout.strip().splitlines()
+    if found.exit_code != 0 or not lines:
+        return "The sandbox has no Python (python3): run shell commands only."
+    version, packages = lines[0], (lines[1].split() if len(lines) > 1 else [])
+    named = ", ".join(p.replace("==", " ") for p in packages[:CARD_PACKAGES])
+    more = len(packages) - CARD_PACKAGES
+    listed = (f"{named} and {more} more" if more > 0 else named) or "the standard library only"
+    card = f"Its environment: Python {version}; installed: {listed}."
+    if offline:
+        card += " It has no network: nothing else can be installed."
+    return card
 
 
 def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
@@ -394,6 +470,7 @@ __all__ = [
     "SandboxTools",
     "SupportsPause",
     "SupportsSnapshot",
+    "card_of",
     "reap",
     "sandbox",
 ]

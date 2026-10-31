@@ -55,6 +55,13 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- The sandbox's environment card: `sandbox_exec`, and Deep Agents' `execute` under
+  `ReAct(backend=sandbox())`, are described with the image's Python version and installed
+  distributions, and with no network, that nothing else can be installed
+  (`SandboxSource.card`). The card is read once per process in a sandbox made for it alone.
+  [sandbox.md](docs/sandbox.md) has an image recipe that installs from your index
+  (`PIP_INDEX_URL`, `UV_INDEX_URL`, a build secret for credentials).
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

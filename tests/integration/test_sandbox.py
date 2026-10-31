@@ -41,8 +41,10 @@ from trellis.harness.sandbox import (
     READ_BYTES,
     REAP_SECONDS,
     DockerSandbox,
+    ExecResult,
     SandboxRef,
     SandboxSpec,
+    card_of,
     ended,
     paused,
     reap,
@@ -636,3 +638,52 @@ async def test_way_2_a_provider_and_governed_without_a_harness() -> None:
     assert await run(command="echo hi") == {"exit_code": 0, "stdout": "hi TOKEN=t", "stderr": ""}
     await provider.delete(box.ref)
     assert provider.boxes == {}
+
+
+CARD = (
+    "Its environment: Python 3.12.7; installed: numpy 2.1.0, openpyxl 3.1.5. It has no "
+    "network: nothing else can be installed."
+)
+
+
+async def test_sandbox_exec_is_described_with_the_images_environment_read_once() -> None:
+    """The card is read in a sandbox made for it alone, deleted at once, once per process."""
+    provider = FakeSandboxes()
+    box = sandbox(provider)
+    first, again = await box.tools().resolve(), await box.tools().resolve()
+    assert first[0].spec.description.endswith(CARD)
+    assert again[0].spec.description == first[0].spec.description
+    assert [t.spec.description for t in first[1:]] == [t.spec.description for t in box._tools[1:]]
+    [made, deleted] = provider.probes
+    assert made[0] == "create" and deleted == ("delete", made[1]) and provider.boxes == {}
+    assert provider.calls == []  # no run's sandbox was made for it
+
+
+async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_as_it_was(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    open_box = FakeSandboxes()
+    open_box.environment = "3.13.1\n" + " ".join(f"p{n:03}==1" for n in range(85))
+    card = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
+    assert card.startswith("Its environment: Python 3.13.1; installed: p000 1, p001 1")
+    assert card.endswith("p079 1 and 5 more.")  # no network sentence: it has one
+    bare = FakeSandboxes()
+    bare.environment = "3.12.7"
+    assert await sandbox(bare).card() == (
+        "Its environment: Python 3.12.7; installed: the standard library only. It has no "
+        "network: nothing else can be installed."
+    )
+    assert card_of(ExecResult(exit_code=127, stderr="python3: not found"), offline=True) == (
+        "The sandbox has no Python (python3): run shell commands only."
+    )
+    broken = FakeSandboxes()
+
+    async def unreachable(ref: SandboxRef, spec: SandboxSpec) -> Any:
+        raise ToolError("Docker is not reachable", source="tools")
+
+    broken.create = unreachable  # type: ignore[method-assign]
+    source = sandbox(broken)
+    with caplog.at_level("WARNING", logger="trellis.sandbox"):
+        tools = await source.tools().resolve()
+    assert tools[0].spec.description == source._tools[0].spec.description
+    assert "environment card was not read: Docker is not reachable" in caplog.text

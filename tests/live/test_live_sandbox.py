@@ -176,3 +176,13 @@ async def test_the_reaper_deletes_the_container_an_ended_run_left(harness: Harne
     assert await state(ref.id) == "running"
     deleted = await reap(PROVIDER, harness.runs, tenant="default")
     assert ref in deleted and await state(ref.id) is None
+
+
+async def test_the_environment_card_is_read_from_the_image_and_its_sandbox_deleted() -> None:
+    card = await sandbox(PROVIDER).card()
+    assert card.startswith("Its environment: Python 3.")
+    assert card.endswith("It has no network: nothing else can be installed.")
+    filters = json.dumps({"label": ["trellis.probe=1"]})
+    assert (
+        await engine("GET", "/containers/json", params={"all": "true", "filters": filters})
+    ).json() == []
