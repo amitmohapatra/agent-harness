@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from trellis.contracts import ToolError
+from trellis.harness import snapshots
 from trellis.harness.files import FileStore, file_name, part
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import results
@@ -37,7 +38,8 @@ LISTED: Final = 100
 #: The largest file read back (a query loads at most as much: ``query.LOAD_CHARS``).
 MAX_BYTES: Final = 64 * 1024 * 1024
 NOTE: Final = (
-    "Files kept for the user in this chat. read_file(file_path=...) reads one: its rows, and "
+    "Files kept for the user in this chat (it is now {now}). read_file(file_path=...) reads "
+    "one: its rows, and "
     "how it was made. query_result(file_path=..., sql=...) queries one as the table result, "
     "joined with this run's results by their tools' names. read_file(file_path=\"/files\") "
     "lists the user's files of every chat."
@@ -49,6 +51,7 @@ MISSING: Final = (
     "Error: no file is kept at {path}: it was deleted, or never kept. "
     'read_file(file_path="/files") lists the user\'s files.'
 )
+GONE: Final = "Error: {path} was deleted: it is no longer kept. It was {made}."
 #: The extension Excel's files have.
 XLSX: Final = ".xlsx"
 
@@ -64,11 +67,15 @@ class Kept:
     path: str
     folder: str
     name: str
-    size: int
+    #: ``None``: the file was deleted (its record is left)
+    size: int | None
     record: dict[str, Any]
 
     def line(self) -> str:
-        """The file in one line: its path, size, and how it was made (:func:`made`)."""
+        """The file in one line: its path, size, and how it was made (:func:`made`) — or that
+        it was deleted."""
+        if self.size is None:
+            return f"- {self.path}: deleted, no longer kept ({made(self.record)})"
         return f"- {self.path} ({self.size} bytes; {made(self.record)})"
 
 
@@ -124,7 +131,7 @@ async def kept(runtime: Runtime, *, everywhere: bool, store: FileStore | None = 
     here = part(runtime.conversation)
     base = _user(runtime) if everywhere else f"{_user(runtime)}/{here}"
     found = sorted(await store.files(base))[-LISTED:]
-    records = await asyncio.gather(*(store.record(folder, name) for folder, name, _ in found))
+    records = await asyncio.gather(*(store.record(where, name) for where, name, _ in found))
     listed = []
     for (folder, name, size), record in zip(found, records, strict=True):
         conversation, _, run = folder.split("/", 2)[2].partition("/")
@@ -140,8 +147,8 @@ async def note(runtime: Runtime) -> str | None:
     the :data:`NOTED` newest, a line each), else that other chats have some (:data:`ELSEWHERE`:
     a folder of another chat, one listing); ``None`` when there are none, for a sub-agent's run
     (its parent was told), or when the store cannot say (a warning)."""
-    if runtime.parent is not None:
-        return None
+    if runtime.parent is not None or runtime.agent.adapter.name == "function":
+        return None  # a function's code is offered no reader (``agent.tools`` is its toolbox)
     store = runtime.agent.harness.files
     try:
         here = (
@@ -154,7 +161,7 @@ async def note(runtime: Runtime) -> str | None:
             lines = [k.line() for k in here[:NOTED]]
             if more > 0:
                 lines.append(f'- and {more} more: read_file(file_path="/files")')
-            return "\n".join([NOTE, *lines])
+            return "\n".join([NOTE.format(now=when(snapshots.now().isoformat())), *lines])
         chats = await store.folders(_user(runtime))
         return ELSEWHERE if set(chats) - {part(runtime.conversation)} else None
     except Exception as exc:
@@ -234,7 +241,10 @@ async def _loaded(runtime: Runtime, path: str) -> tuple[bytes, str, dict[str, An
     store = runtime.agent.harness.files
     size = await store.size(folder, name)
     if size is None:
-        return MISSING.format(path=path)
+        record = await store.record(folder, name)
+        if record is None:
+            return MISSING.format(path=path)
+        return GONE.format(path=path, made=made(record))
     if size > MAX_BYTES:
         return f"Error: {path} is {size} bytes, more than {MAX_BYTES} read here"
     data, record = await asyncio.gather(store.read(folder, name), store.record(folder, name))

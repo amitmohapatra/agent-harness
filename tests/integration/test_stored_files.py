@@ -34,6 +34,9 @@ FIRST: Final = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
 SECOND: Final = datetime(2026, 10, 2, 9, 30, tzinfo=UTC)
 LOW: Final = "SELECT sku, stock FROM result WHERE stock < 10 ORDER BY sku"
 today: dict[str, int] = dict(DAY1)
+#: what a run of a chat with files is told first
+NOTED: Final = stored.NOTE
+NOTED_SOME: Final = stored.NOTE.split(" (it is now")[0]
 #: an id for each agent a test wraps
 IDS: Final = (f"stock-{n}" for n in itertools.count())
 
@@ -116,7 +119,8 @@ async def test_a_later_run_is_told_of_its_chats_files_and_reads_how_one_was_made
         "bytes; saved 2026-10-01 09:00 UTC by query_result from inventory fetched "
         "2026-10-01 09:00 UTC)",
     )
-    assert stored.NOTE in said and line[0] in said and line[1] in said, said[-1_500:]
+    assert NOTED.format(now="2026-10-02 09:30 UTC") in said, said[-1_500:]
+    assert line[0] in said and line[1] in said, said[-1_500:]
     assert {"read_file", "query_result"} <= set(offered(model, 0))  # from the first call
     page = last(model, 1)
     run = path.split("/")[2]
@@ -134,7 +138,7 @@ async def test_another_users_files_are_neither_told_nor_read(
 ) -> None:
     path = await first_run(harness, user="u")
     model = await later_run(harness, [("read_file", {"file_path": path}), "no"], user="v")
-    assert stored.NOTE not in told(model) and stored.ELSEWHERE not in told(model)
+    assert NOTED_SOME not in told(model) and stored.ELSEWHERE not in told(model)
     assert last(model, 1) == stored.MISSING.format(path=path)  # v's own scope holds none
     model = await later_run(harness, [("read_file", {"file_path": "/files"}), "no"], user="v")
     assert last(model, 1) == "No files are kept for the user."
@@ -146,9 +150,9 @@ async def test_a_deleted_file_is_said_to_be_gone(
     path = await first_run(harness)
     deleted(root, "low.xlsx")
     model = await later_run(harness, [("read_file", {"file_path": path}), "gone"])
-    assert path not in told(model)  # not listed
-    assert stored.ELSEWHERE not in told(model)  # its record is left, no file
-    assert last(model, 1) == stored.MISSING.format(path=path)
+    made = "saved 2026-10-01 09:00 UTC by query_result from inventory fetched 2026-10-01 09:00 UTC"
+    assert f"- {path}: deleted, no longer kept ({made})" in told(model), told(model)
+    assert last(model, 1) == stored.GONE.format(path=path, made=made)
 
 
 async def test_another_chats_files_are_listed_on_asking(
@@ -156,7 +160,7 @@ async def test_another_chats_files_are_listed_on_asking(
 ) -> None:
     path = await first_run(harness, thread="monday")
     model = await later_run(harness, [("read_file", {"file_path": "/files"}), "listed"])
-    assert stored.ELSEWHERE in told(model) and stored.NOTE not in told(model)
+    assert stored.ELSEWHERE in told(model) and NOTED_SOME not in told(model)
     listing = last(model, 1)
     run = path.split("/")[2]
     assert listing.startswith("The user's files, newest first:\n- /files/conv_"), listing
@@ -191,7 +195,9 @@ class Run:
         self.tenant, self.user, self.conversation, self.run_id = "t", "u", "c_1", "r1"
         self.parent: Any = None
         self.replay = SimpleNamespace(journal=Journal())
-        self.agent = SimpleNamespace(harness=SimpleNamespace(files=store))
+        self.agent = SimpleNamespace(
+            harness=SimpleNamespace(files=store), adapter=SimpleNamespace(name="langgraph")
+        )
         self.events = SimpleNamespace(warning=lambda *a: None)
         self.__dict__.update(more)
 

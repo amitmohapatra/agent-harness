@@ -176,6 +176,29 @@ never has two ways. Each adapter offers the run's own variant (`results.readers(
 and `middleware()` per model call, OpenAI Agents, Claude and MCP per attempt. The parameters
 add about 50 tokens to `query_result`'s definition, and nothing to a run that is not offered it.
 
+### Files kept for the user, read back
+
+A file a run kept for its user (`query_result(save_as=)`, a sandbox's `outputs/`) is read back
+by later runs, always within the run's tenant and user (`tools/stored.py`). Beside each file the
+store keeps its record (`.<name>.json`): the run, when, what made it, `query_result`'s query
+and the results it read with their fetch times, the run's last 20 tool calls. A finished run
+keeps no journal, so the record is the file's own.
+
+- **Told as a run starts.** A run of a chat that has files is told of them after its memory
+  context: one line each (`/files/<run>/<name>`, size, saved when by what, from which results
+  fetched when), the 20 newest. A run of a user whose files are only in other chats is told
+  where to list them. A user with no files is told nothing, and `read_file` and
+  `query_result` are offered from the first model call only when there is something to read.
+  Listing a chat's files costs one store listing per run, run beside the memory context.
+- **`read_file`** reads `/files/<run>/<name>` (another chat's: `/files/<chat>/<run>/<name>`).
+  CSV is read as it is and Excel as CSV rows (the `xlsx` extra), paged as any kept result.
+  The first page starts with how the file was made, from its record. `/files` lists the files
+  of every chat, newest first.
+- A path never names a tenant or a user: another user's file is not found. A deleted file
+  whose record is left is listed as deleted, and reading it says so and how it was made.
+- The note gives the run's start time, so an answer dates this run's results against the
+  file's. A function target (its code is offered no reader) is told nothing.
+
 ## Values that change: freshness
 
 A tool's data is live by default: any value from an earlier turn, a replayed window or memory is

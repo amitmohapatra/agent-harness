@@ -59,6 +59,11 @@ own model work follows the harness's configuration.
   user (`Runtime.save_file`), in a run with no tool that runs code (`tools.export.runs_code`);
   each adapter offers the run's own variant (about 50 tokens more, and none where
   `query_result` is not offered). Excel needs the new `xlsx` extra (openpyxl).
+- Files kept for the user are read back by later runs, within the run's tenant and user: each
+  file has a record beside it (`.<name>.json`: the run, what made it, the query and the results
+  it read with their fetch times, the run's tool calls); a run of a chat with files is told of
+  them as it starts (one line each); `read_file` reads `/files/<run>/<name>` (CSV and Excel as
+  rows, with how it was made) and `/files` lists every chat's. A deleted file is said to be gone.
 - A sandbox's files for the user: the command tool says that files written in `outputs/` are
   given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
   store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the

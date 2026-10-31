@@ -136,19 +136,23 @@ class FileStore:
 
         return await asyncio.to_thread(read)
 
-    async def files(self, folder: str) -> list[tuple[str, str, int]]:
-        """Every file kept below ``folder`` (a scope's beginning: a user's, a conversation's):
-        its folder (below the store's root), its name and its size — never a record."""
+    async def files(self, folder: str) -> list[tuple[str, str, int | None]]:
+        """Every file kept below ``folder`` (a scope's beginning: a user's, a conversation's),
+        one listing: its folder (below the store's root), its name and its size — and each
+        file deleted whose record is left (:meth:`record`), its size ``None``."""
         base = f"{self.root}/{folder}"
 
-        def find() -> list[tuple[str, str, int]]:
+        def find() -> list[tuple[str, str, int | None]]:
             found = self.fs.find(base, detail=True) if self.fs.exists(base) else {}
-            kept = []
+            sizes: dict[tuple[str, str], int | None] = {}
             for path, info in found.items():
                 where, _, name = str(path).rstrip("/").rpartition("/")
-                if not name.startswith("."):
-                    kept.append((where[len(self.root) + 1 :], name, int(info.get("size") or 0)))
-            return kept
+                where = where[len(self.root) + 1 :]
+                if name.startswith(".") and name.endswith(".json"):
+                    sizes.setdefault((where, name[1:-5]), None)  # its file, unless listed
+                else:
+                    sizes[where, name] = int(info.get("size") or 0)
+            return [(where, name, size) for (where, name), size in sizes.items()]
 
         return await asyncio.to_thread(find)
 
