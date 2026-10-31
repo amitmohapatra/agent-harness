@@ -52,6 +52,10 @@ class FakeDocker:
         self.broken: dict[str, httpx.Response] = {}
         #: the files of each committed image
         self.snapshots: dict[str, dict[str, bytes]] = {}
+        #: the paths an image declares as volumes (its ``VOLUME``), and the anonymous volumes
+        #: the daemon made for them: volume -> the container it was made for
+        self.image_volumes: dict[str, list[str]] = {}
+        self.volumes: dict[str, str] = {}
 
     @contextmanager
     def running(self) -> Iterator[FakeDocker]:
@@ -99,6 +103,8 @@ class FakeDocker:
         self.containers[name] = FakeContainer(
             config, files=dict(self.snapshots.get(config["Image"], {}))
         )
+        for path in self.image_volumes.get(config["Image"], []):
+            self.volumes[f"{name}{path}"] = name
         return httpx.Response(201, json={"Id": name, "Warnings": []})
 
     async def _list(self, request: httpx.Request) -> httpx.Response:
@@ -131,6 +137,8 @@ class FakeDocker:
     async def _remove(self, request: httpx.Request, name: str) -> httpx.Response:
         if self.containers.pop(name, None) is None:
             return _error(404, f"No such container: {name}")
+        if request.url.params.get("v") in ("1", "true"):  # its anonymous volumes with it
+            self.volumes = {v: c for v, c in self.volumes.items() if c != name}
         return httpx.Response(204)
 
     async def _put(self, request: httpx.Request, name: str) -> httpx.Response:
