@@ -26,8 +26,9 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
   steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
   within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
-* :func:`read_result` — the tool that reads an earlier result back by its call's id: what a
-  ``ContextEditingMiddleware`` placeholder points to (the state keeps the result whole);
+* :class:`ReadTools` — ``read_file`` offered once there is something to read back: a large
+  result kept, a file in the graph's state, or a result LangChain's ``ClearToolUsesEdit``
+  cleared (paged from the graph's state by its call's id, which keeps it whole);
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
   in the run's journal (``thread_id`` is the run): a resume — in any worker, after a pause or
   a crash — continues where the graph stopped, without asking the model again;
@@ -102,7 +103,6 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
-from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
@@ -146,12 +146,9 @@ MAX_REPEATS: Final = 3
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
 #: error or a timeout) that stop the run.
 ERROR_STREAK: Final = 3
-#: The tool that reads a cleared result back by its call's id (:func:`read_result`), and the
-#: most it reads at once, in characters.
-READ_RESULT: Final = "read_result"
-#: Deep Agents' tool that reads a large result saved as a file.
+#: Deep Agents' tool that reads a large result saved as a file — and, by the path
+#: ``/large_tool_results/<call id>`` (Deep Agents' own), a result cleared from the request.
 READ_FILE: Final = "read_file"
-READ_LIMIT: Final = 20_000
 #: What the model is asked when its steps run out.
 LAST_STEP: Final = (
     "You have used every step this run allows. Do not call tools: answer now with what you "
@@ -201,7 +198,6 @@ TOOLSETS: Final = 64
 STATE_TOOLS: Final = frozenset(
     {
         "write_todos",
-        "read_result",
         "ls",
         "read_file",
         "write_file",
@@ -334,13 +330,32 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     path = "/" + str(args.get("file_path", "")).lstrip("/")
     kept = path in runtime.replay.journal.results
     said: str | None = None
-    if call["name"] == READ_FILE and (request.tool is None or kept):
+    cleared = None if kept else _cleared_result(request.state, path)
+    if call["name"] == READ_FILE and cleared is not None:
+        said = results.read(args, text=cleared)
+    elif call["name"] == READ_FILE and (request.tool is None or kept):
         said = results.read(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
+
+
+def _cleared_result(state: Any, path: str) -> str | None:
+    """The whole text of a tool result the request no longer shows (LangChain's
+    ``ClearToolUsesEdit`` cleared it: the graph's state keeps it), named by Deep Agents' path
+    for its call (``/large_tool_results/<call id>``) — ``None`` for any other path, and for a
+    result Deep Agents evicted to its backend (its own ``read_file`` reads that file)."""
+    prefix = results.PREFIX + "/"
+    if not path.startswith(prefix) or not isinstance(state, Mapping):
+        return None
+    ident = path[len(prefix) :]
+    for message in reversed(state.get("messages") or ()):
+        if isinstance(message, ToolMessage) and message.tool_call_id == ident:
+            text = message.text
+            return None if text.startswith(results.EVICTED) else text
+    return None
 
 
 def _state_file(state: Any, path: str) -> str | None:
@@ -1157,72 +1172,36 @@ def _failing(history: Sequence[AnyMessage]) -> int:
 
 
 # --------------------------------------------------------------------------- results
-def read_result(most: int = READ_LIMIT) -> BaseTool:
-    """The ``read_result`` tool: part of an earlier tool result, by the id of the call that
-    returned it — what a result ``ContextEditingMiddleware`` cleared from the request (the graph's
-    state keeps it whole) is read again with, at most ``most`` characters at a time."""
-
-    async def read(
-        id: str,
-        state: Annotated[dict[str, Any], InjectedState],
-        offset: int = 0,
-        limit: int = most,
-    ) -> str:
-        """Read an earlier tool result that was cleared to keep the context small, by the id
-        of the call that returned it (from offset, at most limit characters)."""
-        text = next(
-            (
-                m.content
-                for m in reversed(state.get("messages", []))
-                if isinstance(m, ToolMessage) and m.tool_call_id == id
-            ),
-            None,
-        )
-        if not isinstance(text, str):
-            return f"there is no result {id!r} to read"
-        start = max(0, offset)
-        end = start + min(max(1, limit), most)
-        part = text[start:end]
-        if end < len(text):
-            part += (
-                f'\n…[{len(text) - end} more characters: {READ_RESULT}(id="{id}", offset={end})]'
-            )
-        return part
-
-    return StructuredTool.from_function(coroutine=read, name=READ_RESULT)
-
-
 class ReadTools(AgentMiddleware):
-    """The tools that read back what was put aside, offered once there is something to read:
-    ``read_result`` (:func:`read_result`, which it adds to the graph) once a result reads as
-    ``placeholder`` (cleared by a ``ContextEditingMiddleware``), and Deep Agents' ``read_file``
-    once the graph's state holds a file (a large result saved, a summarized history) — a small
-    model offered them from the start reads nothing, again and again. Both stay callable.
-    ``placeholder=None``: no ``read_result`` (nothing is cleared); ``files=True``: ``read_file``
-    always offered (its files are outside the graph's state: a disk, a store, a sandbox, the
-    skills)."""
+    """``read_file``, the one tool that reads back what was put aside, offered once there is
+    something to read: once a result reads as ``placeholder`` (cleared by LangChain's
+    ``ClearToolUsesEdit``: ``read_file`` pages it from the graph's state by its call's id, the
+    harness's own when the graph has none), once the graph's state holds a file (a large result
+    saved, a summarized history) or the run keeps a result — a small model offered it from the
+    start reads nothing, again and again. ``files=True``: ``read_file`` always offered (its
+    files are outside the graph's state: a disk, a store, a sandbox, the skills)."""
 
     def __init__(self, placeholder: str | None, *, files: bool = False) -> None:
         super().__init__()
         self.placeholder = placeholder
         self.files = files
-        self.tools = [read_result()] if placeholder is not None else []
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        unused = set()
-        if not self.files and not request.state.get("files") and not results.kept():
-            unused.add(READ_FILE)
-        if self.placeholder is None or not any(
+        tools = list(request.tools)
+        has = any(_named(t) == READ_FILE for t in tools)
+        if self.placeholder is not None and any(
             isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
         ):
-            unused.add(READ_RESULT)
-        kept = [t for t in request.tools if _named(t) not in unused]
+            if not has:  # a result was cleared: read_file reads it back
+                tools.append(READ_FILE_TOOL)
+        elif has and not (self.files or request.state.get("files") or results.kept()):
+            tools = [t for t in tools if _named(t) != READ_FILE]
         return await handler(
-            request if len(kept) == len(request.tools) else request.override(tools=kept)
+            request if tools == list(request.tools) else request.override(tools=tools)
         )
 
 
@@ -1238,8 +1217,6 @@ FIT_KEEP: Final = 8
 FIT_DESCRIPTION: Final = 120
 #: The characters a cut result's marker takes at most (its size, and where the rest is read).
 CUT_MARKER: Final = 192
-#: What a tool result cleared to fit reads as (``read_result`` reads it back: the state keeps it).
-FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=<this call's id>)]"
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
 #: how often each fired in this process (a bounded counter: these keys only).
 FIT_STEPS: Final = ("tools", "descriptions", "results", "turns", "memory")
@@ -1288,9 +1265,12 @@ class FitWindow(AgentMiddleware):
        request, at least :data:`FIT_KEEP`;
     2. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
        parameter descriptions);
-    3. ``results`` — older tool results cleared (``read_result`` reads them back), then the
-       tools narrowed past :data:`FIT_KEEP`, then the longest results cut to their head and
-       tail;
+    3. ``results`` — the tools narrowed past :data:`FIT_KEEP`, then the longest results cut
+       to their head and tail, each kept whole and its cut naming where ``read_file`` reads the
+       rest (clearing older results is LangChain's ``ClearToolUsesEdit``'s, before it: one
+       clearing pass). ``turns=False`` (a Deep Agents summarization after it) leaves the
+       results to it too: it offloads a result whole to its backend and reads it back with its
+       own ``read_file``, so a result is stored once, where its sandbox's code reads it;
     4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
        to a summarization after it: ``ReAct``'s summarizes them);
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
@@ -1372,6 +1352,11 @@ class FitWindow(AgentMiddleware):
                 reply = max(reply, value)
         return max(0, int(window * FIT_SHARE) - reply)
 
+    def _results(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        """The longest results cut (:func:`_cut`) — none with a summarization after it, whose
+        own overflow handling offloads them whole (Deep Agents')."""
+        return _cut(request, budget) if self.turns else request
+
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
@@ -1379,7 +1364,7 @@ class FitWindow(AgentMiddleware):
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
+            lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
             lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
@@ -1517,18 +1502,6 @@ def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
     for spec in (function.get("parameters") or {}).get("properties", {}).values():
         spec.pop("description", None)
     return found
-
-
-def _cleared(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """The request with the tool results before the latest model step cleared."""
-    messages = list(request.messages)
-    last = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
-    changed = False
-    for n, message in enumerate(messages[:last]):
-        if isinstance(message, ToolMessage) and message.content != FIT_CLEARED:
-            messages[n] = message.model_copy(update={"content": FIT_CLEARED})
-            changed = True
-    return request.override(messages=messages) if changed else request
 
 
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
@@ -1932,5 +1905,4 @@ __all__ = [
     "StallGuard",
     "StepLimit",
     "model_error",
-    "read_result",
 ]

@@ -165,7 +165,7 @@ src/trellis/
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
-                       StallGuard, ReadTools, read_result, FitWindow;
+                       StallGuard, ReadTools, FitWindow;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
@@ -465,7 +465,7 @@ flowchart TB
     sg["StallGuard, StepLimit, Budgeted · harness<br/>max_repeats, max_steps, the budget's stop"]
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
-    rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
+    rt["ReadTools · harness<br/>read_file offered once needed"]
     yours["yours: middleware=[...]<br/>(HumanInTheLoopMiddleware, PII, a tool selector...)"]
     mh["ModelHooks · harness<br/>chat span, call_timeout, on_error,<br/>pinned prompt, unparsable calls answered"]
     tail["Deep Agents' tail<br/>prompt caching, memory files, unsupported content"]

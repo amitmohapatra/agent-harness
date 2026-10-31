@@ -176,7 +176,7 @@ result as a file and the model went looking. Deep Agents' capabilities stay a pa
 | Capability | When |
 |---|---|
 | planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
-| `read_result` | once an older result was cleared past half the window |
+| `read_file` | once an older result was cleared past half the window (by its call's id: `/large_tool_results/<call id>`), a large result was kept, or the graph's state holds a file |
 | file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
 | `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict; on a long task, Deep Agents' general-purpose helper too |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
@@ -216,8 +216,8 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed, stop the run with a `ModelError` |
 | `StepLimit` | after `max_steps` model calls one more, with `tool_choice: "none"`, for the best answer with what it has; a `warning` event (`max_steps`) says so |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
-| `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
-| `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
+| `ContextEditingMiddleware` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_file` (the call's id as its path) in their place — the one clearing pass — only when it frees a tenth of the window, so a prompt cache breaks rarely |
+| `ReadTools` | `read_file` offered once a result was cleared, the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered it from the start reads nothing, again and again; a cleared result is paged from the graph's state as a kept one is (100 lines, 20,000 characters a page) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
 
@@ -304,7 +304,7 @@ smaller, step by step, only as far as it must, in this order:
 |---|---|---|
 | `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
-| `results` | older tool results cleared (`read_result` reads them back), the longest cut to head and tail, each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
+| `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
 | `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
