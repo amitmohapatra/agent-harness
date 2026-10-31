@@ -72,7 +72,7 @@ thread="t-7")}})`.
 `create_agent(model, tools, middleware=trellis.middleware(...))` gives a `create_agent` graph
 everything `ReAct` adds on top of
 Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
-among them), the graph's own tools governed, `max_steps` then a final answer, the stall guard,
+among them), the graph's own tools governed, `max_steps` (LangChain's model call limit), the stall guard,
 the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
 cleared and read back with a `context_window`, the request fitted to the window, and its
 checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a
@@ -89,7 +89,7 @@ is still narrowed and governed, said once at `h.wrap`.
 | Long-term store | a graph compiled without a `store` gets the memory service as its `BaseStore` per run (`runtime.store`, `get_store()`): each item one memory of the user's. A graph compiled with its own store keeps it (said once); `without={"memory"}` leaves the graph as built |
 | Records | the transcript (the question and the final AI message), every tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every tool call — the graph's own and the harness's — is governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
-| Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`), but its `ToolNode`'s calls are governed, journaled and recorded as the run's |
+| Tool hints | the context is asked for with the toolbox's names (5 or more); from 30 tools in the run, a `create_agent` graph is offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`), but its `ToolNode`'s calls are governed, journaled and recorded as the run's |
 | Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
 | Hooks | the tool and run hooks as for every target; a model call is LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[yours, ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`: the span, `call_timeout`, a failed call's `on_error`; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per tool call, `retrieve memory`; LangChain's own instrumentation nests under it |
