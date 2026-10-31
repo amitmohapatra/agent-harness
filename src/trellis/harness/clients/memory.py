@@ -54,6 +54,10 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 TOOL_SEARCH: Final = "tool_search"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
+#: The largest recorded tool output the memory service takes (its ``POST /v1/tools/invocations``
+#: ``output``: "at most 256 KiB of JSON"; a larger one is refused with a 422 and the call's
+#: record is lost): a larger output is recorded cut to it (:func:`recorded_output`).
+RECORDED_OUTPUT_MAX_BYTES: Final = 256 * 1024
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
 #: The keys of a run's own outcome record's metadata that keep what its pushed context showed —
@@ -254,7 +258,7 @@ class RunMemory:
         await self.ctx.record_tool(
             call.tool,
             call.args,
-            output=outcome.output,
+            output=recorded_output(outcome.output),
             status=outcome.status.value,
             error_class=outcome.error_class,
             latency_ms=outcome.latency_ms,
@@ -401,3 +405,18 @@ def _agent_tool(tool: AgentTool) -> ToolSpec:
         source="memory",
         side_effects="read" if tool.name in READ_ONLY_TOOLS else "write",
     )
+
+
+def recorded_output(output: Any) -> Any:
+    """``output`` as the memory service records it: as it is when its JSON fits
+    :data:`RECORDED_OUTPUT_MAX_BYTES`; else its JSON cut to fit, as text that ends by saying
+    so (the service keeps the text's head as the call's summary and archives the rest), so the
+    call is still recorded and learned from. One serialisation; the cut text fits whatever the
+    output's size."""
+    text = json.dumps(output, default=str)
+    size = len(text.encode("utf-8"))
+    if size <= RECORDED_OUTPUT_MAX_BYTES:
+        return output
+    # the cut text is sent as a JSON string (quotes and escapes): half the limit leaves room
+    cut = text.encode("utf-8")[: RECORDED_OUTPUT_MAX_BYTES // 2].decode("utf-8", "ignore")
+    return f"{cut}... ({size} bytes; cut to the service's limit)"

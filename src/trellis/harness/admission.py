@@ -13,9 +13,8 @@ task tree its stream shows of them.
 * **Where it applies** — per parent run (:func:`branch`): a run admits at most the limit of
   its own children at once, and each child admits its own (nested children never wait on
   their parent's slots, so nothing deadlocks). Every child run the harness starts goes
-  through it: a sub-agent's call in any framework, ``agent.run`` inside a run, a ``ReAct``'s
-  ``delegate`` jobs (``trellis.harness.delegate``). A framework that spawns its own helpers
-  keeps its own parallelism; Kimi Code is told the limit
+  through it: a sub-agent's call in any framework, ``agent.run`` inside a run. A framework
+  that spawns its own helpers keeps its own parallelism; Kimi Code is told the limit
   (``KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY``, ``adapters.acp``).
 * **Hard ceilings** — a child waits for a slot at most what is left of its parent's time;
   the budget is the parent's (``budget.py``: every child's spending counts toward it).
@@ -335,24 +334,19 @@ def gate(parent: Runtime) -> Gate:
 
 
 class Branch:
-    """One child of a run, as its parent's stream shows it: what the caller says of it
-    (``about``), its time, and what it spent (its journal's, set by whoever ran it)."""
+    """One child of a run, as its parent's stream shows it: its time, and what it spent (its
+    journal's, set by whoever ran it)."""
 
-    def __init__(self, parent: Runtime, run_id: str, agent_id: str, about: dict[str, Any]) -> None:
+    def __init__(self, parent: Runtime, run_id: str, agent_id: str) -> None:
         self.parent = parent
         self.run_id = run_id
         self.agent_id = agent_id
-        self.about = about
         self.spent: dict[str, float] = {}
         self.began: float | None = None
         self.done = False
-        #: its slot in the parent's gate, once admitted
-        self.slot = 0
 
     def emit(self, phase: str, **data: Any) -> None:
-        self.parent.events.helper(
-            phase, run_id=self.run_id, agent_id=self.agent_id, **self.about, **data
-        )
+        self.parent.events.helper(phase, run_id=self.run_id, agent_id=self.agent_id, **data)
 
     def started(self) -> None:
         self.began = time.monotonic()
@@ -372,25 +366,17 @@ class Branch:
 
 
 @contextlib.asynccontextmanager
-async def branch(
-    parent: Runtime,
-    run_id: str,
-    agent_id: str,
-    *,
-    within: float | None = None,
-    **about: Any,
-) -> AsyncIterator[Branch]:
+async def branch(parent: Runtime, run_id: str, agent_id: str) -> AsyncIterator[Branch]:
     """A child of ``parent``, admitted: queued on the stream, a slot of the parent's gate taken
-    (waiting at most ``within`` seconds, else what is left of the parent's time: past it
-    ``TimeoutError``), started, and — however
-    it ends — finished and its slot given back. The caller says how it ended
+    (waiting at most what is left of the parent's time: past it ``TimeoutError``), started,
+    and — however it ends — finished and its slot given back. The caller says how it ended
     (:meth:`Branch.ended`); one that raised ends ``error`` (a pause: ``paused``; a cancellation:
     ``cancelled``)."""
-    found = Branch(parent, run_id, agent_id, about)
+    found = Branch(parent, run_id, agent_id)
     found.emit("queued", limit=ADMISSION.limit)
     held = gate(parent)
     try:
-        found.slot = await held.enter(ADMISSION, parent.remaining() if within is None else within)
+        slot = await held.enter(ADMISSION, parent.remaining())
     except TimeoutError:
         found.ended("timeout", error="no slot before the run's time ran out")
         raise
@@ -404,4 +390,4 @@ async def branch(
         found.ended("paused" if is_pause_signal(exc) else "error", error=str(exc) or None)
         raise
     finally:
-        await held.leave(found.slot)
+        await held.leave(slot)
