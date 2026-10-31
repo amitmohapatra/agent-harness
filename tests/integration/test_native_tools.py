@@ -111,7 +111,7 @@ async def test_a_graphs_own_tool_is_governed_journaled_recorded_and_published(
 
 
 async def test_a_graphs_own_tools_are_narrowed_with_the_harnesss(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     from tests.integration.test_memory_pipeline import graph_tools
 
@@ -327,7 +327,7 @@ async def test_a_governed_mcp_server_passes_through_outside_a_run_and_reports_er
 
 
 async def test_claudes_own_tools_the_hints_leave_out_are_disallowed_for_the_query(
-    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:
     from claude_agent_sdk import ClaudeAgentOptions
 
