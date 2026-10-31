@@ -229,7 +229,9 @@ class Agent:
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
         #: the pushed context's token budget: a share of the model's window when it is known
-        self.context_budget = context_budget(context_window(target))
+        #: the target's model's context window in tokens, when known (``ReAct``'s, a profile's)
+        self.context_window = context_window(target)
+        self.context_budget = context_budget(self.context_window)
         #: the name of the agent's model when its builder says it (``ReAct``): what the
         #: memory service is told with the endpoint, with its profile
         self.model = model_name(target)
@@ -858,7 +860,9 @@ class Agent:
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off, the conversation's earlier turns from the run store
-        (``conversation.earlier``: each one's question and answer) — only where nothing else
+        (``conversation.earlier``: each one's question and answer; whole — its tool calls and
+        their results too, as kept here — for a target that takes messages and fits each request
+        to a known window: ``ReAct``'s ``FitWindow`` and clearing) — only where nothing else
         keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
         a session of the run's, a conversation on OpenAI's servers) or continues the session
         it kept for the conversation's last turn (``Runtime.continued``). A target that takes
@@ -867,8 +871,9 @@ class Agent:
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if runtime.continued or (store is not None and store is not history.MEMORY_THREAD):
             return
+        whole = self.adapter.history_in == "messages" and self.context_window is not None
         try:
-            earlier = await conversation.earlier(runtime)
+            earlier = await conversation.earlier(runtime, whole=whole)
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return
@@ -1020,12 +1025,19 @@ class Agent:
         """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
         owns the conversation (``history.owner``), it is written before the run returns, so
         the next turn's window holds it wherever that turn runs; a write that fails there is
-        queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled). With memory
+        off it is kept in this process for the conversation's later turns (``Agent.results``,
+        ``conversation.earlier``)."""
         memory = runtime.run_memory
-        if memory is None or not runtime.uses("records") or not messages:
+        if not messages or (memory is not None and not runtime.uses("records")):
             return
         # each tool result says which tool returned it and when: a later turn replays it so
         messages = snapshots.stamped(messages, runtime.fetched)
+        if memory is None:
+            # nothing keeps the conversation: its later turns read this one here (``earlier``)
+            if runtime.parent is None and runtime.conversation != runtime.run_id:
+                self.results.said(runtime.conversation, runtime.run_id, messages)
+            return
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:

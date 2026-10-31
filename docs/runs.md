@@ -281,6 +281,15 @@ the newest 10, oldest first. `ReAct`, a graph and an OpenAI agent get them as th
 messages, a function as `agent.history`, Claude and Kimi in the context's text. With memory on,
 memory's window keeps the conversation as before ([memory.md](memory.md)).
 
+A target that takes messages and fits each request to a known window (`ReAct` with
+`context_window=` or a model profile that says it) gets each earlier turn this process ran
+whole: its question, its tool calls and their results (each stamped with its tool and fetch
+time), and its answer — the figures behind an answer, for "why was that?" or "redo it with X",
+as memory's window gives them with memory on. `ReAct`'s clearing and `FitWindow` fit them to
+the window (older results cleared first, `read_result` reads one back). The transcripts are
+kept with the conversation's saved results (`agent.results`, in this process); a turn another
+process ran, or one with no window known, is its question and answer.
+
 ## A Claude or ACP session across turns
 
 A conversation's turn on the Claude Agent SDK or an ACP agent (Kimi) continues the session its

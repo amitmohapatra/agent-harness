@@ -20,6 +20,7 @@ from langchain_core.messages import ToolMessage
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
+from tests.support.models import ScriptedChat
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
@@ -106,6 +107,42 @@ async def test_a_follow_up_has_the_conversation(
     other = await agent.run("What is the locker code?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS, other.error
     assert "4242" not in told(seen)  # another user's thread named alike is not this one
+
+
+@pytest.mark.parametrize("window", [32_000, None])
+async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
+    harness: Harness, window: int | None
+) -> None:
+    """ADV-7: a follow-up ("why was that?") needs the figures behind the earlier answer, not
+    only its question and answer. With memory off and a known window, ``ReAct``'s history is
+    each earlier turn whole — its tool calls and their results, kept in this process — which
+    ``FitWindow`` and clearing fit to the window; with no window known (nothing would fit it),
+    its question and answer, as before."""
+
+    @tool(side_effects="read")
+    def supplier(sku: str) -> str:
+        """The supplier of a SKU and its lead time."""
+        return "Acme Fasteners Ltd, lead time 21 days (portal: 503 on retry)"
+
+    turns: list[Any] = [("supplier", {"sku": "NV-1"}), "Acme supplies it.", "Because of Acme."]
+    model = ScriptedChat([*turns, "I do not know."])
+    react = ReAct(system_prompt="You work.", model=model, context_window=window)
+    agent = arm(harness.wrap(react, id=f"whole-{window}", without={"memory"}), [supplier])
+    first = await agent.run("Who supplies NV-1?", user="ada", thread=THREAD)
+    assert first.status is RunStatus.SUCCESS, first.error
+    second = await agent.run("Why is its lead time so long?", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS, second.error
+    sent = json.dumps(model.requests[-1]["messages"])
+    assert "Who supplies NV-1?" in sent and "Acme supplies it." in sent
+    if window is None:
+        assert "21 days" not in sent
+        return
+    assert "21 days" in sent  # the tool result behind the answer
+    roles = [m["role"] for m in model.requests[-1]["messages"]]
+    assert roles[1:] == ["user", "assistant", "tool", "assistant", "user"], roles
+    other = await agent.run("Why so long?", user="bob", thread=THREAD)
+    assert other.status is RunStatus.SUCCESS
+    assert "21 days" not in json.dumps(model.requests[-1]["messages"])  # another user's chat
 
 
 async def test_a_function_reads_the_earlier_turns_as_its_history(harness: Harness) -> None:
