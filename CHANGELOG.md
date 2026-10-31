@@ -43,6 +43,18 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
+  to the model beside the agent's own (one of the agent's by the same name wins, with a
+  warning); a call streams its `TOOL_CALL_*` events and pauses the run (an interrupt whose
+  reason is `frontend_tool`, its `toolCallId` the call's), and the client's result — a `tool`
+  message with that `toolCallId`, or a `resume` entry — is the call's output. `context` and the
+  `state` reach the model in the pushed context, together at most half of its token budget;
+  the run reads and sets the state (`Runtime.state`), each change streamed as `STATE_DELTA`
+  (a JSON Patch; `STATE_SNAPSHOT` where there was no object to patch), and a resume reads the
+  state the client sends. `forwardedProps.mode` (AG-UI) and the message's `metadata.mode`
+  (A2A) are the run's `mode` (queue, interrupt, steer). A call's paused `TOOL_CALL_RESULT` is
+  no longer sent on AG-UI: the call has no result until the run resumes. New dependency:
+  `jsonpatch`.
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

@@ -71,6 +71,7 @@ from trellis.harness.conversation import (
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay
@@ -312,6 +313,7 @@ async def _attempt(
         parent=parent,
         running_in=asyncio.current_task(),
         continued=continued,
+        frontend=Frontend.of(record.metadata),
     )
     events.trace_run = runtime.trace_run
     decision = _started(agent, runtime, record, resolution)
