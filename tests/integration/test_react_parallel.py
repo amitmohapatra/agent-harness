@@ -14,7 +14,6 @@ from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
-from trellis.harness.middleware import LAST_STEP
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import SAME_CALL
 from trellis.runs import Lease
@@ -393,7 +392,7 @@ async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error
 
 
 # --------------------------------------------------------------------------- stopping
-async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harness) -> None:
+async def test_at_the_step_limit_the_run_ends_with_langchains_message(harness: Harness) -> None:
     @tool(side_effects="read")
     def search(query: str) -> str:
         """Search."""
@@ -405,13 +404,9 @@ async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harnes
     )
     events = [e async for e in agent.stream("x", user="u")]
     finished = events[-1]
-    assert finished.data["result"] == "partial"
-    last = model.requests[-1]
-    assert last["tool_choice"] == "none" and last["tools"]  # the same tools, none to be called
-    assert last["messages"][-1] == {"role": "user", "content": LAST_STEP}
-    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    stopped = [w for w in warnings if w.get("code") == "max_steps"]
-    assert "stopped at its 2 steps" in stopped[0]["message"]
+    # LangChain's ModelCallLimitMiddleware: no call past max_steps, no forced answer
+    assert finished.data["result"] == "Model call limits exceeded: thread limit (2/2)"
+    assert len(model.requests) == 2
 
 
 async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
