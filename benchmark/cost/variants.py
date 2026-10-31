@@ -5,9 +5,9 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``baseline`` — the plain tool-calling loop, everything off: LangChain's ``create_agent``
   with only what runs the harness's tools and bounds the loop (``HarnessTools``,
   ``StallGuard``, LangChain's ``ModelCallLimitMiddleware``, ``PatchToolCallsMiddleware``,
-  ``ModelHooks``), no result paging, no context editing, no summarization, no automatic
-  feature;
-  ``without={"code_mode", "tool_search"}``.
+  ``ModelHooks``), no context editing, no summarization, no automatic feature (a large result
+  is still kept and paged: ``HarnessTools`` runs the harness's tools with the convention every
+  adapter's model reads, ``tools.results``); ``without={"code_mode", "tool_search"}``.
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
   capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
   Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
@@ -23,7 +23,8 @@ same instructions and model. A new cost feature lands as one more entry of :data
 * ``main-planning``, ``deep-files`` — without a feature turned on by itself (:data:`AUTOMATIC`:
   its middleware left out); ``main@8k`` — ``main`` on an 8,192-token window;
 * ``deep-<piece>`` — ``deep`` with one of Deep Agents' pieces off (:data:`PIECES`: ``paging``,
-  ``context_editing``, ``summarization``), each measured on its own (``react.defaults_off``).
+  ``context_editing``, ``summarization``), each measured on its own (``react.defaults_off``);
+  with Deep Agents' paging off a large result is paged by the harness's own convention.
 
 :data:`DEFAULT` are the variants a run compares unless ``--variants`` says.
 """

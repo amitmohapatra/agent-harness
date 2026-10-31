@@ -43,7 +43,15 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, conversation, history, pipeline, sandbox, telemetry
+from trellis.harness import (
+    compat,
+    conversation,
+    history,
+    pipeline,
+    sandbox,
+    snapshots,
+    telemetry,
+)
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -89,7 +97,7 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.base import Source, Tool, arguments_problem, max_age
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -905,9 +913,11 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
                 return None
             output(span, pushed.rendered)
+        stale: list[str] = []
         if window is Window.MESSAGES:
-            runtime.history = from_window(
-                pushed.conversation.messages if pushed.conversation else []
+            runtime.history, stale = snapshots.out_of_date(
+                from_window(pushed.conversation.messages if pushed.conversation else []),
+                lambda name: _max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
         # plan of a skill learned for the task lists its steps); no hint, or none confident
@@ -923,6 +933,8 @@ class Agent:
             if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
                 offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
             runtime.offered = offered
+        if stale and runtime.offered is not None:
+            runtime.offered |= set(stale)  # a tool whose earlier values are out of date: again
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {
@@ -931,7 +943,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
-        rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
+        parts = (pushed.rendered, note, snapshots.note(stale))
+        rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.events.emit(
             RunEventType.CONTEXT_LOADED,
@@ -956,10 +969,14 @@ class Agent:
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
-        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        framework owns the thread (a durable store, ``history.owner``) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``: that session replays
+        the turns, ADR 0005 §4); as the framework's own
         messages where memory owns it, the framework keeps no store and replays messages; in
         the context's text otherwise (a store kept in RAM replays the thread itself while the
         process lives: the window is never given twice)."""
+        if runtime.continued:
+            return Window.NONE  # the continued session holds the turns
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
             return Window.NONE  # the framework's store holds it, or reads memory's thread itself
@@ -998,6 +1015,8 @@ class Agent:
         memory = runtime.run_memory
         if memory is None or not runtime.uses("records") or not messages:
             return
+        # each tool result says which tool returned it and when: a later turn replays it so
+        messages = snapshots.stamped(messages, runtime.fetched)
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:
@@ -1379,6 +1398,14 @@ def _json(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _max_age(runtime: Runtime, name: str) -> float | None:
+    """How long a value of the run's tool ``name`` stays current, as it declared it (``None``:
+    it did not say, or it is not the run's tool)."""
+    found = runtime.toolbox.get(name)
+    spec = found.spec if found is not None else runtime.native.get(name)
+    return None if spec is None else max_age(spec)
 
 
 def _pull(agent: Agent) -> frozenset[str]:

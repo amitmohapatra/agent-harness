@@ -60,7 +60,7 @@ from trellis.contracts import (
     ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
-from trellis.harness import budget
+from trellis.harness import budget, snapshots
 from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.conversation import result_id
 from trellis.harness.events import DECISION, NOTICE
@@ -257,6 +257,7 @@ async def _called(
         if cancelled or is_pause_signal(cut):
             _cut(runtime, ref, tool.name, CANCELLED if cancelled else PAUSED)
         raise
+    runtime.fetched[ref] = snapshots.now()  # what a later turn's replay says it is from
     _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
     await _record(runtime, tool_call, outcome, decision, key=key)
     return outcome
