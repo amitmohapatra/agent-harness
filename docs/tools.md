@@ -194,8 +194,10 @@ keeps no journal, so the record is the file's own.
   CSV is read as it is and Excel as CSV rows (the `xlsx` extra), paged as any kept result.
   The first page starts with how the file was made, from its record. `/files` lists the files
   of every chat, newest first.
-- A path never names a tenant or a user: another user's file is not found. A deleted file is
-  not listed, and reading it says it was deleted or never kept.
+- A path never names a tenant or a user: another user's file is not found. A deleted file
+  whose record is left is listed as deleted, and reading it says so and how it was made.
+- The note gives the run's start time, so an answer dates this run's results against the
+  file's. A function target (its code is offered no reader) is told nothing.
 
 ## Values that change: freshness
 
