@@ -41,6 +41,7 @@ import sqlite3
 import statistics
 import threading
 import time
+from collections import ChainMap
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
@@ -121,11 +122,40 @@ def columns_of(text: str) -> list[str]:
     return column_names(rows_of(text)[0])
 
 
+#: Where a large result is kept (``tools.results.PREFIX``), and what a path there that no run
+#: keeps reads as: a result saved in a turn this process no longer keeps.
+KEPT_PREFIX: Final = "/large_tool_results/"
+GONE: Final = (
+    "Error: File '{path}' not found: it is not a result this conversation keeps here (results "
+    "are kept for a conversation's later turns in the process that saved them, while there is "
+    "room). Call the tool that returned it again."
+)
+
+
+def not_found(path: str) -> str:
+    """What reading or querying ``path``, which nothing keeps, answers."""
+    return (
+        GONE.format(path=path)
+        if path.startswith(KEPT_PREFIX)
+        else f"Error: File '{path}' not found"
+    )
+
+
+def saved(runtime: Any) -> Mapping[str, str]:
+    """Every result ``runtime``'s run can read, by path: those it saved (its journal), then
+    those its conversation's earlier turns saved in this process (``Runtime.earlier_results``:
+    ``tools.results.Conversations``) — a follow-up reads or queries the path its history
+    names."""
+    own: dict[str, str] = runtime.replay.journal.results
+    earlier: Mapping[str, str] = getattr(runtime, "earlier_results", None) or {}
+    return ChainMap(own, dict(earlier)) if earlier else own
+
+
 def tables(runtime: Any) -> dict[str, str]:
     """Every result the run keeps, by its path, and the table it is in a query: the name of the
     tool that returned it (``results.keep``'s ``tool``, in this attempt), else ``result_<n>``
     in the order kept — each name once, never :data:`TABLE` (the queried file's own)."""
-    kept = runtime.replay.journal.results
+    kept = saved(runtime)
     tools = getattr(runtime, "kept_from", None) or {}
     used = {TABLE}
     found: dict[str, str] = {}
@@ -165,12 +195,12 @@ def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], s
     Agents saved) — and the file's own table; or why there is nothing to load."""
     path = "/" + file_path.lstrip("/")
     runtime = current()
-    kept = runtime.replay.journal.results if runtime is not None else {}
+    kept = saved(runtime) if runtime is not None else {}
     named = tables(runtime) if runtime is not None else {}
     if text is None:
         text = kept.get(path)
     if text is None or runtime is None:
-        return f"Error: File '{path}' not found"
+        return not_found(path)
     texts = {named[p]: kept[p] for p in named}
     if path not in named:
         texts[f"{TABLE}_file"] = text  # a file Deep Agents saved: queried as ``result``

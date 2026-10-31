@@ -330,7 +330,7 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
-    kept = path in runtime.replay.journal.results
+    kept = path in query.saved(runtime)
     said: str | None = None
     if call["name"] == READ_FILE and (request.tool is None or kept):
         said = results.read(args)

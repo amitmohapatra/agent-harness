@@ -314,6 +314,7 @@ async def _attempt(
         continued=continued,
     )
     events.trace_run = runtime.trace_run
+    _earlier_results(agent, runtime)
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -365,6 +366,7 @@ async def _attempt(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
     _kept_session(agent, runtime, journal, result)
+    _kept_results(agent, runtime, journal, result)
     await agent.hooks.ended(runtime, result)
     return result
 
@@ -398,6 +400,31 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
         and result.status is not RunStatus.PAUSED
     ):
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
+
+
+def _earlier_results(agent: Agent, runtime: Runtime) -> None:
+    """A conversation's turn reads the large results its earlier turns saved in this process
+    (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
+    a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
+    files in the thread's state. A run with no conversation of its own, or a child run, has
+    none."""
+    if runtime.parent is not None or runtime.conversation == runtime.run_id:
+        return
+    runtime.earlier_results, tools = agent.results.of(runtime.conversation)
+    for path, tool in tools.items():
+        runtime.kept_from.setdefault(path, tool)
+
+
+def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+    """The large results a conversation's turn saved, kept for its later turns
+    (:func:`_earlier_results`); a paused turn keeps them in its journal until it ends."""
+    if (
+        journal.results
+        and runtime.parent is None
+        and runtime.conversation != runtime.run_id
+        and result.status is not RunStatus.PAUSED
+    ):
+        agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
 
 
 async def _worked(

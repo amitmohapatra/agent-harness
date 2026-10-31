@@ -197,6 +197,9 @@ class Runtime:
     #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
     #: its table's name in a query (``tools.query.tables``)
     kept_from: dict[str, str] = field(default_factory=dict)
+    #: the results the conversation's earlier turns saved in this process, by path
+    #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
+    earlier_results: dict[str, str] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
