@@ -315,9 +315,14 @@ async def governed_call(
 
 def _message(outcome: ToolOutcome, call_id: str, name: str, *, kept: bool = False) -> ToolMessage:
     """A harness call's outcome as the tool message the model reads — ``kept``: a large one
-    kept in the run and previewed, ``read_file`` paging it (``tools.results``)."""
+    kept in the run and previewed, ``read_file`` paging it (``tools.results``); a table of
+    many rows read whole is kept too, for ``query_result`` (``results.tabled``)."""
     return ToolMessage(
-        content=results.readable(outcome.output, name) if kept else text_of(outcome.output),
+        content=(
+            results.readable(outcome.output, name)
+            if kept
+            else results.tabled(text_of(outcome.output), name)
+        ),
         tool_call_id=call_id,
         name=name,
         status="error" if outcome.status in FAILED else "success",
