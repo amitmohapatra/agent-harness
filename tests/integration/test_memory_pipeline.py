@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
@@ -26,7 +27,7 @@ from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import telemetry
+from trellis.harness import snapshots, telemetry
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
@@ -434,8 +435,9 @@ async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
 
 # --------------------------------------------------------------------------- records
 async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(snapshots, "now", lambda: datetime(2026, 10, 30, 9, 0, tzinfo=UTC))
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="stock"), [stock])
     result = await agent.run("how many a?", user="u1")
@@ -445,7 +447,8 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "how many a?", f"{result.run_id}:user:0"),
         ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
-        ("TOOL", "7", f"{result.run_id}:1:msg:2"),
+        # which tool returned it, and when: a later turn replays it so (``snapshots``)
+        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7", f"{result.run_id}:1:msg:2"),
         ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
     ]
     call, answered = batch.body["messages"][1:3]

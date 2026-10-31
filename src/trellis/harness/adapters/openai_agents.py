@@ -76,8 +76,8 @@ from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answer
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool
-from trellis.harness.tools.mcp import side_effects_of
+from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool, data_of
+from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
 
@@ -463,6 +463,7 @@ def _governed_server() -> type:
                 source="mcp",
                 server=self.name,
                 side_effects=side_effects_of(self._annotations.get(tool_name)),
+                **data_of(self._annotations.get(tool_name), strict=False),
             )
             outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
             if outcome.ok and isinstance(outcome.output, dict):
@@ -587,6 +588,7 @@ async def _listed(server: Any) -> list[ToolSpec]:
             source="mcp",
             server=server.name,
             side_effects=side_effects_of(tool.annotations),
+            **data_of_listed(tool),
         )
         for tool in tools
     ]

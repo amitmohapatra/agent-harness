@@ -184,3 +184,24 @@ async def test_reacts_sandbox_is_paused_with_its_run_and_attached_by_the_resume(
     assert ("attach", made) in provider.calls  # the same sandbox, not a new one
     assert provider.commands == ["echo drafted", "echo again"]
     assert provider.made() == [made] and ("delete", made) in provider.calls
+
+
+async def test_a_result_the_run_keeps_is_a_file_in_its_sandbox_for_code(harness: Harness) -> None:
+    """``ReAct(backend=sandbox())``: a result the harness keeps (one cut to fit the window)
+    is written into the sandbox at the path the model was given, once per attempt, before a
+    command runs there — code reads every row of it."""
+    from trellis.harness.tools import results
+
+    provider = FakeSandboxes()
+    backend = backend_of(provider)
+    seen: list[str] = []
+
+    async def work(input: str, agent: Runtime) -> str:
+        path = results.keep("sku,stock\nSKU-1,4")
+        assert path is not None
+        seen.append((await backend.aexecute(f"cat {path}")).output)
+        seen.append((await backend.aexecute(f"cat {path}")).output)  # written once: still there
+        return "done"
+
+    assert (await harness.wrap(work, id="kept-in-box").run("go", user="u")).answer == "done"
+    assert seen == ["sku,stock\nSKU-1,4"] * 2

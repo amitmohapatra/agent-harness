@@ -20,6 +20,8 @@ from benchmark.cost import catalog, prices, run, stats
 from benchmark.cost.variants import VARIANTS
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Settings
+from trellis.harness.journal import content_key
+from trellis.harness.tools.base import max_age
 from trellis.harness.tools.lint import lint
 
 #: What the realistic definitions must never be (the set's size, and two list tools of one
@@ -84,6 +86,7 @@ def test_the_class_suite_has_ten_distinct_tasks_per_class_on_their_own_tools() -
     tasks = [t for s in sets for t in s.tasks]
     kinds = [t["metadata"]["length"] for t in tasks]
     assert {k: kinds.count(k) for k in catalog.CLASSES} == dict.fromkeys(catalog.CLASSES, 10)
+    assert {"large", "aggregate", "freshness"} <= set(catalog.CLASSES)
     assert len({t["metadata"]["task"] for t in tasks}) == 10 * len(catalog.CLASSES)
     assert sum(bool(t["metadata"]["mix"]) for t in tasks) == 10
     for taskset in sets:
@@ -91,6 +94,37 @@ def test_the_class_suite_has_ten_distinct_tasks_per_class_on_their_own_tools() -
         assert all(set(t["metadata"]["needed_tools"]) <= own for t in taskset.tasks)
     large = [t for t in tasks if t["metadata"]["length"] == "large"]
     assert {t["expected"] for t in large} >= {"NET-0001", "DES-1100"}
+
+
+def test_the_aggregate_tasks_ask_over_every_row_of_10000_skus() -> None:
+    """A count, a sum, a top-N, a filter and a group over an export past what a model reads
+    at once: the answers are computed from every row, so one page read is not enough."""
+    export = catalog.sku_export.fn()
+    rows = export.splitlines()[1:]
+    assert len(rows) == catalog.SKUS == 10_000 and len(export) > 80_000
+    tasks = [t for s in catalog.class_sets() for t in s.tasks]
+    aggregate = {t["metadata"]["task"]: t for t in tasks if t["metadata"]["length"] == "aggregate"}
+    assert all(t["metadata"]["needed_tools"] == ["sku_export"] for t in aggregate.values())
+    low = sum(int(r.split(",")[3]) < 10 for r in rows)
+    assert aggregate["inventory: SKUs with stock under 10"]["expected"] == str(low)
+    by_revenue = sorted(rows, key=lambda r: -int(r.split(",")[4]))
+    top5 = [r.split(",")[0] for r in by_revenue[:5]]
+    assert aggregate["inventory: top 5 by revenue"]["expected"] == top5
+    # none of them is answered by the preview's head and tail alone
+    seen = rows[:5] + rows[-5:]
+    assert top5[0] not in "\n".join(seen)
+
+
+def test_the_freshness_tasks_give_an_older_value_and_expect_the_current_one() -> None:
+    tasks = [t for s in catalog.class_sets() for t in s.tasks]
+    fresh = [t for t in tasks if t["metadata"]["length"] == "freshness"]
+    assert max_age(catalog.sku_stock.spec) == 0  # declared live
+    for task in fresh:
+        sku, older = task["metadata"]["sku"], task["metadata"]["older"]
+        now = catalog.sku_stock.fn(sku)["stock"]
+        assert task["metadata"]["needed_tools"] == ["sku_stock"]
+        assert str(older) in task["input"] and task["expected"] == [str(now)]
+        assert str(now) not in task["input"]  # an answer repeating the question does not pass
 
 
 def test_the_chain_class_is_answered_only_through_the_chain() -> None:
@@ -386,10 +420,12 @@ async def _one_row(h: Any, variant: str, size: int, **kwargs: Any) -> list[Any]:
     return [row]
 
 
-@pytest.mark.parametrize(("variant", "paged"), [("deep", True), ("deep-paging", False)])
+@pytest.mark.parametrize(("variant", "harness"), [("deep", False), ("deep-paging", True)])
 async def test_a_main_piece_is_measured_on_its_own(
-    variant: str, paged: bool, monkeypatch: pytest.MonkeyPatch
+    variant: str, harness: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``deep-paging``: Deep Agents' paging off — the export is paged all the same, by the
+    harness's own convention (``tools.results``, every adapter's), not Deep Agents'."""
     monkeypatch.setattr(run.Settings, "from_env", classmethod(lambda cls: Settings()))
     desk = next(s for s in catalog.task_sets() if s.name == "help desk")
     export = [t for t in desk.tasks if t["metadata"]["needed_tools"] == ["ticket_export"]]
@@ -404,7 +440,9 @@ async def test_a_main_piece_is_measured_on_its_own(
         )
     assert row["success"] and row["checks"] == {"contains": True}
     result = model.seen[-1][-1]  # what the model read of the export
-    assert (len(str(result.content)) < 80_000) is paged
+    assert len(str(result.content)) < 80_000
+    kept = f"/large_tool_results/{content_key('result', catalog.ticket_export.fn('network'))}"
+    assert (kept in str(result.content)) is harness
 
 
 def test_only_the_measured_models_own_price_counts_its_cache() -> None:
