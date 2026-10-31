@@ -224,6 +224,20 @@ async def test_an_excel_file_reads_as_csv_rows(run: Run) -> None:
     assert await results.aread({"file_path": "/files/r0/a.xlsx", "offset": 2}) == "3  x,6"
 
 
+async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None:
+    files = run.agent.harness.files
+    await files.put("t/u/c_1/r0", "d.csv", b"a,b\n1,2\n", source="sandbox_exec")
+    await files.keep_record("t/u/c_1/r0", "d.csv", {"run": "r0", "source": "sandbox_exec"})
+    said = await stored.read("/files/r0/d.csv")
+    assert said == (
+        "/files/r0/d.csv was saved an unknown time in run r0 by sandbox_exec. The run's tool "
+        "calls: none.\n\n1  a,b\n2  1,2"
+    ), said
+    await files.put("t/u/c_1/r0", "e.xlsx", b"not a zip", source="sandbox_exec")
+    said = await stored.read("/files/r0/e.xlsx")
+    assert said.startswith("Error: /files/r0/e.xlsx is no table: BadZipFile"), said
+
+
 async def test_a_file_that_is_no_table_or_too_large_says_so(
     run: Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
