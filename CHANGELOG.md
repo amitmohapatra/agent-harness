@@ -104,6 +104,10 @@ own model work follows the harness's configuration.
   20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
   naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
   placeholder naming `read_result`, a tool that request did not offer.
+- `FitWindow(turns=False)` (ReAct on Deep Agents: a summarization after it) leaves tool results
+  to Deep Agents too: its overflow path offloads a result whole to its backend. Before, both cut
+  the same result, so a sandbox held it twice (the harness's whole copy, written in for code,
+  and Deep Agents' offload of the cut text).
 
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 

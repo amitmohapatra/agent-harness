@@ -103,3 +103,30 @@ def test_code_modes_meta_tools_are_apart_from_the_sandboxs_execute() -> None:
     meta = {t.name for t in CODE_MODE_TOOLS}
     assert meta.isdisjoint({"execute", "read_file", "write_file", "ls", "grep", "glob"})
     assert meta.isdisjoint({"sandbox_exec", "sandbox_read", "sandbox_write", "query_result"})
+
+
+async def test_a_result_over_the_window_is_offloaded_once_where_code_reads_it(
+    harness: Harness, kept_by_harness: list[str]
+) -> None:
+    """Below Deep Agents' eviction but over the window, a result is Deep Agents' to make fit
+    (its summarization's overflow path offloads it whole to the backend): ``FitWindow`` does
+    not also cut it and keep it in the run's journal, which the sandbox would then hold a
+    second time. One copy, the whole result, in the sandbox where code reads it."""
+    rows = "sku,units\n" + "\n".join(f"s{n},{n % 5}" for n in range(5_000))
+
+    @tool(side_effects="read")
+    def stock() -> str:
+        """Every stock row."""
+        return rows
+
+    provider = Kept()
+    model = ScriptedChatModel(turns=[("stock", {}), ("execute", {"command": "echo 2"}), "2"])
+    target = ReAct("s", model, backend=sandbox(provider), context_window=6_000)
+    agent = arm(harness.wrap(target, id="fit"), [stock])
+    result = await agent.run("how many units?", user="u")
+    assert result.answer == "2", result.error
+    assert kept_by_harness == []  # no harness copy
+    [box] = provider.gone.values()
+    saved = {p: v for p, v in box.files.items() if p.startswith(results.PREFIX)}
+    assert list(saved) == [f"{results.PREFIX}/call_1_0"]  # once, by its call's id
+    assert saved[f"{results.PREFIX}/call_1_0"].decode() == rows  # whole

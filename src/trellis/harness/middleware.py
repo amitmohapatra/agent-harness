@@ -1268,7 +1268,9 @@ class FitWindow(AgentMiddleware):
     3. ``results`` — the tools narrowed past :data:`FIT_KEEP`, then the longest results cut
        to their head and tail, each kept whole and its cut naming where ``read_file`` reads the
        rest (clearing older results is LangChain's ``ClearToolUsesEdit``'s, before it: one
-       clearing pass);
+       clearing pass). ``turns=False`` (a Deep Agents summarization after it) leaves the
+       results to it too: it offloads a result whole to its backend and reads it back with its
+       own ``read_file``, so a result is stored once, where its sandbox's code reads it;
     4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
        to a summarization after it: ``ReAct``'s summarizes them);
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
@@ -1350,6 +1352,11 @@ class FitWindow(AgentMiddleware):
                 reply = max(reply, value)
         return max(0, int(window * FIT_SHARE) - reply)
 
+    def _results(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        """The longest results cut (:func:`_cut`) — none with a summarization after it, whose
+        own overflow handling offloads them whole (Deep Agents')."""
+        return _cut(request, budget) if self.turns else request
+
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
@@ -1357,7 +1364,7 @@ class FitWindow(AgentMiddleware):
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: _cut(_narrowed(r, b, runtime, least=0, before=before), b),
+            lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
             lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )

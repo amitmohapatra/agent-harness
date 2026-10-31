@@ -304,7 +304,7 @@ smaller, step by step, only as far as it must, in this order:
 |---|---|---|
 | `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
-| `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
+| `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
 | `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
