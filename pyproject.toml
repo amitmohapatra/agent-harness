@@ -145,6 +145,8 @@ known-first-party = ["trellis", "benchmark"]
 # the model's named arguments, as many as a query has filters
 "benchmark/cost/complex.py" = ["E501", "PLR0912", "PLR0915"]
 "benchmark/cost/retail.py" = ["E501", "PLR0917"]
+# the adversarial cases' table (a turn a line), some in other scripts on purpose
+"benchmark/cost/adversarial.py" = ["E501", "PLR0915", "RUF001"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 # Each bridge imports its framework when its adapter first uses it.

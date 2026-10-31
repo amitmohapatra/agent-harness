@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -78,3 +79,78 @@ class ScriptedChatModel(BaseChatModel):
                 "total_tokens": given + said,
             }
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+#: A string argument holding this is given the path of the last saved large result the model
+#: was told of (the tool message names it), so a scripted call can read it back.
+SAVED: Final = "{saved}"
+_SAVED_PATH: Final = re.compile(r"/large_tool_results/[^\s'\"`),;]+")
+
+
+def _said(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+    return str(content)
+
+
+class KeyedChatModel(ScriptedChatModel):
+    """Answers by the conversation it is given, not by the order of its calls: ``script`` holds
+    each user message (a run's question, a steered message, a helper's task) with its rounds,
+    the answer last. A call is answered with the round of the latest user message the script
+    holds (its k-th time said: the script's k-th entry of it), counted by the assistant
+    messages since — so runs that interleave, are steered or are cut short each still get
+    their own rounds; a call offered no tool gets the answer. A call no scripted message is
+    in is answered from ``turns``, in order. A string argument holding :data:`SAVED` gets the
+    last saved result's path."""
+
+    script: list[tuple[str, list[Turn]]] = Field(default_factory=list)
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        humans = [n for n, m in enumerate(messages) if isinstance(m, HumanMessage)]
+        for n in reversed(humans):
+            text = _said(messages[n].content)
+            entries = [r for key, r in self.script if key == text or (key.strip() and key in text)]
+            if not entries:
+                continue
+            said = sum(_said(messages[k].content) == text for k in humans if k <= n)
+            rounds = entries[min(max(said, 1), len(entries)) - 1]
+            done = sum(isinstance(m, AIMessage) for m in messages[n + 1 :])
+            chosen = rounds[min(done, len(rounds) - 1)]
+            if not isinstance(chosen, str) and _no_tools(kwargs):
+                chosen = rounds[-1]  # offered no tool: it answers
+            self.turns.insert(0, _with_path(chosen, messages))
+            break
+        if not self.turns:
+            self.turns.append("I have nothing more to add.")
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+def _no_tools(kwargs: dict[str, Any]) -> bool:
+    """Whether the call was offered no tool (none bound, or ``tool_choice="none"``)."""
+    return not kwargs.get("tools") or kwargs.get("tool_choice") == "none"
+
+
+def _with_path(turn: Turn, messages: list[BaseMessage]) -> Turn:
+    if isinstance(turn, str):
+        return turn
+    found = [
+        p.rstrip(".:")
+        for m in messages
+        if isinstance(m, ToolMessage)
+        for p in _SAVED_PATH.findall(_said(m.content))
+    ]
+    path = found[-1] if found else SAVED
+
+    def filled(call: tuple[str, dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+        name, args = call
+        return name, {
+            k: v.replace(SAVED, path) if isinstance(v, str) else v for k, v in args.items()
+        }
+
+    return [filled(c) for c in turn] if isinstance(turn, list) else filled(turn)

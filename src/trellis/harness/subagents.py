@@ -189,7 +189,8 @@ async def child_run(
         )
     async with admission.branch(parent, run_id, agent.id) as branch:
         left = parent.remaining()
-        limits = [t for t in (timeout, left) if t is not None]
+        own = agent.timeout if timeout is None else timeout  # the call's, else the agent's
+        limits = [t for t in (own, left) if t is not None]
         start = await agent._start(
             input,
             user=user,

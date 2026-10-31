@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Final
 
+from tests.matrix.adversarial import ADVERSARIAL
 from tests.matrix.dimensions import SELECTION_BY_ID, SELECTIONS
 from tests.matrix.extensions import EXTENSIONS
 from tests.matrix.features import FEATURES, SELECTION
@@ -49,14 +50,53 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
     return lambda feature, adapter, way, mode, selection: set(switches) <= selection.on
 
 
-#: The real failures this matrix found and that are not fixed yet (none now: BUG-1, Claude
+#: The real failures this matrix found and that are not fixed yet (the adversarial rows' below; BUG-1, Claude
 #: running a call the CLI made after a pause, was fixed by the Claude session and governance
 #: work; BUG-2 to BUG-10 by their own commits): where each holds (feature ids, adapters, ways,
 #: modes, and a test on the selection — ``_on`` writes one), the bug, and how it fails (``raises``: any other failure of
 #: the cell is still a failure). The reproduction of each is its cell's id
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
-KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = []
+KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
+    # the adversarial rows' findings (tests/matrix/adversarial.py; the backlog's Adversarial
+    # suite section has each as an issue)
+    (
+        {"features": {"X05"}, "adapters": {"openai_agents"}},
+        Bug(
+            "ADV-8",
+            "a tool name the model made up ends an OpenAI Agents run ERROR (the SDK's "
+            "ModelBehaviorError: 'Tool lookup_all not found') instead of an error the model reads",
+            raises=AssertionError,
+        ),
+    ),
+    (
+        {"features": {"X06"}, "adapters": {"react", "middleware"}},
+        Bug(
+            "ADV-4",
+            "a stall (one call repeated) ends the run ERROR with no answer (StallGuard's "
+            "ModelError): the fix is in flight, #76",
+            raises=AssertionError,
+        ),
+    ),
+    (
+        {"features": {"X06"}, "adapters": {"langgraph", "deepagents", "claude"}},
+        Bug(
+            "ADV-9",
+            "nothing stops a model repeating one call where the trellis middleware is not in the "
+            "graph (a plain create_agent / create_deep_agent, the Claude CLI): all 30 calls ran",
+            raises=AssertionError,
+        ),
+    ),
+    (
+        {"features": {"X06"}, "adapters": {"openai_agents"}},
+        Bug(
+            "ADV-9",
+            "a looping OpenAI Agents run ends ERROR (MaxTurnsExceeded) with no answer: the "
+            "harness does not turn the SDK's own limit into a last answer, as StepLimit does",
+            raises=AssertionError,
+        ),
+    ),
+]
 
 
 def _known(feature: str, adapter: str, way: str, mode: str, selection: Selection) -> Bug | None:
@@ -138,7 +178,7 @@ def on_in(feature: Feature, way: str, selection: Selection) -> bool:
 
 def cells() -> Iterator[Cell]:
     everything = SELECTION_BY_ID["all"]
-    for feature in [*FEATURES, SELECTION, *EXTENSIONS]:
+    for feature in [*FEATURES, SELECTION, *EXTENSIONS, *ADVERSARIAL]:
         for adapter in ADAPTERS:
             for way in WAYS:
                 for mode in MODES:

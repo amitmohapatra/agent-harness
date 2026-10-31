@@ -93,6 +93,40 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Test-order flake: `tests/integration/test_fit_window.py` fails when it runs after the unit suite, on main too. Fix it: nothing may fail | next | reported against main; reproduce first |
 | Memory draft #64: CI was red before its last push, and one merge commit lacks the commit trailer. Fix both before the merge | later | memory #64 |
 
+## Adversarial suite
+
+What the adversarial suite found (`benchmark/cost/adversarial.py`, 48 cases and 144 turns, `--cases adversarial`;
+`tests/matrix/adversarial.py`, rows X01–X17 on every adapter). Each entry names the failing case
+ids; the suite holds each as known (`adversarial.KNOWN`, `generate.KNOWN`), so the day it is fixed
+its cases pass and the suite fails until the entry is removed. Reproduce a complex case with
+`python -m benchmark.cost.complex --scripted --cases <id> --adapter <adapter> --out build/x`, a
+matrix cell with `pytest tests/matrix -k <cell>`.
+
+| Id | Issue | Failing cases | Status |
+|---|---|---|---|
+| ADV-1 | **A blank or whitespace-only message is sent to the model and kept in the thread.** `run("")` and `run("  \n\t")` reach the model as an empty user message on every adapter, and every later request of that thread carries it. A provider that refuses an empty text block (Anthropic does) would fail that turn and every turn after it: the thread can never be continued. Expected: refuse it before the model call with a clear error (or answer without a model call), and never keep it in the history. To verify against a real provider in the final gate. | `advconv-07` turns 0–3 (`nonblank`), langgraph, react, deepagents | next |
+| ADV-2 | **`query_result` sums money in binary floating point.** The September refunds (6,000 lines of two-decimal amounts) sum to `32266.149999999998`, not `32266.15`: a small model may repeat the long figure. Expected: exact decimal sums for decimal text (e.g. SQLite's `decimal` extension or Python `Decimal` aggregates), or the result rounded to the inputs' places. | `advdata-11` turn 0 | next |
+| ADV-3 | **`query_result` fails the whole run on an integer past 64 bits** (`OverflowError`, run ERROR, no answer). | `advdata-12` turn 0 | in flight: #83 |
+| ADV-4 | **A stall ends the run ERROR with no answer** (StallGuard's `ModelError`): the user is never told what went wrong. | `advres-02` turn 0; matrix X06 react, middleware | in flight: #76 |
+| ADV-5 | **Three different malformed calls in a row stop the run** (`ERROR_STREAK`): a model correcting itself (wrong type, then a missing argument, then a made-up tool name, then the right call) is cut before its fourth call, though no call repeated. Expected: count a streak only of the same error, or allow more steps when each error differs; at least, answer with what is known (after #76). | `advres-01` turn 0 | next |
+| ADV-6 | **A result saved in one turn is gone in the next, while the history still names its path.** A follow-up's `query_result` or `read_file` on `/large_tool_results/...` answers "File not found", so every what-if on a 50k-line result needs the whole fetch again. Deep Agents keeps it (its state backend); `create_agent` with the middleware and `ReAct` do not. Expected: keep a conversation's saved results for its later turns (or say in the history that they expired and how to fetch them again). | `advscen-01` turn 7, `advscen-02` turn 6, `advscen-03` turn 6 (langgraph, react) | next |
+| ADV-7 | **ReAct with memory off replays only questions and answers, of the last 10 runs.** A follow-up has no earlier tool result (a vendor name read in turn 1, the 503 behind an explanation, the figures behind a recommendation: the `grounded` checks flag the reasons' figures as not in the context), and a figure from 13 turns back is gone with no summary. Partly by design (ADR 0005); the explain part is the steps list in flight (#62, arm D). | react: `advconv-05` t13, `advdata-06` t1, `advexp-02` t1, `advexp-05` t1, `advscen-01` t6, `advscen-02` t5, `advscen-03` t5, `advfile-02` t2 | in flight (explain: #62); the rest next |
+| ADV-8 | **A tool name the model made up ends an OpenAI Agents run ERROR** (the SDK's `ModelBehaviorError: Tool lookup_all not found`) instead of an error the model reads, as on every other adapter. Expected: the harness answers the unknown call with what tools exist. | matrix X05 openai_agents (run, stream, worker) | next |
+| ADV-9 | **Nothing stops a looping model without the trellis middleware**: a plain `create_agent`/`create_deep_agent` graph and the Claude CLI ran all 30 identical calls; OpenAI Agents stops at its own `max_turns` but ends ERROR (`MaxTurnsExceeded`) with no answer. Expected: the harness's tool bridge (which every adapter's calls go through) stops the same call repeated, and a framework's own limit ends with a last answer, as `StepLimit` does. | matrix X06 langgraph, deepagents, claude, openai_agents | next |
+| ADV-10 | **A helper's own time limit (`h.wrap(run_timeout=)`) was dropped when its parent had a limit**: the child ran its full 2 s inside a parent with 60 s, though wrapped with 0.2 s. | matrix X09; `test_subagents.py::test_a_childs_own_time_limit_holds_inside_a_parent_that_has_one` | fixed in this PR (`subagents.child_run` takes the agent's own limit) |
+| ADV-11 | **What a finished run spent is not on its end**: its tokens, model calls and cost are kept in the journal while it works (`budget.account`) and dropped at the end — neither `RUN_FINISHED` nor the record says them (only per-call spans, with tracing on). A scenario job's total cost cannot be read back. | matrix X17 (a strict gap on every adapter with a model) | next |
+| ADV-12 | **No file store**: a run cannot hand its user a file, so "the report you gave me yesterday" works only through the suite's own file tools (`advfile-02..04`), not the harness. | matrix X13 (a strict gap) | in flight: #91 |
+
+Covered and passing on main (no finding): two people on one thread id (X01, `advconv-09`); queue,
+interrupt and steer while busy (X02, `advconv-11..13`, `advexp-01`); a burst of 20 runs (X03); a
+slow run store (X04); 24 helpers under the admission limit (X07), nested (X08), cancelled with
+their parent (X10, X16), asking for an approval (X11), steered around (X12); a scenario job as a
+durable run with progress over AG-UI, an approval before applying and an explanation after (X14),
+its worker dying mid-way without redoing a scenario (X15); 20 Deep Agents helpers at once
+(`advflow-02`); the allocation pipeline's waterfall, its missing and plain-text stage logs
+(`advpipe-01..02`); unicode, nulls, wrong types, duplicate keys, malformed CSV, a 503 or a timeout
+mid-chain, pages without end, a 60,000-line log (`advdata-*`).
+
 ## Safety and privacy
 
 | Gap | Status | Evidence |
