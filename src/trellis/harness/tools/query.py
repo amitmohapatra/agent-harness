@@ -43,7 +43,10 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
+from trellis.contracts import ToolError
+from trellis.harness.files import file_name
 from trellis.harness.runtime import current
+from trellis.harness.tools import export
 from trellis.harness.tools.base import arguments_problem, not_run
 
 #: The tool, and what it is told and given.
@@ -69,6 +72,23 @@ QUERY_RESULT_SCHEMA: Final[dict[str, Any]] = {
     "required": ["file_path", "sql"],
     "additionalProperties": False,
 }
+#: The schema of a run that saves a query's result as a file (:func:`saving`): with
+#: ``save_as`` and ``file_name`` (``tools.export``).
+QUERY_RESULT_SAVING_SCHEMA: Final[dict[str, Any]] = {
+    **QUERY_RESULT_SCHEMA,
+    "properties": {
+        **QUERY_RESULT_SCHEMA["properties"],
+        "save_as": {
+            "enum": list(export.formats()),
+            "description": "Also save the query's whole result as a file the user downloads.",
+        },
+        "file_name": {"type": "string", "description": "With save_as: the file's name."},
+    },
+}
+#: The rows a saved file's answer shows (the file holds them all).
+SAVED_ROWS: Final = 5
+#: The seconds a query saving its whole result may run, writing included.
+SAVE_SECONDS: Final = 60.0
 #: The most rows a query answers with, its longest text, the seconds it may run, the memory
 #: its database may take, and the delimiters a CSV result is read with.
 ROWS: Final = 200
@@ -139,23 +159,64 @@ def tables(runtime: Any) -> dict[str, str]:
     return found
 
 
+def saving(runtime: Any) -> bool:
+    """Whether ``query_result`` saves a query's whole result as a file in ``runtime``'s run
+    (``save_as``): a run with no tool that runs code (``tools.export.runs_code``) — a run with
+    one writes its files with its code."""
+    return runtime is not None and export.runs_code(runtime) is None
+
+
+def schema(runtime: Any) -> dict[str, Any]:
+    """``query_result``'s input schema in ``runtime``'s run (:func:`saving`)."""
+    return QUERY_RESULT_SAVING_SCHEMA if saving(runtime) else QUERY_RESULT_SCHEMA
+
+
 async def query(args: dict[str, Any], text: str | None = None) -> str:
     """``query_result``: the query's rows as CSV (a header line first), at most :data:`ROWS`
     and :data:`OUTPUT_CHARS`; or what is wrong — the arguments, the path, the SQL (SQLite's own
     words, and the tables there are). The file asked about is the table :data:`TABLE`; every
     other result the run keeps is a table too (:func:`tables`), so one query joins and groups
-    across them — only the run's own: nothing else is ever loaded.
+    across them — only the run's own: nothing else is ever loaded. With ``save_as`` (a run that
+    is :func:`saving`), the query's every row is also kept as a file for the user
+    (``Runtime.save_file``), and the answer says so, with its first :data:`SAVED_ROWS` rows.
 
     The query runs in a worker thread (the event loop never waits on it), at most
     :data:`CONCURRENT` at once in the process, on a database made for it and closed after it
     whatever happens; a cancelled call (the run cancelled, or out of time) interrupts it."""
-    problem = arguments_problem(QUERY_RESULT_SCHEMA, args)
+    runtime = current()
+    problem = arguments_problem(schema(runtime), args)
     if problem is not None:
         return not_run(QUERY_RESULT, problem)
     sql = str(args["sql"]).strip().rstrip(";")
     if len(sql) > SQL_CHARS:
         return f"Error: the query is longer than {SQL_CHARS} characters"
-    return await run(str(args["file_path"]), sql, (), text)
+    if args.get("save_as") is None:
+        return await run(str(args["file_path"]), sql, (), text)
+    return await _save(runtime, args, sql, text)
+
+
+async def _save(runtime: Any, args: dict[str, Any], sql: str, text: str | None) -> str:
+    """``query_result`` with ``save_as``: the query's every row kept as a file for the user
+    (``Runtime.save_file``), its name ``file_name`` with the format's extension; what was kept,
+    and its first :data:`SAVED_ROWS` rows — or why nothing was."""
+    kind = args["save_as"]
+    if kind not in export.formats():
+        return not_run(QUERY_RESULT, f"save_as is one of: {', '.join(export.formats())}")
+    name = str(args.get("file_name") or QUERY_RESULT)
+    name = name if name.lower().endswith(f".{kind}") else f"{name}.{kind}"
+    try:
+        file_name(name)
+    except ToolError as exc:
+        return not_run(QUERY_RESULT, exc.message)
+    found = await run(str(args["file_path"]), sql, (), text, save=kind)
+    if isinstance(found, str):
+        return found
+    data, count, shown = found
+    stored = await runtime.save_file(name, data, source=QUERY_RESULT)
+    return (
+        f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
+        f"its download link. Its first rows:\n{shown}"
+    )
 
 
 def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], str] | str:
@@ -181,15 +242,27 @@ def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], s
     return texts, named.get(path, f"{TABLE}_file")
 
 
-async def run(file_path: str, sql: str, params: Sequence[Any] = (), text: str | None = None) -> str:
+async def run(
+    file_path: str,
+    sql: str,
+    params: Sequence[Any] = (),
+    text: str | None = None,
+    *,
+    save: str | None = None,
+) -> Any:
     """``sql`` (with ``params``) over the run's saved results (:func:`loadable`), in a worker
-    thread (see :func:`query`)."""
+    thread (see :func:`query`): its rows shown, or — ``save``, a format of ``tools.export`` —
+    every row as a file of that format, how many, and the first :data:`SAVED_ROWS` shown; or
+    what is wrong, as text."""
     found = loadable(file_path, text)
     if isinstance(found, str):
         return found
     texts, own = found
     call = _Call()
-    work = asyncio.to_thread(_answer, texts, own, sql, params, call=call)
+    take, seconds = (_shown, SECONDS) if save is None else (_saved(save), SAVE_SECONDS)
+    work = asyncio.to_thread(
+        _answer, texts, own, sql, params, call=call, take=take, seconds=seconds
+    )
     try:
         return await asyncio.shield(asyncio.ensure_future(work))
     except asyncio.CancelledError:
@@ -220,9 +293,12 @@ def _answer(
     params: Sequence[Any],
     *,
     call: _Call,
-) -> str:
+    take: Callable[[sqlite3.Cursor, list[str]], Any] | None = None,
+    seconds: float = SECONDS,
+) -> Any:
     """The query over ``texts`` (:func:`query`), in this worker thread, once its turn comes
-    (and its call was not cancelled meanwhile); ``call`` holds its database while it is open."""
+    (and its call was not cancelled meanwhile), within ``seconds``; what ``take`` makes of its
+    rows (:func:`_shown` by default); ``call`` holds its database while it is open."""
     if not _RUNNING.acquire(timeout=WAIT_SECONDS):
         return f"Error: the query waited {WAIT_SECONDS:g} s for others to finish: ask it again"
     deadline = time.monotonic() + LOAD_SECONDS
@@ -236,10 +312,12 @@ def _answer(
             try:
                 db.set_progress_handler(lambda: int(time.monotonic() > ends[0]), 10_000)
                 _loaded(db, texts, own, deadline)
-                deadline = ends[0] = time.monotonic() + SECONDS  # the query's own, from here
+                deadline = ends[0] = time.monotonic() + seconds  # the query's own, from here
                 cursor = db.execute(sql, tuple(params))
-                rows = cursor.fetchmany(ROWS + 1)
                 names = [d[0] for d in cursor.description or ()]
+                return (take or _shown)(cursor, names)
+            except export.TooManyRows as exc:
+                return f"Error: the query has {exc}: aggregate, or narrow it with WHERE"
             except sqlite3.Error as exc:
                 said = "took too long" if time.monotonic() > deadline else str(exc)
                 there = "; ".join(f"{t} ({', '.join(columns_of(x))})" for t, x in texts.items())
@@ -252,16 +330,46 @@ def _answer(
                     call.db = None  # no interrupt from here on: it closes
     finally:
         _RUNNING.release()
-    out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(names)
-    writer.writerows(rows[:ROWS])
-    shown = out.getvalue().rstrip("\n")
+
+
+def _shown(cursor: sqlite3.Cursor, names: list[str]) -> str:
+    """A query's first :data:`ROWS` rows as CSV, at most :data:`OUTPUT_CHARS`, saying when
+    there were more."""
+    rows = cursor.fetchmany(ROWS + 1)
+    shown = _csv(names, rows[:ROWS])
     if len(shown) > OUTPUT_CHARS:
         shown = shown[:OUTPUT_CHARS] + f"\n…[cut at {OUTPUT_CHARS} characters: aggregate more]"
     elif len(rows) > ROWS:
         shown += f"\n…[only the first {ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     return shown
+
+
+def _saved(kind: str) -> Callable[[sqlite3.Cursor, list[str]], tuple[bytes, int, str]]:
+    """What a query saving its result as a ``kind`` file takes of its rows: every row written
+    as they come (``tools.export.written``), how many, and the first :data:`SAVED_ROWS` as
+    CSV."""
+
+    def take(cursor: sqlite3.Cursor, names: list[str]) -> tuple[bytes, int, str]:
+        first: list[Any] = []
+
+        def rows() -> Any:
+            for row in cursor:
+                if len(first) < SAVED_ROWS:
+                    first.append(row)
+                yield row
+
+        data, count = export.written(kind, names, rows())
+        return data, count, _csv(names, first)
+
+    return take
+
+
+def _csv(names: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(names)
+    writer.writerows(rows)
+    return out.getvalue().rstrip("\n")
 
 
 def _loaded(db: sqlite3.Connection, texts: Mapping[str, str], own: str, deadline: float) -> None:

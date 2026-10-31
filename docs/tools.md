@@ -163,6 +163,19 @@ has to. In order of preference:
 `benchmark/cost` measures it (`--suite classes --classes aggregate`: a count, a sum, a filter,
 a top-N and a group over 10,000 SKUs).
 
+### A query's result as a file
+
+In a run with no tool that runs code, `query_result` also takes `save_as` (`"csv"`, or `"xlsx"`
+with the `xlsx` extra: openpyxl) and `file_name`: the query's **every** row, not the 200 its
+answer shows, is written as the rows come (`tools/export.py`) and kept for the user with
+`Runtime.save_file` (the [file store](configuration.md)); the answer says the file's name, rows
+and size, with its first 5 rows. A run that has a tool running code (`sandbox_exec`, Deep
+Agents' `execute` on a sandbox, Claude Code's or Kimi's `Bash`, OpenAI's `code_interpreter`)
+writes its files with its code instead, so its `query_result` has no `save_as`: one purpose
+never has two ways. Each adapter offers the run's own variant (`results.readers()`): `ReAct`
+and `middleware()` per model call, OpenAI Agents, Claude and MCP per attempt. The parameters
+add about 50 tokens to `query_result`'s definition, and nothing to a run that is not offered it.
+
 ## Values that change: freshness
 
 A tool's data is live by default: any value from an earlier turn, a replayed window or memory is

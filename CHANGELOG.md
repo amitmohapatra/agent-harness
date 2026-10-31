@@ -55,6 +55,10 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- `query_result(save_as="csv" | "xlsx", file_name=)`: a query's every row kept as a file for the
+  user (`Runtime.save_file`), in a run with no tool that runs code (`tools.export.runs_code`);
+  each adapter offers the run's own variant (about 50 tokens more, and none where
+  `query_result` is not offered). Excel needs the new `xlsx` extra (openpyxl).
 - A sandbox's files for the user: the command tool says that files written in `outputs/` are
   given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
   store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the

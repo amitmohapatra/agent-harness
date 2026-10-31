@@ -271,9 +271,25 @@ async def aread(args: dict[str, Any]) -> str:
     return read(args)
 
 
-READERS: Final[
-    tuple[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]], ...]
-] = (
+#: A reader: its name, description, JSON schema, and what answers a call.
+Reader = tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]]
+READERS: Final[tuple[Reader, ...]] = (
     (READ_FILE, READ_FILE_DESCRIPTION, READ_FILE_SCHEMA, aread),
     (query.QUERY_RESULT, query.QUERY_RESULT_DESCRIPTION, query.QUERY_RESULT_SCHEMA, query.query),
 )
+#: The readers of a run whose ``query_result`` saves a result as a file (``query.saving``).
+SAVING: Final[tuple[Reader, ...]] = (
+    READERS[0],
+    (
+        query.QUERY_RESULT,
+        query.QUERY_RESULT_DESCRIPTION,
+        query.QUERY_RESULT_SAVING_SCHEMA,
+        query.query,
+    ),
+)
+
+
+def readers() -> tuple[Reader, ...]:
+    """The readers as the current run is offered them: :data:`SAVING` in a run with no tool
+    that runs code (``query.saving``), else :data:`READERS`."""
+    return SAVING if query.saving(current()) else READERS
