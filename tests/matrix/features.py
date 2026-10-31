@@ -110,8 +110,11 @@ async def events(w: World) -> None:
     if w.mode == "stream":
         assert [e.type for e in o.surface][-1] is RunEventType.RUN_FINISHED
     if w.mode == "agui":
-        numbers = [n for n, _ in o.surface]
+        # numbered one by one; an activity line shares the number of the result it follows
+        numbers = [n for n, e in o.surface if e["type"] != "ACTIVITY_SNAPSHOT"]
         assert numbers == list(range(len(numbers))), numbers
+        lines = [i for i, (_, e) in enumerate(o.surface) if e["type"] == "ACTIVITY_SNAPSHOT"]
+        assert lines and all(o.surface[i][0] == o.surface[i - 1][0] for i in lines), lines
         assert o.surface[-1][1]["type"] == "RUN_FINISHED" and o.surface[-1][1]["result"] == o.answer
     if w.mode == "a2a":
         assert _a2a_states(o.surface)[-1] == "TASK_STATE_COMPLETED"
