@@ -78,7 +78,7 @@ from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, export
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -417,6 +417,12 @@ async def _worked(
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
     runtime.native = await agent.native_tools(runtime)
+    # files: a run with no tool that runs code saves a table with export_table (its code
+    # writes files otherwise); detected from the run's tools, never configured
+    exporting = None if agent.adapter.fixed_tools else export.offered(runtime)
+    if exporting is not None:
+        tools.append(exporting)
+        runtime.toolbox[exporting.name] = exporting
     pushed = await agent.push(runtime)
     if observe is not None:
         observe(pushed)
