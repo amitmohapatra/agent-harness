@@ -687,3 +687,45 @@ async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_
         tools = await source.tools().resolve()
     assert tools[0].spec.description == source._tools[0].spec.description
     assert "environment card was not read: Docker is not reachable" in caplog.text
+
+
+async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On success each file directly in outputs/ goes to the file store (named in the journal,
+    announced); one it cannot keep is a warning; a run that fails keeps none."""
+    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 8)
+    harness = Harness(config=Settings(files_url=f"memory://outputs-{id(object())}"))
+    provider = FakeSandboxes()
+    box = sandbox(provider)
+    seen: dict[str, Any] = {}
+
+    async def work(input: str, agent: Runtime) -> Any:
+        await agent.tools.use(box.tools())
+        for path in ("outputs/report.csv", "outputs/a b.csv", "outputs/sub/x.txt", "notes.txt"):
+            await agent.tools.call("sandbox_write", path=path, content="n\n1\n")
+        await agent.tools.call("sandbox_write", path="outputs/big.csv", content="x" * 9)
+        seen["runtime"] = trellis.current()
+        if input == "fail":
+            raise RuntimeError("no answer")
+        return "done"
+
+    agent = harness.wrap(work, id="outputs")
+    events = [e async for e in agent.stream("go", user="u")]
+    runtime = seen["runtime"]
+    assert runtime.replay.journal.files == [
+        {"name": "report.csv", "size": 4, "content_type": "text/csv", "source": "sandbox_exec"}
+    ]
+    assert custom(events, "file") == [
+        {"file": "report.csv", "size": 4, "content_type": "text/csv", "source": "sandbox_exec"}
+    ]
+    warned = sorted(w["message"] for w in custom(events, "warning") if w["code"] == "sandbox")
+    assert warned[0].startswith("the output a b.csv was not kept: 'a b.csv' is not a file")
+    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 8 kept"
+    folder = runtime.files_folder()
+    assert await harness.files.size(folder, "report.csv") == 4
+    assert provider.calls[-1][0] == "delete"  # kept before the sandbox went
+    listed = provider.listed
+    failed = [e async for e in agent.stream("fail", user="u")]
+    assert custom(failed, "file") == [] and provider.listed == listed
+    await harness.aclose()

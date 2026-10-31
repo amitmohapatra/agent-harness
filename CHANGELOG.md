@@ -55,6 +55,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- A sandbox's files for the user: the command tool says that files written in `outputs/` are
+  given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
+  store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
+  sandbox is deleted.
+
 - The sandbox's environment card: `sandbox_exec`, and Deep Agents' `execute` under
   `ReAct(backend=sandbox())`, are described with the image's Python version and installed
   distributions, and with no network, that nothing else can be installed

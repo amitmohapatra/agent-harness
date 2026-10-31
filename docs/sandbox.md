@@ -143,6 +143,16 @@ is said to have none. When the card cannot be read (no daemon), the tool keeps i
 description, and a warning is logged. A missing module that a command still imports is
 explained by its hint (see [On failure](#on-failure)).
 
+## Files for the user: `outputs/`
+
+The command tool tells the model that the files it writes in `outputs/` (in the working
+directory) are given to the user. When the run succeeds, each file directly in `outputs/` is kept
+in the file store (`TRELLIS_FILES_URL`, [configuration.md](configuration.md)) before the sandbox
+is deleted. The file is named in the run's journal and announced with the `file` event, and
+`serve_chat` serves it to the run's user ([surfaces.md](surfaces.md)). A file the store cannot
+take is left behind and reported in a warning: a name that is not one safe path part, or a file
+over 50 MiB. A run that fails keeps none.
+
 ## Automatic
 
 **Its life is the run's.**

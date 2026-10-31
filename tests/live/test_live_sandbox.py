@@ -186,3 +186,20 @@ async def test_the_environment_card_is_read_from_the_image_and_its_sandbox_delet
     assert (
         await engine("GET", "/containers/json", params={"all": "true", "filters": filters})
     ).json() == []
+
+
+async def test_a_file_the_code_writes_in_outputs_is_kept_for_the_user(tmp_path: Any) -> None:
+    async with Harness(config=Settings(files_url=tmp_path.as_uri())) as h:
+
+        async def work(input: str, agent: Runtime) -> Any:
+            script = (
+                "import csv, os; os.makedirs('outputs', exist_ok=True); "
+                "csv.writer(open('outputs/totals.csv', 'w')).writerows([['n'], [42]])"
+            )
+            return await agent.tools.call("sandbox_exec", command=f'python -c "{script}"')
+
+        agent = arm(h.wrap(work, id="outputs"), [sandbox(PROVIDER).tools()])
+        result = await agent.run("x", user="u")
+    assert result.answer["exit_code"] == 0, result.answer
+    [kept] = list(tmp_path.rglob("totals.csv"))
+    assert kept.read_bytes() == b"n\r\n42\r\n" and kept.parent.name == result.run_id

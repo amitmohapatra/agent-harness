@@ -112,10 +112,11 @@ EXECUTE: Final = "execute"
 
 
 class SandboxCard(AgentMiddleware):
-    """``ReAct(backend=sandbox())``: Deep Agents' ``execute`` described with the sandbox's
-    environment card (``SandboxSource.card``: its Python and installed distributions), so the
-    model's first script uses what is there. Deep Agents' ``custom_tool_descriptions`` is fixed
-    when the graph is built, before the card can be read; this sets it on each request."""
+    """``ReAct(backend=sandbox())``: Deep Agents' ``execute`` described with where the user's
+    files go (``sandbox.OUTPUTS``) and the sandbox's environment card (``SandboxSource.card``:
+    its Python and installed distributions), so the model's first script uses what is there.
+    Deep Agents' ``custom_tool_descriptions`` is fixed when the graph is built, before the card
+    can be read; this sets it on each request."""
 
     def __init__(self, source: Any) -> None:
         super().__init__()
@@ -126,12 +127,16 @@ class SandboxCard(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        found = [t for t in request.tools if getattr(t, "name", None) == EXECUTE]
-        card = await self.source.card() if found and current() is not None else ""
-        if not card:  # not read (no daemon): Deep Agents' own description
-            return await handler(request)
-        described = found[0].model_copy(update={"description": f"{found[0].description}\n\n{card}"})
-        tools = [described if t is found[0] else t for t in request.tools]
+        from trellis.harness.sandbox import DELIVERS  # noqa: PLC0415 - the package imports this
+
+        card = await self.source.card()  # "": not read (no daemon), only where outputs go
+        said = f"\n\n{DELIVERS}" + (f" {card}" if card else "")
+        tools = [
+            t.model_copy(update={"description": t.description + said})
+            if getattr(t, "name", None) == EXECUTE
+            else t
+            for t in request.tools
+        ]
         return await handler(request.override(tools=tools))
 
 

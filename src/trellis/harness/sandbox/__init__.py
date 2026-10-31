@@ -103,6 +103,21 @@ PROBE_SECONDS: Final = 60.0
 CARD_PACKAGES: Final = 80
 #: The label of a sandbox made only to read the environment card.
 PROBE_LABEL: Final = "trellis.probe"
+#: Where code in the sandbox puts the files the user gets: each file directly in it is kept in
+#: the file store when the run succeeds (:func:`delivered`), before the sandbox is deleted.
+OUTPUTS: Final = "outputs"
+#: Each output file's size and name, one per line (POSIX sh: any image's shell).
+LIST_OUTPUTS: Final = (
+    f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
+    'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
+)
+#: The largest output file kept; a larger one is left, said in a warning.
+OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
+#: What the command tool's description says about outputs.
+DELIVERS: Final = (
+    f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
+    "finish."
+)
 
 
 class SandboxSource:
@@ -122,7 +137,7 @@ class SandboxSource:
                 _spec(
                     EXEC,
                     "Run a shell command in your sandbox (sh -c, in its working directory): "
-                    "its exit code, stdout and stderr.",
+                    f"its exit code, stdout and stderr. {DELIVERS}",
                     {"command": "the command"},
                     side_effects="write",
                 ),
@@ -335,6 +350,27 @@ def sandbox(
     return SandboxSource(provider, given, call_timeout)
 
 
+async def delivered(runtime: Runtime) -> None:
+    """The run succeeded: each file its code wrote directly in :data:`OUTPUTS` of its sandbox
+    kept in the file store for its user (``Runtime.save_file``: named in its journal, announced,
+    served over AG-UI), before the sandbox is deleted. A file that cannot be kept (its name, its
+    size past :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
+    box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
+    if box is None or source is None:
+        return
+    tool = EXEC if EXEC in runtime.toolbox else "execute"
+    listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
+    for line in listed.stdout.splitlines():
+        size, _, name = line.strip().partition(" ")
+        try:
+            if int(size) > OUTPUT_MAX_BYTES:
+                raise ToolError(f"{size} bytes, past the {OUTPUT_MAX_BYTES} kept", source="tools")
+            data = await box.read(f"{OUTPUTS}/{name}")
+            await runtime.save_file(name, data, source=tool)
+        except ToolError as exc:
+            runtime.events.warning(EVENT, f"the output {name} was not kept: {exc}")
+
+
 def card_of(found: ExecResult, *, offline: bool) -> str:
     """The environment card a probe's output makes (:data:`PROBE`): ``Python <version>; installed:
     name version, ...`` — at most :data:`CARD_PACKAGES` named, the rest counted — and, with no
@@ -471,6 +507,7 @@ __all__ = [
     "SupportsPause",
     "SupportsSnapshot",
     "card_of",
+    "delivered",
     "reap",
     "sandbox",
 ]

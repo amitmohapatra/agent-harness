@@ -146,6 +146,10 @@ async def test_react_runs_its_commands_in_the_sandbox_governed_and_recorded(
     assert [c["tool"] for c in called] == ["execute"]  # through the bridge: governed, recorded
     assert "42" in str(called[0]["output"])
     assert "execute" in set(model.requests[0]["tools"])  # the agent's from the start
+    assert (
+        "Files you write in outputs/ (its working directory's) are given to the user"
+        in (model.described[0]["execute"])
+    )
     assert model.described[0]["execute"].endswith(
         "Its environment: Python 3.12.7; installed: numpy 2.1.0, openpyxl 3.1.5. It has no "
         "network: nothing else can be installed."
@@ -227,3 +231,4 @@ async def test_execute_keeps_its_own_description_when_the_card_cannot_be_read(
     agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="coder")
     assert (await agent.run("6*7?", user="u")).answer == "42"
     assert "Its environment" not in model.described[0]["execute"]
+    assert model.described[0]["execute"].endswith("are given to the user when you finish.")

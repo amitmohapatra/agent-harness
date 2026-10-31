@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 
 from trellis.contracts import ToolError
 from trellis.harness.sandbox import (
+    LIST_OUTPUTS,
+    OUTPUTS,
     PROBE,
     PROBE_LABEL,
     ExecResult,
@@ -47,6 +49,8 @@ class FakeSandboxes:
         #: runs': ("create" | "delete", id); and what the probe prints there
         self.probes: list[tuple[str, str]] = []
         self.environment = "3.12.7\nnumpy==2.1.0 openpyxl==3.1.5"
+        #: how often a run's outputs were listed (``LIST_OUTPUTS``), apart from ``commands``
+        self.listed = 0
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec) -> FakeBox:
         if PROBE_LABEL in ref.labels:
@@ -143,6 +147,17 @@ class FakeBox:
         assert not box.paused, "a command in a paused sandbox"
         if command == PROBE:
             return ExecResult(exit_code=0, stdout=self.provider.environment)
+        if command == LIST_OUTPUTS:  # each file directly in outputs/: its size and name
+            self.provider.listed += 1
+            prefix = f"{OUTPUTS}/"
+            found = {
+                p.removeprefix(prefix): c
+                for p, c in box.files.items()
+                if p.startswith(prefix) and "/" not in p.removeprefix(prefix)
+            }
+            return ExecResult(
+                exit_code=0, stdout="".join(f"{len(c)} {n}\n" for n, c in found.items())
+            )
         self.provider.commands.append(command)
         if command == "crash":
             raise self.provider.crash
