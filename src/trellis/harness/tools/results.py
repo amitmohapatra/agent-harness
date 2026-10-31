@@ -92,10 +92,13 @@ CODE: Final = (
     "group its rows, run code over that file with {tool} instead of reading it page by page."
 )
 #: What an earlier turn's replayed result reads as (:func:`carded`): its data card. When it
-#: was fetched and its source are the run record's to say, not the card's.
+#: was fetched and its source are the run record's to say, not the card's. It says the result
+#: was read whole when it came back: a model reading only the card in its own earlier turn
+#: otherwise disowned that turn's answer ("I only saw the opening").
 CARD: Final = (
-    "[data card: {tool} result, kept at {path} ({chars} characters, {lines} lines; table "
-    "{table}, columns {columns}): read_file or query_result reads it whole]\nBegins: {head}"
+    "[data card: this {tool} result was read whole when it came back, and is shown here in "
+    "short. Kept at {path} ({chars} characters, {lines} lines; table {table}, columns "
+    "{columns}): read_file or query_result reads it again]\nBegins: {head}"
 )
 #: The most of an earlier result a data card shows.
 CARD_HEAD: Final = 120

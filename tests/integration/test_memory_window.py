@@ -118,7 +118,7 @@ async def test_an_earlier_result_is_its_data_card_and_read_file_reads_it_whole(
     assert result.status is RunStatus.SUCCESS and result.answer == "S-99: 99.", result.error
     asked = model.requests[2]  # the second turn's first request
     [card] = [m["content"] for m in asked["messages"] if m["role"] == "tool"]
-    assert f"data card: inventory result, kept at {path}" in card
+    assert "data card: this inventory result was read whole" in card and path in card
     assert rows not in card and len(card) < len(rows) / 2
     assert "read_file" in [t["function"]["name"] for t in asked["tools"]]
     [read] = [m["content"] for m in model.requests[3]["messages"] if m["role"] == "tool"][-1:]
