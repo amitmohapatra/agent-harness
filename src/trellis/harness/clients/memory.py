@@ -165,6 +165,15 @@ class Memory:
         return None
 
 
+def _source_id(said: Said, run_id: str, attempt: int, index: int) -> str:
+    """The id the service de-duplicates ``said`` by: its harness id, else its run and place."""
+    if said.id is not None:
+        return said.id
+    if said.role is Speaker.USER:
+        return f"{run_id}:user:{index}"
+    return f"{run_id}:{attempt}:msg:{index}"
+
+
 def _identified(said: Said, run_id: str) -> dict[str, Any]:
     """The ``custom_metadata`` of a message with its harness id: the id, the run, and the
     tool call it answers (a result) or the first it makes (an assistant's calls)."""
@@ -232,18 +241,18 @@ class RunMemory:
     # ------------------------------------------------------------------ records
     async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:
         """One attempt's transcript - its tool calls and their results with it - in one
-        request. Each message names itself (the run for the question, which every attempt
-        asks; the attempt and position for what the agent said), and the service stores a
-        message it has seen before once. A message with its harness id (``Said.id``) carries
-        it in its ``custom_metadata``, with the run it was said in and the tool call it makes
-        or answers (one level: the service allows two)."""
+        request. Each message names itself by its harness id (``Said.id``, the same on every
+        attempt: ``conversation.identified``), so a resumed attempt that sends the first
+        one's messages again has each stored once: the service stores a message it has seen
+        before once. A message with no harness id (a helper's turns) names itself by its run
+        (the question) or by its attempt and position. A message with its harness id
+        carries it in its ``custom_metadata`` too, with the run it was said in and the tool
+        call it makes or answers (one level: the service allows two)."""
         batch = [
             recorded(said)
             | {
                 "source_system": SOURCE_SYSTEM,
-                "source_message_id": f"{run_id}:user:{index}"
-                if said.role is Speaker.USER
-                else f"{run_id}:{attempt}:msg:{index}",
+                "source_message_id": _source_id(said, run_id, attempt, index),
             }
             | _identified(said, run_id)
             for index, said in enumerate(messages)

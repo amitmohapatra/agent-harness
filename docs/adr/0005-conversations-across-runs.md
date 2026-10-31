@@ -68,7 +68,9 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
    (the message's `custom_metadata`: `message_id`, `run_id`, `tool_call_id`, one level deep,
    within the service's limit of two). Because the name does not depend on the attempt or on
    the content, the id survives a resume, a replay and a cleared tool result.
-   `source_message_id` keeps the meaning it had for de-duplication.
+   The memory service de-duplicates by this id too: it is the message's `source_message_id`,
+   so a resumed attempt that sends the first attempt's messages again (a checkpointed graph's
+   whole state) has each stored once (`test_a_resumed_graph_run_stores_each_message_of_its_transcript_once`).
 4. **A conversation continues the framework's own session.** When a turn of a Claude Agent
    SDK or ACP target ends (and does not pause), its session (the journal's `session` and, for
    Claude, its `transcripts`) is kept per conversation in this process (`Agent.sessions`,
