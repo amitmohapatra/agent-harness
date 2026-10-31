@@ -2427,9 +2427,10 @@ _ABSTAIN: Final = re.compile(
 
 
 def numbers(answer: str) -> list[float]:
-    """Every figure an answer states (thousands separators dropped)."""
+    """Every figure an answer states (thousands separators dropped; the minus sign U+2212, as
+    models often write a negative, read as a minus)."""
     out = []
-    for m in _NUMBER.findall(answer):
+    for m in _NUMBER.findall(answer.replace("\u2212", "-")):
         try:
             out.append(float(m.replace(",", "")))
         except ValueError:
@@ -2587,37 +2588,150 @@ class Trace(Hooks):
 
 
 # --------------------------------------------------------------------------- running
+#: The adapters a run can wrap: ``react`` (``ReAct``), ``langgraph`` (LangChain's
+#: ``create_agent``), ``deepagents`` (``create_deep_agent``), ``openai`` (the OpenAI Agents
+#: SDK on the ``LLM_*`` endpoint's chat completions) and ``claude`` (the Claude Agent SDK, its
+#: CLI on the provider's own API).
+ADAPTERS: Final = ("react", "langgraph", "deepagents", "openai", "claude")
+#: The adapters whose model calls are LangChain's (metered by its callbacks); the others are
+#: metered by what the harness accounts to the run's budget (``trellis.harness.budget``).
+LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "deepagents"})
+
+
+def adapter_of(history: str, adapter: str | None) -> str:
+    """The adapter a run wraps: as given, else ``react`` with memory and ``langgraph`` without
+    (what ``--history`` alone always meant)."""
+    return adapter or ("react" if history == "memory" else "langgraph")
+
+
 def target_of(
-    model: Any, history: str, window: int | None, max_steps: int
+    model: Any,
+    history: str,
+    window: int | None,
+    max_steps: int,
+    *,
+    adapter: str | None = None,
+    wire: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """The agent under test: ``thread`` — ``create_agent`` with the harness's middleware and an
-    in-process checkpointer (the framework keeps the conversation); ``memory`` — ``ReAct`` as
-    built (the memory service keeps it)."""
-    if history == "memory":
+    """The agent under test, built as each framework's team builds it, with the retail tools
+    declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
+    ``langgraph`` / ``deepagents`` — ``create_agent`` / ``create_deep_agent`` with the
+    harness's middleware and an in-process checkpointer (the framework keeps the conversation);
+    ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
+    collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
+    ``history="memory"`` the memory service is on for every adapter."""
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    kind = adapter_of(history, adapter)
+    if kind == "react":
         from benchmark.cost.variants import VARIANTS, Setup
 
         setup = Setup(
             system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=r.TOOLS
         )
         return VARIANTS["main"].build(setup)
-    from langchain.agents import create_agent
-    from langgraph.checkpoint.memory import InMemorySaver
+    if kind in ("langgraph", "deepagents"):
+        from langgraph.checkpoint.memory import InMemorySaver
 
-    from trellis import middleware
-    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
-    from trellis.harness.gateways import routed_chat_model
+        from trellis import middleware
+        from trellis.harness.gateways import routed_chat_model
 
-    chat = routed_chat_model(model) if isinstance(model, str) else model
-    graph = create_agent(
-        chat,
-        tools=[],
-        system_prompt=r.SYSTEM,
-        middleware=middleware(max_steps=max_steps, context_window=window),
-        checkpointer=InMemorySaver(),
-        name="complex",
-    )
-    setattr(graph, TOOLS_ATTRIBUTE, list(r.TOOLS))
-    return graph, {}
+        chat = routed_chat_model(model) if isinstance(model, str) else model
+        stack = middleware(max_steps=max_steps, context_window=window)
+        if kind == "langgraph":
+            from langchain.agents import create_agent
+
+            graph = create_agent(
+                chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
+                checkpointer=InMemorySaver(), name="complex",
+            )  # fmt: skip
+        else:
+            from deepagents import create_deep_agent
+
+            graph = create_deep_agent(
+                model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
+                checkpointer=InMemorySaver(), name="complex",
+            )  # fmt: skip
+        setattr(graph, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        return graph, {}
+    if kind == "openai":
+        import httpx
+        from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
+        from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+
+        from trellis.harness.settings import Settings
+
+        set_tracing_disabled(True)  # the SDK's own tracing goes to OpenAI
+        env = Settings.from_env()
+
+        async def sent(request: httpx.Request) -> None:
+            if wire is not None and request.url.path.endswith("/chat/completions"):
+                body = json.loads(request.content or b"{}")
+                wire.append({"messages": body.get("messages"), "tools": body.get("tools")})
+
+        client = AsyncOpenAI(
+            base_url=env.llm_base_url,
+            api_key=env.llm_api_key or "none",
+            http_client=DefaultAsyncHttpxClient(event_hooks={"request": [sent]}),
+        )
+        agent = Agent(
+            name="complex",
+            instructions=r.SYSTEM,
+            model=OpenAIChatCompletionsModel(model=str(model), openai_client=client),
+        )
+        setattr(agent, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        return agent, {"framework_options": {"max_turns": 2 * max_steps}}
+    if kind == "claude":
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        options = ClaudeAgentOptions(
+            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps
+        )
+        setattr(options, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        return options, {}
+    raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
+
+
+class Accounted:
+    """What the harness accounted to the run's budget while it is current (``budget.account``,
+    every adapter's path): the meter of the adapters whose calls are not LangChain's."""
+
+    def __init__(self, spend: Spend) -> None:
+        self.spend = spend
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cached_tokens = 0
+        self.requests: list[dict[str, Any]] = []
+
+
+_ACCOUNTED: list[Accounted] = []
+
+
+def _accounting_hook() -> None:
+    """``budget.account`` also reports to the current :class:`Accounted` (patched once)."""
+    from trellis.harness import budget
+
+    if getattr(budget.account, "_complex", False):
+        return
+    original = budget.account
+
+    def account(runtime: Any, **kw: Any) -> None:
+        original(runtime, **kw)
+        if _ACCOUNTED and runtime.parent is None:
+            a = _ACCOUNTED[-1]
+            a.calls += 1
+            a.input_tokens += int(kw.get("input_tokens") or 0)
+            a.output_tokens += int(kw.get("output_tokens") or 0)
+            a.cached_tokens += int(kw.get("cached") or 0)
+            a.spend.add(
+                int(kw.get("input_tokens") or 0),
+                int(kw.get("output_tokens") or 0),
+                int(kw.get("cached") or 0),
+            )
+
+    account._complex = True  # type: ignore[attr-defined]
+    budget.account = account  # type: ignore[assignment]
 
 
 def scripted_model(case: Case) -> Any:
@@ -2639,15 +2753,22 @@ async def run_case(
     run_seconds: float | None,
     spend: Spend,
     tag: str,
+    adapter: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One case's conversation: its row and every request it made."""
+    """One case's conversation: its row and every request it made (``agent_id``: the wrapped
+    agent's id, one per case unless given — a learning-over-time run gives one for all)."""
     w = r.world()
     w.reset()
     trace = Trace()
-    target, options = target_of(model, history, window, max_steps)
+    kind = adapter_of(history, adapter)
+    wire: list[dict[str, Any]] = []
+    target, options = target_of(model, history, window, max_steps, adapter=kind, wire=wire)
     agent = h.wrap(
-        target, id=f"complex-{case.id}", hooks=[trace], run_timeout=run_seconds, **options
-    )
+        target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
+        run_timeout=run_seconds,
+        **options,
+    )  # fmt: skip
     records: list[dict[str, Any]] = []
     requests: list[dict[str, Any]] = []
     stopped = None
@@ -2655,13 +2776,24 @@ async def run_case(
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
-        captured = Captured(spend)
+        wire.clear()
+        captured: Any = Captured(spend) if kind in LANGCHAIN_ADAPTERS else Accounted(spend)
         began = time.monotonic()
         try:
-            with runner.metered(captured):
-                result = await agent.run(
-                    t.text, user=runner.USER, thread=f"cx-{tag}-{case.id}-{t.thread}"
-                )
+            if spend.reached:
+                raise SpendCapReached(f"spend cap ${spend.cap} reached (${spend.usd:.4f})")
+            if isinstance(captured, Accounted):
+                _accounting_hook()
+                _ACCOUNTED.append(captured)
+            try:
+                with runner.metered(captured if isinstance(captured, Captured) else None):
+                    result = await agent.run(
+                        t.text, user=runner.USER, thread=f"cx-{tag}-{case.id}-{t.thread}"
+                    )
+            finally:
+                if isinstance(captured, Accounted):
+                    _ACCOUNTED.remove(captured)
+                    captured.requests = list(wire)
             answer = (
                 result.answer
                 if isinstance(result.answer, str)
@@ -2702,6 +2834,7 @@ async def run_case(
         "tier": case.tier,
         "edges": list(case.edges),
         "history": history,
+        "adapter": kind,
         "stopped": stopped,
         "turns": records,
     }
@@ -2766,7 +2899,7 @@ def summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def markdown(report: dict[str, Any]) -> str:
     s = report["summary"]
     lines = [
-        f"# complex: {report['model']} ({report['history']} history)",
+        f"# complex: {report['model']} ({report.get('adapter', '?')}, {report['history']} history)",
         "",
         f"Spend: ${report['usd']:.4f}"
         + (f" (cap ${report['max_usd']})" if report["max_usd"] else "")
@@ -2831,7 +2964,9 @@ async def bench(
     rows = [
         x
         for x in _saved(saves)
-        if x.get("model") == model_name and x.get("history") == args.history
+        if x.get("model") == model_name
+        and x.get("history") == args.history
+        and adapter_of(x["history"], x.get("adapter")) == adapter_of(args.history, args.adapter)
     ]
     if args.rerun_failed:
         again = {x["case"] for x in rows if failed(x)}
@@ -2871,7 +3006,7 @@ async def bench(
             model = scripted_model(case) if args.scripted else args.model
             found, requests = await run_case(
                 h, case, model=model, history=args.history, window=args.window, max_steps=args.max_steps,
-                run_seconds=args.timeout, spend=spend, tag=tag,
+                run_seconds=args.timeout, spend=spend, tag=tag, adapter=args.adapter,
             )  # fmt: skip
             found |= {"model": model_name, "usd": round(spend.usd - before, 6)}
             if found["stopped"]:
@@ -2889,6 +3024,7 @@ async def bench(
         "suite": "complex",
         "model": model_name,
         "history": args.history,
+        "adapter": adapter_of(args.history, args.adapter),
         "window": args.window,
         "date": datetime.now(UTC).strftime("%Y-%m-%d"),
         "usd": round(spend.usd, 6),
@@ -2922,6 +3058,12 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="the scripted model replaying the gold calls (no endpoint)",
     )
     p.add_argument("--history", choices=("thread", "memory"), default="thread")
+    p.add_argument(
+        "--adapter",
+        choices=ADAPTERS,
+        default=None,
+        help="the framework wrapped (default: react with memory history, langgraph without)",
+    )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(
         "--rerun-failed",
