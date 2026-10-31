@@ -23,13 +23,6 @@ model calls are what they were before any of these existed (the tools, the instr
   fit, by one model call of its own, when the run has no hints from memory (off, unreachable
   or cold) and a call offers more than :data:`SELECT_ABOVE` tools.
 
-* **A wide task** — :class:`Delegation`: on a large model (:func:`model_tier`) with a known
-  window of :data:`MIN_WINDOW` or more, a request of :data:`WIDE_ITEMS` independent items of
-  one kind or more (:func:`wide`: a list of them, or "each / every / compare" over them; not
-  steps that build on each other, nor a request to change anything) is offered ``delegate``
-  (``trellis.harness.delegate``): helpers that only read, at once, merged for the model to
-  check. A helper is not offered it (``delegate.MAX_DEPTH``); a small model never is.
-
 * **A budget** given (``h.wrap(budget=)``) — :class:`Budgeted`: once it is spent, one more call
   without tools for the best answer with what the run has.
 
@@ -96,13 +89,8 @@ def asks_for_steps(request: ModelRequest[Any]) -> bool:
     """Whether the user's latest message asks for steps: a list of :data:`STEP_ITEMS` items or
     more, or says so ("step by step", "multi-step", "a plan"). The graph's state is read, not
     the request: a middleware's own message to the model (a check) is not the user's."""
-    asked = _latest(request)
+    asked = next((m.text for m in reversed(_history(request)) if isinstance(m, HumanMessage)), "")
     return len(_ITEM.findall(asked)) >= STEP_ITEMS or bool(_CUE.search(asked))
-
-
-def _latest(request: ModelRequest[Any]) -> str:
-    """The user's latest message, from the graph's state."""
-    return next((m.text for m in reversed(_history(request)) if isinstance(m, HumanMessage)), "")
 
 
 def _history(request: ModelRequest[Any]) -> Sequence[Any]:
@@ -288,96 +276,3 @@ class LongTaskTools(_LongTasks, AgentMiddleware):
         if self.wanted(request):
             return await handler(request)
         return await handler(without_tools(request, self.held))
-
-
-# --------------------------------------------------------------------------- delegation
-#: Independent items of one kind from which a request is wide (fewer are one agent's work).
-WIDE_ITEMS: Final = 4
-_WIDE_CUE: Final = re.compile(
-    r"\b(?:each|every|all (?:of )?(?:the|these|those)|for (?:all|each|every)|compare|across|"
-    r"respectively)\b",
-    re.I,
-)
-_SEQUENTIAL: Final = re.compile(
-    r"\b(?:then|after that|afterwards|next|finally|step[- ]by[- ]step|in order)\b", re.I
-)
-_CHANGES: Final = re.compile(
-    r"\b(?:create|update|delete|remove|send|book|refund|cancel|pay|transfer|publish|write)\b",
-    re.I,
-)
-_SENTENCE: Final = re.compile(r"[.?!]+(?=\s|$)|\n+")
-_PART: Final = re.compile(r",|;|\band\b|\bor\b", re.I)
-#: A model named with this many billion parameters or fewer is small (``granite-3.3-2b``,
-#: ``llama-3.1-8b``); a mixture of experts is named by its total (``30b-a3b``).
-SMALL_PARAMS: Final = 14.0
-_PARAMS: Final = re.compile(r"(?<![a-z\d.])(\d+(?:\.\d+)?)b\b", re.I)
-#: Model families small-model mode is for, whatever their size says (no helpers at once on
-#: Granite until a measurement says they pay).
-SMALL_FAMILIES: Final = ("granite",)
-
-
-def wide(text: str) -> bool:
-    """Whether ``text`` asks for :data:`WIDE_ITEMS` independent items of one kind or more: a
-    list of them, or an enumeration with a wide cue ("each", "every", "compare", ...) — not
-    when it asks for steps in order ("then", "finally"...) or to change something (a write's
-    verb: those stay the agent's own, one at a time)."""
-    if _SEQUENTIAL.search(text) or _CHANGES.search(text):
-        return False
-    if len(_ITEM.findall(text)) >= WIDE_ITEMS:
-        return True
-    return bool(_WIDE_CUE.search(text)) and _enumerated(text) >= WIDE_ITEMS
-
-
-def _enumerated(text: str) -> int:
-    """The most items one sentence of ``text`` lists ("A, B, C and D": 4)."""
-    counts = [
-        len([p for p in _PART.split(sentence) if p.strip()])
-        for sentence in _SENTENCE.split(text)
-        if sentence.count(",") + sentence.count(";") >= 2
-    ]
-    return max(counts, default=0)
-
-
-def model_tier(name: str | None, window: int | None) -> str:
-    """``"small"`` or ``"large"``, from what is known without a model call (tier 0): small
-    with a window under :data:`MIN_WINDOW` or not known, a name of a small family
-    (:data:`SMALL_FAMILIES`) or of :data:`SMALL_PARAMS` billion parameters or fewer."""
-    if window is None or window < MIN_WINDOW:
-        return "small"
-    named = (name or "").lower()
-    if any(family in named for family in SMALL_FAMILIES):
-        return "small"
-    sizes = [float(size) for size in _PARAMS.findall(named)]
-    return "small" if sizes and max(sizes) <= SMALL_PARAMS else "large"
-
-
-class Delegation(AgentMiddleware):
-    """``delegate`` (``trellis.harness.delegate``), offered only to a wide task (:func:`wide`,
-    the user's latest message) on a large model (``tier``) — never in a helper's own run: until
-    then the model is sent neither the tool nor what it costs. Its jobs' ``subagent_type`` is
-    one of ``subagents`` (the agent's wrapped sub-agents)."""
-
-    def __init__(self, *, tier: str, subagents: Sequence[str] = ()) -> None:
-        from trellis.harness import delegate  # noqa: PLC0415 - it runs child runs
-
-        super().__init__()
-        self.tier = tier
-        self.tools = [delegate.tool(subagents)]
-        self._depth = delegate.MAX_DEPTH
-
-    def wanted(self, request: ModelRequest[Any]) -> bool:
-        runtime = current()
-        if self.tier != "large" or runtime is None or runtime.delegated >= self._depth:
-            return False
-        return wide(_latest(request))
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any]:
-        if self.wanted(request):
-            return await handler(request)
-        from trellis.harness.delegate import DELEGATE  # noqa: PLC0415
-
-        return await handler(without_tools(request, {DELEGATE}))
