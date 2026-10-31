@@ -131,8 +131,8 @@ from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import bridge
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, not_run
+from trellis.harness.tools import bridge, query, results
+from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -285,7 +285,7 @@ async def governed_call(
         repeat = bridge.same(
             runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
         )
-        return _message(repeat, str(call["id"]), call["name"])
+        return _message(repeat, str(call["id"]), call["name"], kept=_paged(runtime, request))
     if converted.made(own) or call["name"] in runtime.toolbox:
         return await handler(request)  # the harness's own: its call goes through the bridge
     produced: list[ToolMessage | Command[Any]] = []
@@ -308,17 +308,83 @@ async def governed_call(
     outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
     if produced and outcome.ok and isinstance(produced[-1], Command):
         return produced[-1]  # the graph's state update, as the tool made it
-    return _message(outcome, str(call["id"]), call["name"])
+    return _message(outcome, str(call["id"]), call["name"], kept=_paged(runtime, request))
 
 
-def _message(outcome: ToolOutcome, call_id: str, name: str) -> ToolMessage:
-    """A harness call's outcome as the tool message the model reads."""
+def _message(outcome: ToolOutcome, call_id: str, name: str, *, kept: bool = False) -> ToolMessage:
+    """A harness call's outcome as the tool message the model reads — ``kept``: a large one
+    kept in the run and previewed, ``read_file`` paging it (``tools.results``)."""
     return ToolMessage(
-        content=text_of(outcome.output),
+        content=results.readable(outcome.output, name) if kept else text_of(outcome.output),
         tool_call_id=call_id,
         name=name,
         status="error" if outcome.status in FAILED else "success",
     )
+
+
+def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
+    """Whether a large result of this call is kept in the run and previewed, ``read_file``
+    paging it (``tools.results``, the convention every adapter's model reads): in a graph that
+    is offered the harness's tools per model call (:class:`HarnessTools`, which offers and
+    serves that ``read_file``) and has no ``read_file`` of its own — Deep Agents' saves a large
+    result on its backend itself (a sandbox's among them, where code reads it)."""
+    if runtime not in _PAGED:
+        return False
+    tools = getattr(request.runtime, "tools", None) or ()
+    return not any(getattr(t, "name", None) == READ_FILE for t in tools)
+
+
+async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
+    """A call reading a result the run keeps, answered: ``read_file`` with its page (the graph
+    has no ``read_file`` of its own, or the path is one the run keeps: a result cut to fit the
+    window, in a Deep Agents graph); ``query_result`` with what it computes (``tools.query``)
+    — over a result the run keeps, or one Deep Agents saved in the graph's state. Any other
+    call: ``None``."""
+    call = request.tool_call
+    args = dict(call["args"])
+    path = "/" + str(args.get("file_path", "")).lstrip("/")
+    kept = path in runtime.replay.journal.results
+    said: str | None = None
+    if call["name"] == READ_FILE and (request.tool is None or kept):
+        said = results.read(args)
+    elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
+        said = await query.query(args, None if kept else _state_file(request.state, path))
+    if said is None:
+        return None  # another tool, or the graph's own read_file of its own files
+    return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
+
+
+def _state_file(state: Any, path: str) -> str | None:
+    """The text of a file Deep Agents keeps in the graph's state (a large result it saved), or
+    ``None``."""
+    found = (state.get("files") if isinstance(state, Mapping) else None) or {}
+    content = (found.get(path) or {}).get("content")
+    return "\n".join(content) if isinstance(content, list) else content
+
+
+def _saved(state: Any) -> bool:
+    """Whether the run keeps a result, or the graph's state holds one Deep Agents saved."""
+    files = (state.get("files") if isinstance(state, Mapping) else None) or {}
+    return results.kept() or any(str(p).startswith(results.PREFIX) for p in files)
+
+
+def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) -> BaseTool:
+    """A tool reading a kept result (``tools.results.READERS``) as a LangChain tool, offered
+    once there is one, its calls answered by :class:`HarnessTools` (no tool node runs it)."""
+
+    async def run(**args: Any) -> str:
+        return str(await answer(args))
+
+    return StructuredTool.from_function(
+        coroutine=run, name=name, description=description, args_schema=schema
+    )
+
+
+#: The harness's ``read_file`` and ``query_result`` as LangChain tools.
+READERS: Final = {r[0]: _reader(*r) for r in results.READERS}
+READ_FILE_TOOL: Final = READERS[READ_FILE]
+#: The runs a :class:`HarnessTools` offers the harness's tools to (:func:`_paged`).
+_PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
 
 async def _helped(
@@ -414,6 +480,7 @@ def spec_of(tool: BaseTool) -> ToolSpec:
         description=tool.description or tool.name,
         input_schema=_schema_of(tool),
         side_effects=side_effects_of(tool.metadata),
+        **data_of(tool.metadata, name=tool.name),
     )
 
 
@@ -480,8 +547,12 @@ class HarnessTools(AgentMiddleware):
         harness = self._tools.get(runtime)
         if harness is None:
             harness = self._tools[runtime] = self._converted(runtime)
+        _PAGED.add(runtime)
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
+        if _saved(request.state):  # a large result kept: read in pages, or queried
+            names = {_named(t) for t in own}
+            offered.extend(t for name, t in READERS.items() if name not in names)
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
@@ -502,6 +573,9 @@ class HarnessTools(AgentMiddleware):
     ) -> ToolMessage | Command[Any]:
         runtime = current()
         call = request.tool_call
+        page = await _kept_read(runtime, request) if runtime is not None else None
+        if page is not None:
+            return page
         tool = runtime.toolbox.get(call["name"]) if runtime is not None else None
         if runtime is None or tool is None:
             return await handler(request)
@@ -517,7 +591,7 @@ class HarnessTools(AgentMiddleware):
                 )
         else:
             outcome = await bridge.call(tool, call["args"], call_id=call_id, step=step.first + n)
-        return _message(outcome, call_id, tool.name)
+        return _message(outcome, call_id, tool.name, kept=_paged(runtime, request))
 
     def _step(self, runtime: Runtime, request: ToolCallRequest) -> tuple[_Step, int]:
         """The model step the call is one of (numbered on its first call's arrival), and the
@@ -1181,7 +1255,7 @@ class ReadTools(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         unused = set()
-        if not self.files and not request.state.get("files"):
+        if not self.files and not request.state.get("files") and not results.kept():
             unused.add(READ_FILE)
         if self.placeholder is None or not any(
             isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
@@ -1203,6 +1277,8 @@ FIT_SHARE: Final = 0.95
 FIT_KEEP: Final = 8
 #: A compacted tool description's most characters (its first sentence, at most this).
 FIT_DESCRIPTION: Final = 120
+#: The characters a cut result's marker takes at most (its size, and where the rest is read).
+CUT_MARKER: Final = 192
 #: What a tool result cleared to fit reads as (``read_result`` reads it back: the state keeps it).
 FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=<this call's id>)]"
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
@@ -1578,9 +1654,16 @@ def _remembered_less(
 
 
 def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-    """The longest tool results cut to their head and tail until the request fits."""
+    """The longest tool results cut to their head and tail until the request fits — inside a
+    run, each kept whole first (``tools.results``) and its cut saying where the rest is: the
+    ``read_file`` call that reads on from the line the cut starts on (offered with it), so no
+    row of it is out of the model's reach."""
+    tools = list(request.tools)
+    inside = current() is not None and any(isinstance(m, ToolMessage) for m in request.messages)
+    if inside and all(_named(t) != READ_FILE for t in tools):
+        tools.append(READ_FILE_TOOL)
     messages = list(request.messages)
-    over = _size(request) - budget
+    over = _size(request.override(tools=tools)) - budget
     for n in sorted(
         (n for n, m in enumerate(messages) if isinstance(m, ToolMessage)),
         key=lambda n: -len(messages[n].text),
@@ -1589,15 +1672,21 @@ def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
             break
         text = messages[n].text
         # tokens to characters, as the count does, and room for the marker said in its place
-        keep = max(200, len(text) - over * 4 - 64)
+        keep = max(200, len(text) - over * 4 - CUT_MARKER)
         if keep >= len(text):
             continue
         half = keep // 2
-        gone = len(text) - keep
-        cut = f"{text[:half]}\n…[{gone} characters cut to fit the window]…\n{text[-half:]}"
+        said = f"{len(text) - keep} characters cut to fit the window"
+        path = results.keep(text, tool=messages[n].name) if inside else None
+        if path is not None:
+            line = results.line_at(text, half)
+            said += f'; the rest: {results.READ_FILE}(file_path="{path}", offset={line})'
+        cut = f"{text[:half]}\n…[{said}]…\n{text[-half:]}"
         messages[n] = messages[n].model_copy(update={"content": cut})
         over -= (len(text) - len(cut)) // 4
-    return request.override(messages=messages) if messages != list(request.messages) else request
+    if messages == list(request.messages):
+        return request
+    return request.override(messages=messages, tools=tools)
 
 
 # --------------------------------------------------------------------------- checkpoints

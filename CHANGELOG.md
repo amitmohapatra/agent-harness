@@ -41,9 +41,31 @@ own model work follows the harness's configuration.
   now told so and called once more with no tool, as `StepLimit`'s last step is. The user
   gets an answer that says what went wrong, for example that the tool timed out. The run
   still stops (`ModelError`) when that call gives no answer.
+### Fixed
+
+- A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
+  the service refuses a larger recorded output (422), so the call's record was lost and the
+  service never learned from it. The output is recorded cut to fit, saying so
+  (`clients.memory.recorded_output`).
 
 ### Added
 
+- Large results in `ReAct` without a backend and in a `create_agent` graph with
+  `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
+  and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
+  its cut naming the `read_file` call that reads on from there.
+- `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
+  of the run's saved results — each a table named by its tool, so one query joins them — with
+  formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
+  `regr_*`), offered with `read_file` on every adapter, bounded in time, input, sort memory and
+  answer (`tools.query`). A tool declared `paged=True` is fetched to its last page in one call
+  (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
+- Freshness: a tool's data is live by default; `tool(max_age=)`, `tool(freshness="static")`
+  (or `"live"`), a LangChain tool's `metadata`, an MCP tool's `_meta` say otherwise
+  (`tools.base.data_of`). Tool results written to memory's thread start with
+  `[snapshot of <tool> from <UTC time>]`; replayed past the tool's age they are marked out of
+  date, the context says so, and the tool stays offered (`trellis.harness.snapshots`).
+- `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
 - Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
   from the schemas the tools publish (a function's return annotation, now its
   `ToolSpec.output_schema`; an MCP tool's `outputSchema`), said at the end of each linked
@@ -104,7 +126,7 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   failed, timed-out, refused or skipped job is reported so; identical jobs run once; the
   budget is shared and stops the fan-out early; cancelling the run cancels them; with
   `RUNS_URL` the jobs queue in agent-runs for any worker. See
-  [docs/frameworks/react.md](docs/frameworks/react.md#helpers-at-once-delegate).
+  [docs/frameworks/react.md](docs/frameworks/react.md).
 - Child runs at once, adaptively, for every engine (`trellis.harness.admission`): a parent's
   sub-agent calls, nested `agent.run`s and `delegate` jobs are admitted under an AIMD limit (1
   to 16, from 4) that rises while the container's CPU and memory (cgroup limits), the
@@ -151,6 +173,17 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   adds tools). `FitWindow(optional=)` and its `guidance` step, which only dropped the tool
   guidance, go too (refused the same way). See
   [docs/adr/0002-tool-choice.md](docs/adr/0002-tool-choice.md#amendment-2026-10-28-the-guards-removed).
+- `ReAct`'s `delegate` tool (`trellis.harness.delegate`), with what only it used: the wide-task
+  and model-tier routing that offered it (`automatic.Delegation`, `wide`, `model_tier`,
+  `SMALL_PARAMS`, `SMALL_FAMILIES`), the read-only helper runs (`Runtime.delegated`, the
+  `delegated` run metadata, the read-only toolbox and the bridge's `HelperOnlyReads` refusal),
+  its agent-runs queueing of jobs, the `delegate` stream event and the `delegate_8` overhead
+  case. Deep Agents has helpers natively: its `task` tool, offered as before (a sub-agent of
+  its own, else the general-purpose helper on a long task); the model calls it several times in
+  one step for helpers at once, and LangGraph runs those calls at once. Kept for every engine:
+  the adaptive limit of child runs and the live task tree
+  ([docs/runs.md](docs/runs.md#child-runs-at-once-and-the-task-tree)), Kimi Code's
+  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`, and a sub-agent's own time limit.
 
 ### Breaking
 

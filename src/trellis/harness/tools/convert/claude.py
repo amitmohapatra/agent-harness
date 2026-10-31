@@ -12,7 +12,7 @@ the start: before a result was kept it finds nothing to read.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final
 
 from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server
@@ -30,7 +30,8 @@ WAITING: Final = "Waiting for a person's approval."
 
 
 def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
-    return create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), _read_file()])
+    readers = [_reader(*r) for r in results.READERS]
+    return create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
 
 
 def _one(tool: Tool) -> Any:
@@ -39,21 +40,25 @@ def _one(tool: Tool) -> Any:
             outcome = await bridge.call(tool, dict(args))
         except Paused:  # the run stops here (the harness reads the pause from the runtime)
             return {"content": [{"type": "text", "text": WAITING}], "is_error": True}
-        content = [{"type": "text", "text": results.readable(outcome.output)}]
+        content = [{"type": "text", "text": results.readable(outcome.output, tool.name)}]
         return {"content": content, "is_error": not outcome.ok}
 
     return sdk_tool(tool.name, tool.spec.description or tool.name, _schema(tool))(handler)
 
 
-def _read_file() -> Any:
-    """``read_file``: a page of a large result the run keeps (``tools.results``)."""
+def _reader(
+    name: str,
+    description: str,
+    schema: dict[str, Any],
+    answer: Callable[[dict[str, Any]], Awaitable[str]],
+) -> Any:
+    """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
+    its pages, ``query_result`` SQL over its rows)."""
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
-        return {"content": [{"type": "text", "text": results.read(dict(args))}]}
+        return {"content": [{"type": "text", "text": await answer(dict(args))}]}
 
-    return sdk_tool(results.READ_FILE, results.READ_FILE_DESCRIPTION, results.READ_FILE_SCHEMA)(
-        handler
-    )
+    return sdk_tool(name, description, schema)(handler)
 
 
 def _schema(tool: Tool) -> dict[str, Any]:
