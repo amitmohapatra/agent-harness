@@ -36,13 +36,23 @@ own model work follows the harness's configuration.
 
 ### Changed
 
+- The tool hints narrow what the model is offered only from 30 tools in the run
+  (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
+  still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
+  looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
+  every adapter.
 - A stall no longer ends the run with no answer. A stall is the same call with the same
   arguments in `max_repeats` steps, or every call failing in 3 steps in a row. The model is
   now told so and called once more with no tool, as `StepLimit`'s last step is. The user
   gets an answer that says what went wrong, for example that the tool timed out. The run
   still stops (`ModelError`) when that call gives no answer.
+
 ### Fixed
 
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
