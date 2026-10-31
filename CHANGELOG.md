@@ -34,8 +34,20 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Changed
+
+- The tool hints narrow what the model is offered only from 30 tools in the run
+  (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
+  still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
+  looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
+  every adapter.
+
 ### Fixed
 
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
@@ -50,6 +62,18 @@ own model work follows the harness's configuration.
   the kind of answer for plain chat ([interrupts.md](docs/interrupts.md#asking)).
 - AG-UI activity: an `ACTIVITY_SNAPSHOT` after each tool call that ends groups the run's calls
   into one line, `used 2 tools · ran 1 command` ([surfaces.md](docs/surfaces.md)).
+- AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
+  to the model beside the agent's own (one of the agent's by the same name wins, with a
+  warning); a call streams its `TOOL_CALL_*` events and pauses the run (an interrupt whose
+  reason is `frontend_tool`, its `toolCallId` the call's), and the client's result — a `tool`
+  message with that `toolCallId`, or a `resume` entry — is the call's output. `context` and the
+  `state` reach the model in the pushed context, together at most half of its token budget;
+  the run reads and sets the state (`Runtime.state`), each change streamed as `STATE_DELTA`
+  (a JSON Patch; `STATE_SNAPSHOT` where there was no object to patch), and a resume reads the
+  state the client sends. `forwardedProps.mode` (AG-UI) and the message's `metadata.mode`
+  (A2A) are the run's `mode` (queue, interrupt, steer). A call's paused `TOOL_CALL_RESULT` is
+  no longer sent on AG-UI: the call has no result until the run resumes. New dependency:
+  `jsonpatch`.
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

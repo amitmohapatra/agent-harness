@@ -46,6 +46,7 @@ from trellis.contracts import (
 from trellis.harness import (
     compat,
     conversation,
+    frontend,
     history,
     pipeline,
     sandbox,
@@ -88,6 +89,7 @@ from trellis.harness.evals import (
     sampled,
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
+from trellis.harness.frontend import FRONTEND, Frontend
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
@@ -120,6 +122,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
+#: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
+#: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
+#: narrowed away in 22-26% of turns, and those turns were wrong 2-3 times as often.
+NARROW_FROM: Final = 30
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -637,7 +644,12 @@ class Agent:
         record: RunRecord,
         resolution: InterruptResolution,
         listener: Callable[[RunEvent], None] | None = None,
+        *,
+        app: Frontend | None = None,
     ) -> Result:
+        """The answered run's next attempt, in this process (a run that came from the queue
+        goes back to it). ``app``: what its front end gives it now, over what the run kept
+        (a surface's resume: the front end's current state)."""
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
             await cancel_children(
@@ -651,6 +663,9 @@ class Agent:
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
+        if app is not None:
+            given = {**resumed.metadata, FRONTEND: app.kept()}
+            resumed = resumed.model_copy(update={"metadata": given})
         return await pipeline.attempt(
             self, resumed, record.input, journal=journal, resolution=resolution, listener=listener
         )
@@ -797,7 +812,9 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools...)."""
+        tools of what the run is without (``without=``: its MCP tools...); and the tools the
+        run's front end declared (``frontend.py``), but one named as one of those, which is
+        said in a warning."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -809,7 +826,14 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
+        tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
+        if runtime.frontend is not None and runtime.frontend.tools:
+            theirs, taken = runtime.frontend.offered({t.name for t in tools})
+            if taken:
+                said = ", ".join(taken)
+                runtime.events.warning("frontend_tools", f"the agent's own tools win: {said}")
+            tools.extend(theirs)
+        return tools
 
     async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
@@ -841,11 +865,21 @@ class Agent:
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
         context (:meth:`remembered`), returned when there is one — or, with memory off, the
-        conversation's earlier turns (:meth:`recalled`)."""
+        conversation's earlier turns (:meth:`recalled`) — and after it the front end's
+        context and state (``frontend.rendered``), which take at most
+        :data:`~trellis.harness.frontend.SHARE` of the context's token budget, the memory
+        context the rest."""
+        app, used = frontend.rendered(
+            runtime.frontend, runtime.state, int(self.context_budget * frontend.SHARE)
+        )
+        pushed = None
         if runtime.run_memory is None:
             await self.recalled(runtime)
-            return None
-        return await self.remembered(runtime)
+        else:
+            pushed = await self.remembered(runtime, budget=self.context_budget - used)
+        if app:
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
+        return pushed
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off, the conversation's earlier turns from the run store
@@ -870,7 +904,9 @@ class Agent:
         else:
             runtime.context = conversation.rendered(earlier)
 
-    async def remembered(self, runtime: Runtime) -> PromptContext | None:
+    async def remembered(
+        self, runtime: Runtime, *, budget: int | None = None
+    ) -> PromptContext | None:
         """The memory context for this run, in the runtime. Asked with the run's tool set —
         the harness's tools and the ones its framework gives the model itself
         (``Runtime.native``: an OpenAI Agents agent's own, hosted, MCP and handoff tools,
@@ -882,7 +918,8 @@ class Agent:
         (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
         behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
         reach it; a hinted tool keeps its chain (``Toolbox.related``: the tools its output
-        feeds, and those whose output it needs). A failure is a warning."""
+        feeds, and those whose output it needs). ``budget``: its tokens (else the agent's
+        :attr:`context_budget`). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
@@ -900,7 +937,7 @@ class Agent:
                     tools=[*own, *behind] or None,
                     window=window,
                     hints=hints,
-                    budget=self.context_budget,
+                    budget=self.context_budget if budget is None else budget,
                     document_ids=runtime.document_ids,
                 )
             except Exception as exc:
@@ -918,7 +955,13 @@ class Agent:
         # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
-        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+        if (
+            hints
+            and candidates
+            and best >= NARROW_FLOOR
+            and len(own) >= NARROW_FROM
+            and self.adapter.narrows != "none"
+        ):
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
             # a candidate's chain stays whole: the tools its output feeds, and those giving
             # what it needs (``tools.links``, from the tools' schemas)
@@ -1178,11 +1221,12 @@ class Agent:
         document_ids: Sequence[str] | None = None,
         parent: Runtime | None = None,
         mode: Mode = Mode.QUEUE,
+        app: Frontend | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
         record keeps their JSON. (Surfaces pass their own ``run_id`` when the protocol names
-        the run.)"""
+        the run, and what its front end gave it, ``app``.)"""
         start = await self._start(
             input,
             user=user,
@@ -1197,6 +1241,7 @@ class Agent:
             framework_options=framework_options,
             document_ids=document_ids,
             parent=parent,
+            app=app,
         )
         live = None
         if mode is Mode.STEER and parent is None and thread:
@@ -1229,13 +1274,15 @@ class Agent:
         priority: int = 0,
         concurrency_key: str | None = None,
         document_ids: Sequence[str] | None = None,
+        app: Frontend | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
         its budget, the agent's version, what it is ``without``, its framework options that are
         JSON, the
-        documents its context draws on (``document_ids``), and how a queued run waits its turn
-        (``priority``, ``concurrency_key``) go with it when there are any. A run started
+        documents its context draws on (``document_ids``), what its front end gave it
+        (``app``), and how a queued run waits its turn (``priority``, ``concurrency_key``) go
+        with it when there are any. A run started
         inside another (``parent``: a sub-agent's, a nested ``run``/``stream``/``start``) is
         its child: its record names the parent and the agent group of the
         tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
@@ -1253,6 +1300,8 @@ class Agent:
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
         metadata = self._metadata(turned_off, framework_options, document_ids, budget)
+        if app is not None and (kept := app.kept()):
+            metadata[FRONTEND] = kept
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {

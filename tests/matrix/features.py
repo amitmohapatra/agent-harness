@@ -83,6 +83,10 @@ ONE_CALL_AT_A_TIME: Final = NA(
     "the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)"
 )
 NO_TEXT_OUTSIDE_STREAMS: Final = NA("nothing is streamed: no listener in this mode")
+FIXED_GRAPH: Final = NA(
+    "a graph built with its tools offers those: build it with trellis.middleware() (or use "
+    "ReAct) for a run's own tools, a front end's among them"
+)
 
 
 def only_modes(*modes: str, reason: str) -> dict[str, Note]:
@@ -606,7 +610,15 @@ async def decisions_fed_back(w: World) -> None:
         assert decided == []
 
 
+def narrow_any_size(w: World) -> None:
+    """The hints narrow from :data:`agent.NARROW_FROM` tools; these cells' sets are small."""
+    from trellis.harness import agent
+
+    w.monkeypatch.setattr(agent, "NARROW_FROM", 0)
+
+
 async def hints(w: World) -> None:
+    narrow_any_size(w)
     d = Desk()
     w.memory_service.candidates = ["lookup", CONFIRM[0]]
     tools = [
@@ -630,6 +642,7 @@ async def chains(w: World) -> None:
     """A two-tool chain (``find_sku``'s ``sku_id`` is ``get_stock``'s argument, as their
     schemas say): every model reads it in the tools' descriptions, and the hints, narrowed to
     the first tool, keep the second offered."""
+    narrow_any_size(w)
     d = Desk()
     w.memory_service.candidates = ["find_sku", CONFIRM[0]]
     tools = [
@@ -876,6 +889,37 @@ async def agui_surface(w: World) -> None:
     from trellis.harness.agui.sse import decode
 
     assert decode(replay.text) == w.outcomes[-1].surface[1:]
+
+
+#: A tool the AG-UI client declares (a CopilotKit frontend action): the app runs it.
+PICK_COLOR: Final = {
+    "name": "pick_color",
+    "description": "Ask the person to pick a color in the app.",
+    "parameters": {"type": "object", "properties": {"hint": {"type": "string"}}},
+}
+
+
+async def frontend_tools(w: World) -> None:
+    from trellis.harness.frontend import FRONTEND_TOOL
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if FRONTEND_TOOL in (interrupt.payload or {}):
+            return "answer", "red"  # what the app's picker returned
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("pick_color", {"hint": "warm"})]
+    o = (await w.go([], plan, answer=answer, frontend={"tools": [PICK_COLOR]})).succeeded()
+    [asked] = o.pauses
+    assert asked.tool_call is not None and asked.tool_call.tool == "pick_color", asked
+    assert asked.tool_call.args == {"hint": "warm"}
+    assert o.answer == "Done. red", o.answer  # the model read the app's result
+    events = [e for _, e in o.surface]
+    started = [e for e in events if e["type"] == "TOOL_CALL_START"]
+    assert started and started[0]["toolCallName"] == "pick_color", started
+    paused = [e for e in events if e.get("outcome", {}).get("type") == "interrupt"]
+    [entry] = paused[0]["outcome"]["interrupts"]
+    assert entry["reason"] == FRONTEND_TOOL
+    assert entry["toolCallId"] == started[0]["toolCallId"]
 
 
 async def a2a_surface(w: World) -> None:
@@ -1303,7 +1347,7 @@ FEATURES: Final[list[Feature]] = [
         "F28",
         "tool hints narrow what the model is offered",
         "F28",
-        "automatic from 5 tools, with memory",
+        "automatic from 30 tools in the run, with memory",
         hints,
         needs=frozenset({"memory", "tool_search"}),
         adapters={"function": NO_MODEL},
@@ -1411,6 +1455,19 @@ FEATURES: Final[list[Feature]] = [
         "agent.serve_chat(app)",
         agui_surface,
         modes=only_modes("agui", reason="the AG-UI surface is its own mode"),
+        way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
+    ),
+    Feature(
+        "F62t",
+        "AG-UI frontend tools: offered, called, run by the app, its result read",
+        "F62 (backlog: AG-UI frontend tools)",
+        "RunAgentInput.tools",
+        frontend_tools,
+        modes=only_modes("agui", reason="frontend tools come with an AG-UI request"),
+        adapters={
+            "langgraph": FIXED_GRAPH,
+            "deepagents": FIXED_GRAPH,
+        },
         way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
     ),
     Feature(

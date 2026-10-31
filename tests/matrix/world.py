@@ -298,6 +298,7 @@ class World:
         self.overrides: dict[str, Any] = {}
         self._agents = 0
         self._run_options: dict[str, Any] = {}
+        self._frontend: dict[str, Any] = {}
         self._current: _Handle | None = None
         self.exporter: InMemorySpanExporter | None = None
         self._tap(monkeypatch)
@@ -480,6 +481,7 @@ class World:
         parent: str | None = None,
         during: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         run: dict[str, Any] | None = None,
+        frontend: dict[str, Any] | None = None,
         **wrap: Any,
     ) -> Outcome:
         """Run the agent under test once, in the cell's mode, to its end: each pause answered
@@ -487,8 +489,10 @@ class World:
         run's id while its first attempt is under way (to cancel it). ``run`` holds the run's
         own options (``run_timeout=``, ``without=``, ``framework_options=``: ``run``, ``stream``,
         ``start`` and ``schedule`` take them; ``priority=``, ``concurrency_key=``: ``start`` and
-        ``schedule``)."""
+        ``schedule``). ``frontend``: what the AG-UI request's front end gives the run besides
+        its message (``tools``, ``context``, ``state``)."""
         tools, plan = list(tools), list(plan)
+        self._frontend = dict(frontend or {})
         if self.mode == "elsewhere":
             tools, plan = [*tools, confirm], [CONFIRM, *plan]
         agent = await self.agent(tools, plan, target=target, parent=parent, **wrap)
@@ -614,6 +618,7 @@ class World:
                 "threadId": handle.thread,
                 "runId": handle.run_id,
                 "messages": [{"id": "m1", "role": "user", "content": input}],
+                **self._frontend,
             }
             handle.task = asyncio.create_task(handle.http.post("/agui/run", json=body))
         elif mode == "a2a":

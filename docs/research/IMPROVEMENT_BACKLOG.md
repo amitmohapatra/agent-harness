@@ -27,7 +27,8 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | Follow-ups with pronouns: the memory query is the raw latest message | next (after the window work lands): query = latest message + the previous user turn when short | audit A1, M1 |
 | Messages sent mid-run (steer, interrupt, queue), memory-off history, stable message ids, session continuity | exists (#64) | audit A6, G6 |
-| `mode` (queue / interrupt / steer) on AG-UI, A2A and `start()`: today only `run()` and `stream()` take it | next | #64 |
+| `mode` (queue / interrupt / steer) on AG-UI (`forwardedProps.mode`) and A2A (`metadata.mode`) | exists | `tests/integration/test_agui_frontend.py`, `test_a2a_server.py` |
+| `mode` on `start()`: a queued run waits its turn by `concurrency_key` | next | #64 |
 | A steered message reaches OpenAI Agents and Claude models but is recorded after the question in their transcripts: record messages in the order they came | later | #64 |
 | Claude and ACP sessions are kept per process: a turn on another worker starts a new session (it falls back to the run store's history or the memory window) | later | #64 |
 | The memory service keys threads by tenant and thread only: the harness passes the scoped conversation key, but a direct memory API user can still collide; consider scoping in memory | later | #63, #64 |
@@ -68,7 +69,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Gateway MCP tools' output schemas (Bifrost listing has none) | later: needs the gateway SDK to carry `outputSchema` | `bifrost_sdk.ToolDef` |
 | Cold catalogs of 100–500 tools (0 successes recorded on an 8k window) | next: re-run `benchmark/cost` at 100/500 with hints on | audit M3 |
 | Clarifying questions (ask vs guess) | in flight: `claude/cool-maxwell-w5avo8-reactnative` (#58, `ask_user` arms) | audit F |
-| AG-UI frontend tools: `RunAgentInput.tools` is parsed but never used. Offer the client's tools to the model. On a call, stream `TOOL_CALL` events and pause through the existing interrupt and resume path, then continue when the client returns the tool's result. Test it with a fake AG-UI client | next | `src/trellis/harness/agui/events.py` (`tools` is declared, and nothing reads it) |
+| AG-UI frontend tools, `context` and shared `state` (`frontend.py`): the client's tools offered to the model, a call streamed and paused (interrupt reason `frontend_tool`), answered by a `tool` message or a `resume` entry; context and state in the pushed context within half its budget; state changes streamed as `STATE_DELTA`/`STATE_SNAPSHOT` | exists | `tests/integration/test_agui_frontend.py` (a fake CopilotKit-style client); matrix F62t (every adapter that takes a run's tools) |
 | A structured `ask_user` with optional `options[]`, `date`, `date_range` and `number`, so a UI shows dropdowns and pickers and plain chat shows text | exists, opt-in (`tools/ask.py`, `trellis.ask_user()`); offering it by default is measured on #58 | `tests/integration/test_ask_user.py`; matrix F36u |
 | AG-UI activity summaries ("used N tools · ran K commands") from the tool events | exists (`agui/activity.py`) | `tests/integration/test_ask_user.py` |
 
