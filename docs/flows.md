@@ -535,7 +535,7 @@ sequenceDiagram
   participant FS as FilesystemMiddleware
   participant HT as HarnessTools
   participant SG as StallGuard
-  participant SL as StepLimit
+  participant SL as ModelCallLimit
   participant CE as ContextEditing
   participant SU as Summarization
   participant RT as ReadTools
@@ -544,12 +544,12 @@ sequenceDiagram
   participant T as tools node
   participant Br as tools.bridge
 
-  Note over G: once per invocation (before the agent): PatchToolCalls answers calls left unanswered, StepLimit counts from 0
+  Note over G: once per invocation (before the agent): PatchToolCalls answers calls left unanswered
   G->>FS: wrap_model_call(request)
   FS->>HT: + the read_file tool's guidance
   HT->>SG: tools = the run's offered tools (hints, memory, used), sorted
   SG->>SL: the last steps repeat a call max_repeats times, or 3 failed? → ModelError
-  SL->>CE: step n of max_steps (past it: tool_choice none, one last answer)
+  SL->>CE: before the model: call n of max_steps (past it: the run ends with LangChain's message)
   CE->>SU: over half the window: older tool results cleared (placeholder → read_file by the call's id)
   SU->>RT: near the window's end: older turns summarized (one model call), history to a file
   RT->>MH: read_file offered only once there is something to read
