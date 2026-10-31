@@ -196,10 +196,12 @@ NUMBERS: Final = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
     "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
 }  # fmt: skip
+#: A count, then at most two words (markdown's ``**`` and backticks around them allowed: a small
+#: model writes "**12 `tape_page` calls**"), then what it counts.
 _COUNTED: Final = re.compile(
     r"\b(\d+|"
     + "|".join(NUMBERS)
-    + r")\s+(?:\w+\s+){0,2}?(?:tool\s+)?(?:calls?|steps?|tools?|requests?)\b",
+    + r")[*`]*\s+(?:[*`]*\w+[*`]*\s+){0,2}?(?:tool\s+)?(?:calls?|steps?|tools?|requests?)\b",
     re.IGNORECASE,
 )
 _TIME: Final = re.compile(

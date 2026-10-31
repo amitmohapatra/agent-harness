@@ -158,3 +158,10 @@ def test_the_cli_takes_the_suite(monkeypatch: pytest.MonkeyPatch, tmp_path: Any)
         and seen["run_seconds"] == 600
     )
     assert json.loads(out.with_suffix(".json").read_text())["model"] == "m"
+
+
+def test_a_count_said_in_markdown_is_read() -> None:
+    """A small model writes ``12 `tape_page` calls`` or ``**12** calls``: still twelve."""
+    assert explain.counts("I made **12 `tape_page` calls**, one per page.") == [12]
+    assert explain.counts("I made **12** tool calls.") == [12]
+    assert explain.counts("on October 30, 2 calls") == [2]
