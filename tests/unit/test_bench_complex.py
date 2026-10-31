@@ -290,3 +290,49 @@ async def test_judge_packets_and_the_gap_report(tmp_path: Path, offline: None) -
     assert len(found["model_gaps"]) == 1 and found["all"]["ok"] == 9
     assert found["agreement"]["double_judged"] == 1
     assert "Harness gaps" in judge.markdown(found)
+
+
+def test_a_negative_written_with_the_minus_sign_is_read_as_negative() -> None:
+    assert cx.numbers("r \u2248 \u22120.23, and -1.5") == [-0.23, -1.5]
+
+
+async def test_deep_agents_is_an_adapter_of_its_own(tmp_path: Path, offline: None) -> None:
+    out = tmp_path / "cx-deep"
+    report = await cx.bench(
+        _args(out, cases="multihop-01,conversation-01", adapter="deepagents"),
+        progress=lambda _: None,
+    )
+    assert report["adapter"] == "deepagents" and report["summary"]["all"]["strict"]["mean"] == 1.0
+    rows = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+    assert {x["adapter"] for x in rows} == {"deepagents"}
+    assert out.with_suffix(".md").read_text().startswith("# complex: scripted (deepagents")
+
+
+def test_the_adapter_follows_the_history_unless_given() -> None:
+    assert cx.adapter_of("memory", None) == "react"
+    assert cx.adapter_of("thread", None) == "langgraph"
+    assert cx.adapter_of("memory", "openai") == "openai"
+
+
+def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_up() -> None:
+    case = next(c for c in cx.cases() if c.id == "cantdo-03")
+    expect = case.turns[0].expect
+    assert expect is not None
+
+    def ok(answer: str) -> bool:
+        return cx.score(expect, answer, [])["correct"]
+
+    assert ok(expect.reference)
+    assert not ok("I can't do that.")  # no why, nothing instead
+    assert not ok("Here is your Excel file: [download](sandbox:/top20.xlsx)")  # made up
+    assert not ok(  # says it cannot, yet hands over a made-up file
+        "I can't run code, but here is the file: [download](sandbox:/top20.xlsx). I can list "
+        "the SKUs as a table instead."
+    )
+    assert not ok(  # a file it wrote where the user cannot reach it
+        "I can't create an Excel file. I saved the top 20 as a CSV instead, at `/top20.csv`. "
+        "Here they are as a table too."
+    )
+    assert {c.id for c in cx.cases() if c.category == "cantdo"} == {
+        "cantdo-01", "cantdo-02", "cantdo-03", "cantdo-04"
+    }  # fmt: skip
