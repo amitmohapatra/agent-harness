@@ -217,6 +217,7 @@ def root(tmp_path: Path) -> Iterator[Path]:
 
 
 def ask(**args: Any) -> str:
+    results.keep("other\n1", tool="other")  # a result the query does not read
     path = results.keep("n,name,blob\n1,a,\n2,b,x\n3,c,y")
     assert path is not None
     return asyncio.run(query.query({"file_path": path, **args}))

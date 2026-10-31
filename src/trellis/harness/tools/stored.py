@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
@@ -179,7 +180,7 @@ async def read(path: str, offset: int = 0, limit: int = results.READ_LINES) -> s
         if not listed:
             return "No files are kept for the user."
         return "\n".join(["The user's files, newest first:", *(k.line() for k in listed)])
-    found = await _text(runtime, path)
+    found = await _text(path)
     if isinstance(found, str):
         return found
     text, record = found
@@ -199,11 +200,12 @@ async def table(path: str) -> tuple[Table | str, dict[str, Any]] | str:
     data, name, record = found
     try:
         return (_sheet(data) if name.lower().endswith(XLSX) else data.decode()), record
-    except (UnicodeDecodeError, ValueError, KeyError, ImportError) as exc:
+    except (ValueError, KeyError, ImportError, OSError, zipfile.BadZipFile) as exc:
         return f"Error: {path} is no table: {type(exc).__name__}: {exc}"
 
 
-async def _text(runtime: Runtime, path: str) -> tuple[str, dict[str, Any]] | str:
+async def _text(path: str) -> tuple[str, dict[str, Any]] | str:
+    """A kept file as text: CSV rows for an Excel file."""
     found = await table(path)
     if isinstance(found, str):
         return found
