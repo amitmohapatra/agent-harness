@@ -797,8 +797,7 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools...); a ``delegate`` job's
-        run (``Runtime.delegated``) has only those that read."""
+        tools of what the run is without (``without=``: its MCP tools...)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -810,12 +809,7 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return [
-            t
-            for t in tools
-            if (t.feature is None or runtime.uses(t.feature))
-            and not (runtime.delegated and t.spec.side_effects != "read")
-        ]
+        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
     async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
@@ -1235,7 +1229,6 @@ class Agent:
         priority: int = 0,
         concurrency_key: str | None = None,
         document_ids: Sequence[str] | None = None,
-        metadata: Mapping[str, Any] | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
@@ -1247,7 +1240,7 @@ class Agent:
         its child: its record names the parent and the agent group of the
         tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
         both) and what the parent is without, unless it names its own (``without`` adds to the
-        parent's). ``metadata`` is kept with it besides (a ``delegate`` job's depth)."""
+        parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
@@ -1259,8 +1252,7 @@ class Agent:
             document_ids = parent.document_ids if document_ids is None else document_ids
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
-        kept = self._metadata(turned_off, framework_options, document_ids, budget)
-        metadata = {**kept, **(metadata or {})}
+        metadata = self._metadata(turned_off, framework_options, document_ids, budget)
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
