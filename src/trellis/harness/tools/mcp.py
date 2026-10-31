@@ -15,14 +15,23 @@ Its tools are named ``<server>-<tool>`` (``server`` from ``name=``, else the nam
 gives itself), their side effects come from their annotations (``readOnlyHint``: ``read``;
 ``destructiveHint``: ``irreversible``; otherwise ``write``; the catalog has the last word), and
 every call goes through the bridge as any other: governance, the journal, retries of reads,
-paging, the run's records."""
+paging, the run's records.
+
+A server that asks the person in the middle of a call (MCP elicitation: the client says it can
+be asked, so a server asks only then) pauses the run as ``trellis.current().ask`` does
+(``tools.elicit``: one field of a few values a choice, else a form with the server's schema);
+the call is made again when the run resumes, and the answer goes back to the server. On the
+protocol of 2026-07-28 the question comes back in the call's result, with its call; before it,
+the question is a request of the server's own, which says no call: it is the call's that is under
+way on the connection, and a question while several are is refused (:data:`WHOSE`)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import PurePath
@@ -30,7 +39,11 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.contracts.errors import is_pause_signal
+from trellis.harness.asking import RunCancelled
+from trellis.harness.runtime import current
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, data_of
+from trellis.harness.tools.elicit import elicited
 
 if TYPE_CHECKING:
     from mcp import Client
@@ -39,6 +52,15 @@ log = logging.getLogger("trellis.tools")
 
 #: An HTTP server's address.
 URL: Final = re.compile(r"^https?://", re.IGNORECASE)
+#: What a server that asks while several of its calls are under way is told (before
+#: 2026-07-28 its question names no call).
+WHOSE: Final = (
+    "several calls to this server are under way, and the question names none of them: "
+    "ask again when one call is"
+)
+#: What a server is told when the person answers later: the run pauses, and the call is made
+#: again, with the answer, when it resumes.
+LATER: Final = "the person answers later: the call is made again then"
 
 
 @dataclass(frozen=True)
@@ -123,6 +145,8 @@ class MCPSource:
         #: each listed tool's annotations, as the catalog takes them (``tools.toolbox``)
         self.annotations: dict[str, dict[str, Any]] = {}
         self._connection = _Connection(self._client)
+        #: the calls under way, which a server's question is for
+        self._calls: set[_Call] = set()
 
     def __repr__(self) -> str:
         return f"mcp({self.target!r})"
@@ -175,15 +199,21 @@ class MCPSource:
         from mcp.types import CONNECTION_CLOSED  # noqa: PLC0415
 
         client = await self._connection.client()
+        call = _Call()
+        self._calls.add(call)
         try:
-            result = await client.call_tool(name, args)
+            result = await call.answering(client.call_tool(name, args))
         except Exception as exc:
+            if is_pause_signal(exc) or isinstance(exc, RunCancelled):
+                raise  # the server asked, and the person answers later
             if isinstance(exc, MCPError) and exc.code != CONNECTION_CLOSED:
                 raise ToolError(f"{self.server}: {exc}") from exc  # the server's answer
             self._connection.broken()  # opened again at the next call
             raise ToolError(
                 f"the MCP server {self.server} cannot be reached: {exc}", retryable=True
             ) from exc
+        finally:
+            self._calls.discard(call)
         if result.is_error:
             said = [c.text for c in result.content if getattr(c, "type", None) == "text"]
             raise ToolError("\n".join(said) or f"{name} failed")
@@ -196,6 +226,18 @@ class MCPSource:
 
     def _client(self) -> Client:
         return self.transport.client(self)
+
+    async def _elicited(self, context: Any, params: Any) -> Any:
+        """The SDK's elicitation callback: the server's question, handed to the call it is
+        for and answered there (:meth:`_Call.answering`)."""
+        from mcp.types import INVALID_REQUEST, ErrorData  # noqa: PLC0415 - the mcp extra
+
+        call = _CALL.get() or (next(iter(self._calls)) if len(self._calls) == 1 else None)
+        if call is None:
+            return ErrorData(code=INVALID_REQUEST, message=WHOSE)
+        answered: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        call.asked.put_nowait((params, answered))
+        return await answered
 
     async def aclose(self) -> None:
         """Close the connection (a stdio server's process ends with it)."""
@@ -234,11 +276,11 @@ def _sdk() -> Any:
 def _http_client(source: MCPSource) -> Client:
     sdk = _sdk()
     if not source.headers:
-        return sdk.Client(source.target)
+        return sdk.Client(source.target, elicitation_callback=source._elicited)
     http = sdk.shared._httpx_utils.create_mcp_http_client(headers=source.headers)
     source._connection.closing.append(http)
     transport = sdk.client.streamable_http.streamable_http_client(source.target, http_client=http)
-    return sdk.Client(transport)
+    return sdk.Client(transport, elicitation_callback=source._elicited)
 
 
 def _stdio_client(source: MCPSource) -> Client:
@@ -251,7 +293,7 @@ def _stdio_client(source: MCPSource) -> Client:
         env=None if target.env is None else dict(target.env),
         cwd=target.cwd,
     )
-    return sdk.Client(params)
+    return sdk.Client(params, elicitation_callback=source._elicited)
 
 
 def _host_name(target: Any) -> str:
@@ -298,6 +340,56 @@ def mcp(
     server's own name), ``call_timeout`` is the most one call may take, ``headers`` go with
     every HTTP request (its auth)."""
     return MCPSource(target, name=name, timeout=call_timeout, headers=headers)
+
+
+#: The call under way in this task: the SDK asks a server's question (2026-07-28) in a task of
+#: the call's own, which sees it.
+_CALL: ContextVar[_Call | None] = ContextVar("trellis_mcp_call", default=None)
+
+
+@dataclass(eq=False)
+class _Call:
+    """One call under way, and the questions its server asks in it."""
+
+    asked: asyncio.Queue[tuple[Any, asyncio.Future[Any]]] = field(default_factory=asyncio.Queue)
+
+    async def answering(self, made: Awaitable[Any]) -> Any:
+        """The call's result, each question the server asks in it answered here, in the run's
+        task: the person is asked (``ask``), and when they answer later the server is told
+        :data:`LATER`, the call stops and the pause goes on to the bridge, which makes the
+        call again when the run resumes (its answer then in the journal)."""
+        token = _CALL.set(self)
+        try:
+            task = asyncio.ensure_future(made)
+        finally:
+            _CALL.reset(token)
+        try:
+            while True:
+                question = asyncio.ensure_future(self.asked.get())
+                await asyncio.wait({task, question}, return_when=asyncio.FIRST_COMPLETED)
+                if task.done():
+                    question.cancel()
+                    return task.result()
+                await _answer(*question.result())
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+async def _answer(params: Any, answered: asyncio.Future[Any]) -> None:
+    """Ask the person the server's question; their answer, or :data:`LATER`, to the server."""
+    from mcp.types import INVALID_REQUEST, ElicitResult, ErrorData  # noqa: PLC0415
+
+    asking = elicited(params)
+    runtime = current()
+    assert runtime is not None, "a harness tool runs in a run (the bridge)"
+    try:
+        answer = await runtime.ask(asking.question, **asking.asking)
+    except BaseException:
+        answered.set_result(ErrorData(code=INVALID_REQUEST, message=LATER))
+        raise
+    answered.set_result(ElicitResult.model_validate(asking.result(answer)))
 
 
 @dataclass
