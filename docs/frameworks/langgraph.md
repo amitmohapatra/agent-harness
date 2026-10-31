@@ -89,7 +89,7 @@ is still narrowed and governed, said once at `h.wrap`.
 | Long-term store | a graph compiled without a `store` gets the memory service as its `BaseStore` per run (`runtime.store`, `get_store()`): each item one memory of the user's. A graph compiled with its own store keeps it (said once); `without={"memory"}` leaves the graph as built |
 | Records | the transcript (the question and the final AI message), every tool call, the run's `system` outcome; approvals as `TOOL_CALL` feedback |
 | Governance and approvals | every tool call — the graph's own and the harness's — is governed by the catalog as it is at the call (a rule set after the graph was compiled applies) |
-| Tool hints | the context is asked for with the toolbox's names (5 or more); a `create_agent` graph is then offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`), but its `ToolNode`'s calls are governed, journaled and recorded as the run's |
+| Tool hints | the context is asked for with the toolbox's names (5 or more); from 30 tools in the run, a `create_agent` graph is offered, at each model call, only the tools the run offers — the hinted ones, the memory tools, those already used, what a `tool_search` found (`narrows="turn"`): the harness runs a copy of it whose model calls go through one more `awrap_model_call` handler, innermost, so your graph object is unchanged. A hand-built `StateGraph` binds its model's tools itself: not narrowed (`narrows="none"`), but its `ToolNode`'s calls are governed, journaled and recorded as the run's |
 | Grounding, judges | sampled successful runs with an answer ([evaluation.md](../evaluation.md)) |
 | Hooks | the tool and run hooks as for every target; a model call is LangChain's own middleware, given when the graph is built: `create_agent(model, tools=..., middleware=[yours, ModelHooks()])` (`from trellis.harness.middleware import ModelHooks`: the span, `call_timeout`, a failed call's `on_error`; the other harness middleware — the run's tools per model call, a step limit, stall detection, the checkpoint in the run — is in [react.md](react.md#the-middleware)) — a hand-built `StateGraph` calls its model itself: none ([hooks.md](../hooks.md)) |
 | Tracing | one `invoke_agent` span per attempt, `execute_tool` per tool call, `retrieve memory`; LangChain's own instrumentation nests under it |
@@ -229,6 +229,16 @@ gateway's stored prompts; a `ReAct` takes the run's sandbox as its `backend=sand
 and a graph of yours its tools, `sandbox().tools()`, which govern and journal every command
 ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). A LangChain `create_agent` can
 take Deep Agents' `SkillsMiddleware` for `SKILL.md` folders ([skills.md](../skills.md#native-or-ours)).
+
+## Conversations
+
+A graph with its own checkpointer keeps the conversation on its thread (the conversation's key,
+`h.conversation`). Without one — and `ReAct`, whose checkpoint is the run's — memory's window
+keeps it, or with memory off the run store's earlier turns, as messages before the question
+([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` reaches a graph with the harness's middleware (`ReAct`,
+`middleware()`: `HarnessTools.before_model` adds the message before the next model call, kept in
+the graph's messages and in the run's transcript); any other graph waits as `"queue"`, said once
+([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 ## Limits
 

@@ -88,6 +88,8 @@ class ModelLog:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls: list[tuple[str, list[str]]] = []
+        #: each tool's description as the models were last given it
+        self.described: dict[str, str] = {}
         self._bound: dict[int, list[str]] = {}
         log = self
 
@@ -95,6 +97,8 @@ class ModelLog:
 
         def replied(script: Script, body: dict[str, Any]) -> Any:
             offered = [t["function"]["name"] for t in body.get("tools") or []]
+            for t in body.get("tools") or []:
+                log.described[t["function"]["name"]] = t["function"].get("description") or ""
             log.calls.append((json.dumps(body.get("messages"), default=str), offered))
             return reply(script, body)
 
@@ -102,6 +106,9 @@ class ModelLog:
 
         def bind_tools(model: ScriptedChatModel, tools: Sequence[Any], **kw: Any) -> Any:
             log._bound[id(model)] = [getattr(t, "name", str(t)) for t in tools]
+            for t in tools:
+                if hasattr(t, "name"):
+                    log.described[t.name] = getattr(t, "description", "") or ""
             return model
 
         generate = ScriptedChatModel._generate
@@ -126,6 +133,8 @@ class ModelLog:
             tools = k.get("tools", a[3] if len(a) > 3 else ())
             said = json.dumps([system, given], default=str)
             log.calls.append((said, [t.name for t in tools or ()]))
+            for t in tools or ():
+                log.described[t.name] = getattr(t, "description", "") or ""
 
         async def get_response(model: ScriptedModel, *a: Any, **k: Any) -> Any:
             heard(a, k)

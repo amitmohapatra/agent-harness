@@ -54,17 +54,20 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
-from trellis.harness.automatic import JournalBackend
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, Rewrite, Verdict
+from trellis.harness.journal import content_key
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
+from trellis.harness.tools.results import MAX_LINE
 
+#: How a tool's description says the chain it is in (``tools.links``).
+CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 
@@ -404,17 +407,46 @@ async def repeated_calls(w: World) -> None:
 
 
 # --------------------------------------------------------------------------- context
+#: The report a large-result scenario reads: past ``tools.results.MAX_CHARS``, one line.
+LARGE_REPORT: Final = 100_000
+
+
 async def large_result(w: World) -> None:
     d = Desk()
-
-    async def deep(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
-        # ReAct on Deep Agents: a backend given (the journal's), its file tools and paging
-        return ReAct("You read.", PlannedChat(plan), backend=JournalBackend()), tools
-
-    target = deep if w.adapter == "react" else None
-    o = (await w.go([d.report(100_000)], [("report", {"name": "q3"})], target=target)).succeeded()
+    o = (await w.go([d.report(LARGE_REPORT)], [("report", {"name": "q3"})])).succeeded()
     assert "/large_tool_results/" in o.text, f"the model read all {len(o.text)} characters"
     assert len(o.text) < 25_000
+
+
+async def large_result_read(w: World) -> None:
+    """The kept result read to its last part (``read_file`` from an offset): every part is
+    within reach, not only the preview's head and tail."""
+    d = Desk()
+    report = d.report(LARGE_REPORT)
+    text = "".join(f"{n:04d}" for n in range(LARGE_REPORT // 4 + 1))[:LARGE_REPORT]
+    path = f"/large_tool_results/{content_key('result', text)}"
+    last = LARGE_REPORT // MAX_LINE - 1  # a 100,000-character line read in parts of 5,000
+    plan: list[Call] = [
+        ("report", {"name": "q3"}),
+        ("read_file", {"file_path": path, "offset": last}),
+    ]
+    o = (await w.go([report], plan)).succeeded()
+    assert o.text.endswith(text[-MAX_LINE:]), o.text[:200]
+
+
+async def large_result_query(w: World) -> None:
+    """The kept result queried with read-only SQL (``query_result``): computed over all of it,
+    with no sandbox — the model adds nothing up itself."""
+    d = Desk()
+    text = "".join(f"{n:04d}" for n in range(LARGE_REPORT // 4 + 1))[:LARGE_REPORT]
+    path = f"/large_tool_results/{content_key('result', text)}"
+    sql = "SELECT length(line) AS n, substr(line, -8) AS tail FROM result"
+    plan: list[Call] = [
+        ("report", {"name": "q3"}),
+        ("query_result", {"file_path": path, "sql": sql}),
+    ]
+    o = (await w.go([d.report(LARGE_REPORT)], plan)).succeeded()
+    assert o.text.endswith(f"n,tail\n{LARGE_REPORT},{text[-8:]}"), o.text[:200]
 
 
 async def context_management(w: World) -> None:
@@ -557,7 +589,15 @@ async def decisions_fed_back(w: World) -> None:
         assert decided == []
 
 
+def narrow_any_size(w: World) -> None:
+    """The hints narrow from :data:`agent.NARROW_FROM` tools; these cells' sets are small."""
+    from trellis.harness import agent
+
+    w.monkeypatch.setattr(agent, "NARROW_FROM", 0)
+
+
 async def hints(w: World) -> None:
+    narrow_any_size(w)
     d = Desk()
     w.memory_service.candidates = ["lookup", CONFIRM[0]]
     tools = [
@@ -575,6 +615,33 @@ async def hints(w: World) -> None:
         assert narrowed and all("lookup" in names for names in offered), offered
     else:
         assert not narrowed, offered
+
+
+async def chains(w: World) -> None:
+    """A two-tool chain (``find_sku``'s ``sku_id`` is ``get_stock``'s argument, as their
+    schemas say): every model reads it in the tools' descriptions, and the hints, narrowed to
+    the first tool, keep the second offered."""
+    narrow_any_size(w)
+    d = Desk()
+    w.memory_service.candidates = ["find_sku", CONFIRM[0]]
+    tools = [
+        d.find_sku(),
+        d.get_stock(),
+        d.note(),
+        d.parallel("t4", "read"),
+        d.parallel("t5", "read"),
+    ]
+    plan = [("find_sku", {"name": "blue mug"}), ("get_stock", {"sku_id": "SKU-7"})]
+    (await w.go(tools, plan)).succeeded()
+    assert d.ran("get_stock") == [{"sku_id": "SKU-7"}], d.done
+    described = w.models.described | w.claude_described
+    assert CHAIN in described.get("get_stock", ""), described
+    assert CHAIN in described.get("find_sku", ""), described
+    offered = w.models.offered() or w.claude_offered
+    assert offered, "the model was never offered anything"
+    assert all({"find_sku", "get_stock"} <= set(names) for names in offered), offered
+    narrowed = all("note" not in names for names in offered)
+    assert narrowed == w.on, offered
 
 
 # --------------------------------------------------------------------------- gateway
@@ -1066,7 +1133,8 @@ FEATURES: Final[list[Feature]] = [
         "F26",
         "automatic: Deep Agents' FilesystemMiddleware (ReAct's given a backend, Deep Agents' by "
         "default); "
-        "OpenAI Agents and Claude: the same cut, kept in the run (tools.results)",
+        "ReAct, middleware(), OpenAI Agents and Claude: the same cut, kept in the run "
+        "(tools.results)",
         large_result,
         adapters={
             "function": NA("a function target gets the whole result: it has no context to fill"),
@@ -1074,9 +1142,50 @@ FEATURES: Final[list[Feature]] = [
                 "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
                 "and Deep Agents have it by default)"
             ),
-            "middleware": NA(
-                "Deep Agents' own: middleware() adds what Deep Agents lacks; build on "
-                "create_deep_agent (as ReAct does given a backend), or add FilesystemMiddleware"
+        },
+        way2=NA(
+            "by design: a Way 2 caller's own code receives the whole result and decides what "
+            "its model reads"
+        ),
+    ),
+    Feature(
+        "F26r",
+        "large results: read to the last part (read_file from an offset), none out of reach",
+        "F26",
+        "automatic: read_file pages the kept result (tools.results), from any offset",
+        large_result_read,
+        adapters={
+            "function": NA("a function target gets the whole result: it has no context to fill"),
+            "langgraph": NA(
+                "native: add FilesystemMiddleware(tools=['read_file']) to create_agent (ReAct "
+                "and Deep Agents have it by default)"
+            ),
+            "deepagents": NA(
+                "native: Deep Agents' FilesystemMiddleware saves it under the call's id on its "
+                "backend, and its read_file pages it (F26)"
+            ),
+        },
+        way2=NA(
+            "by design: a Way 2 caller's own code receives the whole result and decides what "
+            "its model reads"
+        ),
+    ),
+    Feature(
+        "F26q",
+        "large results: counted, summed, filtered and ranked by read-only SQL over every row "
+        "(query_result), no sandbox needed",
+        "F26",
+        "automatic: query_result is offered with read_file once a result is kept (tools.query)",
+        large_result_query,
+        adapters={
+            "function": NA("a function target gets the whole result: it has no context to fill"),
+            "langgraph": NA(
+                "native: add FilesystemMiddleware(tools=['read_file']) to create_agent, or build "
+                "it with middleware() (query_result comes with it)"
+            ),
+            "deepagents": NA(
+                "native: Deep Agents saves it under the call's id; with middleware() "
+                "query_result reads it from the state (tests/integration/test_large_data.py)"
             ),
         },
         way2=NA(
@@ -1178,13 +1287,23 @@ FEATURES: Final[list[Feature]] = [
         "F28",
         "tool hints narrow what the model is offered",
         "F28",
-        "automatic from 5 tools, with memory",
+        "automatic from 30 tools in the run, with memory",
         hints,
         needs=frozenset({"memory", "tool_search"}),
         adapters={"function": NO_MODEL},
         way2=NA(
             "by design: memory.tool_hints() ranks the tools; your code offers the ones it picks"
         ),
+    ),
+    Feature(
+        "F28c",
+        "tool chains: said in the descriptions, kept whole when the hints narrow",
+        "F28",
+        "the tools' schemas (a return annotation, an MCP outputSchema); with memory",
+        chains,
+        needs=frozenset({"memory", "tool_search"}),
+        adapters={"function": NO_MODEL},
+        way2=NA("by design: the descriptions are the toolbox's; your code offers the tools"),
     ),
     Feature(
         "F17",
@@ -1417,7 +1536,8 @@ async def run_options_without(w: World) -> None:
 #: Each framework's own limit on a run's steps, set below what a plan of one call needs (and
 #: what its error says), and set far above it.
 TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
-    "react": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
+    # one step more than a model call: HarnessTools.before_model (a steered message, ADR 0005)
+    "react": ({"recursion_limit": 4}, "Recursion limit of 4 reached"),
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),

@@ -291,6 +291,15 @@ class FakeMemoryService:
             window = self._window(call.scope.get("thread_id"))
             if window:
                 answer["conversation"] = {"thread_id": call.scope["thread_id"], "messages": window}
+        elif call.body.get("window", True):
+            # the window rendered in the text, as the service renders the recent conversation
+            said = [
+                f"{m['role']}: {m['text']}"
+                for m in self._window(call.scope.get("thread_id"))
+                if m["text"] and m["role"] in ("USER", "ASSISTANT")
+            ]
+            if said:
+                answer["rendered"] += "\n\n## Recent conversation\n" + "\n".join(said)
         return answer
 
     def _window(self, thread: str | None) -> list[dict[str, Any]]:

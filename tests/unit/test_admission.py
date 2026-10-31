@@ -7,6 +7,7 @@ calls of every run feed it (``accounting``)."""
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -300,7 +301,7 @@ def _tree(seen: list[RunEvent]) -> list[tuple[str, Any]]:
 async def test_a_branch_is_on_the_tree_however_it_ends(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(admission, "ADMISSION", Admission(start=1, ceiling=1))
     parent, seen = _runtime()
-    async with branch(parent, "run_a", "kid", job=1) as found:
+    async with branch(parent, "run_a", "kid") as found:
         found.spent = {"tokens": 30, "cost": 0.5, "model_calls": 2}
         found.ended("success")
         found.ended("error")  # once
@@ -309,7 +310,7 @@ async def test_a_branch_is_on_the_tree_however_it_ends(monkeypatch: pytest.Monke
         ("helper_started", None),
         ("helper_finished", "success"),
     ]
-    assert seen[0].data["limit"] == 1 and seen[0].data["job"] == 1
+    assert seen[0].data["limit"] == 1
     finished = seen[2].data
     assert (finished["tokens"], finished["cost"], finished["agent_id"]) == (30, 0.5, "kid")
     for raised, status in [
@@ -329,8 +330,9 @@ async def test_a_branch_with_no_slot_in_time_ends_timeout(monkeypatch: pytest.Mo
     monkeypatch.setattr(admission, "ADMISSION", Admission(start=1, ceiling=1))
     parent, seen = _runtime()
     async with branch(parent, "run_a", "kid") as holding:
+        parent.ends_at = time.monotonic() + 0.01  # what is left of the run's time
         with pytest.raises(TimeoutError):
-            async with branch(parent, "run_b", "kid", within=0.01):
+            async with branch(parent, "run_b", "kid"):
                 pass  # pragma: no cover - never admitted
         holding.ended("success")
     late = [e.data for e in seen if e.data.get("run_id") == "run_b"]

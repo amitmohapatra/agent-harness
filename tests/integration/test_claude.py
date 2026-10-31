@@ -68,7 +68,7 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert refunds == ["o1"]
     cli = started_with(tmp_path)
     # read_file is listed from the start: the CLI lists a server's tools once
-    assert cli["tools"] == ["refund", "read_file"] and cli["allowed_tools"] is None
+    assert cli["tools"] == ["refund", "read_file", "query_result"] and cli["allowed_tools"] is None
     assert cli["permission_prompt_tool"] is None  # the harness's PreToolUse hook decides
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
@@ -323,7 +323,7 @@ async def test_without_memory_no_context_hook_is_registered(
 
 
 async def test_the_hints_narrow_the_tools_for_the_run(
-    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:
     def make(i: int) -> Any:
         def lookup(key: str) -> str:
@@ -334,7 +334,13 @@ async def test_the_hints_narrow_the_tools_for_the_run(
     memory_service.candidates = ["t2", "t5"]
     target = options(tmp_path, [{"text": "done"}])
     await arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)]).run("x", user="u1")
-    assert started_with(tmp_path)["tools"] == ["t2", "t5", *MEMORY_TOOLS, "read_file"]
+    assert started_with(tmp_path)["tools"] == [
+        "t2",
+        "t5",
+        *MEMORY_TOOLS,
+        "read_file",
+        "query_result",
+    ]
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:

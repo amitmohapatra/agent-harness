@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import re
@@ -44,7 +43,15 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, history, pipeline, sandbox, telemetry
+from trellis.harness import (
+    compat,
+    conversation,
+    history,
+    pipeline,
+    sandbox,
+    snapshots,
+    telemetry,
+)
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -67,6 +74,7 @@ from trellis.harness.clients.memory import (
     context_budget,
     documents,
 )
+from trellis.harness.conversation import STEERED_INTO, Mode, Turns
 from trellis.harness.evals import (
     GROUNDING_SAMPLE,
     EvalCase,
@@ -89,7 +97,7 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.base import Source, Tool, arguments_problem, max_age
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -112,6 +120,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
+#: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
+#: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
+#: narrowed away in 22-26% of turns, and those turns were wrong 2-3 times as often.
+NARROW_FROM: Final = 30
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -125,6 +138,10 @@ UNREACHED_FIX: Final = {
 #: How long a turn's transcript may take to write before the run returns, where memory keeps
 #: the conversation; past it the write is queued (``writes``) and the run returns.
 TURN_WRITE_SECONDS: Final = 5.0
+#: How many conversations' last framework sessions an agent keeps in this process
+#: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
+#: and its next turn starts a new one.
+SESSIONS_KEPT: Final = 128
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
 #: the user's history, instead of a confident guess the memory never held. Not when a hinted
@@ -227,6 +244,10 @@ class Agent:
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
+        #: the session its framework kept for each conversation's last turn in this process
+        #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
+        #: turn continues it (``pipeline``, ADR 0005), the most recent kept
+        self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -252,6 +273,7 @@ class Agent:
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        mode: Mode | str = Mode.QUEUE,
     ) -> Result:
         """Run to its end (or its first pause) and return how it ended. ``run_timeout``: the
         most working time the run may take, in seconds (not counting a pause; else the
@@ -265,7 +287,11 @@ class Agent:
         is not JSON (an object) is this call's only. ``document_ids``: the documents
         (``h.add_document``'s ``document_id``) the run's memory context draws its passages
         from, none else (unset: all the person's); kept with the run, its sub-agents' runs
-        included.
+        included. ``mode``: what the run does when another run of the same conversation
+        (``thread``) works in this process (``conversation.Mode``): ``"queue"`` waits for it
+        to end (the default), ``"interrupt"`` cancels it and continues the conversation,
+        ``"steer"`` gives the message to it at its framework's next step — its answer is this
+        run's — where the target can take one (else it waits, as ``"queue"``).
 
         Called inside another run (a tool of it, a node, a function target's code), the run is
         that run's child, as a sub-agent's is (``trellis.harness.subagents.child_run``): its
@@ -291,6 +317,7 @@ class Agent:
                 document_ids=document_ids,
             )
             return self.hooks.answer(result)
+        mode = Mode(mode)
         record = await self._opened(
             input,
             user=user,
@@ -302,8 +329,9 @@ class Agent:
             without=without,
             framework_options=framework_options,
             document_ids=document_ids,
+            mode=mode,
         )
-        return self.hooks.answer(await pipeline.attempt(self, record, input))
+        return self.hooks.answer(await pipeline.attempt(self, record, input, mode=mode))
 
     async def stream(
         self,
@@ -318,12 +346,15 @@ class Agent:
         without: Collection[str] = (),
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
+        mode: Mode | str = Mode.QUEUE,
     ) -> AsyncGenerator[RunEvent]:
         """The run's events as they happen, ending with ``RUN_FINISHED``. Closing the stream
         early cancels the run. ``run_timeout``, ``deadline``, ``budget``, ``without``,
-        ``framework_options`` and ``document_ids`` as for :meth:`run`. Streamed inside another
-        run, it is that run's child (its record names the parent; tenant, thread, documents
-        and what the parent is without carried over), whose events are the stream's: a
+        ``framework_options``, ``document_ids`` and ``mode`` as for :meth:`run` (a message
+        steered into the working run streams that run's answer, under its id). Streamed
+        inside another run, it is that run's child (its record names the parent; tenant,
+        thread, documents and what the parent is without carried over), whose events are the
+        stream's: a
         question it asks ends the stream paused, for the caller to answer (``run`` pauses the
         parent instead)."""
         record = await self._opened(
@@ -338,9 +369,10 @@ class Agent:
             framework_options=framework_options,
             document_ids=document_ids,
             parent=current(),
+            mode=Mode(mode),
         )
         async for event in self._events(
-            lambda listen: pipeline.attempt(self, record, input, listener=listen)
+            lambda listen: pipeline.attempt(self, record, input, listener=listen, mode=Mode(mode))
         ):
             yield self.hooks.event(event)
 
@@ -770,8 +802,7 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools...); a ``delegate`` job's
-        run (``Runtime.delegated``) has only those that read."""
+        tools of what the run is without (``without=``: its MCP tools...)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -783,12 +814,7 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return [
-            t
-            for t in tools
-            if (t.feature is None or runtime.uses(t.feature))
-            and not (runtime.delegated and t.spec.side_effects != "read")
-        ]
+        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
     async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
@@ -819,8 +845,35 @@ class Agent:
 
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
-        context (:meth:`remembered`), returned when there is one."""
+        context (:meth:`remembered`), returned when there is one — or, with memory off, the
+        conversation's earlier turns (:meth:`recalled`)."""
+        if runtime.run_memory is None:
+            await self.recalled(runtime)
+            return None
         return await self.remembered(runtime)
+
+    async def recalled(self, runtime: Runtime) -> None:
+        """With memory off, the conversation's earlier turns from the run store
+        (``conversation.earlier``: each one's question and answer) — only where nothing else
+        keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
+        a session of the run's, a conversation on OpenAI's servers) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``). A target that takes
+        messages (``Adapter.history_in == "messages"``) gets them as its own (a function as
+        ``agent.history``); the others in the context's text."""
+        store = self.adapter.thread_store(self.target, runtime.framework_options)
+        if runtime.continued or (store is not None and store is not history.MEMORY_THREAD):
+            return
+        try:
+            earlier = await conversation.earlier(runtime)
+        except Exception as exc:
+            runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
+            return
+        if not earlier:
+            return
+        if self.adapter.history_in == "messages":
+            runtime.history = earlier
+        else:
+            runtime.context = conversation.rendered(earlier)
 
     async def remembered(self, runtime: Runtime) -> PromptContext | None:
         """The memory context for this run, in the runtime. Asked with the run's tool set —
@@ -833,7 +886,8 @@ class Agent:
         lets them be narrowed. The tenant's first hints wait for its tools to be indexed
         (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
         behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
-        reach it. A failure is a warning."""
+        reach it; a hinted tool keeps its chain (``Toolbox.related``: the tools its output
+        feeds, and those whose output it needs). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
@@ -858,20 +912,34 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
                 return None
             output(span, pushed.rendered)
+        stale: list[str] = []
         if window is Window.MESSAGES:
-            runtime.history = from_window(
-                pushed.conversation.messages if pushed.conversation else []
+            runtime.history, stale = snapshots.out_of_date(
+                from_window(pushed.conversation.messages if pushed.conversation else []),
+                lambda name: _max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
         # plan of a skill learned for the task lists its steps); no hint, or none confident
         # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
-        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+        if (
+            hints
+            and candidates
+            and best >= NARROW_FLOOR
+            and len(own) >= NARROW_FROM
+            and self.adapter.narrows != "none"
+        ):
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+            # a candidate's chain stays whole: the tools its output feeds, and those giving
+            # what it needs (``tools.links``, from the tools' schemas)
+            chain = box.related(offered, code_mode=runtime.uses("code_mode"))
+            offered |= chain & set(runtime.toolbox)
             if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
                 offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
             runtime.offered = offered
+        if stale and runtime.offered is not None:
+            runtime.offered |= set(stale)  # a tool whose earlier values are out of date: again
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {
@@ -880,7 +948,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
-        rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
+        parts = (pushed.rendered, note, snapshots.note(stale))
+        rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.events.emit(
             RunEventType.CONTEXT_LOADED,
@@ -905,10 +974,14 @@ class Agent:
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
-        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        framework owns the thread (a durable store, ``history.owner``) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``: that session replays
+        the turns, ADR 0005 §4); as the framework's own
         messages where memory owns it, the framework keeps no store and replays messages; in
         the context's text otherwise (a store kept in RAM replays the thread itself while the
         process lives: the window is never given twice)."""
+        if runtime.continued:
+            return Window.NONE  # the continued session holds the turns
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
             return Window.NONE  # the framework's store holds it, or reads memory's thread itself
@@ -947,6 +1020,8 @@ class Agent:
         memory = runtime.run_memory
         if memory is None or not runtime.uses("records") or not messages:
             return
+        # each tool result says which tool returned it and when: a later turn replays it so
+        messages = snapshots.stamped(messages, runtime.fetched)
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:
@@ -1113,6 +1188,7 @@ class Agent:
         framework_options: Mapping[str, Any] | None = None,
         document_ids: Sequence[str] | None = None,
         parent: Runtime | None = None,
+        mode: Mode = Mode.QUEUE,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
@@ -1133,6 +1209,12 @@ class Agent:
             document_ids=document_ids,
             parent=parent,
         )
+        live = None
+        if mode is Mode.STEER and parent is None and thread:
+            live = self.turns.live(conversation_key(start.tenant_id, user, thread))
+        if live is not None and live.steers:  # its answer may be this run's (``earlier``)
+            given = {**start.metadata, STEERED_INTO: live.run_id}
+            start = start.model_copy(update={"metadata": given})
         await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
         if not framework_options:
@@ -1158,7 +1240,6 @@ class Agent:
         priority: int = 0,
         concurrency_key: str | None = None,
         document_ids: Sequence[str] | None = None,
-        metadata: Mapping[str, Any] | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
@@ -1170,7 +1251,7 @@ class Agent:
         its child: its record names the parent and the agent group of the
         tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
         both) and what the parent is without, unless it names its own (``without`` adds to the
-        parent's). ``metadata`` is kept with it besides (a ``delegate`` job's depth)."""
+        parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
@@ -1182,8 +1263,7 @@ class Agent:
             document_ids = parent.document_ids if document_ids is None else document_ids
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
-        kept = self._metadata(turned_off, framework_options, document_ids, budget)
-        metadata = {**kept, **(metadata or {})}
+        metadata = self._metadata(turned_off, framework_options, document_ids, budget)
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
@@ -1259,28 +1339,6 @@ async def admitted[T](call: Awaitable[T], operation: str) -> T:
         ) from exc
 
 
-class Turns:
-    """One run of a conversation at a time in this process: the others wait their turn, in
-    order (``pipeline.attempt``)."""
-
-    def __init__(self) -> None:
-        self._held: dict[str, tuple[asyncio.Lock, int]] = {}
-
-    @contextlib.asynccontextmanager
-    async def taken(self, key: str) -> AsyncIterator[None]:
-        lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
-        self._held[key] = (lock, waiting + 1)
-        try:
-            async with lock:
-                yield
-        finally:
-            lock, waiting = self._held[key]
-            if waiting == 1:
-                del self._held[key]
-            else:
-                self._held[key] = (lock, waiting - 1)
-
-
 #: The run's ``system`` feedback verdict for how it ended (a cancelled run says nothing
 #: about the agent).
 OUTCOME_VERDICTS: Final = {RunStatus.SUCCESS: "confirm", RunStatus.ERROR: "reject"}
@@ -1343,6 +1401,14 @@ def _json(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _max_age(runtime: Runtime, name: str) -> float | None:
+    """How long a value of the run's tool ``name`` stays current, as it declared it (``None``:
+    it did not say, or it is not the run's tool)."""
+    found = runtime.toolbox.get(name)
+    spec = found.spec if found is not None else runtime.native.get(name)
+    return None if spec is None else max_age(spec)
 
 
 def _pull(agent: Agent) -> frozenset[str]:
