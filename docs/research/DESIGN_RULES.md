@@ -47,5 +47,5 @@ against the protocol.
 | Explain record | none (each framework keeps its own trace) | the run journal; the memory window | *measuring*: the run's record in context on later turns (`-explain`, `-explain2`, arms C/D) |
 | Steer, interrupt | LangGraph `interrupt()`; Claude SDK interrupt | the frameworks' own | pause and resume in any worker (`RunCheckpointer`); busy-conversation modes (`run(mode=)`, #64) |
 | Approvals | `HumanInTheLoopMiddleware`; OpenAI Agents `needs_approval`; Claude permissions | the frameworks' own | one governance for every adapter: risk tiers, the catalog's `approve_when`, failing closed (`governance/`) |
-| Retries, limits | LangChain model and tool call limits and retries | tenacity (`tools/base.py`) | read-only retries within the call's time, `StepLimit`, `StallGuard` (`middleware.py`). *Measuring*: LangChain's own limits in `ReAct` (`-reactnative`, #58) |
+| Retries, limits | LangChain model and tool call limits and retries | tenacity (`tools/base.py`) | read-only retries within the call's time, `StallGuard` (`middleware.py`); `max_steps` is LangChain's `ModelCallLimitMiddleware`. *Measuring*: LangChain's other limits and retries in `ReAct` (`-reactnative`, #58) |
 | Streaming | each framework's stream | AG-UI, A2A | one event stream for every adapter (`events.py`, `agui/`) |
