@@ -78,7 +78,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | A published ReAct-vs-`create_agent` scorecard (accuracy, tokens, calls, seconds per class) | next: `benchmark/cost` variants `baseline` / `main` / `deep` exist; publish the scorecard per class | [evaluation.md](../evaluation.md) |
 | A "test my tools" scenario command: run a team's own tools through the scenario suite | next | `examples/06_scenarios/tool_choice.py`, `tests/live/heldout.py` |
 | LangChain limits, errors and retries measured by a ReAct suite | in flight: `-reactnative` (#58) | audit I, E4 |
-| `delegate` removed; helpers are Deep Agents' `task` | in flight: `claude/cool-maxwell-w5avo8-rmdelegate` (#57) | audit E2 |
+| `delegate` removed; helpers are Deep Agents' `task` | done (#57) | audit E2; duplication audit A14 |
 | In-run verification, deterministic: every number traced to a tool or query result, every tool and source named present in the run record (no extra model call) | later (re-test with arm D's record) | audit E3; ADR 0006 |
 | Decomposing multi-part questions (Plan-and-Solve, least-to-most), and selective self-consistency only on conflicting evidence or an unverified number, capped in cost | later | ADR 0006 |
 | Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
