@@ -26,7 +26,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Gap | Status | Evidence |
 |---|---|---|
 | Follow-ups with pronouns: the memory query is the raw latest message | in review: memory #66 — a short question whose own search is weak is searched again with the thread's previous question (follow-ups top-3 10 → 14/15, topic changes unchanged, `benchmark/follow_ups.py`) | audit A1, M1 |
-| Honest "I don't know": the abstain note names the missing detail and offers to look it up or ask; it reaches the model in every adapter (matrix F41a) | done (this PR) | audit I6, M2 |
+| Honest "I don't know": the abstain note names the missing detail and offers to look it up or ask; it reaches the model in every adapter (matrix F41a) | done (#89) | audit I6, M2 |
 | The abstain note is skipped whenever a tool hint reaches 0.5, and the memory service's hints claim 0.63–0.74 for questions no tool answers ("What's my sister's name?" → `find_sku` 0.74): with any tools, the note almost never reaches the model (0/12 requests on the complex suite's nodata cases) | next: calibrate the hint confidence (memory) or gate the note on the hinted tool's fit, then measure | audit I6, B13 |
 | Messages sent mid-run (steer, interrupt, queue), memory-off history, stable message ids, session continuity | exists (#64) | audit A6, G6 |
 | `mode` (queue / interrupt / steer) on AG-UI, A2A and `start()`: today only `run()` and `stream()` take it | next | #64 |
