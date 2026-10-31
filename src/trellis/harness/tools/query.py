@@ -207,14 +207,15 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
         return f"Error: the query is longer than {SQL_CHARS} characters"
     path = "/" + str(args["file_path"]).lstrip("/")
     record: dict[str, Any] | None = None
+    given: str | Table | None = text
     if text is None and _stored(path):
         found = await _kept_file(path)
         if isinstance(found, str):
             return found
-        text, record = found
+        given, record = found
     if args.get("save_as") is not None:
-        return await _save(runtime, args, sql, text, record)
-    answer = await run(path, sql, (), text)
+        return await _save(runtime, args, sql, given, record)
+    answer = await run(path, sql, (), given)
     if record is None or answer.startswith("Error"):
         return answer
     return f"{_told(runtime, path, record, sql)}\n{answer}"

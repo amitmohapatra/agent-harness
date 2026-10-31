@@ -79,6 +79,10 @@ def kept(root: Path, name: str) -> tuple[str, dict[str, Any]]:
     return found.read_text(), json.loads((found.parent / f".{name}.json").read_text())
 
 
+def deleted(root: Path, name: str) -> None:
+    next(root.rglob(name)).unlink()
+
+
 def python_diff() -> str:
     changed = [(s, DAY1[s], DAY2[s]) for s in sorted(DAY1) if DAY1[s] != DAY2[s]]
     return "sku,was,now\n" + "\n".join(f"{s},{a},{b}" for s, a, b in changed)
@@ -132,14 +136,12 @@ async def test_a_deleted_file_cannot_be_compared(
     harness: Harness, root: Path, clock: list[datetime]
 ) -> None:
     path = await saved_on_day_one(harness)
-    next(root.rglob("stock.xlsx")).unlink()
+    deleted(root, "stock.xlsx")
     model = ScriptedChat([("query_result", {"file_path": path, "sql": DIFF}), "gone"])
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id=next(IDS)), [inventory])
     assert (await agent.run("compare", user="u", thread="t")).status is RunStatus.SUCCESS
     told = str(model.requests[1]["messages"][-1]["content"])
-    made = (
-        "saved 2026-10-01 09:00 UTC by query_result from inventory fetched 2026-10-01 09:00 UTC"
-    )
+    made = "saved 2026-10-01 09:00 UTC by query_result from inventory fetched 2026-10-01 09:00 UTC"
     assert told == stored.GONE.format(path=path, made=made), told
 
 
