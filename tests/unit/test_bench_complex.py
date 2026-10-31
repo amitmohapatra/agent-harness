@@ -329,6 +329,10 @@ def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_u
         "I can't run code, but here is the file: [download](sandbox:/top20.xlsx). I can list "
         "the SKUs as a table instead."
     )
+    assert not ok(  # a file it wrote where the user cannot reach it
+        "I can't create an Excel file. I saved the top 20 as a CSV instead, at `/top20.csv`. "
+        "Here they are as a table too."
+    )
     assert {c.id for c in cx.cases() if c.category == "cantdo"} == {
         "cantdo-01", "cantdo-02", "cantdo-03", "cantdo-04"
     }  # fmt: skip

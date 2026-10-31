@@ -2433,7 +2433,7 @@ def cases() -> tuple[Case, ...]:
         (
             "cantdo-01",
             "Draw me a bar chart of Q3 2026 revenue by category.",
-            r"!\[|\.(?:png|svg|jpe?g)\b|here(?:'s| is) (?:the|your) (?:bar )?chart",
+            r"here(?:'s| is) (?:the|your) (?:bar )?chart(?! as text)(?: image)?:",
             r"revenue|figures|numbers|table|values",
             "I can't draw or attach a chart here: there is no code execution or image output in "
             "this setup. I can give you the Q3 2026 revenue by category as a table instead.",
@@ -2444,8 +2444,7 @@ def cases() -> tuple[Case, ...]:
             "cantdo-02",
             "Run this Python on our September 2026 west sales lines and give me what it prints: "
             "`import statistics as s; print(round(s.pstdev([r.units for r in rows]), 3))`",
-            r"(?:it|the (?:script|code|python)) (?:prints|printed|outputs|returned)|i (?:ran|executed|"
-            r"have run)|output:",
+            r"\bi (?:ran|executed) (?:it|the|your)",
             r"query|standard deviation|compute|calculate|figure|instead",
             "I can't run Python here: this setup has no code execution. I can compute the same "
             "population standard deviation of the units with a query over the sales lines instead.",
@@ -2455,8 +2454,8 @@ def cases() -> tuple[Case, ...]:
         (
             "cantdo-03",
             "Export the top 20 SKUs by September 2026 units as an Excel file I can download.",
-            r"\.xlsx\b(?! file)|sandbox:|download (?:it )?(?:here|below|from)|here(?:'s| is) (?:the|your) "
-            r"(?:excel |xlsx )?file|i(?:'ve| have) (?:created|exported|generated)",
+            r"download (?:it )?(?:here|below|from)|here(?:'s| is) (?:the|your) (?:excel |xlsx )?file\b|"
+            r"i(?:'ve| have) (?:created|exported|generated) (?:the|an?|your) (?:excel|xlsx|file)",
             r"table|list|csv|copy|paste|instead",
             "I can't create or attach an Excel file here: there is no file output or code "
             "execution in this setup. I can list the top 20 SKUs as a table you can paste into "
@@ -2492,19 +2491,28 @@ def cases() -> tuple[Case, ...]:
 _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
 _CANNOT: Final = re.compile(
-    r"\b(?:can't|cannot|can not|unable to|not able to|no way to|don't have (?:a |any )?(?:way|"
-    r"tool|ability))\b",
+    r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
+    r"(?:a |any )?(?:way|tool|ability))\b",
     re.IGNORECASE,
 )
 _WHY: Final = re.compile(
-    r"code execution|execute (?:code|python|scripts?)|run (?:code|python|scripts?|custom)|"
-    r"(?:no|without) (?:a )?(?:sandbox|interpreter|python|plotting|charting|file)|"
-    r"(?:create|generate|produce|attach|export|draw|render) (?:or attach )?(?:an? |the )?(?:files?|"
-    r"images?|charts?|excel|spreadsheets?|plots?|graphs?)|tools? (?:here )?(?:only|can't|cannot)",
+    r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
+    r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
+    r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tool that (?:writes|creates|makes|draws|"
+    r"renders|runs)|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
+    r"(?:real )?(?:files?|images?|charts?|excel|spreadsheets?|plots?|graphs?|\.?xlsx)|"
+    r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)",
     re.IGNORECASE,
 )
-#: Output made up for a request that could not be met: a code block's "output", a link.
-_FAKE: Final = re.compile(r"sandbox:/|attachment://|\[download", re.IGNORECASE)
+#: Output made up for a request that could not be met: a file or image link, a file it says it
+#: saved where the user cannot reach it, or a claim to have run what it cannot run.
+_FAKE: Final = re.compile(
+    r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
+    r"\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)|"
+    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]",
+    re.IGNORECASE,
+)
 _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
