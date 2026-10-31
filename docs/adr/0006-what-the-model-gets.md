@@ -69,7 +69,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 
 | Block | Content | Status (checked against the code) |
 |---|---|---|
-| Fixed prefix (cached) | the system prompt and the tools, in a stable order | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context still sits before the history, which breaks the cross-turn cache (audit K1, backlog) |
+| Fixed prefix (cached) | the system prompt and the tools, in a stable order; then the history | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context is sent with the question, after the history, so the next turn's request repeats it (`middleware.with_question`, audit K1) |
 | Data map | one short block: this chat (N turns, steps available), saved results (names), memory (facts and preferences present), past chats (searchable), tool areas | new (small) |
 | Memory context | facts and preferences for this question, evidence status, tool hints | exists (`agent.py` `remembered`). Expanding a follow-up query with recent turns is new (audit A1). Tool chains are said in the tools' descriptions, not in this block (`tools/links.py`, #65) |
 | History | recent turns whole; older turns as steps lists (tool, arguments, source, fetch time, status); the chat summary | the summary exists (memory service). Steps lists are in flight, not on main (`-explain2`, arm D) |
@@ -102,10 +102,12 @@ Exists:
 
 Backlog:
 
-- answering a call repeated in a later step from a cache;
-- grammar-constrained tool calls for local models;
-- a cheap check of the tool and source names an answer claims against the run record (measured
-  first).
+- grammar-constrained tool calls for local models.
+
+Measured and not built (no gain on the small hosted model; re-test with a small local model):
+
+- answering a call repeated in a later step from the earlier result;
+- a cheap check of the tool and source names an answer claims against the run record.
 
 ### 4. Explain
 
