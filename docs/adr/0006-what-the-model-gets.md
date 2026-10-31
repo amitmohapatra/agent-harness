@@ -83,7 +83,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 | user and MCP tools | narrowed by the hints (confidence 0.5 or more), else all of them with `tool_search` | exists (`agent.py` `NARROW_FLOOR`); a hinted tool's chain stays offered (#65) |
 | `tool_search` | many tools and no confident hint | exists (memory pull tool; the harness answers it, `clients/memory.py`) |
 | `memory_search` (kinds memory, chunk, summary, episode, message; a time range) | memory is on: facts, this chat, past chats | exists (memory service `agent_tools/service.py`) |
-| `memory_remember`, `memory_update`, `memory_forget` | memory is on | exists. `memory_forget` forgets only what the agent wrote. It is a write, announced and not asked by default. Forgetting what the user said, asked in chat, is in the backlog (audit H4) |
+| `memory_remember`, `memory_update`, `memory_forget` | memory is on | exists. `memory_forget` is a write, announced and not asked, for what the agent wrote. What the user said ("forget my address") the service refuses an agent: the harness asks a person through the approval path and forgets it as the user (audit H4) |
 | read a saved result (by page) | the run holds a saved large result | exists for OpenAI Agents, Claude and MCP (`tools/results.py`), and for `ReAct` with a backend (Deep Agents). Plain `ReAct` is in flight (`-data`) |
 | query saved results (read-only SQL; structured table operations for small models later) | the run holds saved results | in flight (`-data`), still being measured |
 | `execute`, Code Mode | a sandbox or Code Mode is configured | exists (`sandbox()`; `tools/toolbox.py`) |
