@@ -593,7 +593,15 @@ async def decisions_fed_back(w: World) -> None:
         assert decided == []
 
 
+def narrow_any_size(w: World) -> None:
+    """The hints narrow from :data:`agent.NARROW_FROM` tools; these cells' sets are small."""
+    from trellis.harness import agent
+
+    w.monkeypatch.setattr(agent, "NARROW_FROM", 0)
+
+
 async def hints(w: World) -> None:
+    narrow_any_size(w)
     d = Desk()
     w.memory_service.candidates = ["lookup", CONFIRM[0]]
     tools = [
@@ -617,6 +625,7 @@ async def chains(w: World) -> None:
     """A two-tool chain (``find_sku``'s ``sku_id`` is ``get_stock``'s argument, as their
     schemas say): every model reads it in the tools' descriptions, and the hints, narrowed to
     the first tool, keep the second offered."""
+    narrow_any_size(w)
     d = Desk()
     w.memory_service.candidates = ["find_sku", CONFIRM[0]]
     tools = [
@@ -1313,7 +1322,7 @@ FEATURES: Final[list[Feature]] = [
         "F28",
         "tool hints narrow what the model is offered",
         "F28",
-        "automatic from 5 tools, with memory",
+        "automatic from 30 tools in the run, with memory",
         hints,
         needs=frozenset({"memory", "tool_search"}),
         adapters={"function": NO_MODEL},

@@ -122,6 +122,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
+#: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
+#: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
+#: narrowed away in 22-26% of turns, and those turns were wrong 2-3 times as often.
+NARROW_FROM: Final = 30
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -950,7 +955,13 @@ class Agent:
         # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
-        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+        if (
+            hints
+            and candidates
+            and best >= NARROW_FLOOR
+            and len(own) >= NARROW_FROM
+            and self.adapter.narrows != "none"
+        ):
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
             # a candidate's chain stays whole: the tools its output feeds, and those giving
             # what it needs (``tools.links``, from the tools' schemas)
