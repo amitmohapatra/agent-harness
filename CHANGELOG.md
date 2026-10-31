@@ -44,6 +44,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
+  on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
+  that ended the run with no answer (ADV-8).
+
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
