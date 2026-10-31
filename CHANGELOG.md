@@ -36,6 +36,9 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Docker sandbox's anonymous volumes (an image's `VOLUME`) are removed with it: before, each
+  run of such an image left one volume behind (50 runs, 50 volumes; now none).
+
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
