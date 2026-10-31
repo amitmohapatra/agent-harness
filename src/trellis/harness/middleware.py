@@ -926,8 +926,8 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     so the next turn's request repeats this one's history as it was sent (audit K1). It is a
     part of the user's message, never a system message after the first: some providers refuse
     one there. Only the request changes; the conversation the graph keeps does not. The
-    question is the latest user message the graph's state holds (a step limit's or budget's
-    last word is not).
+    question is the latest user message the graph's state holds (a spent budget's last word
+    is not).
 
     A cache that keeps only what a request marks (Anthropic's: a prompt-caching middleware
     sets the request's ``cache_control``) keeps the history too: the answer just before the

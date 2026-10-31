@@ -12,7 +12,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from tests.support.chat_model import ScriptedChatModel
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID
-from trellis.harness.middleware import LAST_STEP, with_question
+from trellis.harness.budget import SPENT
+from trellis.harness.middleware import with_question
 
 MARK = {"type": "ephemeral", "ttl": "5m"}
 CONTEXT = SystemMessage("## Facts\n- prefers email", id=CONTEXT_MESSAGE_ID)
@@ -100,8 +101,8 @@ def test_the_first_question_has_no_history_to_mark() -> None:
     ]
 
 
-def test_a_step_limits_last_word_is_not_the_question() -> None:
-    last = HumanMessage(LAST_STEP)
+def test_a_spent_budgets_last_word_is_not_the_question() -> None:
+    last = HumanMessage(SPENT)
     kept = [CONTEXT, HumanMessage("a?", id="q1"), AIMessage("", id="a1", tool_calls=[])]
     sent = with_question(request([*kept, last], kept=kept)).messages
     assert sent[0].content[0] == {"type": "text", "text": CONTEXT.text}
