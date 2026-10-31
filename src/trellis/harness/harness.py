@@ -36,6 +36,7 @@ from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature
+from trellis.harness.files import FileStore
 from trellis.harness.fresh import Fresh
 from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
@@ -46,7 +47,7 @@ from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import current
-from trellis.harness.settings import Settings
+from trellis.harness.settings import Settings, default_files_url
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.mcp import MCPSource
@@ -150,6 +151,9 @@ class Harness:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
+        #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
+        #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
+        self.files = FileStore(s.files_url or default_files_url())
         #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
         self._key = Fresh(
@@ -171,12 +175,13 @@ class Harness:
         self.prompts = Prompts(self.gateway)
         telemetry.configure()
         log.info(
-            "trellis harness: models %s, memory %s, runs %s, spool %s, traces %s "
+            "trellis harness: models %s, memory %s, runs %s, spool %s, files %s, traces %s "
             "(trellis doctor prints each setting and its source)",
             f"{self.model_gateway.title} {self.model_gateway.where}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",
+            self.files.url,
             "on" if telemetry.exporting() else "off",
         )
 
