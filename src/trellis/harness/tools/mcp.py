@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
-from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool
+from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, data_of
 
 if TYPE_CHECKING:
     from mcp import Client
@@ -76,6 +76,16 @@ def side_effects_of(annotations: Any) -> SideEffects:
     if _hint(annotations, "destructive_hint", "destructiveHint"):
         return "irreversible"
     return "write"
+
+
+def data_of_listed(listed: Any) -> dict[str, Any]:
+    """An MCP tool's declared freshness (``tools.base.data_of``): in its ``_meta`` (MCP's place
+    for what the protocol does not name: ``{"freshness": "live"}``, ``{"maxAge": 60}``), else
+    in its annotations where the SDK keeps keys it does not know; a value of another kind is
+    not read."""
+    return data_of(getattr(listed, "meta", None), strict=False) or data_of(
+        getattr(listed, "annotations", None), strict=False
+    )
 
 
 def _hint(annotations: Any, attribute: str, key: str) -> bool:
@@ -147,10 +157,12 @@ class MCPSource:
             name=f"{server}-{listed.name}",
             description=listed.description or listed.title or listed.name,
             input_schema=listed.input_schema or {"type": "object"},
+            output_schema=getattr(listed, "output_schema", None),
             source="mcp",
             server=server,
             side_effects=side_effects_of(annotations),
             idempotent=bool(annotations is not None and annotations.idempotent_hint),
+            **data_of_listed(listed),
         )
 
         async def run(args: dict[str, Any]) -> Any:

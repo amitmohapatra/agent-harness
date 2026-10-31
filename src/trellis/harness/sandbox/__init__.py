@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import weakref
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
 
@@ -129,6 +130,8 @@ class SandboxSource:
         self._as_tools = SandboxTools(self)
         #: when this process last reaped each tenant's sandboxes (``time.monotonic``)
         self._reaped: LRU[str, float] = LRU()
+        #: the kept results each attempt has written into its sandbox (:meth:`with_results`)
+        self._written: weakref.WeakKeyDictionary[Runtime, set[str]] = weakref.WeakKeyDictionary()
 
     def tools(self) -> SandboxTools:
         """The sandbox as three harness tools (:data:`EXEC`, :data:`READ`, :data:`WRITE`), a
@@ -190,6 +193,18 @@ class SandboxSource:
         runtime.events.custom(EVENT, action=action, sandbox=ref.id)
         return box
 
+    async def with_results(self, runtime: Runtime, box: Sandbox) -> None:
+        """The results the run keeps (``tools.results``: a large one, or one cut to fit the
+        window) written into its sandbox at the path the model was given, before a command
+        runs or a file is read there — so code counts, sums, filters and ranks every row of
+        one, instead of the model paging it into its context. Each once per attempt (a later
+        attempt's sandbox may be one made again from a snapshot)."""
+        written = self._written.setdefault(runtime, set())
+        kept = runtime.replay.journal.results
+        for path in [p for p in kept if p not in written]:
+            await box.write(path, kept[path].encode())
+            written.add(path)
+
     async def _reaping(self, provider: SandboxProvider, runtime: Runtime) -> None:
         """At most every :data:`REAP_SECONDS` per tenant, in the background: the tenant's
         sandboxes whose runs ended without deleting them, deleted."""
@@ -208,12 +223,15 @@ class SandboxSource:
     async def _exec(self, args: dict[str, Any]) -> dict[str, Any]:
         runtime = _running()
         box = await self.opened(runtime, changes=True)
+        await self.with_results(runtime, box)
         return (await box.exec(str(args["command"]), timeout=runtime.remaining())).model_dump()
 
     async def _read(self, args: dict[str, Any]) -> str:
         runtime = _running()
         path = str(args["path"])
-        data = await (await self.opened(runtime)).read(path)
+        box = await self.opened(runtime)
+        await self.with_results(runtime, box)
+        data = await box.read(path)
         if len(data) > READ_BYTES:
             raise ToolError(
                 f"{path} is {len(data)} bytes, more than the {READ_BYTES} read at once: read "

@@ -78,14 +78,7 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay, content_key
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
-from trellis.harness.runtime import (
-    STALLED,
-    Runtime,
-    _call,
-    _current,
-    delegated_of,
-    interrupt_id,
-)
+from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.harness.tools import bridge
 from trellis.harness.tools.base import SOURCES
@@ -316,7 +309,6 @@ async def _attempt(
         task=query_of(input),
         document_ids=record.metadata.get(DOCUMENTS),
         budget=Spending.of(record.metadata.get(KEPT_BUDGET)) or agent.budget,
-        delegated=delegated_of(record.metadata),
         started_at=datetime.now(UTC),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,

@@ -43,7 +43,15 @@ from trellis.contracts import (
     new_id,
     safe_id,
 )
-from trellis.harness import compat, conversation, history, pipeline, sandbox, telemetry
+from trellis.harness import (
+    compat,
+    conversation,
+    history,
+    pipeline,
+    sandbox,
+    snapshots,
+    telemetry,
+)
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
     FIT_SHARE,
@@ -92,7 +100,7 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.base import Source, Tool, arguments_problem, max_age
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -814,8 +822,7 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools...); a ``delegate`` job's
-        run (``Runtime.delegated``) has only those that read."""
+        tools of what the run is without (``without=``: its MCP tools...)."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -827,12 +834,7 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return [
-            t
-            for t in tools
-            if (t.feature is None or runtime.uses(t.feature))
-            and not (runtime.delegated and t.spec.side_effects != "read")
-        ]
+        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
 
     async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
@@ -904,7 +906,8 @@ class Agent:
         lets them be narrowed. The tenant's first hints wait for its tools to be indexed
         (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
         behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
-        reach it. A failure is a warning."""
+        reach it; a hinted tool keeps its chain (``Toolbox.related``: the tools its output
+        feeds, and those whose output it needs). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
@@ -931,9 +934,11 @@ class Agent:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
                 return None
             output(span, pushed.rendered)
+        stale: list[str] = []
         if window is Window.MESSAGES:
-            runtime.history = from_window(
-                pushed.conversation.messages if pushed.conversation else []
+            runtime.history, stale = snapshots.out_of_date(
+                from_window(pushed.conversation.messages if pushed.conversation else []),
+                lambda name: _max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
         # plan of a skill learned for the task lists its steps); no hint, or none confident
@@ -942,9 +947,15 @@ class Agent:
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
         if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
+            # a candidate's chain stays whole: the tools its output feeds, and those giving
+            # what it needs (``tools.links``, from the tools' schemas)
+            chain = box.related(offered, code_mode=runtime.uses("code_mode"))
+            offered |= chain & set(runtime.toolbox)
             if set(pushed.tool_names) & set(behind):  # reached through the meta-tools
                 offered |= {n for n, t in runtime.toolbox.items() if t.feature == "code_mode"}
             runtime.offered = offered
+        if stale and runtime.offered is not None:
+            runtime.offered |= set(stale)  # a tool whose earlier values are out of date: again
         status = pushed.evidence_status
         runtime.evidence = status
         runtime.pushed = {
@@ -953,7 +964,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
-        rendered = "\n\n".join(part for part in (pushed.rendered, note) if part)
+        parts = (pushed.rendered, note, snapshots.note(stale))
+        rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.events.emit(
             RunEventType.CONTEXT_LOADED,
@@ -1004,10 +1016,14 @@ class Agent:
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
-        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        framework owns the thread (a durable store, ``history.owner``) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``: that session replays
+        the turns, ADR 0005 §4); as the framework's own
         messages where memory owns it, the framework keeps no store and replays messages; in
         the context's text otherwise (a store kept in RAM replays the thread itself while the
         process lives: the window is never given twice)."""
+        if runtime.continued:
+            return Window.NONE  # the continued session holds the turns
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
             return Window.NONE  # the framework's store holds it, or reads memory's thread itself
@@ -1046,6 +1062,8 @@ class Agent:
         memory = runtime.run_memory
         if memory is None or not runtime.uses("records") or not messages:
             return
+        # each tool result says which tool returned it and when: a later turn replays it so
+        messages = snapshots.stamped(messages, runtime.fetched)
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:
@@ -1264,7 +1282,6 @@ class Agent:
         priority: int = 0,
         concurrency_key: str | None = None,
         document_ids: Sequence[str] | None = None,
-        metadata: Mapping[str, Any] | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
@@ -1276,7 +1293,7 @@ class Agent:
         its child: its record names the parent and the agent group of the
         tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
         both) and what the parent is without, unless it names its own (``without`` adds to the
-        parent's). ``metadata`` is kept with it besides (a ``delegate`` job's depth)."""
+        parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
         run_id = run_id or new_id("run_")
@@ -1288,8 +1305,7 @@ class Agent:
             document_ids = parent.document_ids if document_ids is None else document_ids
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
-        kept = self._metadata(turned_off, framework_options, document_ids, budget)
-        metadata = {**kept, **(metadata or {})}
+        metadata = self._metadata(turned_off, framework_options, document_ids, budget)
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
@@ -1427,6 +1443,14 @@ def _json(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _max_age(runtime: Runtime, name: str) -> float | None:
+    """How long a value of the run's tool ``name`` stays current, as it declared it (``None``:
+    it did not say, or it is not the run's tool)."""
+    found = runtime.toolbox.get(name)
+    spec = found.spec if found is not None else runtime.native.get(name)
+    return None if spec is None else max_age(spec)
 
 
 def _pull(agent: Agent) -> frozenset[str]:

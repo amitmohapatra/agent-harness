@@ -66,9 +66,6 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 #: The tag of a framework's own tool that hands the work to another agent
 #: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
 HELPER: Final = "helper"
-#: The ``RunStart.metadata`` key of a ``delegate`` job's run (``trellis.harness.delegate``):
-#: how deep in delegation it is. Such a run only reads.
-DELEGATED: Final = "delegated"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -194,6 +191,12 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: when each tool call of this attempt returned, by its reference (the framework's call
+    #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
+    fetched: dict[str, datetime] = field(default_factory=dict)
+    #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
+    #: its table's name in a query (``tools.query.tables``)
+    kept_from: dict[str, str] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
@@ -225,9 +228,6 @@ class Runtime:
     #: the most this run may spend: its own (``run(budget=)``, kept with its record), else its
     #: agent's (``h.wrap(budget=)``); ``None``: no cap
     budget: Budget | None = None
-    #: how deep this run is in a ``ReAct``'s delegation (a ``delegate`` job's run: 1; 0: not
-    #: one): it only reads — a call of a tool that does more is refused (``tools.bridge``)
-    delegated: int = 0
     #: the helpers the framework spawns in this attempt (``bridges.helpers``), once its
     #: adapter made them
     helpers: Helpers | None = None
@@ -615,12 +615,6 @@ MARKER: Final = "trellis_interrupt"
 #: earlier call of the same model step paused (``middleware.HarnessTools``): no question —
 #: the call runs, in its turn, when the run resumes.
 DEFERRED: Final = "trellis_deferred"
-
-
-def delegated_of(metadata: dict[str, Any]) -> int:
-    """How deep in delegation a run is, from its record's metadata (:data:`DELEGATED`)."""
-    depth = metadata.get(DELEGATED)
-    return depth if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0 else 0
 
 
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:

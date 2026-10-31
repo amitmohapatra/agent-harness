@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, get_args, overload
 
 import httpx
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.runtime import current
@@ -35,6 +35,7 @@ from trellis.harness.tools.base import (
     Sourced,
     Tool,
     citations,
+    data_of,
     invoked,
 )
 
@@ -73,6 +74,9 @@ class FunctionTool:
         idempotent: bool = False,
         timeout: float | None = None,
         response_format: ResponseFormat = "content",
+        freshness: Literal["live", "static"] | None = None,
+        max_age: float | None = None,
+        paged: bool = False,
     ) -> None:
         if response_format not in get_args(ResponseFormat):
             raise ConfigurationError(
@@ -86,9 +90,14 @@ class FunctionTool:
             name=name or fn.__name__,
             description=description or said,
             input_schema=_described(self.model.model_json_schema(), params),
+            output_schema=output_schema(fn),
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
+            **data_of(
+                {"freshness": freshness, "max_age": max_age, "paged": paged},
+                name=name or fn.__name__,
+            ),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -126,6 +135,9 @@ def tool(
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -136,6 +148,9 @@ def tool(
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -147,6 +162,9 @@ def tool(
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -165,6 +183,13 @@ def tool(
     ``trellis.Citation(name=, date=, link=)`` or a list of them — the run keeps the sources with
     the call (an answer's ``Result.sources``, ``docs/explanations.md``); an artifact that names
     no source is not kept.
+    A tool's data is live by default: an earlier result of it that the conversation replays is
+    a dated snapshot, marked out of date, and the model calls it again
+    (``trellis.harness.snapshots``); ``max_age`` (the seconds a value stays current) or
+    ``freshness="static"`` (reference data that does not change) say otherwise;
+    ``freshness="live"`` says it in the tool's description too. ``paged``: it returns its rows
+    a page at a time (a cursor argument, the next cursor in its result): one call fetches every
+    page (``tools.pages``).
     """
     made = functools.partial(
         FunctionTool,
@@ -174,6 +199,9 @@ def tool(
         idempotent=idempotent,
         timeout=call_timeout,
         response_format=response_format,
+        freshness=freshness,
+        max_age=max_age,
+        paged=paged,
     )
     return made(fn) if fn is not None else made
 
@@ -262,6 +290,23 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     return create_model(  # type: ignore[call-overload]
         f"{fn.__name__}_arguments", __config__=ConfigDict(extra="forbid"), **fields
     )
+
+
+def output_schema(fn: Callable[..., Any]) -> dict[str, Any] | None:
+    """The JSON schema of what ``fn`` returns, from its return annotation (pydantic's
+    ``TypeAdapter``; an async function's, what it resolves to): what tool chains read
+    (``tools.links``). ``None`` when it declares nothing, ``Any`` or ``None``, a name that
+    cannot be resolved, or a type no schema says."""
+    try:
+        returned = typing.get_type_hints(fn).get("return", inspect.Signature.empty)
+    except Exception:
+        returned = inspect.signature(fn).return_annotation
+    if returned in (inspect.Signature.empty, Any, None, type(None)) or isinstance(returned, str):
+        return None
+    try:
+        return TypeAdapter(returned).json_schema()
+    except Exception:  # a type pydantic has no schema for: nothing is said of it
+        return None
 
 
 # --------------------------------------------------------------------------- A2A
