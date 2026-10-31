@@ -35,7 +35,7 @@ from trellis.contracts import (
     ToolError,
     ToolSpec,
 )
-from trellis.harness import telemetry
+from trellis.harness import snapshots, telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
@@ -78,6 +78,8 @@ PROGRESS_SECONDS: Final = 20.0
 STALL_SECONDS: Final = 600.0
 #: The message a stalled step's watchdog cancels the attempt with.
 STALLED: Final = "trellis: the model call stalled"
+#: The run's last tool calls a kept file's record names (``Runtime.save_file``).
+RECORDED_CALLS: Final = 20
 
 
 class ModelTimeout(ModelError):
@@ -197,8 +199,12 @@ class Runtime:
     #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
     fetched: dict[str, datetime] = field(default_factory=dict)
     #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
-    #: its table's name in a query (``tools.query.tables``)
+    #: its table's name in a query (``tools.query.tables``); and when it was fetched (kept)
     kept_from: dict[str, str] = field(default_factory=dict)
+    kept_at: dict[str, datetime] = field(default_factory=dict)
+    #: what the run is told of the files kept for its user (``tools.stored.noted``): its
+    #: conversation's, or that other chats have some — ``None`` when there are none
+    files_note: str | None = None
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
@@ -572,14 +578,36 @@ class Runtime:
         return scope(self.tenant, self.user, self.conversation, self.run_id)
 
     async def save_file(
-        self, name: str, data: bytes, *, source: str, content_type: str | None = None
+        self,
+        name: str,
+        data: bytes,
+        *,
+        source: str,
+        content_type: str | None = None,
+        made: dict[str, Any] | None = None,
     ) -> StoredFile:
         """Keep ``data`` as the file ``name`` for the run's user (``harness.files``: stored, never
         parsed or remembered), named in the run's journal and announced on its stream (the
         ``file`` event: the file's name, size, media type, source), where AG-UI serves it
-        (``GET .../runs/{run_id}/files/{name}``). ``source``: what made it (a tool's name)."""
-        stored = await self.agent.harness.files.put(
-            self.files_folder(), name, data, source=source, content_type=content_type
+        (``GET .../runs/{run_id}/files/{name}``). ``source``: what made it (a tool's name);
+        ``made``: how (``query_result``'s query, the results it read). Beside it is kept its
+        record (``FileStore.record``): the run, when, ``source``, ``made`` and the run's last
+        :data:`RECORDED_CALLS` tool calls, so a later run reads how it was made."""
+        files, folder = self.agent.harness.files, self.files_folder()
+        stored = await files.put(folder, name, data, source=source, content_type=content_type)
+        calls = self.replay.journal.trajectory[-RECORDED_CALLS:]
+        await files.keep_record(
+            folder,
+            name,
+            {
+                "run": self.run_id,
+                "saved_at": snapshots.now().isoformat(),
+                "source": source,
+                **(made or {}),
+                "calls": [
+                    {"tool": c.tool, "args": c.args, "status": o.status.value} for c, o in calls
+                ],
+            },
         )
         kept = self.replay.journal.files
         kept[:] = [f for f in kept if f["name"] != name] + [stored.model_dump()]

@@ -78,7 +78,7 @@ from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, stored
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -417,7 +417,9 @@ async def _worked(
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
     runtime.native = await agent.native_tools(runtime)
-    pushed = await agent.push(runtime)
+    # the memory context, and — read meanwhile — the files kept for the run's user
+    pushed, files = await asyncio.gather(agent.push(runtime), stored.note(runtime))
+    stored.told(runtime, files)
     if observe is not None:
         observe(pushed)
     if unresumable is not None:

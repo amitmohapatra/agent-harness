@@ -131,7 +131,7 @@ from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import bridge, query, results
+from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
@@ -337,10 +337,11 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
-    kept = path in runtime.replay.journal.results
+    # a result the run keeps, or a file kept for its user (``tools.stored``): the harness's
+    kept = path in runtime.replay.journal.results or stored.is_stored(path)
     said: str | None = None
     if call["name"] == READ_FILE and (request.tool is None or kept):
-        said = results.read(args)
+        said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:

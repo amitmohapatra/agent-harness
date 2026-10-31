@@ -206,7 +206,7 @@ def root(tmp_path: Path) -> Iterator[Path]:
     found = tmp_path / "files"
     store = FileStore(found.as_uri())
 
-    async def save_file(name: str, data: bytes, *, source: str) -> Any:
+    async def save_file(name: str, data: bytes, *, source: str, **made: Any) -> Any:
         return await store.put("f", name, data, source=source)
 
     given = Run()
