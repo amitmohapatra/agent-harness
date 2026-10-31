@@ -6,7 +6,10 @@
   replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
   the checkpointer already holds. Where memory keeps the conversation instead, its recent
   messages follow the context as LangChain's own — ``HumanMessage``, ``AIMessage`` with its
-  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay;
+  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay. A
+  ``create_agent`` graph (``ReAct``'s, Deep Agents') sends its model the context as the first
+  part of the turn's question instead, after the history a prompt cache keeps
+  (``middleware.with_question``);
 * transcript: the messages the run added after the question — tool calls and their results
   with the answer — so the conversation memory keeps replays as the framework's would;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the

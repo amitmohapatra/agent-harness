@@ -57,7 +57,9 @@ def replayed(request: dict[str, Any]) -> list[str]:
 
 
 def context(request: dict[str, Any]) -> str:
-    return "\n".join(m["content"] for m in request["messages"] if m["role"] == "system")
+    """The memory context as sent: the first part of the latest question (audit K1)."""
+    asked = [m for m in request["messages"] if m["role"] == "user"][-1]["content"]
+    return asked[0]["text"] if isinstance(asked, list) else ""
 
 
 # --------------------------------------------------------------------------- declared

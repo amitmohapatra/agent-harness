@@ -181,15 +181,19 @@ async def test_a_graphs_own_interrupt_needs_a_checkpointer(harness: Harness) -> 
     assert "checkpointer" in result.error.message
 
 
-async def test_the_memory_context_leads_the_messages(
+async def test_the_memory_context_comes_with_the_question(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChatModel(turns=["you prefer email"])
     graph = create_agent(model, tools=[], system_prompt="You help.")
     await memory_harness.wrap(graph, id="helper").run("how to reach me?", user="u1")
     sent = model.seen[0]
-    assert [m.type for m in sent][:2] == ["system", "system"]
-    assert sent[1].content == memory_service.context_text
+    # after the history a prompt cache keeps (audit K1): the question's first part
+    assert [m.type for m in sent] == ["system", "human"]
+    assert sent[1].content == [
+        {"type": "text", "text": memory_service.context_text},
+        {"type": "text", "text": "how to reach me?"},
+    ]
 
 
 async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conversation(
@@ -209,7 +213,7 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
     # one context message in the checkpointed thread, replaced each turn, asked for without
     # the conversation the checkpointer already holds
     assert [m.content for m in systems] == [memory_service.context_text]
-    assert [m.type for m in model.seen[1]] == ["system", "system", "human", "ai", "human"]
+    assert [m.type for m in model.seen[1]] == ["system", "human", "ai", "human"]
     assert [c.body["window"] for c in memory_service.named("context")] == [False, False]
 
 

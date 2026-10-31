@@ -80,10 +80,14 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | LangChain limits, errors and retries measured by a ReAct suite | in flight: `-reactnative` (#58) | audit I, E4 |
 | `delegate` removed; helpers are Deep Agents' `task` | done (#57) | audit E2; duplication audit A14 |
 | In-run verification, deterministic: every number traced to a tool or query result, every tool and source named present in the run record (no extra model call) | later (re-test with arm D's record) | audit E3; ADR 0006 |
+| A cheap claim check: a tool named in the final answer that the conversation never called gets one harness-written correction step | measured, not built: on the small hosted model, 0 made-up tool claims in 248 answers (the complex suite's explain, edge and conversation cases); both names a naive check flags are tools it suggests next ("a `warehouse_scan` would show…"), so a correction would remove good advice. The scripted model: 0 → 0. Re-test with a small local model | `-reactcache` |
+| A read-only call repeated in a later step of one run answered from the earlier result, with a harness-written note | measured, not built: on the small hosted model, 1 repeat of a call that had succeeded in 248 turns (a retry after a malformed result) and no stalls; a tool's data is live by default (`max_age` 0), so an earlier result is not current. `StallGuard` and `max_steps` stay the backstop. Re-test with a small local model | `-reactcache`; research: harness-written feedback cut repeats ~76% |
 | Decomposing multi-part questions (Plan-and-Solve, least-to-most), and selective self-consistency only on conflicting evidence or an unverified number, capped in cost | later | ADR 0006 |
 | Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
 | The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md) |
-| Prompt cache: memory context before the history | later | audit K1 |
+| Prompt cache: memory context before the history | done (`-reactcache`): sent with the question, after the history; the answer ending the history marked for a cache that keeps only what is marked. On the small hosted model, 15 multi-turn cases: cached share of a later turn's first call 0.70 → 0.80, of all input 0.858 → 0.877, uncached input −10%, accuracy unchanged | audit K1 |
+| Prompt cache for a model given by name: the harness's routed chat model is not a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` does nothing for it, and `ReAct` on `create_agent` has no caching middleware at all | next: mark the request for the route's provider (a capability of the route), then measure | `-reactcache` (found while measuring K1) |
+| Replayed results re-marked as dated snapshots differ from what the earlier turn sent: the next turn's cached prefix stops at the latest exchange | later: measure on long chats | `-reactcache` |
 
 ## Models and CI
 

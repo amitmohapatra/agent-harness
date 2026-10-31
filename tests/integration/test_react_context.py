@@ -98,8 +98,11 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     assert "/conversation_history/" in summary["content"]  # the full history, saved to read
     assert "SESSION INTENT: take notes." in summary["content"]
     # the task, and the memory context pushed with it, stay ahead of the summary
-    assert [m["content"] for m in after[1:3]] == ["The user prefers email.", "take five notes"]
-    assert after[3] is summary
+    assert after[1]["content"] == [
+        {"type": "text", "text": "The user prefers email."},
+        {"type": "text", "text": "take five notes"},
+    ]
+    assert after[2] is summary
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.answer == "done", done.error
     assert summarizing.summaries == summaries  # the resume continued from the summary

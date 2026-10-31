@@ -105,7 +105,12 @@ def test_agent_runs_needs_the_memory_services_keys() -> None:
 
 
 # --------------------------------------------------------------------------- push
-async def test_push_injects_the_context_as_a_system_message(
+def pushed(request: dict[str, Any]) -> str:
+    """The memory context as a request sends it: the first part of the question."""
+    return request["messages"][1]["content"][0]["text"]
+
+
+async def test_push_sends_the_context_with_the_question(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat(["7 units"])
@@ -114,9 +119,16 @@ async def test_push_injects_the_context_as_a_system_message(
     )
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
-    instructions, context = model.requests[0]["messages"][:2]
+    instructions, question = model.requests[0]["messages"][:2]
     assert instructions == {"role": "system", "content": "You answer stock questions."}
-    assert context == {"role": "system", "content": memory_service.context_text}
+    # after the history a prompt cache keeps: the question's first part (audit K1)
+    assert question == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": memory_service.context_text},
+            {"type": "text", "text": "how many a?"},
+        ],
+    }
     [call] = memory_service.named("context")
     assert call.scope["user_id"] == "u1"
     assert call.scope["thread_id"] == conversation_key("acme", "u1", "t1")  # u1's own "t1"
@@ -138,9 +150,9 @@ async def test_a_small_toolbox_gets_its_learned_skills_and_every_tool(
     assert result.status is RunStatus.SUCCESS, result.error
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": ["t0", "t1"], "k": 8}
-    pushed = model.requests[0]["messages"][1]["content"]
-    assert "## Learned skills for this task\n- refund-an-order: t0 -> t1" in pushed
-    assert "## Tools" not in pushed
+    sent = pushed(model.requests[0])
+    assert "## Learned skills for this task\n- refund-an-order: t0 -> t1" in sent
+    assert "## Tools" not in sent
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
     assert {"t0", "t1"} <= set(offered), "no hints: every tool offered"
 
@@ -176,7 +188,7 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
 
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
-    assert "## Tools" in model.requests[0]["messages"][1]["content"]  # confidence/args/missing
+    assert "## Tools" in pushed(model.requests[0])  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     memory_tools = list(MEMORY_TOOLS)
     # the candidates and the memory tools, never all six, sorted by name
@@ -220,7 +232,7 @@ async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
     everything = sorted([f"t{i}" for i in range(6)] + list(MEMORY_TOOLS))
     assert offered == (sorted(["t3", *MEMORY_TOOLS]) if narrows else everything)
-    noted = "## Memory" in model.requests[0]["messages"][1]["content"]
+    noted = "## Memory" in pushed(model.requests[0])
     assert noted is not narrows
 
 
@@ -875,7 +887,7 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     model = ScriptedChat(["I don't know your sister's name."])
     agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
     events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
-    system = model.requests[0]["messages"][1]["content"]
+    system = pushed(model.requests[0])
     assert system.startswith(memory_service.context_text)
     if note is None:
         assert "## Memory" not in system
@@ -895,7 +907,7 @@ async def test_no_abstain_note_when_a_hinted_tool_answers_the_question(
     model = ScriptedChat(["done"])
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
     await agent.run("what is the daily meal allowance", user="u")
-    assert "## Memory" not in model.requests[0]["messages"][1]["content"]
+    assert "## Memory" not in pushed(model.requests[0])
 
 
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
