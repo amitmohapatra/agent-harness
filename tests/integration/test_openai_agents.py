@@ -138,7 +138,7 @@ async def test_the_context_is_a_system_message_and_memory_tools_are_added(
 
 
 async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     @function_tool
     def eta(order: str) -> str:
@@ -420,7 +420,7 @@ async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog(
 
 
 async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The specialist a run hands off to gets the run's memory tools (not the harness tools of
     the agent it started with), and its own tools are offered as the hints narrow them."""

@@ -17,6 +17,7 @@ import pytest
 import respx
 from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
@@ -28,8 +29,10 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
+from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
@@ -165,7 +168,7 @@ async def test_a_memory_outage_is_a_warning_not_a_failure(
 
 # --------------------------------------------------------------------------- tool hints
 async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
@@ -187,6 +190,34 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     assert offered[2] == [*sorted(["t1", "t3", *memory_tools]), "t5"]
 
 
+async def test_confident_hints_narrow_a_small_tool_set_not_at_all(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Below ``NARROW_FROM`` tools every tool is offered however confident the hints: narrowing
+    a small set hid the tool a question needed (a name looked up before its id was used)."""
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {f"t{i}" for i in range(6)} <= offered
+    assert "## Tools" in model.requests[0]["messages"][1]["content"]  # the hints still said
+
+
+async def test_confident_hints_narrow_a_large_tool_set(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    tools = many(NARROW_FROM)
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), tools)
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {"t1", "t3"} <= offered and "t5" not in offered
+
+
 async def test_hints_below_the_floor_narrow_nothing(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -206,7 +237,11 @@ async def test_hints_below_the_floor_narrow_nothing(
 
 @pytest.mark.parametrize(("top", "narrows"), [(0.5, True), (0.49, False)])
 async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
-    memory_harness: Harness, memory_service: FakeMemoryService, top: float, narrows: bool
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    top: float,
+    narrows: bool,
+    narrowing: None,
 ) -> None:
     """B13 at ``NARROW_FLOOR``: a best hint of exactly 0.5 narrows the offer (and drops the
     abstain note: a tool answers); 0.49 narrows nothing and the note stays."""
@@ -225,7 +260,7 @@ async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
 
 
 async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
-    memory_service: FakeMemoryService,
+    memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """B16/B17: the hints are asked about the tools behind Code Mode too; when one is hinted,
     the narrowing keeps the meta-tools, the only way to reach it (they were dropped)."""
@@ -246,7 +281,7 @@ async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
 
 
 async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The offered set is the hints, the tools the learned plan names, the used ones and the
     memory tools — never all of the run's tools while hints exist."""
@@ -261,7 +296,7 @@ async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
 
 
 async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """A graph's tools are bound when it is built: the harness runs a copy of a
     ``create_agent`` graph whose model calls offer only the tools the run offers — its own
@@ -299,7 +334,7 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
 
 
 async def test_the_hints_narrow_what_a_deep_agent_is_offered(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The harness tools are those the run offers; Deep Agents' state tools (its files) are no
     tools of the run's set, and its ``task`` hands work on: they stay offered."""
@@ -444,14 +479,21 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
     [batch] = memory_service.named("messages")
-    # the question, the call with its result, the answer: as a checkpoint would replay them
-    assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
-        ("USER", "how many a?", f"{result.run_id}:user:0"),
-        ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
+    # the question, the call with its result, the answer: as a checkpoint would replay them,
+    # each under its harness id (the same on every attempt)
+    sent = batch.body["messages"]
+    assert [(m["role"], m["content"]) for m in sent] == [
+        ("USER", "how many a?"),
+        ("ASSISTANT", ""),
         # which tool returned it, and when: a later turn replays it so (``snapshots``)
-        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7", f"{result.run_id}:1:msg:2"),
-        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
+        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7"),
+        ("ASSISTANT", "7 units"),
     ]
+    assert [m["source_message_id"] for m in sent] == [
+        m["custom_metadata"]["message_id"] for m in sent
+    ]
+    assert sent[0]["source_message_id"] == question_id(result.run_id, result.run_id)
+    assert sent[3]["source_message_id"] == answer_id(result.run_id, result.run_id)
     call, answered = batch.body["messages"][1:3]
     [made] = call["tool_calls"]
     assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
@@ -529,13 +571,48 @@ async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
     ]
     run = paused.run_id
     assert sent[:3] == [
-        ("USER", "ask", f"{run}:user:0"),  # on the pause
-        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: the service stores
-        ("ASSISTANT", "yes", f"{run}:2:msg:1"),  # it once (its source id is the same)
+        ("USER", "ask", question_id(run, run)),  # on the pause
+        ("USER", "ask", question_id(run, run)),  # again on the resumed attempt: the service
+        ("ASSISTANT", "yes", answer_id(run, run)),  # stores it once (the same source id)
     ]
     assert sent[3][:2] == ("USER", "fail")  # a failed run's question is kept too
     # a run with no thread is its own thread
     assert {b.scope["thread_id"] for b in batches} == {paused.run_id, failed.run_id}
+
+
+async def test_a_resumed_graph_run_stores_each_message_of_its_transcript_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A checkpointed graph run paused on an approval and resumed sends its whole transcript
+    again on the second attempt: the question, and the first attempt's assistant call. Each
+    message is stored once: the service de-duplicates by ``source_message_id``, which is the
+    message's own stable id (``conversation.identified``), not its attempt (ADR 0005 §3)."""
+
+    @tool(side_effects="irreversible")
+    def wipe(disk: str) -> str:
+        """Wipe a disk."""
+        return "wiped"
+
+    model = ScriptedChatModel(turns=[("wipe", {"disk": "d1"}), "wiped d1"])
+    graph = create_agent(
+        model,
+        tools=await native_tools(memory_harness, wipe, framework="langgraph"),
+        checkpointer=InMemorySaver(),
+    )
+    agent = memory_harness.wrap(graph, id="graph-ops")
+    paused = await agent.run("wipe d1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
+    await memory_harness.writes.drain()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
+    assert done.status is RunStatus.SUCCESS, done.error
+    await memory_harness.writes.drain()
+    stored = memory_service.threads[paused.run_id]
+    said = [(m["role"], m["content"], bool(m.get("tool_calls"))) for m in stored]
+    assert said.count(("USER", "wipe d1", False)) == 1
+    assert sum(1 for role, _, calls in said if role == "ASSISTANT" and calls) == 1, said
+    assert [r for r, _, _ in said] == ["USER", "ASSISTANT", "TOOL", "ASSISTANT"], said
+    ids = [m["custom_metadata"].get("message_id") for m in stored]
+    assert len(ids) == len(set(ids)), ids
 
 
 async def test_an_approval_decision_is_feedback_on_the_tool_call(
