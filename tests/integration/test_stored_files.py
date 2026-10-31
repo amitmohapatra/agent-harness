@@ -306,8 +306,9 @@ async def test_the_note_names_the_newest_and_counts_the_rest(
         "- /files/r0/f1.csv (3 bytes; saved 2026-10-02 00:00 UTC by an unknown tool)",
         '- and 1 more: read_file(file_path="/files")',
     ], said
+    assert stored.looks(run)  # type: ignore[arg-type]
     run.parent = object()
-    assert await stored.note(run) is None  # type: ignore[arg-type]  # its parent was told
+    assert not stored.looks(run)  # type: ignore[arg-type]  # its parent was told
 
 
 async def test_how_a_file_was_made_says_what_is_known(run: Run) -> None:
