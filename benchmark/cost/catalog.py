@@ -23,7 +23,7 @@ from __future__ import annotations
 import importlib
 import random
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 from tests.live import heldout
 
@@ -536,6 +536,101 @@ def _fresh(task: dict[str, Any], *, sku: str, older: int) -> dict[str, Any]:
     return {**task, "expected": [now], "metadata": {**task["metadata"], "sku": sku, "older": older}}
 
 
+# --------------------------------------------------------------------------- a tool chain
+#: The products the chain tasks ask about: name -> (sku, on hand, supplier, units a day).
+PRODUCTS: Final = {
+    "blue mug": ("SKU-104", 12, "SUP-3", 4),
+    "red kettle": ("SKU-221", 3, "SUP-7", 1),
+    "steel pan": ("SKU-318", 40, "SUP-3", 6),
+    "oak shelf": ("SKU-405", 0, "SUP-9", 2),
+    "wool rug": ("SKU-512", 7, "SUP-7", 1),
+}
+#: Each supplier's lead time, in days.
+LEAD_DAYS: Final = {"SUP-3": 5, "SUP-7": 12, "SUP-9": 8}
+CHAIN_SYSTEM: Final = (
+    "You are an inventory assistant. Answer from the tools: never guess an id or a number. "
+    "Write numbers as plain digits."
+)
+
+
+class FoundSku(TypedDict):
+    sku_id: str
+    name: str
+
+
+class StockLevel(TypedDict):
+    sku_id: str
+    on_hand: int
+    supplier_id: str
+    daily_demand: int
+
+
+class SupplierLeadTime(TypedDict):
+    supplier_id: str
+    lead_time_days: int
+
+
+@tool(side_effects="read")
+def find_sku(name: str) -> FoundSku:
+    """Find a product's SKU by the product's name.
+
+    Args:
+        name: The product's name, such as "blue mug".
+    """
+    sku = PRODUCTS.get(name.strip().casefold().rstrip("s"))
+    if sku is None:
+        raise ValueError(f"no product is named {name!r}")
+    return {"sku_id": sku[0], "name": name}
+
+
+@tool(side_effects="read")
+def get_stock(sku_id: str) -> StockLevel:
+    """A SKU's units on hand, its supplier and how many units sell a day.
+
+    Args:
+        sku_id: The SKU's id, such as SKU-104.
+    """
+    found = next((p for p in PRODUCTS.values() if p[0] == sku_id.strip().upper()), None)
+    if found is None:
+        raise ValueError(f"no SKU {sku_id!r}")
+    sku, on_hand, supplier, demand = found
+    return {"sku_id": sku, "on_hand": on_hand, "supplier_id": supplier, "daily_demand": demand}
+
+
+@tool(side_effects="read")
+def supplier_lead_time(supplier_id: str) -> SupplierLeadTime:
+    """How many days a supplier takes to deliver an order.
+
+    Args:
+        supplier_id: The supplier's id, such as SUP-3.
+    """
+    days = LEAD_DAYS.get(supplier_id.strip().upper())
+    if days is None:
+        raise ValueError(f"no supplier {supplier_id!r}")
+    return {"supplier_id": supplier_id, "lead_time_days": days}
+
+
+@tool(side_effects="read")
+def reorder_quantity(on_hand: int, lead_time_days: int, daily_demand: int) -> int:
+    """The units to reorder so stock lasts until the supplier delivers.
+
+    Args:
+        on_hand: Units on hand now.
+        lead_time_days: Days the supplier takes to deliver.
+        daily_demand: Units sold a day.
+    """
+    return max(0, daily_demand * lead_time_days - on_hand)
+
+
+def reorder_of(product: str) -> int:
+    """What the chain answers for a product's reorder quantity."""
+    _, on_hand, supplier, demand = PRODUCTS[product]
+    return max(0, demand * LEAD_DAYS[supplier] - on_hand)
+
+
+CHAIN_TOOLS: Final = [find_sku, get_stock, supplier_lead_time, reorder_quantity]
+
+
 # --------------------------------------------------------------------------- the tasks
 @dataclass(frozen=True)
 class TaskSet:
@@ -615,8 +710,9 @@ def task_sets() -> list[TaskSet]:
 #: The class suite's task classes (``--suite classes``), and the tasks ``mix`` marks for the
 #: catalogues of 50 and 100 tools: four simple, three multi-step, three wide. ``aggregate``: a
 #: count, a sum, a filter, a top-N or a group over 10,000 SKUs; ``freshness``: a live figure
-#: asked again after an older value of it was given (it is fetched, not repeated).
-CLASSES: Final = ("simple", "multi", "wide", "large", "aggregate", "freshness")
+#: asked again after an older value of it was given (it is fetched, not repeated); ``chain``: two
+#: to four calls, each taking the one before's output.
+CLASSES: Final = ("simple", "multi", "wide", "large", "aggregate", "freshness", "chain")
 #: The teams whose ticket export the large tasks read, and its id prefix (``ticket_export``).
 TEAMS: Final = (
     "network",
@@ -784,6 +880,7 @@ def class_sets() -> list[TaskSet]:
     ]
     return [
         TaskSet("store", scenario.SYSTEM, store_tools, store),
+        TaskSet("inventory chain", CHAIN_SYSTEM, list(CHAIN_TOOLS), chain_tasks()),
         TaskSet(
             "help desk",
             heldout.HELPDESK_SYSTEM,
@@ -792,6 +889,78 @@ def class_sets() -> list[TaskSet]:
         ),
         TaskSet("travel", heldout.TRAVEL_SYSTEM, heldout.TRAVEL_TOOLS, travel),
         TaskSet("inventory", INVENTORY_SYSTEM, [sku_export, sku_stock], inventory),
+    ]
+
+
+def chain_tasks() -> list[dict[str, Any]]:
+    """The ``chain`` class: dependent calls, each one's argument the output of the one before
+    — ``find_sku`` (a name) -> ``sku_id`` -> ``get_stock`` -> ``supplier_id`` ->
+    ``supplier_lead_time`` -> ``lead_time_days`` (with ``on_hand``, ``daily_demand``) ->
+    ``reorder_quantity`` — two, three and four calls long, worded plainly and paraphrased; no
+    task names an id, so none is answered without the chain. ``--repeats`` with ``--memory``
+    runs each again once a plan may be learned."""
+    item = scenario.item
+    two = ["find_sku", "get_stock"]
+    three = [*two, "supplier_lead_time"]
+    four = [*three, "reorder_quantity"]
+
+    def stock(p: str) -> str:
+        return str(PRODUCTS[p][1])
+
+    def lead(p: str) -> str:
+        return str(LEAD_DAYS[PRODUCTS[p][2]])
+
+    tasks = [
+        ("How many blue mugs do we have in stock?", two, stock("blue mug"), "two calls"),
+        ("What's the on-hand count for the red kettle?", two, stock("red kettle"), "two, reworded"),
+        (
+            "How many days does the supplier of the steel pan take to deliver?",
+            three,
+            lead("steel pan"),
+            "three calls",
+        ),
+        (
+            "Lead time in days from whoever supplies our oak shelf?",
+            three,
+            lead("oak shelf"),
+            "three, reworded",
+        ),
+        (
+            "Wool rug: how long until its supplier can get more to us, in days?",
+            three,
+            lead("wool rug"),
+            "three, terse",
+        ),
+        ("How many blue mugs should we reorder?", four, str(reorder_of("blue mug")), "four calls"),
+        (
+            "Work out the reorder quantity for the red kettle.",
+            four,
+            str(reorder_of("red kettle")),
+            "four, reworded",
+        ),
+        (
+            "We're out of oak shelves, I think. How many should I order so we last until the "
+            "next delivery?",
+            four,
+            str(reorder_of("oak shelf")),
+            "four, conversational",
+        ),
+        (
+            "Do we need to reorder any steel pans? Give me the quantity.",
+            four,
+            str(reorder_of("steel pan")),
+            "four, nothing to order",
+        ),
+        (
+            "Reorder quantity, wool rug.",
+            four,
+            str(reorder_of("wool rug")),
+            "four, terse",
+        ),
+    ]
+    return [
+        _classed(item(text, needed, expected=expected), f"chain: {name}", "chain")
+        for text, needed, expected, name in tasks
     ]
 
 

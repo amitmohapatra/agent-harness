@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, overload
 
 import httpx
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.runtime import current
@@ -78,6 +78,7 @@ class FunctionTool:
             name=name or fn.__name__,
             description=description or said,
             input_schema=_described(self.model.model_json_schema(), params),
+            output_schema=output_schema(fn),
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
@@ -256,6 +257,23 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     return create_model(  # type: ignore[call-overload]
         f"{fn.__name__}_arguments", __config__=ConfigDict(extra="forbid"), **fields
     )
+
+
+def output_schema(fn: Callable[..., Any]) -> dict[str, Any] | None:
+    """The JSON schema of what ``fn`` returns, from its return annotation (pydantic's
+    ``TypeAdapter``; an async function's, what it resolves to): what tool chains read
+    (``tools.links``). ``None`` when it declares nothing, ``Any`` or ``None``, a name that
+    cannot be resolved, or a type no schema says."""
+    try:
+        returned = typing.get_type_hints(fn).get("return", inspect.Signature.empty)
+    except Exception:
+        returned = inspect.signature(fn).return_annotation
+    if returned in (inspect.Signature.empty, Any, None, type(None)) or isinstance(returned, str):
+        return None
+    try:
+        return TypeAdapter(returned).json_schema()
+    except Exception:  # a type pydantic has no schema for: nothing is said of it
+        return None
 
 
 # --------------------------------------------------------------------------- A2A

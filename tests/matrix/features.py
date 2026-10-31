@@ -66,6 +66,8 @@ from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.results import MAX_LINE
 
+#: How a tool's description says the chain it is in (``tools.links``).
+CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 
@@ -605,6 +607,32 @@ async def hints(w: World) -> None:
         assert narrowed and all("lookup" in names for names in offered), offered
     else:
         assert not narrowed, offered
+
+
+async def chains(w: World) -> None:
+    """A two-tool chain (``find_sku``'s ``sku_id`` is ``get_stock``'s argument, as their
+    schemas say): every model reads it in the tools' descriptions, and the hints, narrowed to
+    the first tool, keep the second offered."""
+    d = Desk()
+    w.memory_service.candidates = ["find_sku", CONFIRM[0]]
+    tools = [
+        d.find_sku(),
+        d.get_stock(),
+        d.note(),
+        d.parallel("t4", "read"),
+        d.parallel("t5", "read"),
+    ]
+    plan = [("find_sku", {"name": "blue mug"}), ("get_stock", {"sku_id": "SKU-7"})]
+    (await w.go(tools, plan)).succeeded()
+    assert d.ran("get_stock") == [{"sku_id": "SKU-7"}], d.done
+    described = w.models.described | w.claude_described
+    assert CHAIN in described.get("get_stock", ""), described
+    assert CHAIN in described.get("find_sku", ""), described
+    offered = w.models.offered() or w.claude_offered
+    assert offered, "the model was never offered anything"
+    assert all({"find_sku", "get_stock"} <= set(names) for names in offered), offered
+    narrowed = all("note" not in names for names in offered)
+    assert narrowed == w.on, offered
 
 
 # --------------------------------------------------------------------------- gateway
@@ -1257,6 +1285,16 @@ FEATURES: Final[list[Feature]] = [
         way2=NA(
             "by design: memory.tool_hints() ranks the tools; your code offers the ones it picks"
         ),
+    ),
+    Feature(
+        "F28c",
+        "tool chains: said in the descriptions, kept whole when the hints narrow",
+        "F28",
+        "the tools' schemas (a return annotation, an MCP outputSchema); with memory",
+        chains,
+        needs=frozenset({"memory", "tool_search"}),
+        adapters={"function": NO_MODEL},
+        way2=NA("by design: the descriptions are the toolbox's; your code offers the tools"),
     ),
     Feature(
         "F17",

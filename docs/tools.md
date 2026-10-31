@@ -46,12 +46,36 @@ format. What helps it choose, whatever the source:
 | **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
 | **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
 | **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
+| **Tool chains** — which tool's output is another's argument (`find_sku → sku_id → get_stock`), read from the schemas the tools publish ([below](#tool-chains)) | automatic: a function's return annotation, an MCP tool's `outputSchema` |
 | **What it can do** — capabilities beyond the tools, said plainly | the instructions: `ReAct("... You cannot accept an image upload.", ...)` |
 | **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
 
 [`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py) and
 `tests/live/test_live_tool_choice.py` measure tool choice per item; every framework gets the
 descriptions, the lint and the hints ([frameworks/react.md](frameworks/react.md#tool-choice)).
+
+### Tool chains
+
+When one tool's answer is another's argument — `find_sku(name)` gives a `sku_id`,
+`get_stock(sku_id)` takes it — the harness reads it from the schemas the tools publish
+(`trellis.harness.tools.links`): a field of one tool's output schema that a declared argument
+of another takes, by name and compatible type (records in a list included), or an `id` by the
+tool's noun (`find_sku`'s `id` is a `sku_id`). Generic names (`name`, `status`, `items`...)
+link nothing. Each linked tool's description then ends with its chains, in every framework:
+
+```text
+Chains: find_sku → sku_id → get_stock; get_stock → supplier_id → supplier_lead_time.
+```
+
+so a model with nothing learned yet calls them in order, and the tool hints keep a hinted
+tool's chain offered ([below](#tool-hints-what-the-model-is-offered)). The output schema is a
+function's return annotation (`-> Stock`, a pydantic model or a `TypedDict`: pydantic's
+`TypeAdapter`), an MCP server's `outputSchema`; a tool that declares none (an untyped
+function, an OpenAPI operation, a gateway's MCP tool, whose listing carries no output schema)
+links nothing — nothing is guessed. Once runs succeed, the memory service learns the chain as
+a procedure with its argument bindings (`step 1.sku_id` from step 0's output) and hands the
+next step and its arguments over with the hints. `benchmark/cost` measures chains
+(`--suite classes --classes chain`: two to four dependent calls, cold and reworded).
 
 ## Every call
 
@@ -184,7 +208,9 @@ more tools, the model is then offered:
 * the memory tools,
 * the tools the service named (at most 8),
 * every tool the run has already called (kept in the journal across a pause),
-* whatever a `tool_search` call found during the run.
+* whatever a `tool_search` call found during the run,
+* the chain of a tool named ([tool chains](#tool-chains)): the tools its output feeds, and
+  those whose output gives an argument it requires.
 
 | Framework | Narrowing |
 |---|---|

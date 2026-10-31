@@ -52,6 +52,14 @@ own model work follows the harness's configuration.
   the tool's declared age they are marked out of date, the context says so, and the tool stays
   offered (`trellis.harness.snapshots`).
 - `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
+- Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
+  from the schemas the tools publish (a function's return annotation, now its
+  `ToolSpec.output_schema`; an MCP tool's `outputSchema`), said at the end of each linked
+  tool's description (`Chains: find_sku → sku_id → get_stock.`) in every framework, and kept
+  whole when the tool hints narrow what is offered ([tools.md](docs/tools.md#tool-chains)).
+  `benchmark/cost --suite classes --classes chain` measures two- to four-call chains.
+- `docs/research/`: the improvement backlog, the evaluation protocol every change must pass to
+  be kept, the scenario coverage audit and the self-explanation research.
 - Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
   - with memory off, a run of a conversation is given its earlier turns from the run store
     (each run's question and answer) where the framework keeps no thread of its own —

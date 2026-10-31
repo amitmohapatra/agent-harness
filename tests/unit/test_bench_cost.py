@@ -127,6 +127,38 @@ def test_the_freshness_tasks_give_an_older_value_and_expect_the_current_one() ->
         assert str(now) not in task["input"]  # an answer repeating the question does not pass
 
 
+def test_the_chain_class_is_answered_only_through_the_chain() -> None:
+    """Each chain task's answer is what its tools give, called in order, each taking the one
+    before's output; the tools' schemas link them (``tools.links``)."""
+    from trellis.harness.tools.links import links
+
+    tasks = catalog.chain_tasks()
+    assert {len(t["metadata"]["needed_tools"]) for t in tasks} == {2, 3, 4}
+    assert not any("SKU-" in t["input"] or "SUP-" in t["input"] for t in tasks)
+    found = links([t.spec for t in catalog.CHAIN_TOOLS])
+    said = {(link.source, link.target) for link in found}
+    assert {
+        ("find_sku", "get_stock"),
+        ("get_stock", "supplier_lead_time"),
+        ("get_stock", "reorder_quantity"),
+        ("supplier_lead_time", "reorder_quantity"),
+    } <= said
+    found_sku = catalog.find_sku.fn("blue mugs")
+    level = catalog.get_stock.fn(found_sku["sku_id"])
+    days = catalog.supplier_lead_time.fn(level["supplier_id"])["lead_time_days"]
+    qty = catalog.reorder_quantity.fn(level["on_hand"], days, level["daily_demand"])
+    assert str(qty) == next(
+        t["expected"] for t in tasks if t["input"].startswith("How many blue mugs should")
+    )
+    for bad in (
+        lambda: catalog.find_sku.fn("teapot"),
+        lambda: catalog.get_stock.fn("SKU-1"),
+        lambda: catalog.supplier_lead_time.fn("SUP-1"),
+    ):
+        with pytest.raises(ValueError):
+            bad()
+
+
 async def test_the_command_picks_a_suites_classes_and_memory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
