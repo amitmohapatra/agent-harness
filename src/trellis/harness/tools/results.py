@@ -91,17 +91,14 @@ CODE: Final = (
     "The whole result is also the file {path} in your sandbox: to count, sum, filter, rank or "
     "group its rows, run code over that file with {tool} instead of reading it page by page."
 )
-#: What an earlier turn's replayed result reads as (:func:`carded`): its data card.
+#: What an earlier turn's replayed result reads as (:func:`carded`): its data card. When it
+#: was fetched and its source are the run record's to say, not the card's.
 CARD: Final = (
-    "[data card: {tool}'s result from an earlier turn, kept at {path}: {lines} lines, {chars} "
-    "characters; its rows are the table {table} (columns: {columns}). What was called, when it "
-    "was fetched and its source are in the run record. To read it: "
-    'read_file(file_path="{path}"); to count, sum, filter or rank it: '
-    'query_result(file_path="{path}", sql="SELECT ... FROM {table} ...").]\n'
-    "It begins: {head}"
+    "[data card: {tool} result, kept at {path} ({chars} characters, {lines} lines; table "
+    "{table}, columns {columns}): read_file or query_result reads it whole]\nBegins: {head}"
 )
 #: The most of an earlier result a data card shows.
-CARD_HEAD: Final = 300
+CARD_HEAD: Final = 120
 #: Deep Agents' stub for a large result (``_message_eviction._TOO_LARGE_TOOL_MSG``).
 STUB: Final = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
 

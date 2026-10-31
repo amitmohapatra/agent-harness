@@ -158,10 +158,10 @@ def test_an_earlier_turns_result_is_read_as_its_data_card_and_kept_whole(
     carded = results.carded(history, runtime)  # type: ignore[arg-type]
     card = carded[2].content
     path = f"{results.PREFIX}/{content_key('result', rows)}"
-    assert card.startswith(f"[data card: stock's result from an earlier turn, kept at {path}:")
-    assert "the table stock (columns: sku, qty)" in card and 'FROM stock ...")' in card
-    assert 'It begins: [{"sku": "S-0", "qty": 0}' in card and card.endswith("…")
-    assert len(card) < 800 < len(rows)
+    assert card.startswith(f"[data card: stock result, kept at {path} (")
+    assert "table stock, columns sku, qty): read_file or query_result reads it whole]" in card
+    assert 'Begins: [{"sku": "S-0", "qty": 0}' in card and card.endswith("…")
+    assert len(card) < 350 < len(rows)
     assert journal.results == {path: rows} and kept()
     assert read_file(path, limit=1).startswith("1  [")  # read back whole, page by page
     assert [m.content for m in carded if m is not carded[2]] == [

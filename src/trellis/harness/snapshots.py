@@ -28,10 +28,7 @@ from trellis.harness.history import Said, Speaker
 FETCHED: Final = "fetched"
 MAX_AGE: Final = "max_age"
 #: The line a replayed result past its tool's max age starts with.
-STALE: Final = (
-    "[out of date: {tool}'s values change — call {tool} again for the current value; when it "
-    "was fetched is in the run record]"
-)
+STALE: Final = "[out of date: call {tool} again for the current value]"
 #: What the context says of the tools whose replayed results are out of date.
 NOTE: Final = (
     "The values {tools} returned in earlier turns are out of date (older than they stay "
