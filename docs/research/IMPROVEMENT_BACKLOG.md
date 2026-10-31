@@ -11,7 +11,7 @@ the made-up rate does not rise, controls do not drop, and tokens, model calls an
 materially up (accuracy wins ties against cost). A change that does not pass is not kept, however
 reasonable it looks.
 
-**Design rules.** Every change follows [DESIGN_RULES.md](DESIGN_RULES.md): the framework's own mechanism first, the harness adds only what is missing, library-first and research-backed, and the code is checked before every change.
+**Design rules.** Every change follows [DESIGN_RULES.md](DESIGN_RULES.md): the framework's own mechanism first, the harness adds only what is missing, library-first and research-backed, and the code is checked before every change. Every PR answers the [challenge checklist](DESIGN_RULES.md#challenge-every-change).
 
 **Status.** *exists*: on main. *in flight*: being built, on the branch named. *next*: the
 next to build, once measured. *later*: deliberately deferred.
@@ -68,6 +68,8 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Gateway MCP tools' output schemas (Bifrost listing has none) | later: needs the gateway SDK to carry `outputSchema` | `bifrost_sdk.ToolDef` |
 | Cold catalogs of 100–500 tools (0 successes recorded on an 8k window) | next: re-run `benchmark/cost` at 100/500 with hints on | audit M3 |
 | Clarifying questions (ask vs guess) | in flight: `claude/cool-maxwell-w5avo8-reactnative` (#58, `ask_user` arms) | audit F |
+| AG-UI frontend tools: `RunAgentInput.tools` is parsed but never used. Offer the client's tools to the model. On a call, stream `TOOL_CALL` events and pause through the existing interrupt and resume path, then continue when the client returns the tool's result. Test it with a fake AG-UI client | next | `src/trellis/harness/agui/events.py` (`tools` is declared, and nothing reads it) |
+| A structured `ask_user` (on #58) with optional `options[]`, `date`, `date_range` and `number`, so a UI shows dropdowns and pickers and plain chat shows text | next | #58 |
 
 ## ReAct
 
@@ -82,6 +84,14 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
 | The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md) |
 | Prompt cache: memory context before the history | later | audit K1 |
+
+## Models and CI
+
+| Gap | Status | Evidence |
+|---|---|---|
+| A model profile for a model LangChain's route does not know (an Anthropic model on the OpenAI-compatible route refuses `temperature`): look the model up in the models.dev data that LangChain's installed provider packages ship (data, not rules on names), else use one documented profile setting | later | [ADR 0004](../adr/0004-provider-neutral-models.md) |
+| Test-order flake: `tests/integration/test_fit_window.py` fails when it runs after the unit suite, on main too. Fix it: nothing may fail | next | reported against main; reproduce first |
+| Memory draft #64: CI was red before its last push, and one merge commit lacks the commit trailer. Fix both before the merge | later | memory #64 |
 
 ## Safety and privacy
 

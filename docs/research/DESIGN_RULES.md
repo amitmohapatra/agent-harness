@@ -14,6 +14,22 @@ The standing rules for every harness and `ReAct` change. They sit with the
 5. **Keep only what passes [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md).** A big-model judge checks the
    answer and the sufficiency of the context. Accuracy comes first, then latency and cost.
 
+## Challenge every change
+
+Answer each of these with evidence (a file, a test, a number) in the PR. The questions are in the
+[pull request template](../../.github/pull_request_template.md).
+
+1. **The right approach at all?** Which alternatives were considered (the adapter's own
+   mechanism, an existing library), and why was each rejected?
+2. **The right data structure and algorithm?** Time and space on the hot path, and the worst
+   case at 50k rows or a long chat. No full scans or copies where streaming or paging fits.
+3. **The right design pattern?** One owner per concern, a strategy or capability instead of
+   branches, no duplication.
+4. **Accuracy evidence:** the tests (written first, failing on main) and the judge
+   ([EVAL_PROTOCOL.md](EVAL_PROTOCOL.md)).
+5. **Latency, tokens per layer, memory, cost:** before and after, as numbers.
+6. **What can be removed now?**
+
 ## Who does what
 
 The paths are this repository's. *Measuring* marks a row whose choice is still being measured
