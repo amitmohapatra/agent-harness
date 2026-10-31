@@ -170,8 +170,6 @@ async def child_run(
     without: Collection[str] = (),
     framework_options: Mapping[str, Any] | None = None,
     document_ids: Sequence[str] | None = None,
-    metadata: Mapping[str, Any] | None = None,
-    branch: Branch | None = None,
 ) -> Result:
     """A run of ``agent`` inside ``parent``'s — a sub-agent's call, or ``agent.run`` called
     from the parent's code — as the parent's child: started (its record names the parent and
@@ -183,64 +181,47 @@ async def child_run(
     ended.
 
     It is one of the parent's children at once (``admission.branch``: it waits for a slot
-    under the adaptive limit, and is on the parent's task tree), unless the caller admitted it
-    already (``branch``: a ``delegate`` job). ``metadata`` is kept with its record."""
+    under the adaptive limit, and is on the parent's task tree)."""
     if run_id is None:
         place = parent.idempotency_key or parent.run_id
         run_id = stable_id(
             place, CHILD, agent.id, parent.child_number(place, agent.id), prefix="run_"
         )
-    if branch is None:
-        async with admission.branch(parent, run_id, agent.id) as found:
-            result = await child_run(
-                agent,
-                parent,
-                input,
-                user=user,
-                run_id=run_id,
-                thread=thread,
-                tenant=tenant,
-                timeout=timeout,
-                deadline=deadline,
-                budget=budget,
-                without=without,
-                framework_options=framework_options,
-                document_ids=document_ids,
-                metadata=metadata,
-                branch=found,
-            )
-            found.ended(result.status.value.lower(), error=_why(result))
-            return result
-    left = parent.remaining()
-    limits = [t for t in (timeout, left) if t is not None]
-    start = await agent._start(
-        input,
-        user=user,
-        thread=thread,
-        tenant=tenant,
-        run_id=run_id,
-        record_input=True,
-        timeout=min(limits) if limits else None,
-        deadline=deadline,
-        budget=budget,
-        parent=parent,
-        without=without,
-        framework_options=framework_options,
-        document_ids=document_ids,
-        metadata=metadata,
-    )
-    result = await _continued(agent, parent, await agent.harness.runs.start(start), branch)
-    while result.status is RunStatus.PAUSED:
-        assert result.interrupt is not None
-        asked = result.interrupt
-        named = {"agent_id": agent.id, "run_id": asked.run_id, "interrupt_id": asked.interrupt_id}
-        answered = await parent.interrupt(
-            content_key("subagent", asked.run_id, asked.interrupt_id),
-            payload={**(asked.payload or {}), SUBAGENT: named},
-            **{name: getattr(asked, name) for name in ASKED},
+    async with admission.branch(parent, run_id, agent.id) as branch:
+        left = parent.remaining()
+        limits = [t for t in (timeout, left) if t is not None]
+        start = await agent._start(
+            input,
+            user=user,
+            thread=thread,
+            tenant=tenant,
+            run_id=run_id,
+            record_input=True,
+            timeout=min(limits) if limits else None,
+            deadline=deadline,
+            budget=budget,
+            parent=parent,
+            without=without,
+            framework_options=framework_options,
+            document_ids=document_ids,
         )
-        result = await _answered(agent, parent, asked, answered, branch)
-    return result
+        result = await _continued(agent, parent, await agent.harness.runs.start(start), branch)
+        while result.status is RunStatus.PAUSED:
+            assert result.interrupt is not None
+            asked = result.interrupt
+            named = {
+                "agent_id": agent.id,
+                "run_id": asked.run_id,
+                "interrupt_id": asked.interrupt_id,
+            }
+            answered = await parent.interrupt(
+                content_key("subagent", asked.run_id, asked.interrupt_id),
+                payload={**(asked.payload or {}), SUBAGENT: named},
+                **{name: getattr(asked, name) for name in ASKED},
+            )
+            result = await _answered(agent, parent, asked, answered, branch)
+        branch.ended(result.status.value.lower(), error=_why(result))
+        return result
 
 
 def _why(result: Result) -> str | None:
@@ -344,7 +325,7 @@ def _unseen(agent: Agent) -> bool:
     """Whether the target has tools of its framework's own, whose effects the harness does not
     know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
     agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
-    own read tools, and ``delegate``, whose helpers only read)."""
+    own read tools)."""
     from trellis.harness.middleware import READ_RESULT, STATE_TOOLS  # noqa: PLC0415 - react
 
     target, framework = agent.target, agent.adapter.name
@@ -354,9 +335,7 @@ def _unseen(agent: Agent) -> bool:
         return True
     if framework == "openai_agents":
         return bool(target.tools or target.handoffs)
-    from trellis.harness.delegate import DELEGATE  # noqa: PLC0415 - react
-
-    harness_own = {READ_RESULT, DELEGATE, *STATE_TOOLS}
+    harness_own = {READ_RESULT, *STATE_TOOLS}
     return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 

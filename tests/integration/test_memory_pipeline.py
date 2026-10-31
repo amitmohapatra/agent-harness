@@ -30,6 +30,7 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
+from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
@@ -470,6 +471,29 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert outcome.body["target_kind"] == "run" and outcome.body["target_id"] == result.run_id
     assert outcome.body["verdict"] == "confirm" and outcome.body["source"] == "system"
     assert outcome.idempotency_key == f"{result.run_id}:outcome"
+
+
+async def test_a_large_result_is_recorded_within_the_services_limit(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The service refuses a recorded output over 256 KiB (its ``TOOL_OUTPUT_MAX_BYTES``) with
+    a 422, and the call's record was lost: a large result's call is recorded with its output
+    cut to the limit, so the service still learns from the call."""
+
+    @tool(side_effects="read")
+    def sales_rows(region: str) -> list[dict[str, Any]]:
+        """Every sales line of a region."""
+        return [{"region": region, "line": n, "note": "x" * 80} for n in range(5000)]
+
+    model = ScriptedChat([("sales_rows", {"region": "north"}), "5000 lines"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="rows"), [sales_rows])
+    await agent.run("every north line?", user="u1")
+    await memory_harness.writes.drain()
+    [recorded] = memory_service.named("record_tool")
+    output = recorded.body["output"]
+    assert len(json.dumps(output).encode()) <= RECORDED_OUTPUT_MAX_BYTES
+    assert isinstance(output, str) and output.startswith('[{"region": "north", "line": 0')
+    assert output.endswith("bytes; cut to the service's limit)")
 
 
 async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
