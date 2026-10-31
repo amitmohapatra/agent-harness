@@ -47,7 +47,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox
+from trellis.harness import budget, conversation, sandbox, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -981,7 +981,9 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
     """``said`` with what the run's journal records of it (``Said.facts``, plain values: the
     service's custom metadata nests two levels at most): each tool result its call's status,
     seconds and sources (the trajectory's outcome of the same call, matched by content in
-    order, as the journal matches calls), and the last message the run's status, its seconds
+    order, as the journal matches calls), when it was fetched (``Runtime.fetched``: the one
+    place a fetch time is kept, ``snapshots``) and how long its tool says its value stays
+    current, and the last message the run's status, its seconds
     so far and the approvals given — what the memory service's steps list of the
     turn shows (not when it is a tool result: a run stopped at a call keeps that call's own).
     A result no recorded call matches carries nothing."""
@@ -1011,6 +1013,12 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
         )
         if sources:
             facts["sources"] = sources
+        fetched = runtime.fetched.get(s.tool_call_id or "")
+        if fetched is not None:
+            facts[snapshots.FETCHED] = fetched.strftime(snapshots.TIME)
+        age = snapshots.declared_max_age(runtime, called.name) if called else None
+        if age is not None:
+            facts[snapshots.MAX_AGE] = age
         out.append(dataclasses.replace(s, facts=facts))
     if not out or out[-1].role is Speaker.TOOL:
         return out

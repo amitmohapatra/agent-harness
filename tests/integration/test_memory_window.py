@@ -7,7 +7,7 @@ returns): no drain, no worker, no blob of text in the system message."""
 from __future__ import annotations
 
 import asyncio
-import re
+import json
 from typing import Any
 
 import pytest
@@ -22,8 +22,11 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.identity import conversation_key
+from trellis.harness.journal import content_key
+from trellis.harness.tools.results import PREFIX
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -86,10 +89,40 @@ async def test_a_tool_call_comes_back_with_its_result(
     [call] = messages[1]["tool_calls"]
     assert call["function"]["name"] == "stock" and '"sku": "a"' in call["function"]["arguments"]
     assert messages[2]["tool_call_id"] == call["id"]
-    # a dated snapshot, out of date already (a tool's data is live unless it says otherwise)
+    # out of date already (a tool's data is live unless it says otherwise); when it was
+    # fetched is the run record's to say, not the result's
     said = messages[2]["content"]
-    assert re.fullmatch(r"\[snapshot of stock from [0-9TZ:-]+: out of date[^\]]*\]\n7", said)
+    assert said == snapshots.STALE.format(tool="stock") + "\n7"
     assert messages[3]["content"] == "7 units."
+
+
+async def test_an_earlier_result_is_its_data_card_and_read_file_reads_it_whole(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """An earlier turn's result is not replayed raw: its data card stands in, the run record
+    says when it was fetched, and ``read_file`` reads the result itself."""
+    rows = json.dumps([{"sku": f"S-{n}", "qty": n} for n in range(100)])
+
+    @tool(side_effects="read")
+    def inventory() -> str:
+        """Every SKU's stock."""
+        return rows
+
+    path = f"{PREFIX}/{content_key('result', rows)}"
+    model = ScriptedChat(
+        [("inventory", {}), "100 SKUs.", ("read_file", {"file_path": path}), "S-99: 99."]
+    )
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="inv"), [inventory])
+    await agent.run("How many SKUs?", user="u1", thread=THREAD)
+    result = await agent.run("What is S-99's stock?", user="u1", thread=THREAD)
+    assert result.status is RunStatus.SUCCESS and result.answer == "S-99: 99.", result.error
+    asked = model.requests[2]  # the second turn's first request
+    [card] = [m["content"] for m in asked["messages"] if m["role"] == "tool"]
+    assert f"data card: inventory's result from an earlier turn, kept at {path}" in card
+    assert rows not in card and len(card) < len(rows) / 2
+    assert "read_file" in [t["function"]["name"] for t in asked["tools"]]
+    [read] = [m["content"] for m in model.requests[3]["messages"] if m["role"] == "tool"][-1:]
+    assert '"sku": "S-99", "qty": 99' in read
 
 
 async def test_multilingual_turns_reach_the_model_as_said(
@@ -163,7 +196,7 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
     assert kinds == ["user", "function_call", "function_call_output", "assistant", "user"]
     call, output = said[1], said[2]
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
-    assert re.fullmatch(r"\[snapshot of lookup from [0-9TZ:-]+\]\nresult a", output["output"])
+    assert output["output"] == "result a"  # its fetch time is in its run record
     # memory's thread is the session: the context carries no window besides it
     assert all("window_format" not in c.body for c in memory_service.named("context"))
 

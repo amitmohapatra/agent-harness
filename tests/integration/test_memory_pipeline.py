@@ -448,11 +448,13 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
         ("USER", "how many a?", f"{result.run_id}:user:0"),
         ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
-        # which tool returned it, and when: a later turn replays it so (``snapshots``)
-        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7", f"{result.run_id}:1:msg:2"),
+        ("TOOL", "7", f"{result.run_id}:1:msg:2"),
         ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
     ]
     call, answered = batch.body["messages"][1:3]
+    # when it was fetched is in its run record, the one place it is kept (``snapshots``)
+    facts = answered["custom_metadata"]["run_record"]
+    assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
     [made] = call["tool_calls"]
     assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
     assert answered["tool_call_id"] == made["id"] and answered["kind"] == "INTERNAL"

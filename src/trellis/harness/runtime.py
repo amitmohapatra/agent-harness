@@ -192,7 +192,7 @@ class Runtime:
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
     #: when each tool call of this attempt returned, by its reference (the framework's call
-    #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
+    #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
     fetched: dict[str, datetime] = field(default_factory=dict)
     #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
     #: its table's name in a query (``tools.query.tables``)

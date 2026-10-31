@@ -171,14 +171,15 @@ MESSAGE_ID: Final = "message_id"
 
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
-    """The memory service's window as messages, in its order (a role the window does not
-    replay is left out)."""
+    """The memory service's window as messages, in its order, each with the run record the
+    service keeps of it (``Said.facts``; a role the window does not replay is left out)."""
     return [
         Said(
             role=SPEAKERS[m.role],
             content=m.text,
             tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
             tool_call_id=m.tool_call_id,
+            facts=getattr(m, RUN_RECORD, None) or None,
         )
         for m in messages
         if m.role in SPEAKERS

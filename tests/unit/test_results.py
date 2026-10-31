@@ -3,6 +3,7 @@ the run's journal, previewed as Deep Agents previews them, read back in pages.""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -134,3 +135,35 @@ def test_a_run_with_a_sandbox_is_told_the_kept_result_is_a_file_there_to_run_cod
     assert (code in stub) is (said is not None)
     if said is not None:  # said before the preview, which a small model reads past
         assert stub.index(code) < stub.index("Here is a preview")
+
+
+# -- an earlier turn's replayed result: its data card, the result kept for read_file ---------
+def test_an_earlier_turns_result_is_read_as_its_data_card_and_kept_whole(
+    journal: Journal,
+) -> None:
+    from trellis.harness.history import Called, Said, Speaker
+    from trellis.harness.runtime import current
+
+    rows = json.dumps([{"sku": f"S-{n}", "qty": n} for n in range(200)])
+    history = [
+        Said(Speaker.USER, "stock?"),
+        Said(Speaker.ASSISTANT, "", (Called("c1", "stock", {}), Called("c2", "price", {}))),
+        Said(Speaker.TOOL, rows, tool_call_id="c1"),
+        Said(Speaker.TOOL, "9.99", tool_call_id="c2"),  # shorter than any card: as it is
+        Said(Speaker.ASSISTANT, "200 SKUs."),
+    ]
+    runtime = current()
+    assert runtime is not None
+    runtime.kept_from = {}  # type: ignore[attr-defined]
+    carded = results.carded(history, runtime)  # type: ignore[arg-type]
+    card = carded[2].content
+    path = f"{results.PREFIX}/{content_key('result', rows)}"
+    assert card.startswith(f"[data card: stock's result from an earlier turn, kept at {path}:")
+    assert "the table stock (columns: sku, qty)" in card and 'FROM stock ...")' in card
+    assert 'It begins: [{"sku": "S-0", "qty": 0}' in card and card.endswith("…")
+    assert len(card) < 800 < len(rows)
+    assert journal.results == {path: rows} and kept()
+    assert read_file(path, limit=1).startswith("1  [")  # read back whole, page by page
+    assert [m.content for m in carded if m is not carded[2]] == [
+        m.content for m in history if m is not history[2]
+    ]

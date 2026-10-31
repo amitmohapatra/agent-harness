@@ -100,7 +100,8 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import Source, Tool, arguments_problem, max_age
+from trellis.harness.tools import results
+from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -936,9 +937,14 @@ class Agent:
             output(span, pushed.rendered)
         stale: list[str] = []
         if window is Window.MESSAGES:
+            # earlier turns' results as data cards, the results kept for read_file and
+            # query_result (``tools.results.carded``); out of date past their tools' age
             runtime.history, stale = snapshots.out_of_date(
-                from_window(pushed.conversation.messages if pushed.conversation else []),
-                lambda name: _max_age(runtime, name),
+                results.carded(
+                    from_window(pushed.conversation.messages if pushed.conversation else []),
+                    runtime,
+                ),
+                lambda name: snapshots.declared_max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
         # plan of a skill learned for the task lists its steps); no hint, or none confident
@@ -1062,8 +1068,6 @@ class Agent:
         memory = runtime.run_memory
         if memory is None or not runtime.uses("records") or not messages:
             return
-        # each tool result says which tool returned it and when: a later turn replays it so
-        messages = snapshots.stamped(messages, runtime.fetched)
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:
@@ -1443,14 +1447,6 @@ def _json(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
-
-
-def _max_age(runtime: Runtime, name: str) -> float | None:
-    """How long a value of the run's tool ``name`` stays current, as it declared it (``None``:
-    it did not say, or it is not the run's tool)."""
-    found = runtime.toolbox.get(name)
-    spec = found.spec if found is not None else runtime.native.get(name)
-    return None if spec is None else max_age(spec)
 
 
 def _pull(agent: Agent) -> frozenset[str]:
