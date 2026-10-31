@@ -34,6 +34,13 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Fixed
+
+- A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
+  the service refuses a larger recorded output (422), so the call's record was lost and the
+  service never learned from it. The output is recorded cut to fit, saying so
+  (`clients.memory.recorded_output`).
+
 ### Added
 
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
