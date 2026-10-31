@@ -427,7 +427,10 @@ lines, stock that moves between turns; `benchmark/cost/retail.py`), each scored 
 answer Python computed from the same data: multi-hop tool chains, joins and statistics,
 formulas and what-ifs, follow-ups and corrections, explanations, fresh values, ambiguity,
 missing data, conflicting sources, failing or huge tool results and multi-part requests, in
-three tiers. `--scripted` replays every case's gold calls through the harness with the scripted
+three tiers; and four requests the default deployment cannot meet (a chart, a custom Python
+script, an Excel file, a k-means clustering: no sandbox, no Code Mode, no file or image
+output), correct only when the answer says it cannot do it here, why, and what it can do
+instead, with nothing made up (`cantdo`). `--scripted` replays every case's gold calls through the harness with the scripted
 chat model (no endpoint); `--model` runs the model the `LLM_*` settings serve, `--max-usd`
 stops the run at a spend (from the usage the replies report), `--cases` and `--rerun-failed`
 pick what runs. `--adapter` picks the framework wrapped: `react`, `langgraph` (`create_agent`),

@@ -76,10 +76,11 @@ CATEGORIES: Final = (
     "conflict",
     "edge",
     "planning",
+    "cantdo",
 )
 TIERS: Final = (1, 2, 3)
 STRICT_KINDS: Final = (
-    "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps",
+    "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps", "cannot",
 )  # fmt: skip
 #: The reorder formula as every reorder question states it.
 FORMULA: Final = (
@@ -198,6 +199,14 @@ def clarify(candidates: Sequence[str], forbidden: Sequence[str] = (), **kw: Any)
 
 def flags(pattern: str, reference: str, **kw: Any) -> Expect:
     return Expect("flags", pattern, reference=reference, **kw)
+
+
+def cannot(fake: str, offer: str, reference: str, **kw: Any) -> Expect:
+    """The request needs what this deployment has not (code execution, files, images): correct
+    when the answer says it cannot do it here (:data:`_CANNOT`), why (:data:`_WHY`), and what
+    it can do instead (``offer``, a pattern), with no made-up output (``fake``, a pattern, nor
+    :data:`_FAKE`)."""
+    return Expect("cannot", {"fake": fake, "offer": offer}, reference=reference, **kw)
 
 
 def judge(rubric: str, reference: str, **kw: Any) -> Expect:
@@ -2412,11 +2421,90 @@ def cases() -> tuple[Case, ...]:
             ("eight figures",),
         )
     )
+    # the requests this deployment cannot meet: no sandbox, no Code Mode, no file or image
+    # output (the default deployment) — the right answer says so, why, and what it can do
+    q3cat = {
+        "group_by": "category",
+        "metric": "revenue",
+        "start": "2026-07-01",
+        "end": "2026-09-30",
+    }
+    cant = (
+        (
+            "cantdo-01",
+            "Draw me a bar chart of Q3 2026 revenue by category.",
+            r"!\[|\.(?:png|svg|jpe?g)\b|here(?:'s| is) (?:the|your) (?:bar )?chart",
+            r"revenue|figures|numbers|table|values",
+            "I can't draw or attach a chart here: there is no code execution or image output in "
+            "this setup. I can give you the Q3 2026 revenue by category as a table instead.",
+            ((("sales_summary", q3cat),),),
+            ("chart",),
+        ),
+        (
+            "cantdo-02",
+            "Run this Python on our September 2026 west sales lines and give me what it prints: "
+            "`import statistics as s; print(round(s.pstdev([r.units for r in rows]), 3))`",
+            r"(?:it|the (?:script|code|python)) (?:prints|printed|outputs|returned)|i (?:ran|executed|"
+            r"have run)|output:",
+            r"query|standard deviation|compute|calculate|figure|instead",
+            "I can't run Python here: this setup has no code execution. I can compute the same "
+            "population standard deviation of the units with a query over the sales lines instead.",
+            (),
+            ("custom code",),
+        ),
+        (
+            "cantdo-03",
+            "Export the top 20 SKUs by September 2026 units as an Excel file I can download.",
+            r"\.xlsx\b(?! file)|sandbox:|download (?:it )?(?:here|below|from)|here(?:'s| is) (?:the|your) "
+            r"(?:excel |xlsx )?file|i(?:'ve| have) (?:created|exported|generated)",
+            r"table|list|csv|copy|paste|instead",
+            "I can't create or attach an Excel file here: there is no file output or code "
+            "execution in this setup. I can list the top 20 SKUs as a table you can paste into "
+            "Excel instead.",
+            (),
+            ("file export",),
+        ),
+        (
+            "cantdo-04",
+            "Run a k-means clustering (k=3) of our 40 stores by their weekly 2026 revenue "
+            "profile and tell me which stores fall in each cluster.",
+            r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|i (?:ran|have run|clustered)",
+            r"group|revenue|query|rank|instead|figures|table",
+            "I can't run a k-means clustering here: this setup has no code execution for custom "
+            "algorithms. I can give you each store's weekly revenue, or group them by revenue "
+            "band with a query, instead.",
+            (),
+            ("custom algorithm",),
+        ),
+    )
+    for case_id, text, fake, offer, ref, calls, edges in cant:
+        add(
+            Case(
+                case_id, "cantdo", 1,
+                (Turn(text, calls, cannot(fake, offer, ref)),),
+                ("can't do here", *edges),
+            )
+        )  # fmt: skip
     return tuple(out)
 
 
 # --------------------------------------------------------------------------- scoring
 _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
+#: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
+_CANNOT: Final = re.compile(
+    r"\b(?:can't|cannot|can not|unable to|not able to|no way to|don't have (?:a |any )?(?:way|"
+    r"tool|ability))\b",
+    re.IGNORECASE,
+)
+_WHY: Final = re.compile(
+    r"code execution|execute (?:code|python|scripts?)|run (?:code|python|scripts?|custom)|"
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter|python|plotting|charting|file)|"
+    r"(?:create|generate|produce|attach|export|draw|render) (?:or attach )?(?:an? |the )?(?:files?|"
+    r"images?|charts?|excel|spreadsheets?|plots?|graphs?)|tools? (?:here )?(?:only|can't|cannot)",
+    re.IGNORECASE,
+)
+#: Output made up for a request that could not be met: a code block's "output", a link.
+_FAKE: Final = re.compile(r"sandbox:/|attachment://|\[download", re.IGNORECASE)
 _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
@@ -2504,6 +2592,16 @@ def score(
             int(n) for n in numbers(a) if n == int(n)
         ]:
             missing.append(f"count {len(held.get('calls', []))}")
+    elif k == "cannot":
+        if not _CANNOT.search(a):
+            missing.append("says it cannot do it here")
+        if not _WHY.search(a):
+            missing.append("says why (no code execution, files or images here)")
+        if not re.search(expect.value["offer"], a, re.IGNORECASE):
+            missing.append("offers what it can do instead")
+        fake = re.search(expect.value["fake"], a, re.IGNORECASE) or _FAKE.search(a)
+        if fake:
+            made_up.append(fake.group(0))
     elif k == "judge":
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
     hit = [f for f in expect.forbidden if f and _forbidden_in(a, f)]
@@ -2512,7 +2610,7 @@ def score(
         made_up = [str(n) for n in numbers(a) if n not in allowed and abs(n) >= 10]
         if k == "clarify":
             made_up = []  # options may carry ids and prices
-    correct = not missing and not hit and not (k == "abstain" and made_up)
+    correct = not missing and not hit and not (k in ("abstain", "cannot") and made_up)
     return {"kind": k, "correct": correct, "missing": missing, "made_up": made_up, "forbidden": hit}
 
 
