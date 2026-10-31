@@ -94,6 +94,7 @@ CATEGORIES: Final = (
     "adv_scenario",
     "adv_files",
     "adv_pipeline",
+    "adv_domain",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -145,6 +146,7 @@ class Probe:
     * ``fits`` — every request holds at most ``limit`` tokens (counted approximately);
     * ``calls`` — the turn made at most ``limit`` model calls;
     * ``called`` — at least ``limit`` calls of the tool ``pattern`` ended ``ok``.
+    * ``uncalled`` — no call of the tool ``pattern`` (the wrong source for the question).
 
     ``when``: the history it holds for (``memory``: what only the memory service can give,
     such as another chat's turns); unset, every one."""
@@ -261,7 +263,8 @@ def idset(
 ) -> Expect:
     names = names or {}
     value = [[i, names[i]] if i in names else [i] for i in ids]
-    return Expect("set", value, forbidden=tuple(forbidden), reference=", ".join(ids), **kw)
+    ref = kw.pop("reference", ", ".join(ids))
+    return Expect("set", value, forbidden=tuple(forbidden), reference=ref, **kw)
 
 
 def abstain(why: str, **kw: Any) -> Expect:
@@ -2645,7 +2648,8 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
     (or the question's) within its rounding — 0.5%, or shown in thousands, millions or as a
     percentage of a share. Whole numbers up to 100 (counts, percentages the question names,
     list numbering) are not checked."""
-    held = numbers(context) + numbers(question)
+    # a CSV's commas are separators, not thousands: its figures read both ways
+    held = numbers(context) + numbers(context.replace(",", " ")) + numbers(question)
 
     def near(n: float) -> bool:
         return any(
@@ -2838,6 +2842,9 @@ def checked(
         elif p.kind == "called":
             n = sum(c["tool"] == p.pattern and c["status"] == "ok" for c in calls)
             ok, found = n >= (p.limit or 0), n
+        elif p.kind == "uncalled":
+            n = sum(c["tool"] == p.pattern for c in calls)
+            ok, found = n == 0, n
         else:
             raise ValueError(f"no probe kind {p.kind!r}")
         check = f"{p.kind} {p.pattern or p.limit or ''}".strip()

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import date, timedelta
 from decimal import Decimal
 from functools import cache
 from typing import Any, Final
@@ -645,6 +646,198 @@ def allocation_rules() -> str:
 
 
 PIPELINE_TOOLS: Final = (allocation_log, allocation_text_log, allocation_rules)
+
+
+# --------------------------------------------------------------------------- allocation domain
+#: The allocation domain: 14 daily runs (AL-01 .. AL-14, today the last), 48 stores, 2 SKUs.
+#: Its input and output tables answer across runs (``allocation_sql``); each run's stage logs,
+#: in a bucket, answer why one run did what it did (``list_logs`` / ``read_log``) — some
+#: stages log JSON lines, one plain text, one run's optimiser CSV, and two runs' preprocess
+#: nothing; the rules are a document (``rules_doc``).
+DOMAIN_RUNS: Final = tuple(f"AL-{d + 1:02d}" for d in range(14))
+DOMAIN_SKUS: Final = ("SKU-00009", "SKU-00012")
+DOMAIN_RULES: Final = {
+    **RULES,
+    "R6": "optimiser: no store gets more than 150 units of one SKU in one run (a cap per store and SKU)",
+}
+#: The runs whose preprocess stage logged nothing.
+NO_PREPROCESS_LOG: Final = ("AL-07", "AL-13")
+OPT_CAP: Final = 150
+WEIGHTS: Final = {"north": 1.25, "south": 0.9, "east": 1.0, "west": 0.95}
+
+
+def run_date(run_id: str) -> str:
+    return (date(2026, 10, 17) + timedelta(days=DOMAIN_RUNS.index(run_id))).isoformat()
+
+
+def stages_of(forecast: int, n: int, region: str) -> dict[str, int]:
+    """One store-SKU through the stages: each stage's units out."""
+    pre = int(forecast * 1.15) if n % 3 == 0 else forecast
+    opt = min(round(pre * WEIGHTS[region]), OPT_CAP)
+    post = min(opt, 120 if n % 5 == 2 else 400)
+    return {
+        "forecast": forecast,
+        "preprocess": pre,
+        "optimiser": opt,
+        "postprocess": post,
+        "final": post,
+    }
+
+
+@cache
+def domain_rows() -> tuple[dict[str, Any], ...]:
+    """Every run x store x SKU: its inputs (forecast, demand, shelf space) and each stage's
+    units (the truth both the tables and the logs are written from)."""
+    out = []
+    for d, run in enumerate(DOMAIN_RUNS):
+        for n in range(1, 49):
+            store, region = f"ST-{n:02d}", r.REGIONS[(n - 1) % 4]
+            for sku in DOMAIN_SKUS:
+                base = 60 + (n * 13 + d * 5 + (7 if sku == "SKU-00009" else 0)) % 50
+                base = round(base * 1.6) if sku == "SKU-00009" else base
+                forecast = round(base * 1.35) if d == 13 and region == "north" else base
+                demand = round(forecast * (1.1 if n % 7 in (0, 3) else 0.95))
+                out.append({
+                    "run_id": run, "run_date": run_date(run), "store": store, "region": region,
+                    "sku": sku, "forecast": forecast, "demand": demand,
+                    "shelf_space": 120 if n % 5 == 2 else 400,
+                    "stages": stages_of(forecast, n, region),
+                })  # fmt: skip
+    return tuple(out)
+
+
+def _domain_db() -> Any:
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE inputs (run_id TEXT, run_date TEXT, store TEXT, region TEXT, sku TEXT, "
+        "forecast INTEGER, demand INTEGER, shelf_space INTEGER)"
+    )
+    db.execute("CREATE TABLE outputs (run_id TEXT, store TEXT, sku TEXT, final_units INTEGER)")
+    rows = domain_rows()
+    db.executemany(
+        "INSERT INTO inputs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                x["run_id"],
+                x["run_date"],
+                x["store"],
+                x["region"],
+                x["sku"],
+                x["forecast"],
+                x["demand"],
+                x["shelf_space"],
+            )
+            for x in rows
+        ],
+    )
+    db.executemany(
+        "INSERT INTO outputs VALUES (?, ?, ?, ?)",
+        [(x["run_id"], x["store"], x["sku"], x["stages"]["final"]) for x in rows],
+    )
+    db.execute("PRAGMA query_only = ON")
+    return db
+
+
+@tool(side_effects="read")
+def allocation_sql(sql: str) -> str:
+    """Run one read-only SQL query (SQLite) over the allocation tables of every run: inputs
+    (run_id, run_date, store, region, sku, forecast, demand, shelf_space) and outputs (run_id,
+    store, sku, final_units). Runs AL-01..AL-14 are daily, 2026-10-17 to 2026-10-30 (today).
+    Returns CSV.
+
+    Args:
+        sql: one SELECT
+    """
+    import sqlite3
+
+    db = _domain_db()
+    try:
+        cursor = db.execute(sql)
+        head = [c[0] for c in cursor.description or ()]
+        found = cursor.fetchmany(500)
+    except sqlite3.Error as exc:
+        return json.dumps({"error": f"{exc}"})
+    finally:
+        db.close()
+    return "\n".join([",".join(head), *(",".join(str(v) for v in row) for row in found)])
+
+
+def _log_text(run_id: str, stage: str) -> str | None:
+    if stage == "preprocess" and run_id in NO_PREPROCESS_LOG:
+        return None
+    rows = [x for x in domain_rows() if x["run_id"] == run_id]
+    k = STAGES.index(stage)
+    lines = []
+    for x in rows:
+        st = x["stages"]
+        before, after = (st[STAGES[k - 1]] if k else 0), st[stage]
+        rule = (
+            "R6"
+            if stage == "optimiser"
+            and after == OPT_CAP
+            and round(st["preprocess"] * WEIGHTS[x["region"]]) > OPT_CAP
+            else f"R{k + 1}"
+        )
+        if stage == "postprocess":
+            lines.append(
+                f"{run_date(run_id)}T06:{k * 7:02d}:00Z INFO postprocess {x['store']} {x['sku']} in={before} out={after} rule={rule}"
+            )
+        elif stage == "optimiser" and run_id == "AL-14":
+            lines.append(f"{x['store']},{x['sku']},{before},{after},{rule}")
+        else:
+            lines.append(json.dumps({"ts": f"{run_date(run_id)}T06:{k * 7:02d}:00Z", "store": x["store"], "sku": x["sku"],
+                                     "in": before, "out": after, "rule": rule}))  # fmt: skip
+    if stage == "optimiser" and run_id == "AL-14":
+        lines.insert(0, "store,sku,in,out,rule")
+    return "\n".join(lines)
+
+
+def _log_path(run_id: str, stage: str) -> str:
+    ext = (
+        "txt"
+        if stage == "postprocess"
+        else ("csv" if stage == "optimiser" and run_id == "AL-14" else "jsonl")
+    )
+    return f"gs://alloc-logs/{run_id}/{stage}.{ext}"
+
+
+@tool(side_effects="read")
+def list_logs(run_id: str) -> str:
+    """The stage logs one allocation run left in the log bucket (paths, read with read_log).
+
+    Args:
+        run_id: e.g. AL-13
+    """
+    return json.dumps([_log_path(run_id, st) for st in STAGES if _log_text(run_id, st) is not None])
+
+
+@tool(side_effects="read")
+def read_log(path: str) -> str:
+    """One log file from the log bucket, whole (its shape is the stage's own: JSON lines, CSV
+    or plain text).
+
+    Args:
+        path: a path list_logs gave, e.g. gs://alloc-logs/AL-13/optimiser.jsonl
+    """
+    parts = path.removeprefix("gs://alloc-logs/").split("/")
+    if len(parts) == 2 and parts[0] in DOMAIN_RUNS:
+        stage = parts[1].split(".")[0]
+        if stage in STAGES and path == _log_path(parts[0], stage):
+            text = _log_text(parts[0], stage)
+            if text is not None:
+                return text
+    return json.dumps({"error": f"no such log: {path}"})
+
+
+@tool(side_effects="read")
+def rules_doc() -> str:
+    """The allocation rules document: each rule's id and text."""
+    return json.dumps(DOMAIN_RULES)
+
+
+DOMAIN_TOOLS: Final = (allocation_sql, list_logs, read_log, rules_doc)
 
 
 @tool(side_effects="irreversible")
@@ -1480,7 +1673,297 @@ def cases() -> tuple[Any, ...]:
     out.extend(scenario_cases())
     out.extend(file_cases())
     out.extend(pipeline_cases())
+    out.extend(domain_cases())
     return tuple(out)
+
+
+def domain_cases() -> list[Any]:
+    """Open-ended questions about the allocation domain (:data:`DOMAIN_TOOLS`): history across
+    runs from the tables, a run's why from its logs, the rules from their document. Each is
+    checked for the source it must use (``called``) and the one it must not (``uncalled``),
+    exact figures against :func:`domain_rows`, honest gaps (a stage with no log is said, never
+    filled in) and, for the open ones, figures the model was given (``grounded``)."""
+    from benchmark.cost.complex import Case, Probe, Turn, flags, grounded, idset, record
+
+    rows = domain_rows()
+
+    def total(run: str, region: str | None = None) -> int:
+        return sum(
+            x["stages"]["final"]
+            for x in rows
+            if x["run_id"] == run and (region is None or x["region"] == region)
+        )
+
+    totals = {run: total(run) for run in DOMAIN_RUNS}
+    week = {
+        run: totals[run] - totals[DOMAIN_RUNS[i - 7]] for i, run in enumerate(DOMAIN_RUNS) if i >= 7
+    }
+    most = max(week, key=lambda k: abs(week[k]))
+    under = sorted(
+        {x["store"] for x in rows}
+        - {x["store"] for x in rows if x["stages"]["final"] >= x["demand"]}
+    )
+    today, yesterday = DOMAIN_RUNS[-1], DOMAIN_RUNS[-2]
+    moved = {g: total(today, g) - total(yesterday, g) for g in r.REGIONS}
+    region = max(moved, key=lambda g: abs(moved[g]))
+    s42 = {x["sku"]: x["stages"] for x in rows if x["run_id"] == today and x["store"] == "ST-42"}
+    rules42 = sorted(
+        {
+            f"R{k + 1}"
+            for st in s42.values()
+            for k in range(1, 4)
+            if st[STAGES[k]] != st[STAGES[k - 1]]
+        }
+    )
+    lower = stages_of(round(s42["SKU-00012"]["forecast"] * 0.9), 42, "south")
+    capped = next(
+        x
+        for x in rows
+        if x["run_id"] == "AL-11" and x["store"] == "ST-07" and x["sku"] == "SKU-00009"
+    )["stages"]
+    sql = ("called", "allocation_sql")
+    logs = ("called", "read_log")
+
+    def src(kind: str, tool_name: str, why: str) -> Any:
+        return Probe(kind, tool_name, why, limit=1)
+
+    def ask(
+        case_id: str,
+        text: str,
+        calls: Any,
+        expect: Any,
+        *probes: Any,
+        tier: int = 2,
+        edge: str = "",
+    ) -> Any:
+        return Case(case_id, "adv_domain", tier, (Turn(text, calls, expect, sent=probes),),
+                    ("allocation domain", edge), tools=DOMAIN_TOOLS)  # fmt: skip
+
+    per_run = (
+        "SELECT run_id, sum(final_units) AS units FROM outputs GROUP BY run_id ORDER BY run_id"
+    )
+    return [
+        ask(
+            "advdom-01",
+            "Which allocation runs changed most against the same day last week?",
+            ((("allocation_sql", {"sql": per_run}),),),
+            record(
+                {"run": most, "change": week[most]},
+                tol={"change": 0},
+                reference=f"{most}: {week[most]:+d} units against the run a week before ({totals[most]} vs "
+                f"{totals[DOMAIN_RUNS[DOMAIN_RUNS.index(most) - 7]]}). "
+                + "; ".join(f"{k} {v:+d}" for k, v in week.items()),
+            ),
+            src(*sql, "history across runs is the tables'"),
+            src("uncalled", "read_log", "no log is needed for history"),
+            edge="history across runs",
+        ),
+        ask(
+            "advdom-02",
+            "Which rules affect store 42's allocation?",
+            (
+                (("list_logs", {"run_id": today}),),
+                (
+                    *tuple(("read_log", {"path": _log_path(today, st)}) for st in STAGES),
+                    ("rules_doc", {}),
+                ),
+            ),
+            idset(
+                rules42,
+                reference=", ".join(rules42)
+                + " in today's run: "
+                + "; ".join(f"{k}: {DOMAIN_RULES[k]}" for k in rules42),
+            ),
+            src(*logs, "a run's why is its logs'"),
+            Probe("has", "R6", "the rules document is read", role="tool"),
+            edge="rules for one store",
+        ),
+        ask(
+            "advdom-03",
+            "What if store 42's forecast for SKU-00012 in today's run were 10% lower?",
+            (
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": f"SELECT forecast, shelf_space, region FROM inputs WHERE run_id = '{today}' AND store = 'ST-42' AND sku = 'SKU-00012'"
+                        },
+                    ),
+                    ("rules_doc", {}),
+                ),
+            ),
+            record(
+                {
+                    "final_units": lower["final"],
+                    "change": lower["final"] - s42["SKU-00012"]["final"],
+                },
+                tol={"final_units": 0, "change": 0},
+                rubric="each stage recomputed by its rule: forecast, +15% safety stock, x0.9 south weight, shelf cap",
+                reference=f"Forecast {lower['forecast']} -> preprocess {lower['preprocess']} (R2) -> optimiser "
+                f"{lower['optimiser']} (R3, south x0.9) -> final {lower['final']}: "
+                f"{lower['final'] - s42['SKU-00012']['final']:+d} on today's {s42['SKU-00012']['final']}.",
+            ),
+            src(*sql, "the inputs are the tables'"),
+            tier=3,
+            edge="what-if through the rules",
+        ),
+        ask(
+            "advdom-04",
+            "Why did the optimiser cap SKU-00009 at store 7 in run AL-11?",
+            (
+                (("list_logs", {"run_id": "AL-11"}),),
+                (("read_log", {"path": _log_path("AL-11", "optimiser")}), ("rules_doc", {})),
+            ),
+            record(
+                {"in": capped["preprocess"], "out": capped["optimiser"], "rule": "R6"},
+                tol={"in": 0, "out": 0},
+                reference=f"In AL-11's optimiser log ST-07 SKU-00009 went {capped['preprocess']} -> {capped['optimiser']} "
+                f"under R6: {DOMAIN_RULES['R6']}.",
+            ),
+            src(*logs, "one run's why is its log's"),
+            Probe(
+                "has",
+                '"store": "ST-07", "sku": "SKU-00009"',
+                "the store's log line is read",
+                role="tool",
+            ),
+            edge="one run's why",
+        ),
+        ask(
+            "advdom-05",
+            f"Compare runs {yesterday} and {today}.",
+            (
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": f"SELECT run_id, region, sum(final_units) FROM outputs JOIN inputs USING (run_id, store, sku) WHERE run_id IN ('{yesterday}', '{today}') GROUP BY run_id, region"
+                        },
+                    ),
+                ),
+            ),
+            record(
+                {
+                    "total change": totals[today] - totals[yesterday],
+                    "region": region,
+                    "region change": moved[region],
+                },
+                tol={"total change": 0, "region change": 0},
+                reference=f"{today} allocates {totals[today]} units against {totals[yesterday]} ({totals[today] - totals[yesterday]:+d}); "
+                + "; ".join(f"{g} {v:+d}" for g, v in moved.items())
+                + f": the {region} moved most.",
+            ),
+            src(*sql, "comparing runs is the tables'"),
+            src("uncalled", "read_log", "no log is needed to compare totals"),
+            edge="compare two runs",
+        ),
+        ask(
+            "advdom-06",
+            "Which stores are always under-allocated (final units below demand in every run)?",
+            (
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": "SELECT store FROM outputs JOIN inputs USING (run_id, store, sku) GROUP BY store HAVING sum(final_units < demand) = count(*)"
+                        },
+                    ),
+                ),
+            ),
+            idset(under, reference=", ".join(under)),
+            src(*sql, "a pattern across runs is the tables'"),
+            src("uncalled", "read_log", "no log is needed"),
+            tier=3,
+            edge="always under-allocated",
+        ),
+        ask(
+            "advdom-07",
+            "Is today's allocation run unusual?",
+            (
+                (("allocation_sql", {"sql": per_run}),),
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": f"SELECT run_id, region, sum(final_units) FROM outputs JOIN inputs USING (run_id, store, sku) WHERE run_id IN ('{yesterday}', '{today}') GROUP BY run_id, region"
+                        },
+                    ),
+                ),
+            ),
+            record(
+                {"today": totals[today], "region": region},
+                rubric=f"yes: {totals[today]} units, above every earlier run ({min(totals.values())}-{max(v for k, v in totals.items() if k != today)}), driven by the {region}",
+                reference=f"Yes: {today} allocates {totals[today]} units, more than any earlier run (the highest was "
+                f"{max(v for k, v in totals.items() if k != today)}); the {region} rose {moved[region]:+d}.",
+            ),
+            src(*sql, "unusual against history is the tables'"),
+            edge="is today's run unusual",
+        ),
+        ask(
+            "advdom-08",
+            "What data is missing to explain store 7's allocation in run AL-13?",
+            ((("list_logs", {"run_id": "AL-13"}),),),
+            flags(
+                r"preprocess",
+                "AL-13 has no preprocess log: the forecast, optimiser, postprocess and final logs are there, so the "
+                "safety-stock step for store 7 can only be inferred from the optimiser's input, not read.",
+            ),
+            src("called", "list_logs", "the bucket says which logs exist"),
+            Probe("lacks", r"gs://alloc-logs/AL-13/preprocess", "no preprocess log is invented"),
+            edge="a stage with no log",
+        ),
+        ask(
+            "advdom-09",
+            "Summarise yesterday's allocation run.",
+            (
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": f"SELECT region, sum(final_units) FROM outputs JOIN inputs USING (run_id, store, sku) WHERE run_id = '{yesterday}' GROUP BY region"
+                        },
+                    ),
+                    ("allocation_sql", {"sql": per_run}),
+                    ("list_logs", {"run_id": yesterday}),
+                ),
+            ),
+            grounded(
+                r"preprocess",
+                "totals by region from the tables, and the gap: no preprocess log",
+                f"{yesterday} ({run_date(yesterday)}): {totals[yesterday]} units — "
+                + ", ".join(f"{g} {total(yesterday, g)}" for g in r.REGIONS)
+                + ". Its preprocess stage left no log, so that step cannot be checked.",
+            ),
+            edge="summarise a run",
+        ),
+        ask(
+            "advdom-10",
+            "List the risks for next week's allocation.",
+            (
+                (
+                    (
+                        "allocation_sql",
+                        {
+                            "sql": "SELECT store FROM outputs JOIN inputs USING (run_id, store, sku) GROUP BY store HAVING sum(final_units < demand) = count(*)"
+                        },
+                    ),
+                    ("allocation_sql", {"sql": per_run}),
+                    ("list_logs", {"run_id": yesterday}),
+                    ("rules_doc", {}),
+                ),
+            ),
+            grounded(
+                r"risk|under",
+                f"the {len(under)} stores always under demand, today's {region} spike, the R6 cap on SKU-00009, the missing preprocess logs",
+                f"Risks: {len(under)} stores were under demand in every run ({', '.join(under[:4])} and more); today's run "
+                f"jumped to {totals[today]} units on a {region} spike; the optimiser's 150-unit cap (R6) binds on SKU-00009; "
+                "preprocess logs are missing for AL-07 and AL-13, so those steps cannot be audited.",
+                cites=1,
+            ),
+            tier=3,
+            edge="risks",
+        ),
+    ]
 
 
 def pipeline_cases() -> list[Any]:

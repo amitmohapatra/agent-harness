@@ -95,7 +95,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 
 ## Adversarial suite
 
-What the adversarial suite found (`benchmark/cost/adversarial.py`, 48 cases and 144 turns, `--cases adversarial`;
+What the adversarial suite found (`benchmark/cost/adversarial.py`, 58 cases and 154 turns, `--cases adversarial`;
 `tests/matrix/adversarial.py`, rows X01–X17 on every adapter). Each entry names the failing case
 ids; the suite holds each as known (`adversarial.KNOWN`, `generate.KNOWN`), so the day it is fixed
 its cases pass and the suite fails until the entry is removed. Reproduce a complex case with
@@ -124,7 +124,9 @@ their parent (X10, X16), asking for an approval (X11), steered around (X12); a s
 durable run with progress over AG-UI, an approval before applying and an explanation after (X14),
 its worker dying mid-way without redoing a scenario (X15); 20 Deep Agents helpers at once
 (`advflow-02`); the allocation pipeline's waterfall, its missing and plain-text stage logs
-(`advpipe-01..02`); unicode, nulls, wrong types, duplicate keys, malformed CSV, a 503 or a timeout
+(`advpipe-01..02`); the allocation domain's open questions, each checked for the source it must
+use (tables for history, a run's logs for its why) and the one it must not (`advdom-01..10`; with
+a scripted model these prove the pipeline, the judge gate measures the model); unicode, nulls, wrong types, duplicate keys, malformed CSV, a 503 or a timeout
 mid-chain, pages without end, a 60,000-line log (`advdata-*`).
 
 ## Safety and privacy
