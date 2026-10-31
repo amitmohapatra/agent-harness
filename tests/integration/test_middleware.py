@@ -504,6 +504,18 @@ async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: 
         StallGuard(1)
 
 
+async def test_a_stall_outside_a_run_ends_with_one_answer_too() -> None:
+    def step(n: int) -> list[Any]:
+        call = {"name": "nothing", "args": {}, "id": f"c{n}", "type": "tool_call"}
+        return [AIMessage(content="", tool_calls=[call]), ToolMessage("no", tool_call_id=f"c{n}")]
+
+    model = ScriptedChatModel(turns=[("nothing", {}), "gave up"])
+    state = await graph(model, StallGuard(3)).ainvoke(
+        {"messages": [HumanMessage("x"), *step(1), *step(2)]}
+    )
+    assert state["messages"][-1].content == "gave up"
+
+
 async def test_a_stall_with_no_answer_then_stops_the_run(harness: Harness) -> None:
     look_a: Any = ("look", {"item": "a"})
     model = ScriptedChatModel(turns=[look_a, look_a, look_a, look_a])
