@@ -41,6 +41,10 @@ own model work follows the harness's configuration.
   its own thread (its checkpointer), so its earlier results are marked in the request it sends
   (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
   marks them as memory's window does. In both, the tool stays offered.
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
