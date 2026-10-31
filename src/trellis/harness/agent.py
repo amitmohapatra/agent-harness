@@ -956,10 +956,14 @@ class Agent:
 
     def window(self, runtime: Runtime) -> Window:
         """How this run's context carries the thread's recent messages: not at all where the
-        framework owns the thread (a durable store, ``history.owner``); as the framework's own
+        framework owns the thread (a durable store, ``history.owner``) or continues the session
+        it kept for the conversation's last turn (``Runtime.continued``: that session replays
+        the turns, ADR 0005 §4); as the framework's own
         messages where memory owns it, the framework keeps no store and replays messages; in
         the context's text otherwise (a store kept in RAM replays the thread itself while the
         process lives: the window is never given twice)."""
+        if runtime.continued:
+            return Window.NONE  # the continued session holds the turns
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if self.owner(runtime, store) is history.Owner.FRAMEWORK or store is history.MEMORY_THREAD:
             return Window.NONE  # the framework's store holds it, or reads memory's thread itself
