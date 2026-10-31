@@ -489,9 +489,8 @@ async def test_a_step_limit_with_no_tools_and_a_last_call_without_an_answer() ->
 async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: Harness) -> None:
     """A stall is not run again: the model is told so and answers with what it has, offered
     no tool (``tool_choice="none"``) — the user gets an answer saying what went wrong."""
-    model = ScriptedChatModel(
-        turns=[("look", {"item": "a"})] * 3 + ["the lookup keeps failing: no answer"]
-    )
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, "the lookup keeps failing: no answer"])
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="stall"), [look]).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
@@ -506,7 +505,8 @@ async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: 
 
 
 async def test_a_stall_with_no_answer_then_stops_the_run(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=[("look", {"item": "a"})] * 3 + [("look", {"item": "a"})])
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, look_a])
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="stall-none"), [look]).run("x", user="u")
     assert result.error is not None
