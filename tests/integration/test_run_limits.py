@@ -324,7 +324,8 @@ async def test_a_run_in_this_process_is_cancelled_with_its_reason(harness: Harne
     await agent.cancel(runs[1])
     await streaming
     assert events[-1].outcome is RunOutcome.CANCELLED
-    assert events[-1].data == {"reason": "cancelled"}
+    assert events[-1].data["reason"] == "cancelled"
+    assert events[-1].data["spent"]["model_calls"] == 0  # a function: no model
 
 
 async def test_a_cancelled_queued_run_ends_cancelled_and_its_caller_too(

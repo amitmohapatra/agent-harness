@@ -55,6 +55,10 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- What a finished run spent is on its end: every `RUN_FINISHED` carries `data.spent` (tokens,
+  cached tokens, dollars, model calls, tool calls — its sub-agents' runs and earlier attempts
+  included), which agent-runs' event log keeps (ADV-11).
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

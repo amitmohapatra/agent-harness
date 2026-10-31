@@ -12,7 +12,7 @@ import pytest
 
 from tests.support.arm import arm
 from trellis import Budget, Harness, Runtime, tool
-from trellis.contracts import ConfigurationError, RunStatus, ToolError
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolError
 from trellis.harness import budget
 from trellis.harness.tools import base
 
@@ -233,3 +233,35 @@ def test_the_calls_of_an_invocation_with_no_user_message_count_from_its_start() 
 
     request: Any = SimpleNamespace(state={"messages": [AIMessage("a"), AIMessage("b")]})
     assert automatic.calls_made(request) == 2
+
+
+# --------------------------------------------------------------------------- what a run spent
+async def test_a_finished_run_says_what_it_spent_on_its_end(harness: Harness) -> None:
+    """Its tokens, model calls, dollars and tool calls — counted in its journal while it works
+    — are on its ``RUN_FINISHED`` event, whatever its ending (ADV-11)."""
+    shop = Shop()
+
+    async def spender(input: str, agent: Runtime) -> Any:
+        budget.account(agent, model="m", input_tokens=100, output_tokens=20, cached=40, cost=0.25)
+        budget.account(agent, model="m", input_tokens=50, output_tokens=5, cost=0.5)
+        await agent.tools.call("stock", sku="a")
+        if input == "fail":
+            raise ValueError("broken")
+        return "done"
+
+    agent = arm(harness.wrap(spender, id="spender"), shop.tools())
+    spent = {"tokens": 175, "cached_tokens": 40, "cost": 0.75, "model_calls": 2, "tool_calls": 1}
+    for asked in ("ok", "fail"):
+        events = [e async for e in agent.stream(asked, user="u")]
+        finished = events[-1]
+        assert finished.type is RunEventType.RUN_FINISHED, finished
+        assert finished.data["spent"] == spent, (asked, finished.data)
+
+
+async def test_a_run_that_spent_nothing_says_so(harness: Harness) -> None:
+    async def idle(input: str, agent: Runtime) -> str:
+        return "ok"
+
+    agent = harness.wrap(idle, id="idle")
+    events = [e async for e in agent.stream("x", user="u")]
+    assert events[-1].data["spent"] == dict.fromkeys(budget.SPENT_KEYS, 0)
