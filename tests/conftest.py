@@ -104,6 +104,15 @@ def an_applications_tracer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hints narrow a tool set of any size (``agent.NARROW_FROM`` off): the narrowing's
+    own tests, whose tool sets are small."""
+    from trellis.harness import agent
+
+    monkeypatch.setattr(agent, "NARROW_FROM", 0)
+
+
+@pytest.fixture
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
     """The spans the harness ends during the test, in memory."""
     exporter = InMemorySpanExporter()

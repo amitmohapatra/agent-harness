@@ -113,7 +113,7 @@ after any of yours:
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
-| Tool hints | from 5 tools, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
+| Tool hints | from 30 tools in the run, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with the `trellis` server's `read_file` (listed from the start: the CLI lists a server's tools once) ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target |
 

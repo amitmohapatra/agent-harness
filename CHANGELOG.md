@@ -34,6 +34,14 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Changed
+
+- The tool hints narrow what the model is offered only from 30 tools in the run
+  (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
+  still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
+  looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
+  every adapter.
+
 ### Fixed
 
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
