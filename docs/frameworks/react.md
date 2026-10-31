@@ -219,7 +219,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
-| `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
+| `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped. A declarative
@@ -336,7 +336,7 @@ plus memory context did not fit 8,192 tokens (the server refused them; the fact 
 in the context's best-ranked items): 9/10 answered right with the memory context trimmed, 10/10
 with it whole on 16,384; without the step none of the ten fits the window. LangChain's
 `LLMToolSelectorMiddleware` on the same 50 tools completed 6/10 (coverage 0.60): it is not a
-default (`automatic.ToolSelection`, for a measurement).
+default, and the harness has no fallback to it; a team adds it through `middleware=`.
 
 ## What else is automatic
 

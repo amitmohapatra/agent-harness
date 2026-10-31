@@ -11,6 +11,7 @@ from typing import Any, cast
 import httpx2
 import openai
 import pytest
+from bifrost_sdk import RETRYABLE
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -360,6 +361,20 @@ def test_the_model_clients_errors_say_whether_a_retry_may_pass() -> None:
         assert f"({code})" in error.message
     other = ValueError("x")
     assert model_error(other) is other
+
+
+def test_a_model_status_is_retryable_exactly_where_the_gateway_client_says() -> None:
+    """One set of retryable statuses for every model call: bifrost-sdk's ``RETRYABLE``, the one
+    the gateway client and the memory service retry on (duplication audit C1)."""
+    request = httpx2.Request("POST", "http://gateway/v1/chat/completions")
+    differ = []
+    for code in range(400, 600):
+        response = httpx2.Response(code, request=request, json={"error": {"message": "no"}})
+        error = model_error(openai.APIStatusError("no", response=response, body=None))
+        assert isinstance(error, ModelError)
+        if error.retryable != (code in RETRYABLE):
+            differ.append(code)
+    assert differ == []
 
 
 async def test_a_model_client_error_reaches_the_run_as_a_model_error(harness: Harness) -> None:

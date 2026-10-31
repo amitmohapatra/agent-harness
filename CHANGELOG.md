@@ -102,6 +102,20 @@ own model work follows the harness's configuration.
   OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
   a Google token refresh and an AWS SigV4 signature recomputed from the specification.
 
+### Removed
+
+- `automatic.ToolSelection`, `react.defaults_on` and the `benchmark.cost` variant
+  `main+selector`: a harness fallback to LangChain's `LLMToolSelectorMiddleware` when memory
+  gave no hints, which ADR 0003 §6 rules out (one owner of tool narrowing: memory's hints). A
+  team adds `LLMToolSelectorMiddleware` through `ReAct(middleware=)` itself.
+
+### Changed
+
+- A model call's HTTP status is retryable exactly when it is in bifrost-sdk's `RETRYABLE`
+  (408, 409, 425, 429, 500, 502, 503, 504), the set the gateway client and the memory service
+  use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
+  425 is now retryable; 501, 505 and the other 5xx are not.
+
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
 `ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'
