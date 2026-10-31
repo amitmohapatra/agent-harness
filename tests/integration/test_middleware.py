@@ -12,26 +12,26 @@ import httpx2
 import openai
 import pytest
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, Hooks, Settings, current, tool
-from trellis.contracts import ConfigurationError, ModelError, RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, ModelError, RunStatus
+from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
-    LAST_STEP,
     READ_RESULT,
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
     StallGuard,
-    StepLimit,
     _HarnessToolsState,
     model_error,
     read_result,
+    step_limit,
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
 
@@ -453,34 +453,32 @@ async def test_a_prompt_needs_a_run_and_the_gateway(harness: Harness) -> None:
         ModelHooks(timeout=0)
 
 
-# --------------------------------------------------------------------------- StepLimit
-async def test_at_the_step_limit_the_model_answers_without_tools(harness: Harness) -> None:
+# --------------------------------------------------------------------------- the step limit
+async def test_the_step_limit_is_langchains_model_call_limit_and_one_layer(
+    harness: Harness,
+) -> None:
+    """``max_steps`` is LangChain's ``ModelCallLimitMiddleware`` (duplication audit A7): at the
+    limit the run ends with LangChain's message, and no call past ``max_steps`` is made."""
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), ("look", {"item": "b"}), "partial"])
-    target = graph(model, HarnessTools(), StepLimit(2), checkpointer=RunCheckpointer())
-    agent = arm(harness.wrap(target, id="limit"), [look])
-    events = [e async for e in agent.stream("x", user="u")]
-    assert events[-1].data["result"] == "partial"
-    last = model.requests[-1]
-    assert last["tool_choice"] == "none" and last["tools"] == ["look"]
-    assert model.seen[-1][-1].content == LAST_STEP
-    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
-    assert warnings[0]["code"] == "max_steps"
-    assert "stopped at its 2 steps" in warnings[0]["message"]
+    target = graph(
+        model, HarnessTools(), step_limit(2, scoped=True), checkpointer=RunCheckpointer()
+    )
+    result = await arm(harness.wrap(target, id="limit"), [look]).run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "Model call limits exceeded: thread limit (2/2)"
+    assert len(model.requests) == 2  # max_steps calls, none more
+    assert not hasattr(ours, "StepLimit") and not hasattr(ours, "LAST_STEP")
 
 
-async def test_a_step_limit_with_no_tools_and_a_last_call_without_an_answer() -> None:
-    model = ScriptedChatModel(turns=[("nothing", {}), "the end"])
-    target = graph(model, HarnessTools(), StepLimit(1))
-    state = await target.ainvoke({"messages": [HumanMessage("x")]})
-    assert state["messages"][-1].content == "the end"
-    assert "tool_choice" not in model.requests[-1] or model.requests[-1]["tool_choice"] is None
-    stubborn = ScriptedChatModel(turns=[("nothing", {}), ("nothing", {})])
-    with pytest.raises(ModelError, match="stopped after 1 model calls without an answer"):
-        await graph(stubborn, HarnessTools(), StepLimit(1)).ainvoke(
-            {"messages": [HumanMessage("x")]}
-        )
-    with pytest.raises(ConfigurationError):
-        StepLimit(0)
+def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
+    per_run, per_invocation = step_limit(3, scoped=True), step_limit(3)
+    assert isinstance(per_run, ModelCallLimitMiddleware)
+    assert isinstance(per_invocation, ModelCallLimitMiddleware)
+    assert (per_run.thread_limit, per_run.run_limit) == (3, None)
+    assert (per_invocation.thread_limit, per_invocation.run_limit) == (None, 3)
+    for wrong in (0, True):
+        with pytest.raises(ConfigurationError, match="max_steps is a number of model calls"):
+            step_limit(wrong)
 
 
 # --------------------------------------------------------------------------- StallGuard
@@ -658,7 +656,7 @@ async def test_a_pause_resumes_in_place_in_another_process(harness: Harness) -> 
 
 
 def test_a_middleware_state_never_reaches_the_graphs_input_or_output() -> None:
-    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), StepLimit())
+    target = graph(ScriptedChatModel(turns=[]), HarnessTools(), StallGuard())
     schema = target.get_input_jsonschema()
     assert set(schema["properties"]) == {"messages"}
 

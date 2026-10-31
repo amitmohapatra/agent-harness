@@ -21,8 +21,8 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
-* :class:`StepLimit` — at ``max_steps`` model calls one more, without tools, for the best
-  answer (and a ``max_steps`` warning event), instead of LangChain's canned limit message;
+* :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``,
+  which ends the run with its message at the limit;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
   steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
   within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
@@ -70,11 +70,11 @@ from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
+    ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
 )
 from langchain.agents.middleware.types import (
-    ExtendedModelResponse,
     PrivateStateAttr,
     hook_config,
 )
@@ -139,7 +139,7 @@ from trellis.harness.tools.mcp import side_effects_of as annotated
 
 log = logging.getLogger("trellis.run")
 
-#: Model calls with tools one run may make (:class:`StepLimit`); then one more, without tools.
+#: Model calls one run may make (:func:`step_limit`: LangChain's ``ModelCallLimitMiddleware``).
 MAX_STEPS: Final = 12
 #: Consecutive steps making the same call with the same arguments that stop the run.
 MAX_REPEATS: Final = 3
@@ -152,18 +152,11 @@ READ_RESULT: Final = "read_result"
 #: Deep Agents' tool that reads a large result saved as a file.
 READ_FILE: Final = "read_file"
 READ_LIMIT: Final = 20_000
-#: What the model is asked when its steps run out.
-LAST_STEP: Final = (
-    "You have used every step this run allows. Do not call tools: answer now with what you "
-    "have, and say what is left undone."
-)
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
 #: handler (:func:`narrowing`).
 HANDLER: Final = "awrap_model_call_handler"
-#: The state key of :class:`StepLimit`: the model calls of this invocation.
-STEPS: Final = "trellis_steps"
 #: The openai client's statuses a call may pass after (its own retry rule).
 RETRYABLE_STATUS: Final = frozenset({408, 409, 429})
 
@@ -1013,63 +1006,18 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 
 
 # --------------------------------------------------------------------------- limits
-class _StepsState(AgentState[Any]):
-    trellis_steps: NotRequired[Annotated[int, PrivateStateAttr]]
-
-
-class StepLimit(AgentMiddleware):
-    """At most ``max_steps`` model calls with tools in one invocation; then one more, told to
-    answer with what it has (:data:`LAST_STEP`) and to call no tool (``tool_choice="none"``;
-    with structured output, offered none but the answer's own), and a ``max_steps`` warning on
-    the run's stream. No answer then fails the run (``ModelError``)."""
-
-    state_schema = _StepsState
-
-    def __init__(self, max_steps: int = MAX_STEPS) -> None:
-        super().__init__()
-        if max_steps < 1:
-            raise ConfigurationError("max_steps is a number of model calls from 1")
-        self.max_steps = max_steps
-
-    async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return {STEPS: 0}
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest[Any],
-        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
-    ) -> ModelResponse[Any] | ExtendedModelResponse[Any]:
-        taken = request.state.get(STEPS, 0)
-        if taken < self.max_steps:
-            reply = await handler(request)
-            return ExtendedModelResponse(
-                model_response=reply, command=Command(update={STEPS: taken + 1})
-            )
-        told = [*request.messages, HumanMessage(content=LAST_STEP)]
-        if request.response_format is not None:
-            # the answer may be the structured output's own tool call: no other tool
-            last = request.override(messages=told, tools=[])
-        else:
-            # the same tools (the cached prompt holds), none of them called
-            last = request.override(
-                messages=told, tool_choice="none" if request.tools else request.tool_choice
-            )
-        reply = await handler(last)
-        message = _ai(reply)
-        answered = reply.structured_response is not None or (
-            message is not None and not message.tool_calls and bool(message.text)
-        )
-        if not answered:
-            raise ModelError(
-                f"stopped after {self.max_steps} model calls without an answer",
-                source="langgraph",
-            )
-        runtime = current()
-        stopped = f"run {runtime.run_id if runtime else '-'} stopped at its {self.max_steps} steps"
-        log.warning("%s", stopped)
-        if runtime is not None:
-            runtime.events.warning("max_steps", stopped)
-        return reply
+def step_limit(
+    max_steps: int = MAX_STEPS, *, scoped: bool = False
+) -> AgentMiddleware[Any, Any, Any]:
+    """At most ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``
+    (``exit_behavior="end"``: past them the run ends with LangChain's message saying the limit
+    was reached; LangChain has no exit that asks the model for an answer). ``scoped``: counted
+    per thread (a ``ReAct`` graph's thread is its run, so a resume keeps the count), else per
+    invocation (``middleware()`` in a graph whose thread outlives a run)."""
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+        raise ConfigurationError("max_steps is a number of model calls from 1")
+    counted = {"thread_limit" if scoped else "run_limit": max_steps}
+    return ModelCallLimitMiddleware(exit_behavior="end", **counted)
 
 
 class StallGuard(AgentMiddleware):
@@ -1930,7 +1878,7 @@ __all__ = [
     "ReadTools",
     "RunCheckpointer",
     "StallGuard",
-    "StepLimit",
     "model_error",
     "read_result",
+    "step_limit",
 ]
