@@ -118,6 +118,7 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
+    snapshots,
 )
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
@@ -132,7 +133,14 @@ from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
+from trellis.harness.tools.base import (
+    SideEffects,
+    Tool,
+    arguments_of,
+    data_of,
+    max_age,
+    not_run,
+)
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -321,6 +329,36 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
         return False
     tools = getattr(request.runtime, "tools", None) or ()
     return not any(getattr(t, "name", None) == READ_FILE for t in tools)
+
+
+def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:
+    """``messages`` (a thread the framework keeps, as the model is sent it) with each result
+    from before the latest user message of a live tool of the run (``max_age`` 0: every
+    earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
+    already stamped (a memory window's replay), or of a tool whose value stays current a while
+    (its age is not known here) or for good, is left as it is."""
+    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    called = {
+        c["id"]: c["name"]
+        for m in messages[:asked]
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
+    }
+    out = list(messages)
+    stale: set[str] = set()
+    for n, m in enumerate(messages[:asked]):
+        if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
+            continue
+        tool = called.get(m.tool_call_id) or m.name or ""
+        found = runtime.toolbox.get(tool)
+        spec = found.spec if found is not None else runtime.native.get(tool)
+        if spec is None or m.content.startswith("[snapshot of ") or max_age(spec) != 0:
+            continue
+        stale.add(tool)
+        # the request's copy is marked, never the graph's state: each call marks it anew
+        mark = snapshots.EARLIER.format(tool=tool)
+        out[n] = m.model_copy(update={"content": f"{mark}\n{m.content}"})
+    return out, stale
 
 
 async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
@@ -537,6 +575,13 @@ class HarnessTools(AgentMiddleware):
         if harness is None:
             harness = self._tools[runtime] = self._converted(runtime)
         _PAGED.add(runtime)
+        # a thread the framework keeps: an earlier turn's live value is out of date, and its
+        # tool stays offered (the memory window's replay is stamped where it is read)
+        messages, stale = _earlier(runtime, request.messages)
+        if stale:
+            request = request.override(messages=messages)
+            if runtime.offered is not None:
+                runtime.offered |= stale
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         if _saved(request.state):  # a large result kept: read in pages, or queried

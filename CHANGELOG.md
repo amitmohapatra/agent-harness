@@ -36,6 +36,11 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A live tool's value from an earlier turn reads as out of date in every adapter, not only
+  where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
+  its own thread (its checkpointer), so its earlier results are marked in the request it sends
+  (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
+  marks them as memory's window does. In both, the tool stays offered.
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
