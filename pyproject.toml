@@ -59,6 +59,9 @@ claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 # (``npm install -g @moonshot-ai/kimi-code@2.1.1``), its tested range in compat.BINARIES.
 kimi = ["agent-client-protocol>=0.12.1,<0.13", "mcp>=2.2,<3"]
 agui = ["fastapi>=0.115"]
+# ``query_result`` runs on DuckDB when it is installed, else on Python's own SQLite
+# (``tools.query``, docs/adr/0007-query-engine.md): the minor range benchmark/query_engines measured.
+query = ["duckdb>=2.0,<2.1"]
 a2a = ["a2a-sdk[http-server]>=1.1,<1.2", "fastapi>=0.115"]
 # ``mcp(...)`` entries for MCP servers the harness reaches itself (HTTP, stdio): the official SDK.
 mcp = ["mcp>=2.2,<3"]
@@ -72,7 +75,7 @@ gemini = ["langchain-google-genai>=4.4,<5"]
 vertex = ["langchain-google-vertexai>=3.2,<4", "bifrost-sdk[google]>=0.4"]
 bedrock = ["langchain-aws>=1.9,<2", "bifrost-sdk[aws]>=0.4"]
 all = [
-  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,a2a,otel,mcp,anthropic,gemini,vertex,bedrock]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,query,a2a,otel,mcp,anthropic,gemini,vertex,bedrock]",
 ]
 
 [dependency-groups]
@@ -142,6 +145,8 @@ known-first-party = ["trellis", "benchmark"]
 "benchmark/**" = ["PLC0415"]
 # the distractor servers' table, one kind of record a line
 "benchmark/cost/catalog.py" = ["E501"]
+# the tool-chain cases' table, one case a line
+"benchmark/tool_chains/cases.py" = ["E501"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 # Each bridge imports its framework when its adapter first uses it.
