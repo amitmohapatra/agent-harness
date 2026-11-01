@@ -412,3 +412,44 @@ def test_a_model_langchain_cannot_make_offline_has_no_profile(
     assert routed_chat_model("anthropic:claude-sonnet-4-5").profile is not None
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", broken)
     assert routed_chat_model("gpt-4o").profile is None
+
+
+#: Anthropic's own API, as an OpenAI-compatible endpoint (its OpenAI SDK compatibility layer).
+ANTHROPIC_V1 = "https://api.anthropic.com/v1/"
+
+
+def test_anthropics_own_api_is_reached_with_its_own_client() -> None:
+    """Anthropic's OpenAI compatibility layer drops prompt caching ("Prompt caching is not
+    supported, but it is supported in the Anthropic SDKs"): its models are made with
+    Anthropic's own client, on the same endpoint and key."""
+    from langchain_anthropic import ChatAnthropic
+
+    route = model_gateway(Settings(llm_base_url=ANTHROPIC_V1, llm_api_key="sk-ant"))
+    chat = route.chat_model("claude-x", effort="low")
+    assert isinstance(chat, ChatAnthropic)
+    assert chat.model == "claude-x" and chat.reasoning_effort == "low"
+    assert chat.anthropic_api_url == "https://api.anthropic.com"
+    assert chat.anthropic_api_key.get_secret_value() == "sk-ant"
+    assert route.chat_model("claude-x", effort=None).reasoning_effort is None
+    said = doctor.gateway_said(Settings(llm_base_url=ANTHROPIC_V1, llm_api_key="sk-ant"), {})
+    assert said[2].startswith("client: Anthropic's own, on its API")
+    forced = Settings(llm_gateway="openai-compatible", llm_base_url=ANTHROPIC_V1, llm_api_key="k")
+    assert not any(line.startswith("client:") for line in doctor.gateway_said(forced, {}))
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        # the OpenAI-compatible client asked for by name: kept
+        Settings(llm_gateway="openai-compatible", llm_base_url=ANTHROPIC_V1, llm_api_key="k"),
+        Settings(llm_base_url="http://vllm.test/v1", llm_api_key="k"),  # any other endpoint
+        Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk"),  # the gateway caches
+    ],
+    ids=["forced", "other-endpoint", "bifrost"],
+)
+def test_any_other_endpoint_keeps_the_openai_compatible_client(settings: Settings) -> None:
+    from langchain_anthropic import ChatAnthropic
+
+    chat = model_gateway(settings).chat_model("claude-x", effort=None)
+    assert not isinstance(chat, ChatAnthropic)
+    assert chat.openai_api_base == settings.llm_base_url

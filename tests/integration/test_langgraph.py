@@ -18,8 +18,8 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
 from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import conversation_key
-from trellis.harness.middleware import ASKED_WITH
 
 executed: list[str] = []
 

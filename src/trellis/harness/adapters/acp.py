@@ -94,7 +94,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import ASKED_WITH, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
@@ -560,6 +560,7 @@ class ACPAdapter:
             servers = [_server(s) for s in target.mcp_servers]
             if run.native_tools is not None:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
+                attempt.served = run.native_tools
             conn, process = await stack.enter_async_context(
                 spawn_agent_process(
                     cast("Any", attempt),  # an ACP ``Client``: the methods the agent calls
@@ -698,6 +699,8 @@ class Attempt:
         self.drain: asyncio.Task[None] | None = None
         #: the agent's requests being answered now (each in a task of the connection's)
         self.handling: set[asyncio.Task[Any]] = set()
+        #: the harness's tools as the attempt serves them (``tools.convert.mcp.Tools``)
+        self.served: Any = None
 
     def bind(self, conn: Any, process: Any) -> None:
         self.conn = conn
@@ -783,8 +786,8 @@ class Attempt:
         if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
         blocks = [text_block(native_input.prompt)]
-        if native_input.context:
-            blocks.insert(0, text_block(native_input.context))
+        if native_input.context:  # marked off: the question is the block after it
+            blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:
@@ -814,8 +817,10 @@ class Attempt:
                     async with asyncio.timeout(USAGE_SECONDS):
                         item = await self.queue.get()
                 except TimeoutError:
+                    self._died()
                     await self._spent()
                     continue
+                self._died()
                 if isinstance(item, _Ended):
                     await self._settled()
                     if item.error is not None:
@@ -832,6 +837,13 @@ class Attempt:
             runtime.model_ended(STEP)
             if not asking.done():
                 asking.cancel()
+
+    def _died(self) -> None:
+        """What ended a harness call that was not an error (the worker dying), raised in the
+        attempt: in the server's request it ended only the server."""
+        fatal = self.served.fatal if self.served is not None else None
+        if fatal is not None:
+            raise fatal
 
     async def _failed(self, error: BaseException) -> BaseException:
         """The agent's error — or, when the connection closed (its process ended), why the

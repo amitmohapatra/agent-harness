@@ -38,6 +38,12 @@ SPENT: Final = (
     "This run's budget is spent. Do not call tools: answer now with what you have, and say "
     "that the budget was reached and what is left undone."
 )
+#: What a run's model is told when its step limit is reached (``ReAct``'s ``max_steps``, OpenAI
+#: Agents' ``max_turns``): its one last call, with no tool, answers.
+LIMIT: Final = (
+    "This run has reached its limit of {limit} steps. Do not call tools: answer now with what "
+    "you found, and say what is left undone."
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +201,7 @@ def _no_cost(model: str) -> None:
 __all__ = [
     "BUDGET",
     "BUDGET_EXCEEDED",
+    "LIMIT",
     "SPENT",
     "SPENT_KEYS",
     "Budget",
