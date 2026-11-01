@@ -44,6 +44,14 @@ LIMIT: Final = (
     "This run has reached its limit of {limit} steps. Do not call tools: answer now with what "
     "you found, and say what is left undone."
 )
+#: The same, told in a framework's session that the conversation's next turn continues (Claude
+#: Agent SDK, ACP): kept there, :data:`LIMIT` read as still in force, and a later turn answered
+#: "I've reached the tool-call limit" without calling a tool.
+TURN_LIMIT: Final = (
+    "This turn has reached its limit of {limit} steps. Do not call tools now: answer with what "
+    "you found, and say what is left undone. The limit is for this turn only: the user's next "
+    "message starts a new turn, with your tools."
+)
 
 
 @dataclass(frozen=True)
@@ -204,6 +212,7 @@ __all__ = [
     "LIMIT",
     "SPENT",
     "SPENT_KEYS",
+    "TURN_LIMIT",
     "Budget",
     "account",
     "account_reply",

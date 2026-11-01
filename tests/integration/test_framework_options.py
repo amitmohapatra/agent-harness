@@ -32,7 +32,7 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
-    "claude_agent_sdk": ({"max_turns": 1}, "Reached maximum number of turns"),
+    "claude_agent_sdk": ({"max_turns": 1}, "the turn limit (1) was reached"),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "langgraph": {"recursion_limit": 50},
