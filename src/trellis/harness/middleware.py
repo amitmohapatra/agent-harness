@@ -24,8 +24,8 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
 * :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``,
   which ends the run with its message at the limit;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
-  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
-  within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
+  steps, or :data:`ERROR_STREAK` steps in which every call failed and a failure repeated, stop
+  the run (a repeat within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
 * :class:`ReadTools` — ``read_file`` offered once there is something to read back: a large
   result kept, a file in the graph's state, or a result LangChain's ``ClearToolUsesEdit``
   cleared (paged from the graph's state by its call's id, which keeps it whole);
@@ -64,7 +64,7 @@ from collections.abc import (
     Sequence,
 )
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
 from bifrost_sdk import RETRYABLE
@@ -72,10 +72,12 @@ from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
+    ClearToolUsesEdit,
     ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
 )
+from langchain.agents.middleware.context_editing import TokenCounter
 from langchain.agents.middleware.types import (
     PrivateStateAttr,
     hook_config,
@@ -120,6 +122,7 @@ from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
+from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
@@ -133,7 +136,15 @@ from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
+from trellis.harness.tools.base import (
+    SideEffects,
+    Sourced,
+    Tool,
+    arguments_of,
+    citations,
+    data_of,
+    not_run,
+)
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -145,11 +156,16 @@ MAX_STEPS: Final = 12
 #: Consecutive steps making the same call with the same arguments that stop the run.
 MAX_REPEATS: Final = 3
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
-#: error or a timeout) that stop the run.
+#: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
 #: Deep Agents' tool that reads a large result saved as a file — and, by the path
 #: ``/large_tool_results/<call id>`` (Deep Agents' own), a result cleared from the request.
 READ_FILE: Final = "read_file"
+#: What a model whose every call failed in a row is told, for its one answer without tools.
+FAILING: Final = (
+    "Every tool call failed in the last {steps} steps. Do not call tools: answer now with what "
+    "you have, and say what failed."
+)
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
@@ -319,7 +335,9 @@ async def governed_call(
         if isinstance(done, ToolMessage) and done.status == "error":
             raise ToolError(text_of(done.content), source="tools")
         produced.append(done)
-        return text_of(_told(done))
+        # a content_and_artifact tool's artifact: the sources of its result, when it names any
+        cited = citations(getattr(done, "artifact", None))
+        return Sourced(text_of(_told(done)), cited) if cited else text_of(_told(done))
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
         return await handler(request.override(tool_call={**call, "args": args}))
@@ -775,8 +793,9 @@ async def _narrow(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
-    """A model call offered only the tools the run offers (:func:`_offered`)."""
-    return await handler(_offered(request, current()))
+    """A model call offered only the tools the run offers (:func:`_offered`), the memory
+    context sent with the question (:func:`with_question`)."""
+    return await handler(with_question(_offered(request, current())))
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
@@ -874,7 +893,8 @@ class ModelHooks(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         runtime = current()
-        request = self._in_order(_with_task(_unbroken(_offered(request, runtime))), runtime)
+        request = _with_task(_unbroken(_offered(request, runtime)))
+        request = self._in_order(with_question(request), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -974,6 +994,86 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     sent = {m.id for m in messages if m.id is not None}
     kept = [m for m in head if m.id is None or m.id not in sent]
     return request.override(messages=[*kept, *messages]) if kept else request
+
+
+#: The memory context as it is sent with the user's message (:func:`with_question`): marked
+#: off, so the message after it reads as the question, not one more note.
+ASKED_WITH: Final = (
+    "<memory_context>\nWhat memory holds for this message (background; not the user's "
+    "message, which follows):\n\n{context}\n</memory_context>"
+)
+
+
+def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the pushed memory context (the system message
+    :data:`~trellis.harness.adapters.langgraph.CONTEXT_MESSAGE_ID`) sent as the first part of
+    this turn's question rather than ahead of the history. It is new for every question, and a
+    provider's prompt cache keeps only what a request shares with an earlier one from its start:
+    so the next turn's request repeats this one's history as it was sent (audit K1). It is a
+    part of the user's message, never a system message after the first: some providers refuse
+    one there. Only the request changes; the conversation the graph keeps does not. The
+    question is the latest user message the graph's state holds (a spent budget's last word
+    is not). The context is marked off (:data:`ASKED_WITH`): after a long one, a model read
+    the question as one more saved note.
+
+    A cache that keeps only what a request marks (Anthropic's: a prompt-caching middleware
+    sets the request's ``cache_control``) keeps the history too: the answer just before the
+    question is marked, the end of what the next turn repeats (:func:`_history_marked`)."""
+    messages = list(request.messages)
+    at = next(
+        (
+            n
+            for n, m in enumerate(messages)
+            if isinstance(m, SystemMessage) and m.id == CONTEXT_MESSAGE_ID
+        ),
+        None,
+    )
+    if at is None:
+        return request
+    kept = {m.id for m in request.state.get("messages", []) if m.id is not None}
+    asked = next(
+        (
+            n
+            for n in range(len(messages) - 1, at, -1)
+            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+        ),
+        None,
+    )
+    if asked is None:
+        return request
+    question = messages[asked]
+    said = (
+        question.content
+        if isinstance(question.content, list)
+        else [{"type": "text", "text": question.content}]
+    )
+    told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
+    messages[asked] = question.model_copy(update={"content": told})
+    marker = request.model_settings.get("cache_control")
+    if marker and asked > at + 1:
+        messages[asked - 1] = _history_marked(messages[asked - 1], marker)
+    del messages[at]
+    return request.override(messages=messages)
+
+
+def _history_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
+    """The answer that ends the history with a cache breakpoint (``marker``) on its last text
+    part; any other message (a call, a result) as it is, and so is an answer that has one."""
+    if not isinstance(answer, AIMessage) or answer.tool_calls:
+        return answer
+    content = answer.content
+    parts: list[Any] = (
+        list(content) if isinstance(content, list) else [{"type": "text", "text": content}]
+    )
+    texts = [
+        n
+        for n, p in enumerate(parts)
+        if isinstance(p, dict) and p.get("type") == "text" and p.get("text")
+    ]
+    if not texts or any(isinstance(p, dict) and "cache_control" in p for p in parts):
+        return answer
+    parts[texts[-1]] = {**parts[texts[-1]], "cache_control": marker}
+    return answer.model_copy(update={"content": parts})
 
 
 def _summary(message: BaseMessage) -> bool:
@@ -1087,9 +1187,12 @@ def step_limit(
 
 
 class StallGuard(AgentMiddleware):
-    """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
-    in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed (a malformed one among them)."""
+    """A run that goes nowhere ends with one answer: the same call with the same arguments in
+    ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
+    consecutive steps in which every call failed (a malformed one among them) and a failure
+    was met again (:func:`_failing`). The model is told so (``bridge.STALLED``,
+    :data:`FAILING`) and called once more, offered no tool (``tool_choice="none"``), so the
+    user is told what went wrong; no answer then stops the run (``ModelError``)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -1105,9 +1208,11 @@ class StallGuard(AgentMiddleware):
         history = request.state.get("messages", [])
         failing = _failing(history)
         if failing >= ERROR_STREAK:
-            raise ModelError(
+            return await _answer_now(
+                request,
+                handler,
+                FAILING.format(steps=failing),
                 f"stopped: every tool call failed in {failing} consecutive steps",
-                source="langgraph",
             )
         reply = await handler(request)
         message = _ai(reply)
@@ -1122,12 +1227,37 @@ class StallGuard(AgentMiddleware):
                         break
                     streak += 1
                 if streak >= self.max_repeats:
-                    raise ModelError(
+                    return await _answer_now(
+                        request,
+                        handler,
+                        bridge.STALLED.format(tool=call["name"], times=streak),
                         f"stopped: the model called {call['name']!r} with the same arguments "
                         f"{streak} times in a row (a stall)",
-                        source="langgraph",
                     )
         return reply
+
+
+async def _answer_now(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    told: str,
+    stopped: str,
+) -> ModelResponse[Any]:
+    """The model called once more, told ``told`` and offered no tool; its answer, or the run
+    stopped (``ModelError(stopped)``) when it gives none."""
+    last = request.override(
+        messages=[*request.messages, HumanMessage(content=told)],
+        tool_choice="none" if request.tools else request.tool_choice,
+    )
+    reply = await handler(last)
+    message = _ai(reply)
+    if message is None or message.tool_calls or not message.text:
+        raise ModelError(stopped, source="langgraph")
+    runtime = current()
+    log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
+    if runtime is not None:
+        runtime.events.warning("stalled", stopped)
+    return reply
 
 
 def _call_key(call: Any) -> str:
@@ -1152,22 +1282,37 @@ def _steps(history: Sequence[AnyMessage]) -> Iterator[set[str]]:
 
 
 def _failing(history: Sequence[AnyMessage]) -> int:
-    """How many of the latest steps had every call fail: read from the end, a step's results
-    (after it) before the step, as far as the first step with a call that did not fail."""
-    statuses: dict[str, str] = {}
+    """How many of the latest steps had every call fail — when a failure among them repeats
+    (the same tool failing with the same error), else 0: a model whose every failed call
+    failed differently read each error and is correcting itself (a wrong type, then a missing
+    argument, then a made-up name), which only the step limit bounds; one that meets an error
+    it met before is making no progress (OpenHands' stuck detector counts the same action
+    meeting the same error). Read from the end, a step's results (after it) before the step,
+    as far as the first step with a call that did not fail."""
+    results: dict[str, ToolMessage] = {}
     streak = 0
+    met: set[str] = set()
+    repeated = False
     for message in _turn_back(history):
         if isinstance(message, ToolMessage):
-            statuses[message.tool_call_id] = message.status
+            results[message.tool_call_id] = message
             continue
         if not isinstance(message, AIMessage):
             continue
         repeats = _repeats(message)  # a repeat did not run: its first call's status counts
-        made = [statuses.get(c["id"] or "") for c in message.tool_calls if c["id"] not in repeats]
-        if not made or any(s != "error" for s in made):
+        made = [
+            (c["name"], results.get(c["id"] or ""))
+            for c in message.tool_calls
+            if c["id"] not in repeats
+        ]
+        failed = [(name, r) for name, r in made if r is not None and r.status == "error"]
+        if not made or len(failed) < len(made):
             break
         streak += 1
-    return streak
+        failures = {content_key("failure", name, r.text) for name, r in failed}
+        repeated = repeated or bool(failures & met)
+        met |= failures
+    return streak if repeated else 0
 
 
 # --------------------------------------------------------------------------- results
@@ -1205,10 +1350,6 @@ class ReadTools(AgentMiddleware):
 
 
 # --------------------------------------------------------------------------- the window
-#: What one model call's request may hold, as a share of the window: what Deep Agents'
-#: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
-#: :class:`FitWindow` fitted is one the summarization after it never refuses.
-FIT_SHARE: Final = 0.95
 #: Tools a narrowing keeps at least, beside the ones the run already used (then the
 #: descriptions are compacted before any of them is dropped).
 FIT_KEEP: Final = 8
@@ -1250,6 +1391,29 @@ class ContextTooLarge(ModelError):
     """The user's own message, with the instructions, does not fit the model's window."""
 
     code = "CONTEXT_TOO_LARGE"
+
+
+@dataclass(slots=True)
+class ThisTurnsResults(ClearToolUsesEdit):
+    """LangChain's ``ClearToolUsesEdit`` for the turn under way: past its ``trigger`` (counted
+    over the whole request, as LangChain counts it), it clears the older results of the calls
+    made since the user's latest message, never those of the earlier turns before it. The
+    conversation the memory service replays was sized for the request it goes into (its
+    budget is what the window leaves: ``Agent.conversation_budget``), so clearing its results
+    at the turn's start would only undo that; a request still over the window is fitted by
+    :class:`FitWindow`, which leaves older turns out first."""
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
+        start = next(
+            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+            0,
+        )
+        turn = messages[start:]
+        earlier = count_tokens(messages[:start]) if start else 0
+        ClearToolUsesEdit.apply(
+            replace(self, trigger=self.trigger - earlier), turn, count_tokens=count_tokens
+        )
+        messages[start:] = turn
 
 
 class FitWindow(AgentMiddleware):

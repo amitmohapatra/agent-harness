@@ -55,7 +55,9 @@ await scope.feedback("run", run_id, "confirm", source="system")  # or "reject"
   with `tools=` (your tool names), the tools that fit the task, each with a confidence.
   `window=False` leaves the recent conversation out when your framework keeps the thread
   (a LangGraph checkpointer, an OpenAI Agents session, a Claude session).
-* Where the context goes is your framework's: a leading system message for a LangGraph graph,
+* Where the context goes is your framework's: a leading system message for a LangGraph graph
+  (a `create_agent` graph, `ReAct`'s among them, sends it with the turn's question, after the
+  history, so a provider's prompt cache keeps the history from one turn to the next),
   a `system` input item for OpenAI Agents' `Runner.run`, appended to Claude's `system_prompt`.
 * `history.add([...])` appends to the thread's transcript, `(role, text)` pairs or messages.
 * `feedback("run", run_id, verdict, source=...)` is how the run went: `confirm` or `reject`
