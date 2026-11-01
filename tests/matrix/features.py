@@ -73,6 +73,8 @@ CHAIN: Final = "find_sku → sku_id → get_stock"
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 #: A real MCP server that asks the person in the middle of a call (MCP elicitation).
 MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
+#: A real MCP server with resources (MCP resources).
+MCP_RESOURCES_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_resources_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -580,6 +582,29 @@ async def pull(w: World) -> None:
     assert searched.path["name"] == "memory_search" and searched.body["args"] == search
 
 
+async def forget_said(w: World) -> None:
+    """Forget by chat: what the user said, which the service refuses an agent, is asked about
+    through the approval path and, approved, forgotten as the user — in every adapter."""
+    if not w.on:
+        return  # no memory tools: F42 checks none is offered
+    w.memory_service.memories["mem_said"] = {
+        "content": "I live at 12 Baker Street.",
+        "memory_type": "SEMANTIC",
+        "visibility": "PRIVATE",
+        "user": USER,
+        "current": True,
+        "created_at": "2026-10-01T09:00:00Z",
+        "supersedes": None,
+        "superseded_by": None,
+    }
+    o = (await w.go([Desk().lookup()], [("memory_forget", {"id": "mem_said"})])).succeeded()
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert asked == ["memory_forget"] and "mem_said" in o.pauses[0].question, o.pauses
+    [forgot] = w.memory_service.named("forget")
+    assert forgot.path["memory_id"] == "mem_said" and not forgot.scope.get("agent_id")
+    assert not w.memory_service.memories["mem_said"]["current"]
+
+
 async def records(w: World) -> None:
     d = Desk()
     plan: list[Call] = [("lookup", {"topic": "a"}), ("note", {"text": "b"})]
@@ -710,6 +735,17 @@ async def mcp_asks(w: World) -> None:
     assert [(p.question, p.options) for p in asked] == [("Which size of shirt?", ["S", "L"])]
     assert "ordered shirt in size L" in o.text, o.answer
     assert [r["status"] for r in o.results("shop-order")][-1:] == ["ok"]  # after the pause
+
+
+async def mcp_resources(w: World) -> None:
+    """An MCP server of the agent's own with resources: one read tool, its description the
+    map of what there is, a resource read by its URI as any tool's result."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_RESOURCES_SERVER)), name="docs")
+    o = await w.go([d.lookup(), server], [("docs-read_resource", {"uri": "docs://handbook"})])
+    o.succeeded()
+    assert "Ship on Tuesdays." in o.text, o.answer
+    assert [r["status"] for r in o.results("docs-read_resource")] == ["ok"]
 
 
 async def prompts(w: World) -> None:
@@ -1350,6 +1386,16 @@ FEATURES: Final[list[Feature]] = [
         ),
     ),
     Feature(
+        "F42d",
+        "memory pull: forgetting what the user said asks, then forgets it as them",
+        "F42",
+        "the memory service (its refusal names the user's statement)",
+        forget_said,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("a function target calls memory_forget itself, as any tool")},
+        way2=NA("the harness's approval path: Way 2 calls the service, which refuses the agent"),
+    ),
+    Feature(
         "F43",
         "memory records: transcript, tool calls, outcome",
         "F43",
@@ -1413,6 +1459,14 @@ FEATURES: Final[list[Feature]] = [
         "automatic for mcp(...) servers (the client says it can be asked)",
         mcp_asks,
         way2=NA("Way 2 gives the MCP SDK's client an elicitation callback of its own"),
+    ),
+    Feature(
+        "F18r",
+        "MCP resources: a server's resources read by one tool whose description maps them",
+        "N2",
+        "automatic for mcp(...) servers that have resources",
+        mcp_resources,
+        way2=NA("Way 2 reads a server's resources with the MCP SDK's client itself"),
     ),
     Feature(
         "F19",

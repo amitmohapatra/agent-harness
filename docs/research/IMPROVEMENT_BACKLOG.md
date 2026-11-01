@@ -47,8 +47,9 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Sources, steps, tools, seconds, approvals of an earlier answer | in flight: `claude/cool-maxwell-w5avo8-explain` (#59), `-explain2` (#62, arm D) | audit B1, B2, B5, B6; [SELF_EXPLANATION.md](SELF_EXPLANATION.md) |
 | Explain test fixed first (template, memory-off floor, prompt capture, strict scorer) | in flight: `-explain2` | [SELF_EXPLANATION.md](SELF_EXPLANATION.md#fix-four-flaws-in-the-test-before-re-measuring) |
 | Pilot arm E (shortlist 2–5: tool names, worked example, repeated-call wording, confidence/why from the record) | next, one change at a time | [shortlist](SELF_EXPLANATION.md#shortlist-to-test-against-main-one-change-at-a-time) |
-| Why a step was taken; how sure the answer is | later (after arm D) | audit B3, B4 |
-| What changed since last time (tool values) | later (needs fetch time) | audit B7 |
+| Why a step was taken; how sure the answer is | in flight: `-explain2` (memory's steps list: `from step N` on a call whose argument an earlier result returned; an evidence line per turn — calls that succeeded, sources and how many calls name each, values out of date — graded high/medium/low from the record alone) | audit B3, B4; explain pilot on a small hosted model: strict 27/27 as arm D, controls 6/6, context sufficient 27/27, turn-2 input 13,199 → 11,898 tokens |
+| Earlier turns' results as data cards (the result kept for `read_file` and `query_result`) | dropped: failed the keep rule | explain pilot: turn-2 input −35% (13,199 → 8,628), but strict 27/27 → 26/27 and more model calls and seconds: the model read the card in its own earlier turn as all it had seen and disowned that answer |
+| What changed since last time (tool values) | later (the fetch time is now in the run record: `-explain2`) | audit B7 |
 
 ## Live data and large results
 
@@ -84,8 +85,10 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | AG-UI frontend tools, `context` and shared `state` (`frontend.py`): the client's tools offered to the model, a call streamed and paused (interrupt reason `frontend_tool`), answered by a `tool` message or a `resume` entry; context and state in the pushed context within half its budget; state changes streamed as `STATE_DELTA`/`STATE_SNAPSHOT` | exists | `tests/integration/test_agui_frontend.py` (a fake CopilotKit-style client); matrix F62t (every adapter that takes a run's tools) |
 | AG-UI activity summaries ("used N tools · ran K commands") from the tool events | next | `Role.ACTIVITY` in `agui/events.py` |
 | MCP elicitation: an `mcp(...)` server's question in a call pauses the run as `ask` does (a choice, or a form with the server's schema) and the answer goes back to the server | exists (#80) | `tools/elicit.py`; matrix F18e; `tests/integration/test_mcp_elicitation.py` (both protocol eras) |
-| MCP resources: a server's resources readable by the model | next | the MCP SDK's `list_resources`, `read_resource` |
-| MCP tasks (a long call polled for its result): the official SDK has no client for them (2.2 and 2.3 leave `tasks/*` out; 2026-07-28 makes them an extension the SDK does not ship) | later: when the SDK ships it | `mcp_types.methods` ("tasks/* deliberately absent") |
+| MCP resources: a server's resources readable by the model | exists (#82): one read tool whose description maps them; a large one kept and queried as any result | `tools/resources.py`; matrix F18r; `tests/integration/test_mcp_resources.py` |
+| MCP resources in the data map (ADR 0006 §1): the map is not built yet; today the read tool's description is the map | later: with the data map | [ADR 0006](../adr/0006-what-the-model-gets.md) |
+| MCP resource updates: subscribe (2026-07-28 `Client.listen(resource_subscriptions=)`) so a changed resource marks its earlier reads out of date; today a read is live data (a dated snapshot when replayed) and the map says `lastModified` | later | the MCP SDK's `listen` |
+| MCP tasks (a long call answered later): the official SDK has no client for them (2.2 and 2.3 leave `tasks/*` out; 2026-07-28 makes them an extension the SDK does not ship), so nothing is built on our own copy of the protocol. The design when it ships: a call that returns a task pauses the run (the existing interrupt and resume; no worker waits), agent-runs' scheduler polls `tasks/get` (or the server's notification resumes it), the task's result is the call's result, and cancelling the run sends `tasks/cancel`; no new queue or store | later: when the SDK ships it | `mcp_types.methods` ("tasks/* deliberately absent") |
 | A structured `ask_user` (on #58) with optional `options[]`, `date`, `date_range` and `number`, so a UI shows dropdowns and pickers and plain chat shows text | next | #58 |
 
 ## ReAct
@@ -97,10 +100,14 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | LangChain limits, errors and retries measured by a ReAct suite | in flight: `-reactnative` (#58) | audit I, E4 |
 | `delegate` removed; helpers are Deep Agents' `task` | done (#57) | audit E2; duplication audit A14 |
 | In-run verification, deterministic: every number traced to a tool or query result, every tool and source named present in the run record (no extra model call) | later (re-test with arm D's record) | audit E3; ADR 0006 |
+| A cheap claim check: a tool named in the final answer that the conversation never called gets one harness-written correction step | measured, not built: on the small hosted model, 0 made-up tool claims in 248 answers (the complex suite's explain, edge and conversation cases); both names a naive check flags are tools it suggests next ("a `warehouse_scan` would show…"), so a correction would remove good advice. The scripted model: 0 → 0. Re-test with a small local model | `-reactcache` |
+| A read-only call repeated in a later step of one run answered from the earlier result, with a harness-written note | measured, not built: on the small hosted model, 1 repeat of a call that had succeeded in 248 turns (a retry after a malformed result) and no stalls; a tool's data is live by default (`max_age` 0), so an earlier result is not current. `StallGuard` and `max_steps` stay the backstop. Re-test with a small local model | `-reactcache`; research: harness-written feedback cut repeats ~76% |
 | Decomposing multi-part questions (Plan-and-Solve, least-to-most), and selective self-consistency only on conflicting evidence or an unverified number, capped in cost | later | ADR 0006 |
 | Grammar-constrained tool calls for local models (llama.cpp grammars, XGrammar) | next: the chain measurement showed a 2B model writing its calls as text the server did not parse | #65; ADR 0006 |
 | The complex suite (retrieve, compute, chain, converse, explain, with edge cases) and a big-model reference answer per case | next | ADR 0006; [EVAL_PROTOCOL.md](EVAL_PROTOCOL.md) |
-| Prompt cache: memory context before the history | later | audit K1 |
+| Prompt cache: memory context before the history | done (`-reactcache`): sent with the question, after the history; the answer ending the history marked for a cache that keeps only what is marked. On the small hosted model, 15 multi-turn cases: cached share of a later turn's first call 0.70 → 0.80, of all input 0.858 → 0.877, uncached input −10%, accuracy unchanged | audit K1 |
+| Prompt cache for a model given by name: the harness's routed chat model is not a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` does nothing for it, and `ReAct` on `create_agent` has no caching middleware at all | next: mark the request for the route's provider (a capability of the route), then measure | `-reactcache` (found while measuring K1) |
+| Replayed results re-marked as dated snapshots differ from what the earlier turn sent: the next turn's cached prefix stops at the latest exchange | later: measure on long chats | `-reactcache` |
 
 ## Models and CI
 
@@ -108,7 +115,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | A model profile for a model LangChain's route does not know (an Anthropic model on the OpenAI-compatible route refuses `temperature`): look the model up in the models.dev data that LangChain's installed provider packages ship (data, not rules on names), else use one documented profile setting | later | [ADR 0004](../adr/0004-provider-neutral-models.md) |
 | Test-order flake: `tests/integration/test_fit_window.py` fails when it runs after the unit suite, on main too. Fix it: nothing may fail | next | reported against main; reproduce first |
-| Memory draft #64: CI was red before its last push, and one merge commit lacks the commit trailer. Fix both before the merge | later | memory #64 |
+| Memory draft #64: CI was red before its last push (the complexity ratchet: `replay_window`), and one merge commit lacks the commit trailer | CI fixed on `-explain2` (split in three); the trailer cannot be added without rewriting shared history | memory #64 |
 
 ## Safety and privacy
 
@@ -116,7 +123,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | Prompt injection in tool results and the memory context | **later** (by the user's decision) | audit J2 |
 | PII detection in memory and run records | **later** (by the user's decision) | audit J3 |
-| "Forget that" said in chat | later | audit H4 |
+| "Forget that" said in chat | done: `memory_forget` of the user's own statement asks a person, then forgets it as the user (`harness._forgotten`); the service names the memory it refuses (memory `-forgetid`) | audit H4 |
 
 ## Resume plan
 

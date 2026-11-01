@@ -47,7 +47,7 @@ from trellis.harness.sandbox.base import (
 #: Engine API version spoken (Docker 24 and later).
 DOCKER_SOCKET: Final = "/var/run/docker.sock"
 API_VERSION: Final = "v1.43"
-#: The image of a sandbox whose spec and provider name none (``SANDBOX_IMAGE`` names another).
+#: The image of a sandbox whose spec and provider name none (``sandbox(image=)`` names another).
 DEFAULT_IMAGE: Final = "python:3.12-slim"
 #: The label of a snapshot's image: the sandbox it was taken of (what ``delete`` removes by).
 SNAPSHOT: Final = "trellis.snapshot_of"

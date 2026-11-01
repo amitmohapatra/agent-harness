@@ -293,4 +293,6 @@ temporary directory, with no isolation) that shows the whole interface working.
 * Tests: `tests/integration/test_sandbox.py` (every adapter, calls at once, a pause, a lost
   sandbox, crashes, a timeout, governance, redaction, every ending, the reaper),
   `tests/unit/test_docker_sandbox.py` (the Engine API calls), and against the real daemon
-  `tests/live/test_live_sandbox.py`.
+  `tests/live/test_live_sandbox.py` and `tests/live/test_live_sandbox_data.py` (a data image,
+  [`tests/live/sandbox-data`](../tests/live/sandbox-data/Dockerfile): code over a kept 50k-row
+  result, an Excel workbook and a PNG chart, a missing module, two users at once).
