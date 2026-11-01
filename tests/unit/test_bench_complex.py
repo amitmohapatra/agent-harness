@@ -371,6 +371,21 @@ def test_an_export_the_run_saved_for_the_user_is_no_made_up_file() -> None:
     assert not cx.score(expect, other, [], question, saved)["correct"]  # not that file
 
 
+def test_a_chart_drawn_as_text_in_the_answer_is_no_claimed_image() -> None:
+    case = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02")
+    expect = case.turns[2].expect
+    assert expect is not None
+    answer = (
+        "I can't create a downloadable file here, since I only have data tools. Here is the "
+        "chart as text, which you can paste into a spreadsheet or document.\n"
+        "Footwear   ██████████  £379,447\nKnitwear   █████████   £346,485\n"
+        "I can also give you a CSV of the same two rows to paste in."
+    )
+    assert cx.score(expect, answer, [])["correct"]
+    claimed = "Here is the chart: [download](sandbox:/august.png). I can also give the figures."
+    assert not cx.score(expect, claimed, [])["correct"]
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",
