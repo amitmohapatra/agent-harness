@@ -27,7 +27,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import BaseModel
 
@@ -35,6 +35,7 @@ from trellis.contracts import (
     AgentError,
     ConfigurationError,
     ErrorCategory,
+    ErrorSource,
     Interrupt,
     InterruptDecision,
     InterruptReason,
@@ -638,7 +639,7 @@ def _unanswered(agent: Agent, runtime: Runtime, extracted: Extracted | None) -> 
         code=budget.NO_ANSWER,
         category=ErrorCategory.MODEL,
         message=f"the run ended with no answer: {why}",
-        source=agent.adapter.name,
+        source=cast("ErrorSource", agent.adapter.name),  # every adapter's name is a source
     )
 
 
