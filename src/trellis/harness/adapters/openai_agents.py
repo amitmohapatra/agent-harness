@@ -76,7 +76,7 @@ from trellis.harness.gateways import Capability, per_loop
 from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool, data_of
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
@@ -637,9 +637,49 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     on, and the model names routed through Bifrost when it serves the harness
     (:func:`_routed`)."""
     options = dict(runtime.framework_options)
-    if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
-        options["session"] = MemorySession(runtime)
+    if _thread_store(options) is MEMORY_THREAD:  # the harness gives the SDK the conversation
+        if runtime.run_memory is not None:
+            options["session"] = MemorySession(runtime)
+        options = _trimmed(options)
     return _routed(runtime, target, _steering(runtime, _told_unknown_tools(options)))
+
+
+def _trimmed(options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the SDK's own ``ToolOutputTrimmer`` as the run's
+    ``call_model_input_filter`` (:class:`_Trimmed`), unless the run has a filter of its own: the
+    conversation the harness gives the SDK (memory's thread, the run store's turns) does not
+    resend every old result whole on every model call. A thread the framework keeps (a session
+    of yours, OpenAI's servers) is left to it."""
+    from agents import RunConfig
+
+    config = options.get("run_config") or RunConfig()
+    if config.call_model_input_filter is not None:
+        return options
+    trimmer = _Trimmed()
+    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=trimmer)}
+
+
+class _Trimmed:
+    """The SDK's ``ToolOutputTrimmer`` with its defaults — the last two turns whole, an older
+    tool result over 500 characters cut to a 200-character preview that says so — and a cut
+    result the run keeps still naming where (``tools.results.still_kept``): ``read_file`` and
+    ``query_result`` read it whole in a later turn."""
+
+    def __init__(self) -> None:
+        from agents.extensions import ToolOutputTrimmer
+
+        self.native = ToolOutputTrimmer()
+
+    def __call__(self, data: Any) -> Any:
+        from agents.run_config import ModelInputData
+
+        given = data.model_data.input
+        trimmed = self.native(data)
+        items = [
+            results.still_kept(before, after) if before is not after else after
+            for before, after in zip(given, trimmed.input, strict=True)
+        ]
+        return ModelInputData(input=items, instructions=trimmed.instructions)
 
 
 def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:

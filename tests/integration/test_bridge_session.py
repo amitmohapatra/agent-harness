@@ -208,3 +208,88 @@ async def test_an_agent_tools_call_asks_as_the_catalog_rules() -> None:
         target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Check.")])
         paused = await h.wrap(target, id="desk").run("check o1", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+
+
+#: a result the SDK's trimmer cuts in an older turn (over its 500 characters)
+REPORT = "row " * 300
+
+
+@function_tool
+def report(name: str) -> str:
+    """A long report."""
+    return f"{name}: {REPORT}"
+
+
+def outputs(model: ScriptedModel, call: int) -> list[str]:
+    """The tool results the model was given on its ``call``-th call."""
+    return [
+        str(item["output"])
+        for item in model.inputs[call]
+        if isinstance(item, dict) and item.get("type") == "function_call_output"
+    ]
+
+
+async def test_older_turns_large_results_are_trimmed_by_the_sdks_own_trimmer(
+    memory_harness: Harness,
+) -> None:
+    """Where the harness gives the SDK the conversation (memory's thread as its session), the
+    turns before the last two reach the model with their large tool results cut to the SDK's
+    preview (its ``ToolOutputTrimmer``, the run's ``call_model_input_filter``): a long chat does
+    not resend every old result whole on every call."""
+    model = ScriptedModel([("report", {"name": "q3"}), "q3 done", "two", "three"])
+    agent = memory_harness.wrap(
+        Agent(name="s", model=model, tools=[report]),
+        id="trim",
+    )
+    for asked in ("the q3 report", "and then?", "and now?"):
+        await agent.run(asked, user="u1", thread="t1")
+        await memory_harness.writes.drain()
+    assert outputs(model, 1) == [f"q3: {REPORT}"]  # its own turn: whole
+    assert outputs(model, 2) == [f"q3: {REPORT}"]  # one turn back: whole
+    (older,) = outputs(model, 3)  # two turns back: the SDK's preview
+    assert older.startswith("[Trimmed: report output") and len(older) < 400, older
+
+
+@function_tool
+def ledger(name: str) -> str:
+    """A ledger: a table of many rows."""
+    return "name,n,units\n" + "\n".join(f"{name},{n},{n * 3}" for n in range(500))
+
+
+async def test_a_kept_result_cut_in_an_older_turn_still_says_where_it_is_kept(
+    memory_harness: Harness,
+) -> None:
+    """A table the run keeps (its path said after its rows) reaches later turns cut to the
+    SDK's preview, still naming its path: ``read_file`` and ``query_result`` read it whole."""
+    model = ScriptedModel([("ledger", {"name": "q3"}), "q3 done", "two", "three"])
+    agent = memory_harness.wrap(Agent(name="s", model=model, tools=[ledger]), id="kept")
+    for asked in ("the q3 ledger", "and then?", "and now?"):
+        await agent.run(asked, user="u1", thread="t1")
+        await memory_harness.writes.drain()
+    (whole,) = outputs(model, 1)
+    path = whole.split("also saved at ", 1)[1].split()[0].rstrip(".")
+    (older,) = outputs(model, 3)
+    assert older.startswith("[Trimmed: ledger output") and len(older) < len(whole), older
+    assert f"[kept whole at {path}: read_file or query_result reads it]" in older, older
+
+
+async def test_a_session_or_filter_of_the_teams_own_gets_no_trimmer(
+    memory_harness: Harness,
+) -> None:
+    """A team's own session keeps its own context, and a team's own input filter is theirs:
+    the harness adds no trimmer to either."""
+    from agents import RunConfig
+
+    model = ScriptedModel([("report", {"name": "q3"}), "q3 done", "two", "three"])
+    agent = memory_harness.wrap(Agent(name="s", model=model, tools=[report]), id="theirs")
+    own = SQLiteSession("mine-trim")
+    for asked in ("the q3 report", "and then?", "and now?"):
+        await agent.run(asked, user="u1", thread="t2", framework_options={"session": own})
+    assert outputs(model, 3) == [f"q3: {REPORT}"]
+    model = ScriptedModel([("report", {"name": "q3"}), "q3 done", "two", "three"])
+    agent = memory_harness.wrap(Agent(name="s", model=model, tools=[report]), id="filter")
+    config = RunConfig(call_model_input_filter=lambda data: data.model_data)
+    for asked in ("the q3 report", "and then?", "and now?"):
+        await agent.run(asked, user="u1", thread="t3", framework_options={"run_config": config})
+        await memory_harness.writes.drain()
+    assert outputs(model, 3) == [f"q3: {REPORT}"]

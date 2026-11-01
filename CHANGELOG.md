@@ -36,6 +36,11 @@ own model work follows the harness's configuration.
 
 ### Changed
 
+- OpenAI Agents: where the harness gives the SDK the conversation (memory's thread, the run
+  store's turns), a run's `call_model_input_filter` is the SDK's own `ToolOutputTrimmer`: the last
+  two turns whole, an older tool result over 500 characters cut to a 200-character preview (one
+  the run keeps still names its path). A filter of yours replaces it; your own `session` keeps
+  its own context. Before, every earlier result was resent whole on every model call.
 - The tool hints narrow what the model is offered only from 30 tools in the run
   (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name

@@ -21,6 +21,8 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
@@ -157,6 +159,25 @@ def tabled(text: str, tool: str | None = None) -> str:
 #: The fewest characters a table's row takes (``a,1`` and its line break): a shorter text
 #: cannot hold :data:`TABLE_ROWS` rows, and is not parsed.
 MIN_ROW_CHARS: Final = 4
+
+
+#: What a result cut short in an older turn adds, when it named where the run keeps it
+#: (:func:`still_kept`).
+STILL_KEPT: Final = "[kept whole at {paths}: read_file or query_result reads it]"
+_KEPT_PATH: Final = re.compile(re.escape(PREFIX) + r"/[\w-]+")
+
+
+def still_kept(before: Any, after: Any) -> Any:
+    """``after``, a tool result item a framework's trimmer cut from ``before`` (a
+    ``function_call_output``), with the paths ``before`` named where the run keeps it and the
+    cut lost: the model can still read it whole. Any other item as it is."""
+    if not (isinstance(before, dict) and isinstance(after, dict)):
+        return after
+    was, now = str(before.get("output", "")), str(after.get("output", ""))
+    lost = [p for p in dict.fromkeys(_KEPT_PATH.findall(was)) if p not in now]
+    if not lost:
+        return after
+    return {**after, "output": f"{now}\n{STILL_KEPT.format(paths=', '.join(lost))}"}
 
 
 def keep(text: str, *, tool: str | None = None) -> str | None:

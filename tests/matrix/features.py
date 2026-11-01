@@ -84,6 +84,11 @@ NATIVE_CONTEXT: Final = NA(
     "with (Deep Agents has its summarization by default; add them to create_agent)"
 )
 OWN_CONTEXT: Final = NA("the framework keeps its own context (its compaction, its trimming)")
+SDK_TRIMMER: Final = NA(
+    "native: the SDK's ToolOutputTrimmer, on where the harness gives it the conversation (older "
+    "turns' results cut to a preview, by turns, not the window's share; "
+    "tests/integration/test_bridge_session.py)"
+)
 ONE_CALL_AT_A_TIME: Final = NA(
     "the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)"
 )
@@ -1278,7 +1283,7 @@ FEATURES: Final[list[Feature]] = [
             "function": NA("a function target has no model context"),
             "langgraph": NATIVE_CONTEXT,
             "deepagents": NATIVE_CONTEXT,
-            "openai_agents": OWN_CONTEXT,
+            "openai_agents": SDK_TRIMMER,
             "claude": OWN_CONTEXT,
             "kimi": OWN_CONTEXT,
         },
