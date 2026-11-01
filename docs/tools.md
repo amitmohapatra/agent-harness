@@ -75,7 +75,10 @@ function, an OpenAPI operation, a gateway's MCP tool, whose listing carries no o
 links nothing — nothing is guessed. Once runs succeed, the memory service learns the chain as
 a procedure with its argument bindings (`step 1.sku_id` from step 0's output) and hands the
 next step and its arguments over with the hints. `benchmark/cost` measures chains
-(`--suite classes --classes chain`: two to four dependent calls, cold and reworded).
+(`--suite classes --classes chain`: two to four dependent calls, cold and reworded), and
+`benchmark/tool_chains` measures their shapes: depth, fan-out, fan-in, a failing step, an id in a
+large result, a follow-up
+([evaluation.md](evaluation.md#tool-chain-benchmark)).
 
 ## Every call
 
