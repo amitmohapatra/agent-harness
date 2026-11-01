@@ -56,7 +56,10 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | Values that change fetched fresh; replayed results dated; a stale tool kept offered | in flight: `claude/cool-maxwell-w5avo8-data` (freshness: `tool(freshness="live", max_age=)`, dated snapshots) | audit C1, C2, M5 |
 | Plain `ReAct` cuts a large result with no way back | in flight: `-data` (results kept and paged by every adapter, `FitWindow` cut says where the rest is) | audit D1, M4 |
-| Summation/aggregation without a sandbox: tool-side aggregation parameters, then a read-only query over saved results (a library, e.g. DuckDB with external access off), then a sandbox or Code Mode | in flight: `-data` (kept results written into the run's sandbox; `--classes aggregate`) | audit D2, E4 |
+| Summation/aggregation without a sandbox: tool-side aggregation parameters, then a read-only query over saved results, then a sandbox or Code Mode | exists (#66: `query_result` on SQLite) | audit D2, E4 |
+| `query_result` on DuckDB when installed (a `query` extra), SQLite as the fallback: the same tables, typing rules, function names and limits on both | next | [QUERY_ENGINE.md](QUERY_ENGINE.md), [ADR 0007](../adr/0007-query-engine.md): ties SQLite on accuracy (18/18), bounds a query's memory, a call 2x faster at 50k rows and 4.5x at 500k, 8 calls at once 6 to 9.5x faster |
+| An id past 64 bits rounded (CSV) or failing the load (JSON) in `query_result` | in flight: #83 | [QUERY_ENGINE.md](QUERY_ENGINE.md) value fidelity |
+| SQLite fallback: a query's own values are not memory-bounded (+370 MB in 0.7 s); a run's results are parsed again on every query | later (after the DuckDB switch) | [QUERY_ENGINE.md](QUERY_ENGINE.md) safety and load |
 | Agent-written memories copying a tool value | later | audit C3 |
 
 ## Tools
