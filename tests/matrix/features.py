@@ -297,41 +297,24 @@ async def cancel(w: World) -> None:
     assert finished[-1].outcome is not None and finished[-1].outcome.value == "cancelled"
 
 
-#: The run time limit of ``run_timeout``: it must run out in the tool, after the model asked
-#: for it, not before the first model call. A run reaches its tool in ~10-40 ms here, but a
-#: loaded CI runner (8 shards at once) was measured past 0.4 s before the first model call
-#: (the run then timed out with no model called): 2 s leaves that margin five times over, and
-#: ``hold`` holds far longer, so the limit still ends the run.
-RUN_LIMIT: Final = 2.0
-#: Kimi Code takes ~1.8 s to start here (a Node program, before it answers ``initialize``), once
-#: per attempt, and far longer on a loaded CI runner: the run's limit leaves this much for each
-#: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
-#: within the run's one limit; ``hold`` holds longer than either limit.
-KIMI_START_SECONDS: Final = 6.0
-#: ``elsewhere`` hands the run to another process, which builds the graph before its first model
-#: call, all within the run's one limit: on a loaded CI runner that has taken past 2 s (Deep
-#: Agents' graph, ReAct's), so the run timed out before its tool started. The hand-off gets its
-#: own margin; ``hold`` holds longer than the limit with it.
-HANDOFF_SECONDS: Final = 6.0
-
-
-def run_limit(w: World) -> float:
-    handoff = w.mode == "elsewhere"
-    if w.adapter != "kimi":
-        return RUN_LIMIT + (HANDOFF_SECONDS if handoff else 0.0)
-    starts = 2 if handoff else 1
-    return RUN_LIMIT + starts * KIMI_START_SECONDS
+#: The run time limit of ``run_timeout``: an hour, which the wall clock never reaches in a cell
+#: (the cell fails first, ``RUN_LIMIT_SECONDS``). It runs out where the cell means it to, in
+#: ``hold`` — which the model asked for — because ``hold`` lets it pass as it starts
+#: (``RunClocks.run_out``): never before, however long a loaded runner takes to reach the tool
+#: (graph builds, Kimi Code starting, the hand-off to another process). A limit of seconds on
+#: the wall clock ran out there first on loaded CI runners, whatever margin it was given.
+RUN_LIMIT: Final = 3600.0
 
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run_timeout=run_limit(w))
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run_timeout=RUN_LIMIT)
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == run_limit(w)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
     # the limit ran out where the cell means it to: in the tool, which the model asked for
-    assert d.started.is_set() and d.ran("hold") == []
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 # --------------------------------------------------------------------------- sub-agents
@@ -1666,11 +1649,13 @@ async def hook_runs(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": run_limit(w)})
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run={"run_timeout": RUN_LIMIT})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == run_limit(w)
-    assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
+    # it ran out in the tool (``RUN_LIMIT``)
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 async def run_options_queue(w: World) -> None:
