@@ -40,8 +40,9 @@ own model work follows the harness's configuration.
   call a tool again only for a value the question needs, and still never to answer with an
   earlier one (`snapshots.NOTE`). It said "call them again; never answer from the earlier
   ones", and on a turn that needed none of them ("Put that in a PDF for finance") ReAct
-  re-fetched every input and dropped why it could not make the file. Haiku, three repeats:
-  that turn 0/3 -> 3/3; the freshness cases 15/15 before and after.
+  re-fetched every input and often dropped why it could not make the file. Haiku, three
+  repeats: that turn 1/3 -> 3/3 (4 of 10 across every ReAct run on main); the freshness
+  cases 27/27 turns before and after.
 - The tool hints narrow what the model is offered only from 30 tools in the run
   (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
