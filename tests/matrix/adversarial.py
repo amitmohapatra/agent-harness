@@ -296,7 +296,7 @@ async def cancel_children(w: World) -> None:
         """Ask the leaf."""
         return str(await agent.tools.call("leaf2", message=input))
 
-    inner = _helper(w, "leaf2", leaf, [d.hold()])
+    inner = _helper(w, "leaf2", leaf, [d.hold(lambda: None)])  # held until cancelled, no limit
     outer = _helper(w, "middle2", middle, [inner])
 
     async def cancelling(run_id: str) -> None:

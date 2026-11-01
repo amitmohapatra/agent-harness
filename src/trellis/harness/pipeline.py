@@ -593,6 +593,8 @@ async def _concluded(
         result = await _failed(agent, runtime, failure, extracted)
     else:
         assert extracted is not None
+        # what the run's code wrote for its user, kept before its sandbox goes
+        await sandbox.delivered(runtime)
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)

@@ -180,6 +180,15 @@ ABSTAIN_NOTES: Final = {
     ),
 }
 
+#: The memory service's search tool, and what the note says of it when the run offers it: a
+#: detail the user gave in an earlier conversation is there, and memory's context for this
+#: question does not reach it.
+SEARCH_TOOL: Final = "memory_search"
+EARLIER_CHATS: Final = (
+    "It may be in one of the user's earlier conversations: search them first (memory_search "
+    'with kinds ["message"]) before you say a detail is missing.'
+)
+
 
 def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:
     """The tokens the replayed conversation may take of a model reading ``window`` tokens: what
@@ -1032,6 +1041,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
+        if note is not None and SEARCH_TOOL in runtime.toolbox:
+            note = f"{note}\n{EARLIER_CHATS}"
         parts = (pushed.rendered, note, snapshots.note(stale))
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None

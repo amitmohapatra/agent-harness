@@ -4,6 +4,7 @@ cell: the outside world they touch)."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any, Final, TypedDict
 
 from trellis import current, tool
@@ -21,7 +22,8 @@ SECRET: Final = "sk-live0123456789abcdefghij"
 HUGE: Final = MAX_CHECKPOINT_BYTES + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).
 WAIT_SECONDS: Final = 1.0
-#: How long ``hold`` holds at most: far past any run time limit a cell sets, which ends it.
+#: How long ``hold`` holds at most: the run's time limit, which it lets pass as it starts,
+#: ends it long before.
 HOLD_SECONDS: Final = 30.0
 
 
@@ -118,11 +120,15 @@ class Desk:
 
         return wait
 
-    def hold(self) -> Any:
+    def hold(self, run_out: Callable[[], None]) -> Any:
+        """``run_out`` lets the run's time limit pass (``World.clocks.run_out``): ``hold`` calls
+        it once it started, so the limit runs out in the tool, never before it."""
+
         @tool(side_effects="read")
         async def hold() -> str:
             """Hold until the run's time runs out."""
             self.started.set()
+            run_out()
             await asyncio.sleep(HOLD_SECONDS)
             self.done.append(("hold", {}))
             return "held"

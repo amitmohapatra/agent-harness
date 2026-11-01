@@ -31,6 +31,8 @@ class ScriptedChatModel(BaseChatModel):
     seen: list[list[BaseMessage]] = Field(default_factory=list)
     #: what each call was bound with: the tools' names, ``tool_choice`` and the settings
     requests: list[dict[str, Any]] = Field(default_factory=list)
+    #: each binding's tools' descriptions, by name
+    described: list[dict[str, str]] = Field(default_factory=list)
     #: the input and output tokens every reply reports (none by default); an input of ``None``:
     #: the size of the request it was sent, counted as ``middleware.FitWindow`` counts one (its
     #: messages and its tools), so the window fitting learns no false ratio from it
@@ -43,8 +45,9 @@ class ScriptedChatModel(BaseChatModel):
         return "scripted"
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> Runnable[Any, Any]:  # type: ignore[override]
-        names = [convert_to_openai_tool(t)["function"]["name"] for t in tools]
-        return self.bind(tools=names, **{OFFERED: list(tools)}, **kwargs)
+        functions = [convert_to_openai_tool(t)["function"] for t in tools]
+        self.described.append({f["name"]: f.get("description", "") for f in functions})
+        return self.bind(tools=[f["name"] for f in functions], **{OFFERED: list(tools)}, **kwargs)
 
     async def _agenerate(
         self,
