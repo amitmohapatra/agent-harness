@@ -70,6 +70,11 @@ own model work follows the harness's configuration.
   model the call is made with, in Deep Agents' own one's place, and marks the answer that
   ends the history. Any other provider's request is unchanged. The small hosted model by name,
   18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- A live tool's value from an earlier turn reads as out of date in every adapter, not only
+  where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
+  its own thread (its checkpointer), so its earlier results are marked in the request it sends
+  (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
+  marks them as memory's window does. In both, the tool stays offered.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
