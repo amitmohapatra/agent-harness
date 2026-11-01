@@ -16,6 +16,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend, StateBackend
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from langchain_core.tools import tool as lc_tool
 
 from tests.support.arm import arm
@@ -178,12 +179,13 @@ def test_a_sandbox_is_a_backend_and_an_agent_a_sub_agent(harness: Harness) -> No
 
 def test_a_declarative_sub_agent_is_given_the_loops_guards_and_a_routed_model() -> None:
     mine = ModelCallLimitMiddleware(run_limit=2)
+    cached = AnthropicPromptCachingMiddleware(ttl="1h")
     spec = _native(
         {
             "name": "payer",
             "description": "pays",
             "model": "gpt-4o-mini",
-            "middleware": [mine],
+            "middleware": [mine, cached],
             "tools": [wire, stock_lc],
             "interrupt_on": {"wire": True, "stock_lc": False, "write_file": True},
         },
@@ -196,9 +198,11 @@ def test_a_declarative_sub_agent_is_given_the_loops_guards_and_a_routed_model() 
         "ModelCallLimitMiddleware",
         "StallGuard",
         "ModelHooks",
+        "AnthropicPromptCachingMiddleware",  # in Deep Agents' own one's place
     ]
     assert spec["middleware"][0] is mine  # its own kept
     assert spec["middleware"][2].timeout == 5.0
+    assert spec["middleware"][3].native is cached  # its own caching, for a routed model too
     by_name = {t.name: t for t in spec["tools"]}
     assert by_name["wire"].metadata["side_effects"] == "irreversible"  # the catalog's ask
     assert "side_effects" not in (by_name["stock_lc"].metadata or {})
