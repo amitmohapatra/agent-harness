@@ -32,6 +32,7 @@ from trellis.harness.adapters.acp import KIMI_BUILTINS
 from trellis.harness.adapters.claude import RESUMED_CALL
 from trellis.harness.budget import Budget
 from trellis.harness.sandbox import sandbox
+from trellis.harness.tools.bridge import TURN_STALLED
 
 pytestmark = needs_kimi
 lookups: list[str] = []
@@ -386,3 +387,46 @@ async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
     assert warned == ["stopped: the step limit (1) was reached"]
     # Kimi's session keeps it: told it holds for this turn only (a later turn calls tools again)
     assert TURN_LIMIT.format(limit=1) in endpoint.said()
+
+
+#: More times than Kimi's own repeat breaker lets one call repeat before it ends the turn (12).
+LOOPS = 20
+
+
+async def test_a_loop_kimis_repeat_breaker_ends_is_asked_once_for_an_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A model looping on one harness call (ADV-9): the bridge refuses the third (``STALLED``)
+    and Kimi's own repeat breaker ends the turn at the twelfth with no answer (its log's
+    ``stopReason`` ``repeat_breaker``; ACP's ``end_turn``). As at its step limit, the run asks
+    once more in the same session, told the turn stalled: its answer is the run's."""
+    lookups.clear()
+    endpoint.plan = [("lookup", {"topic": "tea"})] * LOOPS
+    agent = arm(harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-loop"), [lookup])
+    events = [e async for e in agent.stream("tea?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.startswith("Done."), said[:200]  # the planned model's answer: what it read last
+    assert lookups == ["tea", "tea"]
+    assert "You called lookup with the same arguments 3 times in a row" in endpoint.said()
+    warned = [e.data.get("code") for e in events if e.data.get("name") == "warning"]
+    assert warned == ["stalled"]  # the bridge's, once
+    assert TURN_STALLED in endpoint.said()
+    assert len(endpoint.requests) < LOOPS  # told so, the model answered
+
+
+async def test_a_loop_on_kimis_own_tool_is_asked_once_for_an_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's own tools do not go through the bridge's refusal: its repeat breaker alone ends
+    the loop, with no answer — asked once more the same way, said as a ``stalled`` warning."""
+    endpoint.plan = [("Glob", {"pattern": "*.md"})] * LOOPS
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-own-loop")
+    events = [e async for e in agent.stream("which notes?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.startswith("Done."), said[:200]
+    warned = [e.data for e in events if e.data.get("name") == "warning"]
+    assert [w["code"] for w in warned] == ["stalled"], warned
+    assert TURN_STALLED in endpoint.said()
+    assert len(endpoint.requests) < LOOPS  # told so, the model answered

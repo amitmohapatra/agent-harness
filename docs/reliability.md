@@ -345,7 +345,20 @@ one step: the reads at once, the writes one at a time in the model's order —
   again. Do not call tools: answer now with what you have, and say what went wrong.` — the text
   `StallGuard` tells the model on a stall (`bridge.STALLED`) — (a
   `stalled` warning on the run's stream, once). `ReAct` and a graph with `middleware()` stop
-  the loop a step earlier, in `StallGuard`.
+  the loop a step earlier, in `StallGuard`. OpenAI Agents, which offers its tools per turn,
+  offers none on the turn after (`bridge.stalled`), so the model's reply is the run's answer,
+  as `StallGuard`'s last call.
+* A run never ends `SUCCESS` with no answer. A model may spend its reply on working (rows summed
+  by hand) and reach its output limit (`max_tokens`) before it answers: no text, no tool call.
+  Where the framework has no way back of its own — LangChain's loop ends on a reply with no
+  tool call: `ReAct`, a graph with `middleware()` (`StallGuard`), and any `create_agent` or
+  Deep Agents graph (the harness's narrowing copy) — the model is called once more, told
+  `Your last reply reached the output limit before it gave an answer...` (`budget.CUT_OFF`) and
+  offered no tool, and its answer is the run's (an `output_limit` warning); cut again, the run
+  stops saying so. Claude Code continues such a reply itself, and Kimi asks again; OpenAI
+  Agents' chat model raises its own error. Any run that would still end with no answer (none,
+  or blank text) ends `ERROR` `NO_ANSWER`, saying whether its last reply reached the output
+  limit or had no text; a function target's answer is what it returns.
 * Identical calls made at once that are not one step's repeats (a function's
   `asyncio.gather`, a framework's step the harness does not read) take their turn: one
   runs, then the next, in the order they were made, so each has its own occurrence in the

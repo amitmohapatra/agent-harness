@@ -71,15 +71,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
             raises=AssertionError,
         ),
     ),
-    (
-        {"features": {"X06"}, "adapters": {"openai_agents"}},
-        Bug(
-            "ADV-9",
-            "a looping OpenAI Agents run ends ERROR (MaxTurnsExceeded) with no answer: the "
-            "harness does not turn the SDK's own limit into a last answer, as StepLimit does",
-            raises=AssertionError,
-        ),
-    ),
 ]
 
 

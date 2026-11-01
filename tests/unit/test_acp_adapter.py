@@ -90,8 +90,10 @@ def test_a_calls_arguments_and_output_as_the_agent_shows_them() -> None:
 
 def test_the_native_tools_are_kimis_own_by_their_risk() -> None:
     assert acp.native_spec("Bash", KIMI).side_effects == "irreversible"
-    assert acp.native_spec("Agent", KIMI).tags == ["helper"]
+    assert acp.native_spec("Agent", KIMI).tags == ["builtin", "helper"]
+    assert acp.native_spec("Read", KIMI).tags == ["builtin"]  # the framework's: not counted
     assert acp.native_spec("mcp__crm__find", KIMI).server == "crm"
+    assert acp.native_spec("mcp__crm__find", KIMI).tags == []  # its servers' tools: the run's
     assert acp.native_spec("Other", None).side_effects == "write"
 
 

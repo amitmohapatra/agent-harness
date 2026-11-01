@@ -12,8 +12,9 @@ import pytest
 
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
+from tests.support.planned import FINAL
 from trellis import Harness, Runtime, tool
-from trellis.contracts import RunEventType
+from trellis.contracts import RunEvent, RunEventType
 from trellis.harness.tools.bridge import MAX_REPEATS, STALLED
 
 LOOPS = 8
@@ -44,14 +45,42 @@ async def test_the_same_call_made_over_and_over_runs_twice(
     assert finished.outcome is not None and finished.outcome.value == "success", finished
     assert ran == ["tides"] * (MAX_REPEATS - 1)
     assert finished.data["result"], "the run ended with no answer"
-    warnings = [
-        e.data
+    assert _warned(events).count("stalled") == 1, _warned(events)
+
+
+async def test_openai_agents_answers_on_the_call_after_the_stall(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """OpenAI Agents offers its tools per turn (the SDK's ``FunctionTool.is_enabled``): the
+    call after the stall is offered none, so the model's reply to ``STALLED`` is the run's
+    answer — not the SDK's ``max_turns`` (10) seven calls later, answered about the limit
+    (ADV-9)."""
+    from agents.run_config import DEFAULT_MAX_TURNS
+
+    ran: list[str] = []
+    seen: list[Any] = []
+    plan = [("look", {"topic": "tides"})] * (DEFAULT_MAX_TURNS * 3)
+    target, tools = await BUILDERS["openai_agents"](
+        harness, [lookup(ran)], tmp_path, plan, seen=seen
+    )
+    agent = arm(harness.wrap(target, id="loop-oa"), tools)
+    events = [e async for e in agent.stream("tides?", user="u")]
+    finished, model = events[-1], seen[0]
+    assert finished.outcome is not None and finished.outcome.value == "success", finished
+    assert ran == ["tides"] * (MAX_REPEATS - 1)
+    assert [bool(offered) for offered in model.tools] == [True] * MAX_REPEATS + [False]
+    stalled = STALLED.format(tool="look", times=MAX_REPEATS)
+    assert finished.data["result"] == FINAL.format(last=stalled)
+    assert _warned(events) == ["stalled"]
+
+
+def _warned(events: list[RunEvent]) -> list[str]:
+    """The codes of the run's warnings, in order."""
+    return [
+        e.data["code"]
         for e in events
-        if e.type is RunEventType.CUSTOM
-        and e.data.get("name") == "warning"
-        and e.data.get("code") == "stalled"
+        if e.type is RunEventType.CUSTOM and e.data.get("name") == "warning"
     ]
-    assert len(warnings) == 1, warnings
 
 
 async def test_a_different_call_between_two_starts_the_count_again(harness: Harness) -> None:
