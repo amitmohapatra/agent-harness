@@ -209,7 +209,7 @@ QUESTIONS: Final = [
         "WHERE stock = 0 GROUP BY big ORDER BY big",
         "big,n,r\n"
         + "\n".join(
-            f"{int(big)},{sum(1 for _, u, r in SKUS if u == 0 and (r > 50_000) == big)},"
+            f"{{{big}}},{sum(1 for _, u, r in SKUS if u == 0 and (r > 50_000) == big)},"
             f"{sum(r for _, u, r in SKUS if u == 0 and (r > 50_000) == big)}"
             for big in (False, True)
             if any(u == 0 and (r > 50_000) == big for _, u, r in SKUS)
@@ -218,16 +218,25 @@ QUESTIONS: Final = [
 ]
 
 
+#: A boolean in an answer (``{True}``, ``{False}`` in :data:`QUESTIONS`), as each engine writes it.
+BOOLEANS: Final = {
+    "duckdb": {"True": "true", "False": "false"},
+    "sqlite": {"True": "1", "False": "0"},
+}
+
+
 @pytest.mark.parametrize("question", range(len(QUESTIONS)))
 @pytest.mark.parametrize(
     "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
 )
 async def test_sku_questions_are_answered_exactly_over_every_row_with_no_sandbox(
-    harness: Harness, framework: str, question: int, tmp_path: Path
+    harness: Harness, engine: str, framework: str, question: int, tmp_path: Path
 ) -> None:
     """No sandbox, no Code Mode: the kept result is a table ``query_result`` runs SQL over
-    (``tools.query``, Python's own SQLite) — each answer equals the one computed in Python."""
+    (``tools.query``, DuckDB or SQLite) — each answer equals the one computed in Python (a
+    boolean as each engine writes it: DuckDB's ``true``, SQLite's ``1``)."""
     _, sql, answer = QUESTIONS[question]
+    answer = answer.format_map(BOOLEANS[engine])
     plan: list[Call] = [("inventory", {}), ("query_result", {"file_path": KEPT, "sql": sql})]
     target, own = await BUILDERS[framework](harness, [inventory], tmp_path, plan)
     result = await arm(harness.wrap(target, id=f"sql-{framework}"), own).run("q", user="u")
@@ -249,7 +258,7 @@ async def test_the_stub_names_the_table_and_its_columns_before_the_preview(
     assert "query_result" not in names(model.requests[0])
 
 
-async def test_a_result_deep_agents_saved_is_queried_too(harness: Harness) -> None:
+async def test_a_result_deep_agents_saved_is_queried_too(harness: Harness, engine: str) -> None:
     """``ReAct`` given a backend: Deep Agents saves the result (its own path, in the graph's
     state), and ``query_result`` runs over it the same way."""
 
@@ -397,7 +406,7 @@ def kept_path(text: str) -> str:
     "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
 )
 async def test_three_tools_results_are_joined_in_one_query_exactly(
-    harness: Harness, framework: str, sql: str, tmp_path: Path
+    harness: Harness, engine: str, framework: str, sql: str, tmp_path: Path
 ) -> None:
     """50,000 SKUs from one tool, their sales from another, their lead times from a third that
     pages (fetched to its last page): every saved result is a table named by its tool, and one
@@ -417,7 +426,7 @@ async def test_three_tools_results_are_joined_in_one_query_exactly(
 
 
 async def test_a_join_over_50000_rows_costs_the_model_a_few_thousand_tokens(
-    harness: Harness,
+    harness: Harness, engine: str
 ) -> None:
     """What the model is sent in all — three previews and one small answer, never the rows —
     and how long the query takes (``tools.query.SECONDS`` at most)."""
@@ -474,7 +483,7 @@ def few_lines() -> str:
 
 
 async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand(
-    harness: Harness,
+    harness: Harness, engine: str
 ) -> None:
     """A result of many rows that fits is read whole and also kept as a table: its message
     says so, ``query_result`` is offered and counts over every row exactly."""
@@ -504,7 +513,7 @@ async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:
     "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
 )
 async def test_every_framework_counts_a_table_read_whole_exactly(
-    harness: Harness, framework: str, tmp_path: Path
+    harness: Harness, engine: str, framework: str, tmp_path: Path
 ) -> None:
     plan: list[Call] = [
         ("sales_lines", {}),

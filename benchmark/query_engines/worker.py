@@ -24,6 +24,9 @@ from typing import Any
 from benchmark import procstat
 from benchmark.query_engines import engines, suite
 
+#: The harness's own engines (``tools.query``), run through its own ``_answer``.
+HARNESS = ("sqlite", "duckdb")
+
 
 def _texts(data: Path, fmt: str) -> dict[str, str]:
     return {
@@ -108,7 +111,7 @@ def _answer(engine: Any, db: Any, q: suite.Question, want: list[list[Any]]) -> d
 
 def concurrent(args: dict[str, Any]) -> dict[str, Any]:
     """``args["calls"]`` calls at once, each loading the texts and asking one question — the
-    harness's own path for SQLite (``query._answer``: its 4-at-once limit and its 5 s)."""
+    harness's own path for its engines (``query._answer``: its 4-at-once limit and its 5 s)."""
     name = args["engine"]
     texts = _texts(Path(args["data"]), "csv")
     sql = next(q for q in suite.QUESTIONS if q.name == args["question"]).sql
@@ -116,8 +119,12 @@ def concurrent(args: dict[str, Any]) -> dict[str, Any]:
     gate = threading.Barrier(args["calls"])
     latencies: list[float] = []
     errors: list[str] = []
-    if name == "sqlite":
+    if name in HARNESS:
         from trellis.harness.tools import query
+
+        harnessed = engines.ENGINES[name]()
+        assert isinstance(harnessed, engines.Harness)
+        query.ENGINE = harnessed.engine
 
         def call() -> None:
             gate.wait()
@@ -228,23 +235,14 @@ def _probes(name: str, folder: Path) -> dict[str, str]:
 
 
 def _timeout(name: str, engine: Any, db: Any, texts: dict[str, str]) -> str:
-    """How an endless query is stopped after 2 s (SQLite: the harness's own 5 s)."""
+    """How an endless query is stopped (the harness's engines: its own 5 s)."""
     start = time.perf_counter()
-    if name == "sqlite":
+    if name in HARNESS:
         from trellis.harness.tools import query
 
+        query.ENGINE = engine.engine
         said = query._answer(texts, "ledger", ENDLESS, (), call=query._Call())
         return f"{said[:60]} after {time.perf_counter() - start:.1f} s"
-    if name == "duckdb":
-        timer = threading.Timer(2.0, db.interrupt)
-        timer.start()
-        try:
-            engine.run(db, ENDLESS)
-            return "ran to the end"
-        except Exception as exc:
-            return f"stopped ({type(exc).__name__}) after {time.perf_counter() - start:.1f} s"
-        finally:
-            timer.cancel()
     return "no way to interrupt a running query (not run)"
 
 

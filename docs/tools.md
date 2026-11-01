@@ -136,21 +136,25 @@ has to. In order of preference:
    parameter with no description);
 2. **`query_result`**: offered with `read_file` whenever a result is kept, on every adapter
    (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi):
-   a read-only SQL `SELECT` over every row, in process (`tools/query.py`: Python's own SQLite,
-   no dependency, no sandbox). Every result the run saved is a table named by the tool that
-   returned it (`result` is the file asked about), so one query joins results of several tools;
-   a JSON array of objects (or the first one a JSON object holds), CSV with a header
-   (`,` tab `;` `|`), else one row per line, with whole-number, number and text columns. Besides
-   SQLite's arithmetic, `CASE`, math, date and window functions (a moving average, `lag` for
-   growth), it has `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `corr`,
-   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` (named as PostgreSQL and DuckDB
-   name them). Only reading runs (an authorizer: `SELECT` and functions; never a write,
-   `ATTACH`, a `PRAGMA` or an extension), on a database made for the query and closed after it
-   whatever happens, in a worker thread (4 at once in a process): a query runs at most 5 s
-   (a cancelled run interrupts it), loads at most 64 MB of its own run's results (never
-   another run's), holds at most 8 MB of sort memory (more spills to SQLite's temporary
-   files), and answers at most 200 rows and 20,000 characters — the model reads the small
-   answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
+   a read-only SQL `SELECT` over every row, in process, no sandbox (`tools/query.py`). It runs
+   on DuckDB when the `query` extra is installed, else on Python's own SQLite (no dependency):
+   chosen by what is installed, never by a setting
+   ([ADR 0007](adr/0007-query-engine.md)); the description names the engine, so the model
+   writes its SQL. Every result the run saved is a table named by the tool that returned it
+   (`result` is the file asked about), so one query joins results of several tools; a JSON
+   array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
+   `|`), else one row per line, with whole-number, number and text columns typed alike on
+   both engines (a code such as `007`, or an id past 64 bits, stays text). Besides arithmetic,
+   `CASE`, math, date and window functions (a moving average, `lag` for growth), it has
+   `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `julianday(d)`, `corr`,
+   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` on both. Only reading runs (one
+   `SELECT`; never a write, another file, the network, an extension or a setting: SQLite's
+   authorizer, DuckDB locked after loading), on a database made for the query and closed
+   after it whatever happens, in a worker thread (4 at once in a process): a query runs at
+   most 5 s (a cancelled run interrupts it), loads at most 64 MB of its own run's results
+   (never another run's), holds at most 512 MB (DuckDB's `memory_limit`; SQLite's pages, and
+   8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
+   and 20,000 characters — the model reads the small answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
    its result) is fetched to its last page in one call (`tools/pages.py`, at most 200 pages),
    so its rows are queried whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
