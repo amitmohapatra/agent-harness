@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import sys
 import time
@@ -2649,16 +2650,23 @@ _ASKS: Final = re.compile(
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
 #: above the line").
 _NOT_IN: Final = re.compile(
-    r"(?:[^.\n]|\.(?=\S))*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
-    r"(?:times|more than) (?:any|every|all) other)\b"
-    r"(?:[^.\n]|\.(?=\S))*",
+    r"\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
+    r"(?:times|more than) (?:any|every|all) other)\b",
     re.IGNORECASE,
 )
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
-_EARLIER: Final = re.compile(
-    r"(?:[^.\n]|\.(?=\S))*\b(?:earlier|previously|before|down from|up from)\b(?:[^.\n]|\.(?=\S))*",
-    re.IGNORECASE,
-)
+_EARLIER: Final = re.compile(r"\b(?:earlier|previously|before|down from|up from)\b", re.IGNORECASE)
+#: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
+_SENTENCE_END: Final = re.compile(r"(\n|\.(?!\S))")
+
+
+def _blanked(words: re.Pattern[str], text: str) -> str:
+    """``text`` with each sentence that holds one of ``words`` replaced by a space, in one pass
+    over it (splitting at :data:`_SENTENCE_END`, then one search a sentence: linear time)."""
+    parts = _SENTENCE_END.split(text)  # the sentences, each followed by its end
+    return "".join(p if n % 2 or not words.search(p) else " " for n, p in enumerate(parts))
+
+
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
 _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
@@ -2684,9 +2692,11 @@ def numbers(answer: str) -> list[float]:
     out = []
     for m in _NUMBER.findall(answer.replace("\u2212", "-")):
         try:
-            out.append(float(m.replace(",", "")))
+            found = float(m.replace(",", ""))
         except ValueError:
             continue
+        if math.isfinite(found):  # a run of digits past a float's range is no figure
+            out.append(found)
     return out
 
 
@@ -2843,9 +2853,9 @@ def score(
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
     # a set's wrong member named only as on the other side of the line is no member; a right
     # figure's earlier value, said as earlier, is not the answer
-    said = _NOT_IN.sub(" ", a) if k == "set" else a
+    said = _blanked(_NOT_IN, a) if k == "set" else a
     if k in ("number", "record") and not missing:
-        said = _EARLIER.sub(" ", said)
+        said = _blanked(_EARLIER, said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's

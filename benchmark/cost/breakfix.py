@@ -14,6 +14,8 @@ their score stays honest. Categories: ``bf_past``, ``bf_analytics``, ``bf_explai
 
 from __future__ import annotations
 
+import functools
+import itertools
 from collections.abc import Callable
 from typing import Any, Final
 
@@ -57,6 +59,7 @@ def cases() -> list[Any]:
     def formula(review: int = 7) -> str:
         return cx.FORMULA.format(review=review)
 
+    @functools.cache  # each SKU's average once a build: a scan of the sales lines
     def avg28(sku: str, region: str | None) -> float:
         return r.truth_avg_daily_units(w, sku, start=cx.SEP28[0], end=cx.SEP28[1], region=region)
 
@@ -81,8 +84,9 @@ def cases() -> list[Any]:
         return (sku, w.skus[sku].name)
 
     def first(pick: Callable[[r.Sku], bool], skip: int = 0) -> r.Sku:
-        found = [k for k in sorted(w.skus.values(), key=lambda k: k.sku) if pick(k)]
-        return found[skip]
+        """The SKU after ``skip`` others that ``pick`` takes, in SKU order: the rest unchecked."""
+        found = (k for k in sorted(w.skus.values(), key=lambda k: k.sku) if pick(k))
+        return next(itertools.islice(found, skip, None))
 
     def moves_north(k: r.Sku) -> bool:
         """Its north reorder quantity changes when the clock ticks once (and is above 0)."""
