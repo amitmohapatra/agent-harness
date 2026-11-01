@@ -57,6 +57,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | F28c tool chains: said in the descriptions, kept whole when the hints narrow | yes 35 | yes 35 | no (2) | yes 35 | yes 35 | yes 35 | yes 35 | yes 35 |
 | F17 the key's MCP tools (through the gateway) | yes 35 | yes 35 | yes 35 | yes 35 | yes 35 | yes 35 | yes 35 | yes 35 |
 | F18s MCP servers of the agent's own: a server over stdio, its tools governed and journaled | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
+| F18e MCP elicitation: a server's question in a call pauses the run, the answer goes back | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F19 Code Mode: a script's nested calls are recorded from the gateway's log | yes 42 | yes 42 | yes 42 | yes 42 | yes 42 | yes 42 | yes 42 | yes 42 |
 | F49 stored prompts: pinned per run and recorded | yes 28 | yes 28 | no (2) | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F55 online judges score sampled runs | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
@@ -126,31 +127,32 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 | F28c tool chains: said in the descriptions, kept whole when the hints narrow | no (51) |
 | F17 the key's MCP tools (through the gateway) | yes 1 |
 | F18s MCP servers of the agent's own: a server over stdio, its tools governed and journaled | no (52) |
-| F19 Code Mode: a script's nested calls are recorded from the gateway's log | no (53) |
-| F49 stored prompts: pinned per run and recorded | no (54) |
+| F18e MCP elicitation: a server's question in a call pauses the run, the answer goes back | no (53) |
+| F19 Code Mode: a script's nested calls are recorded from the gateway's log | no (54) |
+| F49 stored prompts: pinned per run and recorded | no (55) |
 | F55 online judges score sampled runs | yes 1 |
 | F54 grounding: the answer checked against its context | yes 1 |
-| F57 tracing: run and tool spans | no (55) |
+| F57 tracing: run and tool spans | no (56) |
 | F61 redaction: credentials never reach a trace; the rest goes as it is | yes 1 |
 | F16 a2a(): a remote A2A agent as a tool | yes 1 |
-| F62 AG-UI: numbered events, the answer, a reconnect replays | no (56) |
-| F63 A2A: the task is the run, submitted to completed | no (56) |
+| F62 AG-UI: numbered events, the answer, a reconnect replays | no (57) |
+| F63 A2A: the task is the run, submitted to completed | no (57) |
 | F06 schedules: a schedule fires a run for its person | no (42) |
 | F03 durable workers: a queued run is claimed and finished by a worker | no (42) |
-| F10 the agent's version (and time limit) recorded with every run it starts | no (57) |
+| F10 the agent's version (and time limit) recorded with every run it starts | no (58) |
 | F71d hooks: before_tool denies a call (never run, the model reads why) | yes 1 |
 | F71w hooks: before_tool rewrites a call's arguments | yes 1 |
 | F71a hooks: before_tool asks a person first | yes 1 |
 | F71t hooks: after_tool replaces what the model reads | yes 1 |
-| F71r hooks: on_run_start / on_run_end around every attempt | no (58) |
-| F09r a run's own time limit: run/stream/start/schedule(run_timeout=) | no (59) |
-| F09q a queued run's own queue order: start/schedule(priority=, concurrency_key=) | no (60) |
-| F75r a run's own without=: memory off for one run, kept across its attempts | no (61) |
-| F70 the framework's own run options: a run's over its agent's, kept across attempts | no (62) |
-| F73 sandbox: write, exec across a pause, one sandbox per run, deleted at its end | no (63) |
-| SEL the selection: everything on works together, everything off leaves no trace | no (64) |
-| F34 an approval rule in code | no (65) |
-| F36v2 HITL v2: options with labels, several answers | no (65) |
+| F71r hooks: on_run_start / on_run_end around every attempt | no (59) |
+| F09r a run's own time limit: run/stream/start/schedule(run_timeout=) | no (60) |
+| F09q a queued run's own queue order: start/schedule(priority=, concurrency_key=) | no (61) |
+| F75r a run's own without=: memory off for one run, kept across its attempts | no (62) |
+| F70 the framework's own run options: a run's over its agent's, kept across attempts | no (63) |
+| F73 sandbox: write, exec across a pause, one sandbox per run, deleted at its end | no (64) |
+| SEL the selection: everything on works together, everything off leaves no trace | no (65) |
+| F34 an approval rule in code | no (66) |
+| F36v2 HITL v2: options with labels, several answers | no (66) |
 
 ### What the Kimi Code (ACP) column does not show
 
@@ -214,16 +216,17 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 50. by design: memory.tool_hints() ranks the tools; your code offers the ones it picks
 51. by design: the descriptions are the toolbox's; your code offers the tools
 52. Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools
-53. Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk
-54. by design: your code reads the prompt from Bifrost's prompt repository itself (h.prompt is the Way 1 form)
-55. by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)
-56. Way 1 only by design (README: surfaces are the harness's)
-57. RunStart.agent_version: your code sets it
-58. no run of the harness's in Way 2: your code has its own
-59. RunStart.timeout_seconds: your code sets it (F09's Way 2 row)
-60. RunStart/ScheduleSpec.priority: your code sets it (F09's Way 2 row)
-61. Way 2 selects by import
-62. Way 2 calls the framework itself, with its own options
-63. sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)
-64. Way 2 selects by import: each block is used or not by your own code
-65. probed in Way 1; the plan names no Way 2 form yet
+53. Way 2 gives the MCP SDK's client an elicitation callback of its own
+54. Code Mode is the gateway's: Way 2 calls its meta-tools through bifrost-sdk
+55. by design: your code reads the prompt from Bifrost's prompt repository itself (h.prompt is the Way 1 form)
+56. by design: OpenTelemetry is the block: your code's own spans, which the SDKs continue (traceparent)
+57. Way 1 only by design (README: surfaces are the harness's)
+58. RunStart.agent_version: your code sets it
+59. no run of the harness's in Way 2: your code has its own
+60. RunStart.timeout_seconds: your code sets it (F09's Way 2 row)
+61. RunStart/ScheduleSpec.priority: your code sets it (F09's Way 2 row)
+62. Way 2 selects by import
+63. Way 2 calls the framework itself, with its own options
+64. sandbox tools are harness tools: they run in a harness run (Way 1, with blocks)
+65. Way 2 selects by import: each block is used or not by your own code
+66. probed in Way 1; the plan names no Way 2 form yet

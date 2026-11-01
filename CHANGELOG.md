@@ -44,10 +44,17 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
+  says the file is the run's own scratch copy, which the user cannot open or download
+  (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
+  graph's state and told the user to open it (break-and-fix round 1, Deep Agents).
 - A conversation is no longer lost when memory fails mid-chat. Where memory replays the
   conversation (its window) and its context call fails (an outage, the circuit open), the
   earlier turns come from the run store, as with memory off; before, the model was sent the
   question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
+- OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
+  on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
+  that ended the run with no answer (ADV-8).
 - A blank message (empty, or whitespace only) opens no run: `run`, `stream` and `start` raise
   `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
   model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
@@ -73,6 +80,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- MCP elicitation: an `mcp(...)` server that asks the person in the middle of a call pauses
+  the run as `ask` does — one field of a few values a choice (a dropdown), any other form a
+  form with the server's schema (a `format: date` field a date picker), a link a choice — and
+  the answer goes back to the server when the run resumes, on both MCP protocol eras
+  (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
 - A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
   `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
   else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
@@ -85,6 +97,18 @@ own model work follows the harness's configuration.
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
   its cut naming the `read_file` call that reads on from there.
+- `query_result` runs on DuckDB when the new `query` extra is installed (in `all`), and on
+  Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
+  one contract on both (the description names the engine; the same tables, column typing,
+  `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
+  Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
+  JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
+  query builds is at most 64 MB, and a query past its time is interrupted by a watcher
+  thread on either engine.
 - `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
   of the run's saved results — each a table named by its tool, so one query joins them — with
   formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
