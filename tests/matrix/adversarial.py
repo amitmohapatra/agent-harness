@@ -562,7 +562,6 @@ SPENT_GAP: Final = Gap(
     "a run's tokens, model calls and cost are kept in its journal while it works and dropped at its "
     "end: neither its RUN_FINISHED event nor its record says what it spent",
 )
-FILES_GAP: Final = Gap("ADVfiles", "no file store on main: a run cannot hand its user a file (#91)")
 
 
 # --------------------------------------------------------------------------- the rows
@@ -690,8 +689,7 @@ ADVERSARIAL: Final = [
         "a file store (TRELLIS_FILES_URL)",
         file_link,
         modes=_only("run", reason=DIRECT),
-        adapters=dict.fromkeys(ADAPTERS, FILES_GAP),
-        way2=NA("no file store yet"),
+        way2=NA("a block keeps no file for a run's user"),
     ),
     Feature(
         "X14",

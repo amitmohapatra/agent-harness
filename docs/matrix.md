@@ -89,7 +89,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | X02 a message to a busy conversation: queued, interrupting, steering | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) |
 | X03 a burst of twenty runs at once: each ends well with its own answer | partly 2 (38) | partly 2 (38) | no (2) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) |
 | X04 a slow run store: every call 30 ms late, the run still ends well | partly 4 (39) | partly 4 (39) | partly 4 (39) | partly 4 (39) | partly 4 (39) | partly 4 (39) | partly 4 (39) | partly 4 (39) |
-| X05 malformed tool calls (an unknown tool, a wrong type): answered, and the run goes on | partly 6 (40) | partly 6 (40) | no (2) | partly 6 (40) | partly 6 (40) | partly 6 (40), waits on ADV-8 | partly 6 (40) | partly 6 (40) |
+| X05 malformed tool calls (an unknown tool, a wrong type): answered, and the run goes on | partly 6 (40) | partly 6 (40) | no (2) | partly 6 (40) | partly 6 (40) | partly 6 (40) | partly 6 (40) | partly 6 (40) |
 | X06 a model repeating one call: stopped well before, and the run still answers | partly 6 (41), waits on ADV-4 | partly 6 (41), waits on ADV-4 | no (2) | partly 6 (41), waits on ADV-9 | partly 6 (41), waits on ADV-9 | partly 6 (41), waits on ADV-9 | partly 6 (41), waits on ADV-9 | partly 6 (41) |
 | X07 fan-out: twenty-four helpers in one turn, every one answered, at most the admission limit at once | partly 4 (42) | partly 4 (42) | no (9) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) |
 | X08 nested helpers: three runs deep, each the child of the one above | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) | partly 4 (42) |
@@ -97,7 +97,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | X10 cancelling a run cancels its helper and its helper's helper | partly 8 (43) | partly 8 (43) | partly 8 (43) | partly 8 (43) | partly 8 (43) | partly 8 (43) | partly 8 (43) | partly 8 (43) |
 | X11 an approval asked inside a helper pauses the parent; approved, the call runs once | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) | partly 6 (44) |
 | X12 a message steered into a run while its helper works: both end well | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) |
-| X13 a file a run makes for its user: a download link only that user can open | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles | partly 2 (38), waits on ADVfiles |
+| X13 a file a run makes for its user: a download link only that user can open | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) | partly 2 (38) |
 | X14 a scenario job: a durable run, a child per scenario, progress on the stream, an approval before applying, explained after | partly 8 (45) | partly 8 (45) | partly 8 (45) | partly 8 (45) | partly 8 (45) | partly 8 (45) | partly 8 (45) | partly 8 (45) |
 | X15 a scenario job whose worker dies mid-way: another worker finishes it, no scenario worked out twice | partly 2 (46) | partly 2 (46) | partly 2 (46) | partly 2 (46) | partly 2 (46) | partly 2 (46) | partly 2 (46) | partly 2 (46) |
 | X16 a scenario job cancelled while its scenarios work: every scenario cancelled | partly 6 (43) | partly 6 (43) | partly 6 (43) | partly 6 (43) | partly 6 (43) | partly 6 (43) | partly 6 (43) | partly 6 (43) |
@@ -288,5 +288,5 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 84. your framework checks its own calls
 85. your framework runs its own loop
 86. a block starts no child runs
-87. no file store yet
+87. a block keeps no file for a run's user
 88. a block keeps no run record

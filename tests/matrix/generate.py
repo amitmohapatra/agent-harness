@@ -61,15 +61,6 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
     # the adversarial rows' findings (tests/matrix/adversarial.py; the backlog's Adversarial
     # suite section has each as an issue)
     (
-        {"features": {"X05"}, "adapters": {"openai_agents"}},
-        Bug(
-            "ADV-8",
-            "a tool name the model made up ends an OpenAI Agents run ERROR (the SDK's "
-            "ModelBehaviorError: 'Tool lookup_all not found') instead of an error the model reads",
-            raises=AssertionError,
-        ),
-    ),
-    (
         {"features": {"X06"}, "adapters": {"react", "middleware"}},
         Bug(
             "ADV-4",
