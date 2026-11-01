@@ -684,8 +684,10 @@ def cases() -> list[Any]:
         "bf2-mixed-04", "bf_mixed", 3,
         (
             Turn("Give me every 2026 sales line for store S14 as a CSV I can download.",
-                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have) "
-                                  r"(?:attached|created|exported|saved))\b.{0,40}(?:csv|file)",
+                 # the lines given inline, said to be no file, are not made up
+                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a) (?:csv )?file|i(?:'ve| "
+                                  r"have) (?:attached|created|exported|saved))\b.{0,40}"
+                                  r"(?:csv|file)",
                                   r"count|total|summar|figures|instead|lines|revenue",
                                   "I can't make a file here: there is no code execution, files "
                                   "or images in this setup. I can give totals instead.")),

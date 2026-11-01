@@ -2604,7 +2604,9 @@ _WHY: Final = re.compile(
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
-    r"reply with) (?:you )?text|only have (?:[\w-]+ ){0,3}tools|with the tools I have",
+    r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with the tools I have|"
+    r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|make (?:an? |the )?(?:image|chart|pdf|"
+    r"csv|excel) ?files?",
     re.IGNORECASE,
 )
 #: Output made up for a request that could not be met: a file or image link, a file it says it
@@ -2619,8 +2621,33 @@ _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
     r"in the data|exist)|isn't (?:available|tracked)|only (?:covers?|goes|from|has|the current)|"
-    r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see)|outside|"
+    r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see|get|"
+    r"retrieve|fetch)|outside|"
     r"before the data|unknown",
+    re.IGNORECASE,
+)
+
+#: A request to choose that ends with no question mark ("confirm which product you mean").
+_ASKS: Final = re.compile(
+    r"\b(?:confirm|tell me|let me know|say|specify|choose|pick)\b[^.?!\n]{0,30}\bwhich\b|"
+    r"\bwhich (?:one|product|item|sku|of these)\b[^.?!\n]{0,30}\byou (?:mean|meant|want)",
+    re.IGNORECASE,
+)
+#: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
+_MONTH: Final = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
+_DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
+#: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",
+#: "one of them").
+_COUNTS: Final = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+                  "eleven", "twelve")  # fmt: skip
+_COUNT_WORD: Final = re.compile(
+    r"(?<!\bthe )(?<!\bwhich )(?<!\bthis )(?<!\bthat )(?<!\beach )(?<!\bany )\**\b("
+    + "|".join(_COUNTS)
+    + r")\b\**(?! of\b)(?=\s+\**[a-z])",
     re.IGNORECASE,
 )
 
@@ -2638,7 +2665,22 @@ def numbers(answer: str) -> list[float]:
 
 
 def _has_number(answer: str, value: float, tol: float) -> bool:
-    return any(abs(n - value) <= tol + 1e-9 for n in numbers(answer))
+    """Whether the answer states ``value`` (within ``tol``): as a figure; a rate (under 1) as a
+    percentage too ("73%" for 0.73); a small whole count as a word too ("one store")."""
+    found = numbers(answer)
+    if 0 < abs(value) < 1:
+        found += [p / 100 for p in _percentages(answer)]
+    if value == int(value) and 1 <= value <= len(_COUNTS):
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
+    return any(abs(n - value) <= tol + 1e-9 for n in found)
+
+
+def _percentages(answer: str) -> list[float]:
+    """The figures an answer states as percentages ("73%", "73 %", "73 per cent")."""
+    return [
+        float(m.replace(",", ""))
+        for m in re.findall(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)", answer)
+    ]
 
 
 def _has_text(answer: str, value: Any) -> bool:
@@ -2728,7 +2770,8 @@ def score(
             missing.append("says the data is not there")
     elif k == "clarify":
         named = sum(_has_text(a, c) for c in expect.value)
-        if "?" not in a or (named < 2 and not re.search(r"\bwhich\b", a, re.IGNORECASE)):
+        asks = "?" in a or _ASKS.search(a)
+        if not asks or (named < 2 and not re.search(r"\bwhich\b", a, re.IGNORECASE)):
             missing.append("asks which one")
     elif k == "flags":
         if not re.search(expect.value, a, re.IGNORECASE):
@@ -2761,8 +2804,11 @@ def score(
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
     hit = [f for f in expect.forbidden if f and _forbidden_in(a, f)]
     if k in ("abstain", "clarify"):
-        allowed = set(numbers(question)) | {2026.0, 2025.0}
-        made_up = [str(n) for n in numbers(a) if n not in allowed and abs(n) >= 10]
+        # what the question or the model's own input holds (an error's code), and a date's
+        # day, are not made up
+        allowed = set(numbers(question)) | set(numbers(context)) | {2026.0, 2025.0}
+        undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", a))
+        made_up = [str(n) for n in numbers(undated) if n not in allowed and abs(n) >= 10]
         if k == "clarify":
             made_up = []  # options may carry ids and prices
     correct = not missing and not hit and not (k in ("abstain", "cannot") and made_up)

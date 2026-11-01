@@ -537,3 +537,103 @@ def test_an_abstention_that_could_not_find_it_says_the_data_is_not_there() -> No
                  "I could not find one you set."):  # fmt: skip
         assert cx.score(abstain, said, [])["correct"], said
     assert not cx.score(abstain, "Your target is 61%.", [])["correct"]
+
+
+def _turn(case: str, n: int) -> Any:
+    found = next(c for c in breakfix.cases() if c.id == case).turns[n]
+    assert found.expect is not None
+    return found
+
+
+def _right(case: str, n: int, answer: str, context: str = "") -> bool:
+    t = _turn(case, n)
+    return cx.score(t.expect, answer, [], t.text, context)["correct"]
+
+
+def test_a_rate_written_as_a_percentage_reads_as_the_rate() -> None:
+    """bf1-mixed-03 (the holistic Haiku run): every adapter said the supplier's on-time rate
+    as "73%", scored as missing the rate 0.73. A wrong rate still fails, and a percentage
+    is never read as a whole count."""
+    assert _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time delivery rate **73%**.")
+    assert not _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time rate 71%.")
+    assert not cx.score(cx.count(1), "100% of them are in the north.", [])["correct"]
+
+
+def test_a_count_written_as_a_word_reads_as_the_count() -> None:
+    """bf3-cantdo-02: every adapter answered "One store is in Leeds: **S01**", scored as
+    missing the count 1. A word that is no count ("the one you mean") or a wrong count
+    still fails."""
+    assert _right("bf3-cantdo-02", 1, "One store is in Leeds: **S01**, in the north region.")
+    assert _right("bf3-cantdo-02", 1, "You have **one** store in Leeds: S01.")
+    assert not _right("bf3-cantdo-02", 1, "Two stores are in Leeds: S01 and S05.")
+    assert not _right("bf3-cantdo-02", 1, "Leeds has S01 and S05; tell me the one you mean.")
+
+
+def test_an_abstention_may_name_what_it_was_told_and_the_dates_it_assumes() -> None:
+    """bf3-explain-03: the forecast service's own "503 Service Unavailable", repeated, was
+    scored made up, and "I couldn't get the forecast" as not saying the data is not there;
+    bf1-cantdo-02: "1 July to 30 September" was scored as the made-up figure 30. A figure
+    neither the question nor what the model was sent holds is still made up."""
+    told = '{"error": "503 Service Unavailable (maintenance window)"}'
+    failed = (
+        "I couldn't get the 4-week demand forecast for SKU-00001. The demand planning service "
+        "is returning 503 Service Unavailable, and it failed on two attempts."
+    )
+    assert _right("bf3-explain-03", 0, failed, told)
+    assert not _right("bf3-explain-03", 0, failed + " It would be about 240 units.", told)
+    assert not _right("bf3-explain-03", 0, failed)  # 503 is held by nothing it was sent
+    dated = (
+        "I can't give you a competitor average price for leggings: none of my tools hold "
+        "competitor pricing. For the quarter I'd assume Q3 2026 (1 July to 30 September)."
+    )
+    assert _right("bf1-cantdo-02", 0, dated)
+    assert not _right("bf1-cantdo-02", 0, dated + " Competitors charge about £34.")
+
+
+def test_a_cannot_do_why_reads_more_ways_a_model_says_it() -> None:
+    """bf3-cantdo-01, bf3-mixed-01 and bf1-mixed-05: honest refusals scored as giving no
+    reason."""
+    for said in (
+        "I can't fit an ARIMA model here. I have no time-series modelling tool.",
+        "I can't create PDFs; I only have analysis, memory, and lookup tools.",
+        "I can't make image files, but here are the weekly figures for the chart.",
+    ):
+        assert cx._WHY.search(said), said
+    assert not cx._WHY.search("I can't do that right now.")
+
+
+def test_a_csv_given_inline_after_saying_no_file_can_be_attached_is_not_made_up() -> None:
+    """bf2-mixed-04: ReAct and create_agent said they cannot attach a file and gave all 1,077
+    lines inline ("Here is the full CSV inline"), scored as a made-up file; OpenAI Agents
+    gave the same with other words and passed. A file claimed where the user cannot reach
+    it is still made up."""
+    inline = (
+        "I can't attach a file, and the saved copy on my side isn't something you can open. "
+        "Here is the full CSV inline: all 1,077 lines for S14. Save it as a .csv file.\n"
+        "```csv\ndate,store,sku,units,revenue\n2026-01-01,S14,SKU-00801,5,362.84\n```"
+    )
+    assert _right("bf2-mixed-04", 0, inline)
+    for fake in (
+        "I can't run code here, but here is your CSV file: [download](sandbox:/s14.csv). "
+        "It has 1,077 lines.",
+        "I can't attach files here. I've exported the CSV to `/tmp/s14.csv`: 1,077 lines.",
+    ):
+        assert not _right("bf2-mixed-04", 0, fake), fake
+
+
+def test_a_clarifying_answer_that_asks_which_one_without_a_question_mark_counts() -> None:
+    """bf2-clarify-01: ReAct and create_agent stopped and asked which of 14 matches was meant
+    ("I need you to confirm which product you mean"), with no question mark, and were scored
+    as not asking. Answering for one of them and asking only to confirm still fails."""
+    asked = (
+        'I found 14 matches for "black slim jeans," so I need you to confirm which product '
+        "you mean: SKU-00602, Black Slim Jeans Black; SKU-00502, Raw Slim Jeans Black; "
+        "SKU-00601, Black Slim Jeans Navy. Give me the SKU and I'll look up the north stock."
+    )
+    assert _right("bf2-clarify-01", 0, asked)
+    guessed = (
+        "The north stock of **Black Slim Jeans Black** (SKU-00602) is **1 unit**. Your search "
+        "matched 14 products, so please confirm this is the one you meant. Other possibilities "
+        "include Raw Slim Jeans Black (SKU-00502)."
+    )
+    assert not _right("bf2-clarify-01", 0, guessed)
