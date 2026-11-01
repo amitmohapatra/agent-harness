@@ -135,6 +135,7 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     else:
         said = ", ".join(keys) if keys else "none set"
         lines.append(f"provider keys: each provider's own SDK reads its own ({said})")
+    lines += gateway.notes()
     lines.append(
         "profile: each model's LangChain profile (reasoning, temperature, output tokens, "
         "tools); the memory service is told it per agent with the endpoint"

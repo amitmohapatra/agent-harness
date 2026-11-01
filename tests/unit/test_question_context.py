@@ -1,6 +1,6 @@
 """The memory context sent with the question, after the history a provider's prompt cache keeps
 (``middleware.with_question``, audit K1), and the end of that history marked for a cache that
-keeps only what a request marks."""
+keeps only what a request marks (``middleware.history_marked``)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from tests.support.chat_model import ScriptedChatModel
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID
 from trellis.harness.budget import SPENT
-from trellis.harness.middleware import ASKED_WITH, with_question
+from trellis.harness.history import ASKED_WITH
+from trellis.harness.middleware import history_marked, with_question
 
 MARK = {"type": "ephemeral", "ttl": "5m"}
 CONTEXT = SystemMessage("## Facts\n- prefers email", id=CONTEXT_MESSAGE_ID)
@@ -43,6 +44,11 @@ def chat(answer: AIMessage) -> list[Any]:
     ]
 
 
+def marked(given: Any) -> Any:
+    """What a model call is sent: the context with the question, the history's end marked."""
+    return history_marked(with_question(given))
+
+
 def test_the_context_comes_with_the_question_and_the_history_is_left_as_it_was() -> None:
     given = chat(AIMessage("7 units.", id="a1"))
     sent = with_question(request(given)).messages
@@ -67,7 +73,7 @@ def test_the_context_is_marked_off_from_the_question_it_comes_with() -> None:
 
 
 def test_a_cache_that_keeps_only_what_is_marked_gets_the_end_of_the_history_marked() -> None:
-    sent = with_question(request(chat(AIMessage("7 units.", id="a1")), cache_control=MARK))
+    sent = marked(request(chat(AIMessage("7 units.", id="a1")), cache_control=MARK))
     assert sent.messages[1].content == [{"type": "text", "text": "7 units.", "cache_control": MARK}]
     assert sent.messages[2].content[0] == {"type": "text", "text": TOLD}
 
@@ -78,7 +84,7 @@ def test_the_last_text_part_of_an_answer_in_parts_is_marked() -> None:
         {"type": "text", "text": "two"},
         {"type": "text"},
     ]
-    sent = with_question(request(chat(AIMessage(parts, id="a1")), cache_control=MARK))
+    sent = marked(request(chat(AIMessage(parts, id="a1")), cache_control=MARK))
     assert sent.messages[1].content == [parts[0], {**parts[1], "cache_control": MARK}, parts[2]]
 
 
@@ -94,19 +100,19 @@ def test_the_last_text_part_of_an_answer_in_parts_is_marked() -> None:
 def test_an_answer_with_nothing_to_mark_or_marked_already_is_left_as_it_is(
     answer: AIMessage,
 ) -> None:
-    sent = with_question(request(chat(answer), cache_control=MARK))
+    sent = marked(request(chat(answer), cache_control=MARK))
     assert sent.messages[1] is answer
 
 
 def test_a_result_before_the_question_is_left_as_it_is() -> None:
     result = ToolMessage("7", tool_call_id="c", id="r1")
     given = [CONTEXT, HumanMessage("a?", id="q1"), result, HumanMessage("b?", id="q2")]
-    assert with_question(request(given, cache_control=MARK)).messages[1] is result
+    assert marked(request(given, cache_control=MARK)).messages[1] is result
 
 
 def test_the_first_question_has_no_history_to_mark() -> None:
     given = [CONTEXT, HumanMessage([{"type": "text", "text": "a?"}], id="q1")]
-    sent = with_question(request(given, cache_control=MARK)).messages
+    sent = marked(request(given, cache_control=MARK)).messages
     assert sent == [
         HumanMessage([{"type": "text", "text": TOLD}, {"type": "text", "text": "a?"}], id="q1")
     ]
@@ -131,3 +137,26 @@ def test_a_spent_budgets_last_word_is_not_the_question() -> None:
 def test_a_request_without_a_context_to_move_is_sent_as_it_is(given: list[Any]) -> None:
     given_request = request(given)
     assert with_question(given_request) is given_request
+
+
+def test_without_a_context_the_end_of_the_history_is_marked_all_the_same() -> None:
+    """Memory off (a checkpointed thread): the answer before the question is still the end of
+    what the next turn repeats."""
+    given = [
+        HumanMessage("a?", id="q1"),
+        AIMessage("7 units.", id="a1"),
+        HumanMessage("b?", id="q2"),
+    ]
+    sent = history_marked(request(given, cache_control=MARK)).messages
+    assert sent[1].content == [{"type": "text", "text": "7 units.", "cache_control": MARK}]
+    assert sent[0] is given[0] and sent[2] is given[2]
+
+
+def test_a_request_no_caching_middleware_marked_is_sent_as_it_is() -> None:
+    given_request = request(chat(AIMessage("7 units.", id="a1")))
+    assert history_marked(given_request) is given_request
+
+
+def test_a_marked_request_with_no_history_before_its_question_is_sent_as_it_is() -> None:
+    given_request = request([HumanMessage("a?", id="q1")], cache_control=MARK)
+    assert history_marked(given_request) is given_request

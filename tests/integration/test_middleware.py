@@ -36,6 +36,7 @@ from trellis.harness.middleware import (
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
 from trellis.harness.tools.bridge import STALLED
+from trellis.harness.tools.query import GONE
 from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 
@@ -474,16 +475,17 @@ async def test_a_prompt_needs_a_run_and_the_gateway(harness: Harness) -> None:
 async def test_the_step_limit_is_langchains_model_call_limit_and_one_layer(
     harness: Harness,
 ) -> None:
-    """``max_steps`` is LangChain's ``ModelCallLimitMiddleware`` (duplication audit A7): at the
-    limit the run ends with LangChain's message, and no call past ``max_steps`` is made."""
+    """``max_steps`` is counted by LangChain's ``ModelCallLimitMiddleware`` (duplication audit
+    A7), and at the limit the model is called once more, told so and offered no tool: the run
+    ends with its answer, one call past ``max_steps`` at most."""
     model = ScriptedChatModel(turns=[("look", {"item": "a"}), ("look", {"item": "b"}), "partial"])
     target = graph(
         model, HarnessTools(), step_limit(2, scoped=True), checkpointer=RunCheckpointer()
     )
     result = await arm(harness.wrap(target, id="limit"), [look]).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
-    assert result.answer == "Model call limits exceeded: thread limit (2/2)"
-    assert len(model.requests) == 2  # max_steps calls, none more
+    assert result.answer == "partial"
+    assert len(model.requests) == 3 and model.requests[-1]["tool_choice"] == "none"
     assert not hasattr(ours, "StepLimit") and not hasattr(ours, "LAST_STEP")
 
 
@@ -491,8 +493,10 @@ def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
     per_run, per_invocation = step_limit(3, scoped=True), step_limit(3)
     assert isinstance(per_run, ModelCallLimitMiddleware)
     assert isinstance(per_invocation, ModelCallLimitMiddleware)
-    assert (per_run.thread_limit, per_run.run_limit) == (3, None)
-    assert (per_invocation.thread_limit, per_invocation.run_limit) == (None, 3)
+    assert per_run.name == per_invocation.name == "ModelCallLimitMiddleware"
+    # LangChain's own limit one call past max_steps: the backstop after the last answer
+    assert (per_run.thread_limit, per_run.run_limit) == (4, None)
+    assert (per_invocation.thread_limit, per_invocation.run_limit) == (None, 4)
     for wrong in (0, True):
         with pytest.raises(ConfigurationError, match="max_steps is a number of model calls"):
             step_limit(wrong)
@@ -598,7 +602,7 @@ async def test_read_file_pages_a_result_of_the_conversation_by_its_calls_id(
         "offset=13)]"
     )
     assert tool_messages(model, 3)[-1][1] == " 99  row 98\n100  row 99"  # what is left
-    assert tool_messages(model, 4)[-1][1] == f"Error: File '{READ_PREFIX}/nope' not found"
+    assert tool_messages(model, 4)[-1][1] == GONE.format(path=f"{READ_PREFIX}/nope")
 
 
 # --------------------------------------------------------------------------- RunCheckpointer

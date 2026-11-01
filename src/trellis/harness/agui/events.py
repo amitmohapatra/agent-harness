@@ -142,11 +142,15 @@ ContentPart = Annotated[TextPart | MediaPart, Field(discriminator="type")]
 
 
 class InputMessage(_Wire):
-    """A message of the thread: its content a text, or parts (AG-UI 1.0 ``ContentPart`` items)."""
+    """A message of the thread: its content a text, or parts (AG-UI 1.0 ``ContentPart`` items).
+    A ``tool`` message carries the result of the tool call ``toolCallId`` (``error``: why it
+    failed)."""
 
     id: str | None = None
     role: Role
     content: str | list[ContentPart] | None = None
+    tool_call_id: str | None = None
+    error: str | None = None
 
     def text(self) -> str | None:
         """The message's text: the content, or its text parts joined (``None``: none)."""
@@ -203,6 +207,33 @@ class Resume(_Wire):
         return value.upper() if isinstance(value, str) else value
 
 
+class FrontendTool(_Wire):
+    """``Tool``: a tool the front end runs, which the model may call (``parameters``: its
+    arguments' JSON Schema)."""
+
+    name: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
+    description: str = ""
+    parameters: dict[str, Any] | None = None
+
+
+class ContextEntry(_Wire):
+    """``Context``: a named piece of what the front end shows, for the run."""
+
+    description: str
+    value: str
+
+
+#: What ``forwardedProps.mode`` may say: what the message does while another run of the thread
+#: works (``conversation.Mode``).
+ModeName = Literal["queue", "interrupt", "steer"]
+
+
+class Forwarded(_Wire):
+    """``forwardedProps`` as the harness reads them: ``mode``. The rest is the client's own."""
+
+    mode: ModeName = "queue"
+
+
 class RunAgentInput(_Wire):
     """``RunAgentInput`` as the protocol defines it. ``runId`` is echoed on every event of the
     run; without one the harness names the run itself."""
@@ -211,11 +242,23 @@ class RunAgentInput(_Wire):
     run_id: str | None = None
     parent_run_id: str | None = None
     messages: list[InputMessage] = Field(default_factory=list)
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    context: list[dict[str, Any]] = Field(default_factory=list)
+    tools: list[FrontendTool] = Field(default_factory=list)
+    context: list[ContextEntry] = Field(default_factory=list)
     state: Any = None
     forwarded_props: Any = None
     resume: list[Resume] = Field(default_factory=list)
+
+    @property
+    def forwarded(self) -> Forwarded:
+        """What of ``forwardedProps`` the harness reads (``ValueError``: a mode it does not
+        know)."""
+        props = self.forwarded_props if isinstance(self.forwarded_props, dict) else {}
+        return Forwarded.model_validate(props)
+
+    def tool_result(self) -> InputMessage | None:
+        """The front end's result of a tool call, when the thread's latest message is one."""
+        last = self.messages[-1] if self.messages else None
+        return last if last is not None and last.role is Role.TOOL and last.tool_call_id else None
 
     def latest_user(self) -> InputMessage | None:
         """The latest user message that says or attaches something."""

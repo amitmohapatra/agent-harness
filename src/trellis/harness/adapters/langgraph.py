@@ -126,9 +126,11 @@ class LangGraphAdapter:
         from trellis.harness import accounting  # noqa: F401
 
         # and every tool node's calls governed, the harness's middleware or not
-        from trellis.harness.middleware import govern_tool_nodes
+        from trellis.harness.middleware import declare_files, govern_tool_nodes
 
         govern_tool_nodes()
+        # a Deep Agent's file tools on a disk, a store or a sandbox change real files: governed
+        declare_files(target)
 
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here

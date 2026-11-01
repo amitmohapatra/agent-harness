@@ -24,8 +24,8 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import conversation_key
-from trellis.harness.middleware import ASKED_WITH
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -213,7 +213,9 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
     assert kinds == ["user", "function_call", "function_call_output", "assistant", "user"]
     call, output = said[1], said[2]
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
-    assert output["output"] == "result a"  # its fetch time is in its run record
+    # lookup is live (it declares no max age): its earlier value reads as out of date, as the
+    # memory window's replay says it, from its run record's fetch time (the text is unstamped)
+    assert output["output"] == snapshots.STALE.format(tool="lookup") + "\nresult a"
     # memory's thread is the session: the context carries no window besides it
     assert all("window_format" not in c.body for c in memory_service.named("context"))
 
