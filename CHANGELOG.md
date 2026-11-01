@@ -49,6 +49,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
+- A large result a conversation's turn saved stays readable in its later turns: a follow-up's
+  `read_file` or `query_result` on the path its history names found "File not found", so every
+  what-if needed the whole fetch again. Kept per conversation in the process that saved them
+  (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
@@ -69,6 +78,10 @@ own model work follows the harness's configuration.
   file tools run ungoverned: a `write_file` changed a real file with no journal, record or
   approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
   (`middleware.declare_files`, marked when the graph is wrapped).
+- An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
+  is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
+  it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
+  on a small model read it as the user's message ("your message doesn't include a question").
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
@@ -92,6 +105,11 @@ own model work follows the harness's configuration.
   model the call is made with, in Deep Agents' own one's place, and marks the answer that
   ends the history. Any other provider's request is unchanged. The small hosted model by name,
   18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- Anthropic's API given as an OpenAI-compatible endpoint (`LLM_BASE_URL=https://api.anthropic.com/v1/`)
+  is called with Anthropic's own client (`ChatAnthropic`, the same endpoint and key), so its
+  prompt cache is on: the OpenAI compatibility layer drops prompt caching, as Anthropic's docs
+  say. `LLM_GATEWAY=openai-compatible` keeps the OpenAI-compatible client; `trellis doctor`
+  says which client is used.
 - A live tool's value from an earlier turn reads as out of date in every adapter, not only
   where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
   its own thread (its checkpointer), so its earlier results are marked in the request it sends
@@ -101,6 +119,12 @@ own model work follows the harness's configuration.
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
 
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the

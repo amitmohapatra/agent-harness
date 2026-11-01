@@ -21,9 +21,12 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Final
 
+from trellis.harness.history import Said
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
 from trellis.harness.tools import query
@@ -40,7 +43,10 @@ TABLE_ROWS: Final = 30
 #: What a table read whole says after its rows (then :data:`QUERY`).
 TABLED: Final = "These {rows} rows are also saved at {path}. "
 #: Where a kept result is read (Deep Agents' ``/large_tool_results/<call id>``).
-PREFIX: Final = "/large_tool_results"
+PREFIX: Final = query.KEPT_PREFIX.rstrip("/")
+#: The most characters of results the conversations' earlier turns saved that an agent keeps
+#: in this process for their later turns (:class:`Conversations`: what one query may load).
+KEPT_CHARS: Final = query.LOAD_CHARS
 #: The longest line read as one, and the most of a line a preview shows.
 MAX_LINE: Final = 5_000
 PREVIEW_LINE: Final = 1_000
@@ -200,7 +206,79 @@ def coding_tool() -> str | None:
 def kept() -> bool:
     """Whether the current run keeps a result to read (``read_file`` is offered then)."""
     runtime = current()
-    return runtime is not None and bool(runtime.replay.journal.results)
+    return runtime is not None and bool(query.saved(runtime))
+
+
+class Conversations:
+    """What each conversation's turns left for its later turns, kept in this process
+    (``Agent.results``) — as a framework's own thread keeps it (Deep Agents' files in its
+    state, a checkpointer's messages): the large results they saved, and, where nothing else
+    keeps the conversation (memory off), each turn's transcript — its question, tool calls,
+    their results and its answer (``conversation.earlier``). The least recently used
+    conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another worker, or
+    after a restart, finds none: a path read then says so (``query.GONE``), and its history is
+    each turn's question and answer from the run store."""
+
+    def __init__(self, most: int = KEPT_CHARS) -> None:
+        self.most = most
+        self.chars = 0
+        self._kept: OrderedDict[str, _Kept] = OrderedDict()
+
+    def of(self, conversation: str) -> tuple[dict[str, str], dict[str, str]]:
+        """The results ``conversation``'s earlier turns saved, by path, and the tool each came
+        from (its table's name in a query)."""
+        found = self._found(conversation)
+        return (found.texts, found.tools) if found is not None else ({}, {})
+
+    def turns(self, conversation: str) -> dict[str, list[Said]]:
+        """The transcripts of ``conversation``'s earlier turns kept here, by run."""
+        found = self._found(conversation)
+        return found.turns if found is not None else {}
+
+    def add(self, conversation: str, texts: Mapping[str, str], tools: Mapping[str, str]) -> None:
+        """A turn's saved results (``texts``) and their tools, kept for ``conversation``."""
+        kept = self._kept.setdefault(conversation, _Kept())
+        self._kept.move_to_end(conversation)
+        for path, text in texts.items():
+            if path not in kept.texts:
+                kept.texts[path] = text
+                self.chars += len(text)
+        kept.tools.update({p: t for p, t in tools.items() if p in kept.texts})
+        self._bounded()
+
+    def said(self, conversation: str, run_id: str, transcript: Sequence[Said]) -> None:
+        """Run ``run_id``'s transcript, kept for ``conversation`` (an attempt's replaces the
+        one before it)."""
+        kept = self._kept.setdefault(conversation, _Kept())
+        self._kept.move_to_end(conversation)
+        self.chars -= _size(kept.turns.get(run_id, ()))
+        kept.turns[run_id] = list(transcript)
+        self.chars += _size(transcript)
+        self._bounded()
+
+    def _found(self, conversation: str) -> _Kept | None:
+        found = self._kept.get(conversation)
+        if found is not None:
+            self._kept.move_to_end(conversation)
+        return found
+
+    def _bounded(self) -> None:
+        while self.chars > self.most:
+            _, gone = self._kept.popitem(last=False)
+            self.chars -= sum(map(len, gone.texts.values())) + sum(map(_size, gone.turns.values()))
+
+
+@dataclass
+class _Kept:
+    """One conversation's: its saved results, their tools, its turns' transcripts by run."""
+
+    texts: dict[str, str] = field(default_factory=dict)
+    tools: dict[str, str] = field(default_factory=dict)
+    turns: dict[str, list[Said]] = field(default_factory=dict)
+
+
+def _size(transcript: Iterable[Said]) -> int:
+    return sum(len(s.content) for s in transcript)
 
 
 def read(args: dict[str, Any], *, text: str | None = None) -> str:
@@ -222,9 +300,9 @@ def read_file(
     runtime = current()
     path = "/" + file_path.lstrip("/")
     if text is None and runtime is not None:
-        text = runtime.replay.journal.results.get(path)
+        text = query.saved(runtime).get(path)
     if text is None:
-        return f"Error: File '{path}' not found"
+        return query.not_found(path)
     lines = _lines(text)
     start = max(0, offset)
     if start >= len(lines):
