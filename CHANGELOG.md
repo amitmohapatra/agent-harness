@@ -59,6 +59,10 @@ own model work follows the harness's configuration.
   one unloaded got a validation error and called it again). The harness's `trellis` server now
   says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
   memory's `tool_search`). A team's own servers keep the CLI's deferral.
+- A Deep Agent of yours on a backend outside its state (a disk, a store, a sandbox) had its
+  file tools run ungoverned: a `write_file` changed a real file with no journal, record or
+  approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
+  (`middleware.declare_files`, marked when the graph is wrapped).
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
