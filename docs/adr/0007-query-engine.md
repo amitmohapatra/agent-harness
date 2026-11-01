@@ -1,9 +1,9 @@
 # 0007. `query_result` runs on DuckDB when it is installed, with SQLite as the zero-dependency fallback
 
 **Status:** Accepted (2026-10-31). Amends [ADR 0006](0006-what-the-model-gets.md), whose list of
-libraries proposed "DuckDB for compute, or stdlib `sqlite3` if it measures as sufficient". The
-switch itself is the next item in the [improvement backlog](../research/IMPROVEMENT_BACKLOG.md).
-Until it lands, `query_result` runs on SQLite as #66 shipped it.
+libraries proposed "DuckDB for compute, or stdlib `sqlite3` if it measures as sufficient".
+Implemented in `tools/query.py` (the `query` extra): its numbers are under
+[Implemented](#implemented).
 
 ## Context
 
@@ -64,6 +64,27 @@ So:
   `test_large_data`) on both engines. The fallback stays at 100% coverage.
 - `benchmark/query_engines` is re-run when either engine is upgraded or the loader changes, and
   its results go to `benchmark/query_engines/results/`.
-- Still to do:
-  - SQLite's unbounded query memory on the fallback path (a per-value length limit, `setlimit`);
-  - caching a run's loaded database between its queries, instead of loading it again on every call.
+- Still to do: caching a run's loaded database between its queries, instead of loading it
+  again on every call. (SQLite's per-value length limit, `setlimit`, came with the switch: a
+  query building a 200 MB value now stops at 64 MB.)
+
+## Implemented
+
+`tools/query.py` has one engine strategy (`Engine`): `DuckDB` when `duckdb` can be imported,
+else `SQLite`, chosen by `chosen()`, never by a setting. Both share the call's limits, its
+worker thread and a watcher that interrupts a query past its time, the answer's CSV, and the
+typing rules (one set of regular expressions, for Python's `re` and DuckDB's RE2). DuckDB
+reads JSON cells as text (a number as written, a nested value as its JSON), types the
+columns in one pass (columns already text in their first 2,048 rows are not checked again),
+and keeps no spill file (`temp_directory` empty). The harness's own engines, measured on the
+same machine (`benchmark/query_engines/results/harness-main.md` is main's SQLite before,
+[harness.md](../../benchmark/query_engines/results/harness.md) after):
+
+| | SQLite (before) | DuckDB (after) |
+|---|---|---|
+| right, 18 questions, 10k to 500k rows, CSV and JSON | 18 | 17 as documented, 1 in DuckDB's dialect (`strftime(d, fmt)`), 0 wrong |
+| load of the 4 tables, 50k rows, CSV | 1.01 s | 0.37 s |
+| load of the 4 tables, 500k rows, CSV / JSON | 9.5 s / 9.3 s | 2.5 s / 3.0 s |
+| the 18 questions, 500k rows, CSV | 5.9 s | 0.89 s |
+| 8 calls at once, 50k / 500k rows | 7.2 s / 89 s | 1.8 s / 12 s |
+| peak memory, 10k / 500k rows, CSV | +9 MB / +398 MB | +89 MB / +348 MB |
