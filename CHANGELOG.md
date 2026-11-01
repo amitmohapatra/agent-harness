@@ -55,6 +55,10 @@ own model work follows the harness's configuration.
 - OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
   on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
   that ended the run with no answer (ADV-8).
+- A blank message (empty, or whitespace only) opens no run: `run`, `stream` and `start` raise
+  `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
+  model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
+  would fail every later turn (ADV-1).
 
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
