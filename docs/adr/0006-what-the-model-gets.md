@@ -2,7 +2,9 @@
 
 **Status:** Accepted as the direction (2026-10-30). The parts marked *proposed* below ship only
 after they pass the [evaluation protocol](../research/EVAL_PROTOCOL.md), each tracked in the
-[improvement backlog](../research/IMPROVEMENT_BACKLOG.md).
+[improvement backlog](../research/IMPROVEMENT_BACKLOG.md). Amended by
+[ADR 0007](0007-query-engine.md): the query engine was measured, and DuckDB is chosen, with SQLite
+as the zero-dependency fallback.
 
 ## Context
 
@@ -69,7 +71,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 
 | Block | Content | Status (checked against the code) |
 |---|---|---|
-| Fixed prefix (cached) | the system prompt and the tools, in a stable order | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context still sits before the history, which breaks the cross-turn cache (audit K1, backlog) |
+| Fixed prefix (cached) | the system prompt and the tools, in a stable order; then the history | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context is sent with the question, after the history, so the next turn's request repeats it (`middleware.with_question`, audit K1); for any Anthropic chat model, a model name too, Anthropic's cache marks the tools, the instructions and the answer that ends the history (`middleware.PromptCache`) |
 | Data map | one short block: this chat (N turns, steps available), saved results (names), memory (facts and preferences present), past chats (searchable), tool areas | new (small) |
 | Memory context | facts and preferences for this question, evidence status, tool hints | exists (`agent.py` `remembered`). Expanding a follow-up query with recent turns is new (audit A1). Tool chains are said in the tools' descriptions, not in this block (`tools/links.py`, #65) |
 | History | recent turns whole; older turns as steps lists (tool, arguments, source, fetch time, status); the chat summary | the summary exists (memory service). Steps lists are in flight, not on main (`-explain2`, arm D) |
@@ -83,7 +85,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 | user and MCP tools | narrowed by the hints (confidence 0.5 or more), else all of them with `tool_search` | exists (`agent.py` `NARROW_FLOOR`); a hinted tool's chain stays offered (#65) |
 | `tool_search` | many tools and no confident hint | exists (memory pull tool; the harness answers it, `clients/memory.py`) |
 | `memory_search` (kinds memory, chunk, summary, episode, message; a time range) | memory is on: facts, this chat, past chats | exists (memory service `agent_tools/service.py`) |
-| `memory_remember`, `memory_update`, `memory_forget` | memory is on | exists. `memory_forget` forgets only what the agent wrote. It is a write, announced and not asked by default. Forgetting what the user said, asked in chat, is in the backlog (audit H4) |
+| `memory_remember`, `memory_update`, `memory_forget` | memory is on | exists. `memory_forget` is a write, announced and not asked, for what the agent wrote. What the user said ("forget my address") the service refuses an agent: the harness asks a person through the approval path and forgets it as the user (audit H4) |
 | read a saved result (by page) | the run holds a saved large result | exists for OpenAI Agents, Claude and MCP (`tools/results.py`), and for `ReAct` with a backend (Deep Agents). Plain `ReAct` is in flight (`-data`) |
 | query saved results (read-only SQL; structured table operations for small models later) | the run holds saved results | in flight (`-data`), still being measured |
 | `execute`, Code Mode | a sandbox or Code Mode is configured | exists (`sandbox()`; `tools/toolbox.py`) |
@@ -102,10 +104,12 @@ Exists:
 
 Backlog:
 
-- answering a call repeated in a later step from a cache;
-- grammar-constrained tool calls for local models;
-- a cheap check of the tool and source names an answer claims against the run record (measured
-  first).
+- grammar-constrained tool calls for local models.
+
+Measured and not built (no gain on the small hosted model; re-test with a small local model):
+
+- answering a call repeated in a later step from the earlier result;
+- a cheap check of the tool and source names an answer claims against the run record.
 
 ### 4. Explain
 

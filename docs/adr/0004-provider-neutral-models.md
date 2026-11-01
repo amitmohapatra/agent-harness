@@ -19,7 +19,8 @@ matching its name against a regular expression.
 1. **Three strategies, each chosen by name from data, never by branching:**
    * **route** — where a model name goes and how it is named there (`ModelGateway`,
      `trellis.harness.gateways`): `openai-compatible` (`OpenAICompatible`: any endpoint, the
-     name as given), `bifrost` (`Bifrost(OpenAICompatible)`: the name as `provider/model`, and
+     name as given; Anthropic's API, whose OpenAI compatibility layer drops prompt caching,
+     with Anthropic's own client, unless `LLM_GATEWAY` names this route), `bifrost` (`Bifrost(OpenAICompatible)`: the name as `provider/model`, and
      its extras), `provider-sdk` (`ProviderSDK`: LangChain's `init_chat_model`, the provider's
      own SDK and key). `LLM_GATEWAY` names it; unset, `LLM_BASE_URL` means `openai-compatible`
      and no `LLM_BASE_URL` means `provider-sdk`. One registry holds them, and a package adds a

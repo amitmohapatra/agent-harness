@@ -45,7 +45,7 @@ AGENT_OF_TOOL: Final = "_agent_instance"
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
-    made = [*(_one(t) for t in tools), *(_reader(*r) for r in results.READERS)]
+    made = [*(_one(t) for t in tools), *(_reader(*r) for r in results.readers())]
     for tool in made:
         setattr(tool.on_invoke_tool, MADE, True)
     return made
@@ -198,8 +198,9 @@ def _reader(
     schema: dict[str, Any],
     answer: Callable[[dict[str, Any]], Awaitable[str]],
 ) -> FunctionTool:
-    """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
-    its pages, ``query_result`` SQL over its rows), enabled once the run keeps one."""
+    """A tool reading a large result the run keeps (``tools.results.readers``: ``read_file``
+    its pages, ``query_result`` SQL over its rows — saving them as a file in a run with no tool
+    that runs code), enabled once the run keeps one."""
 
     async def invoke(context: ToolContext[Any], arguments: str) -> str:
         args = arguments_of(arguments)

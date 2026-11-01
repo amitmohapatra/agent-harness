@@ -21,9 +21,13 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Final
 
+from trellis.harness import snapshots
+from trellis.harness.history import Said
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
 from trellis.harness.tools import query
@@ -40,7 +44,10 @@ TABLE_ROWS: Final = 30
 #: What a table read whole says after its rows (then :data:`QUERY`).
 TABLED: Final = "These {rows} rows are also saved at {path}. "
 #: Where a kept result is read (Deep Agents' ``/large_tool_results/<call id>``).
-PREFIX: Final = "/large_tool_results"
+PREFIX: Final = query.KEPT_PREFIX.rstrip("/")
+#: The most characters of results the conversations' earlier turns saved that an agent keeps
+#: in this process for their later turns (:class:`Conversations`: what one query may load).
+KEPT_CHARS: Final = query.LOAD_CHARS
 #: The longest line read as one, and the most of a line a preview shows.
 MAX_LINE: Final = 5_000
 PREVIEW_LINE: Final = 1_000
@@ -48,7 +55,7 @@ PREVIEW_LINE: Final = 1_000
 HEAD: Final = 5
 TAIL: Final = 5
 #: The tool that pages a kept result, the lines it reads by default, and the most characters
-#: one page holds (as ``read_result`` reads).
+#: one page holds — a kept result's and a cleared one's alike.
 READ_FILE: Final = "read_file"
 READ_LINES: Final = 100
 PAGE_CHARS: Final = 20_000
@@ -69,6 +76,8 @@ READ_FILE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: How a result Deep Agents (or :func:`readable`) saved to a file reads in its place: its stub.
+EVICTED: Final = "Tool result too large"
 #: What a stub says first: the kept rows are a table that ``query_result`` computes over
 #: (``tools.query``) — a count, a sum, a filter, a top-N or a group, exact, with no sandbox.
 QUERY: Final = (
@@ -76,7 +85,13 @@ QUERY: Final = (
     'filter, a ranking or a group over them, call query_result(file_path="{path}", '
     'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
     "this run saved is a table of the same query, named by its tool, so one query can JOIN "
-    "them. Do not add up or rank rows yourself."
+    "them. Do not add up or rank rows yourself. {private}"
+)
+#: What a kept result's note says of its path: the run's own working copy, which the user
+#: cannot reach (a model offered one as an export to open in Excel).
+PRIVATE: Final = (
+    "The path is this run's own working copy, for read_file and query_result: the user cannot "
+    "open or download it, so never offer it to them as a file."
 )
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
@@ -121,7 +136,7 @@ def readable(output: Any, tool: str | None = None) -> str:
         return text
     columns = ", ".join(query.columns_of(text))
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=columns, path=path)
+    table = QUERY.format(table=name, columns=columns, path=path, private=PRIVATE)
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
 
 
@@ -140,7 +155,9 @@ def tabled(text: str, tool: str | None = None) -> str:
     path = keep(text, tool=tool)
     assert path is not None  # in a run
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=", ".join(query.column_names(columns)), path=path)
+    table = QUERY.format(
+        table=name, columns=", ".join(query.column_names(columns)), path=path, private=PRIVATE
+    )
     return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
 
 
@@ -161,6 +178,8 @@ def keep(text: str, *, tool: str | None = None) -> str | None:
     runtime.replay.journal.results[path] = text
     if tool is not None and getattr(runtime, "kept_from", None) is not None:
         runtime.kept_from.setdefault(path, tool)
+    if getattr(runtime, "kept_at", None) is not None:
+        runtime.kept_at.setdefault(path, snapshots.now())  # when it was fetched
     return path
 
 
@@ -188,27 +207,114 @@ def coding_tool() -> str | None:
 
 
 def kept() -> bool:
-    """Whether the current run keeps a result to read (``read_file`` is offered then)."""
+    """Whether the current run keeps a result to read, or was told of files kept for its user
+    (``tools.stored``): ``read_file`` and ``query_result`` are offered then."""
     runtime = current()
-    return runtime is not None and bool(runtime.replay.journal.results)
+    if runtime is None:
+        return False
+    return bool(query.saved(runtime)) or getattr(runtime, "files_note", None) is not None
 
 
-def read(args: dict[str, Any]) -> str:
-    """``read_file``: a page of a kept result, as the model asked for it (``args``)."""
+class Conversations:
+    """What each conversation's turns left for its later turns, kept in this process
+    (``Agent.results``) — as a framework's own thread keeps it (Deep Agents' files in its
+    state, a checkpointer's messages): the large results they saved, and, where nothing else
+    keeps the conversation (memory off), each turn's transcript — its question, tool calls,
+    their results and its answer (``conversation.earlier``). The least recently used
+    conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another worker, or
+    after a restart, finds none: a path read then says so (``query.GONE``), and its history is
+    each turn's question and answer from the run store."""
+
+    def __init__(self, most: int = KEPT_CHARS) -> None:
+        self.most = most
+        self.chars = 0
+        self._kept: OrderedDict[str, _Kept] = OrderedDict()
+
+    def of(self, conversation: str) -> tuple[dict[str, str], dict[str, str]]:
+        """The results ``conversation``'s earlier turns saved, by path, and the tool each came
+        from (its table's name in a query)."""
+        found = self._found(conversation)
+        return (found.texts, found.tools) if found is not None else ({}, {})
+
+    def turns(self, conversation: str) -> dict[str, list[Said]]:
+        """The transcripts of ``conversation``'s earlier turns kept here, by run."""
+        found = self._found(conversation)
+        return found.turns if found is not None else {}
+
+    def add(self, conversation: str, texts: Mapping[str, str], tools: Mapping[str, str]) -> None:
+        """A turn's saved results (``texts``) and their tools, kept for ``conversation``."""
+        kept = self._kept.setdefault(conversation, _Kept())
+        self._kept.move_to_end(conversation)
+        for path, text in texts.items():
+            if path not in kept.texts:
+                kept.texts[path] = text
+                self.chars += len(text)
+        kept.tools.update({p: t for p, t in tools.items() if p in kept.texts})
+        self._bounded()
+
+    def said(self, conversation: str, run_id: str, transcript: Sequence[Said]) -> None:
+        """Run ``run_id``'s transcript, kept for ``conversation`` (an attempt's replaces the
+        one before it)."""
+        kept = self._kept.setdefault(conversation, _Kept())
+        self._kept.move_to_end(conversation)
+        self.chars -= _size(kept.turns.get(run_id, ()))
+        kept.turns[run_id] = list(transcript)
+        self.chars += _size(transcript)
+        self._bounded()
+
+    def _found(self, conversation: str) -> _Kept | None:
+        found = self._kept.get(conversation)
+        if found is not None:
+            self._kept.move_to_end(conversation)
+        return found
+
+    def _bounded(self) -> None:
+        while self.chars > self.most:
+            _, gone = self._kept.popitem(last=False)
+            self.chars -= sum(map(len, gone.texts.values())) + sum(map(_size, gone.turns.values()))
+
+
+@dataclass
+class _Kept:
+    """One conversation's: its saved results, their tools, its turns' transcripts by run."""
+
+    texts: dict[str, str] = field(default_factory=dict)
+    tools: dict[str, str] = field(default_factory=dict)
+    turns: dict[str, list[Said]] = field(default_factory=dict)
+
+
+def _size(transcript: Iterable[Said]) -> int:
+    return sum(len(s.content) for s in transcript)
+
+
+def read(args: dict[str, Any], *, text: str | None = None) -> str:
+    """``read_file``: a page of a kept result, as the model asked for it (``args``) — or of
+    ``text``, a cleared result the graph's state keeps (:func:`read_file`)."""
     problem = arguments_problem(READ_FILE_SCHEMA, args)
     if problem is not None:
         return not_run(READ_FILE, problem)
-    return read_file(**args)
+    return read_file(**args, text=text)
 
 
-def read_file(file_path: str, offset: int = 0, limit: int = READ_LINES) -> str:
+def read_file(
+    file_path: str, offset: int = 0, limit: int = READ_LINES, *, text: str | None = None
+) -> str:
     """Lines ``offset`` on (at most ``limit``, and :data:`PAGE_CHARS`) of the result kept at
-    ``file_path``, numbered, then where the next page starts."""
+    ``file_path`` — or of ``text`` given for it (a result cleared from the request, which the
+    graph's state keeps: ``middleware.HarnessTools``) — numbered, then where the next page
+    starts. The one paging every read-back uses."""
     runtime = current()
     path = "/" + file_path.lstrip("/")
-    text = None if runtime is None else runtime.replay.journal.results.get(path)
+    if text is None and runtime is not None:
+        text = query.saved(runtime).get(path)
     if text is None:
-        return f"Error: File '{path}' not found"
+        return query.not_found(path)
+    return page(text, path, offset, limit)
+
+
+def page(text: str, path: str, offset: int = 0, limit: int = READ_LINES) -> str:
+    """Lines ``offset`` on (at most ``limit``, and :data:`PAGE_CHARS`) of ``text``, read at
+    ``path``, numbered, then where the next page starts."""
     lines = _lines(text)
     start = max(0, offset)
     if start >= len(lines):
@@ -267,13 +373,35 @@ def _numbered(lines: list[str], first: int) -> str:
 #: its rows: ``tools.query``) — as each adapter offers them: name, description, JSON schema, and
 #: what answers a call (its arguments, as the model wrote them).
 async def aread(args: dict[str, Any]) -> str:
-    """:func:`read`, as a reader answers (``READERS``: each awaited)."""
-    return read(args)
+    """:func:`read`, as a reader answers (``READERS``: each awaited) — and a file kept for the
+    user (``tools.stored``: ``/files/...``) read from the file store."""
+    from trellis.harness.tools import stored  # noqa: PLC0415 - it reads its pages here
+
+    path = "/" + str(args.get("file_path", "")).lstrip("/")
+    if not stored.is_stored(path) or arguments_problem(READ_FILE_SCHEMA, args) is not None:
+        return read(args)
+    return await stored.read(path, int(args.get("offset", 0)), int(args.get("limit", READ_LINES)))
 
 
-READERS: Final[
-    tuple[tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]], ...]
-] = (
+#: A reader: its name, description, JSON schema, and what answers a call.
+Reader = tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], Awaitable[str]]]
+READERS: Final[tuple[Reader, ...]] = (
     (READ_FILE, READ_FILE_DESCRIPTION, READ_FILE_SCHEMA, aread),
     (query.QUERY_RESULT, query.QUERY_RESULT_DESCRIPTION, query.QUERY_RESULT_SCHEMA, query.query),
 )
+#: The readers of a run whose ``query_result`` saves a result as a file (``query.saving``).
+SAVING: Final[tuple[Reader, ...]] = (
+    READERS[0],
+    (
+        query.QUERY_RESULT,
+        query.QUERY_RESULT_DESCRIPTION,
+        query.QUERY_RESULT_SAVING_SCHEMA,
+        query.query,
+    ),
+)
+
+
+def readers() -> tuple[Reader, ...]:
+    """The readers as the current run is offered them: :data:`SAVING` in a run with no tool
+    that runs code (``query.saving``), else :data:`READERS`."""
+    return SAVING if query.saving(current()) else READERS

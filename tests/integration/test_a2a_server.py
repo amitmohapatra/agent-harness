@@ -4,6 +4,7 @@ notifications. Calling a remote agent is ``test_a2a_remote``."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -47,6 +48,8 @@ async def greeter(input: Any, agent: Runtime) -> Any:
         return {"user": agent.user, "thread": agent.thread, "run": agent.run_id}
     if input == "boom":
         raise RuntimeError("boom")
+    if input == "hold":
+        await asyncio.sleep(60)  # until a newer message takes over
     if isinstance(input, str) and input.startswith("ask"):
         region = await agent.ask("Which region?", expects={"type": "string"})
         return f"deploying to {region}"
@@ -83,6 +86,7 @@ async def send(
     context_id: str | None = None,
     data: dict[str, Any] | None = None,
     user: str = "u1",
+    metadata: dict[str, Any] | None = None,
 ) -> list[StreamResponse]:
     parts = [new_text_part(text)] if text else []
     if data is not None:
@@ -90,6 +94,8 @@ async def send(
     message = new_message(parts, context_id=context_id, role=Role.ROLE_USER)
     if task_id:
         message.task_id = task_id
+    if metadata:
+        message.metadata.update(metadata)
     request = SendMessageRequest(message=message)
     return [r async for r in client.send_message(request, context=caller(user))]
 
@@ -171,6 +177,16 @@ async def test_a_run_streams_to_completion_and_the_task_is_the_run(
     assert record is not None and record.status is RunStatus.SUCCESS and record.user_id == "u1"
 
 
+async def test_a_blank_message_is_a_rejected_task_and_no_run(
+    served: tuple[Client, Harness],
+) -> None:
+    client, harness = served
+    responses = await send(client, "  \n ")
+    assert states(responses)[-1] == TaskState.TASK_STATE_REJECTED
+    assert any("blank" in t for t in status_texts(responses))
+    assert await harness.runs.get(task_id_of(responses)) is None
+
+
 async def test_identity_comes_from_the_header_and_the_thread_is_the_context(
     served: tuple[Client, Harness],
 ) -> None:
@@ -207,6 +223,19 @@ async def test_a_call_without_the_trusted_header_is_401_unless_identity_is_given
         answered = await http.post("/agents/greeter", json=send_message)
         assert answered.status_code == 200  # the deployment names its callers itself
     await other.aclose()
+
+
+async def test_a_message_with_mode_interrupt_takes_over_its_contexts_working_run(
+    served: tuple[Client, Harness],
+) -> None:
+    client, _ = served
+    held = asyncio.create_task(send(client, "hold", context_id="c-busy"))
+    await asyncio.sleep(0.2)  # the first run works
+    newer = await send(client, "again", context_id="c-busy", metadata={"mode": "interrupt"})
+    assert artifacts(newer) == ["hello again"]
+    assert states(await asyncio.wait_for(held, 10))[-1] == TaskState.TASK_STATE_CANCELED
+    with pytest.raises(A2AError, match=r"metadata\.mode"):
+        await send(client, "x", context_id="c-busy", metadata={"mode": "now"})
 
 
 async def test_a_failing_run_fails_the_task(served: tuple[Client, Harness]) -> None:
