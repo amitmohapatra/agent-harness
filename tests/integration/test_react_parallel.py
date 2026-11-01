@@ -13,7 +13,8 @@ from typing import Any
 from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, current, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall, ToolOutcome
+from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolOutcome
+from trellis.harness import budget
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import SAME_CALL
 from trellis.runs import Lease
@@ -394,21 +395,50 @@ async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error
 
 
 # --------------------------------------------------------------------------- stopping
-async def test_at_the_step_limit_the_run_ends_with_langchains_message(harness: Harness) -> None:
+async def test_at_the_step_limit_the_run_ends_with_one_answer_and_no_tool(
+    harness: Harness,
+) -> None:
+    """``max_steps`` calls that may call tools, then one more, told the limit is reached and
+    offered no tool: the run's answer says what was found and what is left — never LangChain's
+    bare "Model call limits exceeded" (the step limit's last answer, as a stall's: #76)."""
+
     @tool(side_effects="read")
     def search(query: str) -> str:
         """Search."""
         return f"found {query}"
 
-    model = ScriptedChat([("search", {"query": "a"}), ("search", {"query": "b"}), "partial"])
+    turns: list[Any] = [("search", {"query": "a"}), ("search", {"query": "b"})]
+    model = ScriptedChat([*turns, "found a and b; c is left"])
     agent = arm(
         harness.wrap(ReAct(system_prompt="s", model=model, max_steps=2), id="limit"), [search]
     )
     events = [e async for e in agent.stream("x", user="u")]
     finished = events[-1]
-    # LangChain's ModelCallLimitMiddleware: no call past max_steps, no forced answer
-    assert finished.data["result"] == "Model call limits exceeded: thread limit (2/2)"
-    assert len(model.requests) == 2
+    assert finished.outcome is RunOutcome.SUCCESS
+    assert finished.data["result"] == "found a and b; c is left"
+    assert len(model.requests) == 3  # one call past the limit, at most
+    last = model.requests[-1]
+    assert last["tool_choice"] == "none"
+    assert last["messages"][-1]["content"] == budget.LIMIT.format(limit=2)
+    warned = [e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("code")]
+    assert {"name": "warning", "code": "step_limit"}.items() <= warned[-1].items()
+
+
+async def test_a_model_that_will_not_answer_at_the_step_limit_ends_the_run_saying_so(
+    harness: Harness,
+) -> None:
+    @tool(side_effects="read")
+    def search(query: str) -> str:
+        """Search."""
+        return f"found {query}"
+
+    model = ScriptedChat([("search", {"query": q}) for q in "abc"])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model, max_steps=2), id="limit2"), [search]
+    )
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.message == "stopped: the step limit (2) was reached"
 
 
 async def test_steps_in_which_every_call_failed_and_no_answer_stop_the_run(

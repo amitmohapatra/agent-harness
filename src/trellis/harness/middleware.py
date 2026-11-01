@@ -21,8 +21,8 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
-* :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``,
-  which ends the run with its message at the limit;
+* :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``
+  (:class:`AnswerAtLimit`), then one more that answers, offered no tool;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
   steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
   within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
@@ -118,6 +118,7 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
+    budget,
 )
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE
@@ -1025,15 +1026,48 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 def step_limit(
     max_steps: int = MAX_STEPS, *, scoped: bool = False
 ) -> AgentMiddleware[Any, Any, Any]:
-    """At most ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``
-    (``exit_behavior="end"``: past them the run ends with LangChain's message saying the limit
-    was reached; LangChain has no exit that asks the model for an answer). ``scoped``: counted
-    per thread (a ``ReAct`` graph's thread is its run, so a resume keeps the count), else per
-    invocation (``middleware()`` in a graph whose thread outlives a run)."""
+    """At most ``max_steps`` model calls that may call tools, then one that answers
+    (:class:`AnswerAtLimit`). ``scoped``: counted per thread (a ``ReAct`` graph's thread is its run,
+    so a resume keeps the count), else per invocation (``middleware()`` in a graph whose thread
+    outlives a run)."""
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise ConfigurationError("max_steps is a number of model calls from 1")
-    counted = {"thread_limit" if scoped else "run_limit": max_steps}
-    return ModelCallLimitMiddleware(exit_behavior="end", **counted)
+    return AnswerAtLimit(max_steps, scoped=scoped)
+
+
+class AnswerAtLimit(ModelCallLimitMiddleware):
+    """LangChain's own ``ModelCallLimitMiddleware`` counting the model calls, which after
+    ``max_steps`` of them makes one more — the model told the limit is reached
+    (``budget.LIMIT``) and offered no tool, as :class:`StallGuard` does on a stall
+    (:func:`_answer_now`) — so the run ends with an answer saying what was found and what is
+    left, not LangChain's "Model call limits exceeded" message. LangChain's limit, one call
+    past ``max_steps``, stays the backstop (its ``exit_behavior="end"``). Named as LangChain's
+    (a ``ReAct(middleware=)`` of that name is refused, naming ``max_steps=``)."""
+
+    def __init__(self, max_steps: int, *, scoped: bool) -> None:
+        self.max_steps = max_steps
+        self.counted = "thread_model_call_count" if scoped else "run_model_call_count"
+        limit = {"thread_limit" if scoped else "run_limit": max_steps + 1}
+        super().__init__(exit_behavior="end", **limit)
+
+    @property
+    def name(self) -> str:
+        return ModelCallLimitMiddleware.__name__
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if request.state.get(self.counted, 0) < self.max_steps:
+            return await handler(request)
+        return await _answer_now(
+            request,
+            handler,
+            budget.LIMIT.format(limit=self.max_steps),
+            f"stopped: the step limit ({self.max_steps}) was reached",
+            warning="step_limit",
+        )
 
 
 class StallGuard(AgentMiddleware):
@@ -1092,9 +1126,11 @@ async def _answer_now(
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     told: str,
     stopped: str,
+    *,
+    warning: str = "stalled",
 ) -> ModelResponse[Any]:
-    """The model called once more, told ``told`` and offered no tool; its answer, or the run
-    stopped (``ModelError(stopped)``) when it gives none."""
+    """The model called once more, told ``told`` and offered no tool; its answer (``warning``
+    on the run's stream), or the run stopped (``ModelError(stopped)``) when it gives none."""
     last = request.override(
         messages=[*request.messages, HumanMessage(content=told)],
         tool_choice="none" if request.tools else request.tool_choice,
@@ -1106,7 +1142,7 @@ async def _answer_now(
     runtime = current()
     log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
     if runtime is not None:
-        runtime.events.warning("stalled", stopped)
+        runtime.events.warning(warning, stopped)
     return reply
 
 

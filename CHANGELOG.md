@@ -49,6 +49,13 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
+
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
