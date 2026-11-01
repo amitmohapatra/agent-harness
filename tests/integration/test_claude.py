@@ -16,7 +16,14 @@ from tests.support.arm import arm
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED, native_spec
+from trellis.harness.adapters.claude import (
+    BUILTIN_SIDE_EFFECTS,
+    RESUMED,
+    RESUMED_CALL,
+    RESUMED_DENIED,
+    native_spec,
+)
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.journal import content_key
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
@@ -322,18 +329,24 @@ async def test_without_memory_no_context_hook_is_registered(
     assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
 
 
-async def test_the_hints_narrow_the_tools_for_the_run(
-    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
-) -> None:
+def lookups(n: int) -> list[Any]:
+    """``n`` read tools of the run's own, ``t0`` to ``t<n-1>``."""
+
     def make(i: int) -> Any:
         def lookup(key: str) -> str:
             return f"t{i}"
 
         return tool(lookup, name=f"t{i}", side_effects="read")
 
+    return [make(i) for i in range(n)]
+
+
+async def test_the_hints_narrow_the_tools_for_the_run(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
+) -> None:
     memory_service.candidates = ["t2", "t5"]
     target = options(tmp_path, [{"text": "done"}])
-    await arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)]).run("x", user="u1")
+    await arm(memory_harness.wrap(target, id="n"), lookups(6)).run("x", user="u1")
     assert started_with(tmp_path)["tools"] == [
         "t2",
         "t5",
@@ -341,6 +354,21 @@ async def test_the_hints_narrow_the_tools_for_the_run(
         "read_file",
         "query_result",
     ]
+
+
+async def test_claudes_built_in_tools_do_not_count_toward_narrowing_the_runs_own(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Claude Code's built-ins are the framework's, not the run's: the tools the hints narrow
+    from (``NARROW_FROM``) are the run's own. Counted with them, a run of a few tools of its
+    own narrowed, and the one tool a question needed was not listed for the query (the
+    break-and-fix suite: "find_sku isn't available to me in this session")."""
+    memory_service.candidates = ["t2"]
+    own = NARROW_FROM - len(BUILTIN_SIDE_EFFECTS) + 1  # with the built-ins, past the threshold
+    target = options(tmp_path, [{"text": "done"}])
+    await arm(memory_harness.wrap(target, id="n"), lookups(own)).run("x", user="u1")
+    assert {f"t{i}" for i in range(own)} <= set(started_with(tmp_path)["tools"])
+    assert "Bash" not in (started_with(tmp_path)["disallowed_tools"] or "").split(",")
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:

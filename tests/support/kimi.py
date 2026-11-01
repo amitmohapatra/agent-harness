@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from tests.support.planned import FINAL, Call
+from tests.support.planned import CUT, CUT_REPLY, FINAL, Call
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
 from trellis.harness.tools.bridge import TURN_STALLED
 
@@ -111,6 +111,8 @@ class PlannedEndpoint:
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
         self.url = ""
+        #: the :data:`CUT` steps already answered with a reply cut at the output limit
+        self.cut = 0
 
     def said(self) -> str:
         """Everything the model was sent, as one text."""
@@ -143,8 +145,19 @@ class PlannedEndpoint:
                     results.append(said)
         if _told_to_answer(body):  # told its turn is stopped: it answers, calling nothing
             return self.final.replace("{last}", results[-1] if results else "")
-        done = 0
+        return self._planned(results, edited)
+
+    def _planned(self, results: list[str], edited: Call | None) -> Turn:
+        """The plan's next step after ``results``: its call (``edited``: as a reviewer changed
+        it), a reply cut at the output limit, or — every call made — the answer."""
+        done = cuts = 0
         for step in self.plan:  # a step is a call, or several made in one message
+            if step == CUT:  # cut at the output limit once: Kimi asks again itself
+                cuts += 1
+                if self.cut < cuts:
+                    self.cut += 1
+                    return CUT_REPLY
+                continue
             if len(results) <= done:
                 if edited is not None:
                     return edited
@@ -175,8 +188,10 @@ class PlannedEndpoint:
                 ],
             }
         else:
-            message = turn
-        finish = "tool_calls" if message.get("tool_calls") else "stop"
+            message = dict(turn)
+        finish = message.pop("finish_reason", None) or (
+            "tool_calls" if message.get("tool_calls") else "stop"
+        )
         return {
             "id": f"chatcmpl-{len(self.requests)}",
             "created": 0,

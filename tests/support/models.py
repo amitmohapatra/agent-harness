@@ -62,8 +62,10 @@ class Script:
                 ],
             }
         else:
-            message = turn
-        finish = "tool_calls" if message.get("tool_calls") else "stop"
+            message = dict(turn)
+        finish = message.pop("finish_reason", None) or (
+            "tool_calls" if message.get("tool_calls") else "stop"
+        )
         return {
             "id": f"chatcmpl-{len(self.requests)}",
             "object": "chat.completion",

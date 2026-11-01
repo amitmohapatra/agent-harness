@@ -121,7 +121,7 @@ after any of yours:
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
-| Tool hints | from 30 tools in the run, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
+| Tool hints | from 30 tools of the run's own (Claude Code's built-ins are not counted), the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with the `trellis` server's `read_file` (listed from the start: the CLI lists a server's tools once) ([tools.md](../tools.md#large-results)); the CLI's own MCP output limit (`MAX_MCP_OUTPUT_TOKENS`, 25,000 tokens by default, about 50,000 characters of a CSV) is raised to 60,000 so the harness keeps such a result first: a result the CLI saves to its session's own file is one `read_file` and `query_result` cannot read (your own value, in the options' `env` or the environment, is kept) |
 | Grounding, judges, tracing | as for every target |
 

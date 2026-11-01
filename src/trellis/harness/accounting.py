@@ -1,5 +1,6 @@
 """Every LangChain chat model call made inside a harness run, accounted to the run's budget
-(``trellis.harness.budget``) and watched for a stall (``Runtime.model_started``): a LangChain
+(``trellis.harness.budget``), watched for a stall (``Runtime.model_started``) and for a reply
+cut at the model's output limit with no answer (``Runtime.cut_off``, :func:`cut_off`): a LangChain
 callback, attached to every LangChain run of the process (``register_configure_hook``), that
 watches each call from its start to its reply or its error and accounts each reply's usage —
 whatever graph made the call (``ReAct``'s loop, its summarization, a grader, a ``create_agent``
@@ -27,6 +28,25 @@ from trellis.harness.gateways import Capability
 from trellis.harness.runtime import current
 
 log = logging.getLogger("trellis.harness")
+
+
+#: Where LangChain keeps why a reply ended (``response_metadata``), by provider: an
+#: OpenAI-compatible endpoint's ``finish_reason``, Anthropic's ``stop_reason``, Bedrock
+#: Converse's ``stopReason``, Ollama's ``done_reason``.
+STOP_KEYS: Final = ("finish_reason", "stop_reason", "stopReason", "done_reason")
+#: What they say when the reply reached the model's output limit (its ``max_tokens``):
+#: ``length`` (OpenAI-compatible, Ollama), ``max_tokens`` (Anthropic, Bedrock), ``MAX_TOKENS``
+#: (Gemini).
+AT_OUTPUT_LIMIT: Final = frozenset({"length", "max_tokens", "MAX_TOKENS"})
+
+
+def cut_off(message: AIMessage) -> bool:
+    """Whether ``message`` is a reply cut at the model's output limit before it gave an answer:
+    no text, no tool call, and the provider says it reached the limit."""
+    if message.tool_calls or message.text.strip():
+        return False
+    said = message.response_metadata or {}
+    return any(said.get(key) in AT_OUTPUT_LIMIT for key in STOP_KEYS)
 
 
 class UsageAccounting(BaseCallbackHandler):
@@ -70,6 +90,7 @@ class UsageAccounting(BaseCallbackHandler):
                 message = getattr(generation, "message", None)
                 if isinstance(message, AIMessage):
                     budget.account_reply(runtime, message)
+                    runtime.cut_off = cut_off(message)
                     out = int((message.usage_metadata or {}).get("output_tokens") or 0)
                     if began is not None:
                         admission.ADMISSION.paced(time.monotonic() - began, out)

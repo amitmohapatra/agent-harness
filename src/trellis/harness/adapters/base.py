@@ -43,6 +43,7 @@ from typing import Any, ClassVar, Final, Literal, Protocol
 from trellis.contracts import ConfigurationError, InterruptResolution, ToolSpec
 from trellis.harness.history import Said
 from trellis.harness.journal import Pending
+from trellis.harness.runtime import BUILTIN as BUILTIN_TAG
 from trellis.harness.runtime import HELPER as HELPER_TAG
 from trellis.harness.runtime import Runtime
 from trellis.harness.tools.base import Tool
@@ -170,6 +171,17 @@ class Adapter(Protocol):
 #: ``task``, an OpenAI agent's handoff or agent tool, Claude's ``Agent`` —: it joins the run's
 #: tool set (hints, the catalog, records) but the narrowing never takes it away.
 HELPER: Final = HELPER_TAG
+
+
+#: The tag of a tool the framework gives the model of itself (Claude Code's and Kimi's built-ins,
+#: Deep Agents' own): of the run's tool set, but the narrowing's threshold counts only the run's
+#: own tools (``Runtime.own_tools``), so the framework's never narrow a run's few away.
+BUILTIN: Final = BUILTIN_TAG
+
+
+def builtin(spec: ToolSpec) -> ToolSpec:
+    """``spec`` tagged :data:`BUILTIN`."""
+    return spec.model_copy(update={"tags": [*spec.tags, BUILTIN]})
 
 
 def helper(spec: ToolSpec) -> ToolSpec:
