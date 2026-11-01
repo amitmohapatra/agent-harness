@@ -58,7 +58,9 @@ def test_the_context_is_marked_off_from_the_question_it_comes_with() -> None:
     """Sent in one message, the context says where it ends and that the user's message
     follows: a model read a question after a long context as one more saved note
     (break-and-fix round 1: "I don't see a request, only saved notes")."""
-    told = with_question(request(chat(AIMessage("7 units.", id="a1")))).messages[2].content
+    told: list[Any] = list(
+        with_question(request(chat(AIMessage("7 units.", id="a1")))).messages[2].content
+    )
     context = told[0]["text"]
     assert context.startswith("<memory_context") and context.rstrip().endswith("</memory_context>")
     assert "not the user's message" in context and told[-1]["text"] == "and b?"
