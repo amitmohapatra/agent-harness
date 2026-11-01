@@ -140,7 +140,11 @@ has to. In order of preference:
    no dependency, no sandbox). Every result the run saved is a table named by the tool that
    returned it (`result` is the file asked about), so one query joins results of several tools;
    a JSON array of objects (or the first one a JSON object holds), CSV with a header
-   (`,` tab `;` `|`), else one row per line, with whole-number, number and text columns. Besides
+   (`,` tab `;` `|`), else one row per line, with whole-number, decimal, number and text
+   columns. A decimal column (digits and a point as written, at most 15 digits: money) adds up
+   exactly — `sum`, `total` and `avg`, a window's too, in Python's `decimal` — and every number
+   an answer holds is written as SQLite writes a `REAL` (15 significant digits): `32266.15`,
+   never `32266.149999999998`. Besides
    SQLite's arithmetic, `CASE`, math, date and window functions (a moving average, `lag` for
    growth), it has `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `corr`,
    `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` (named as PostgreSQL and DuckDB

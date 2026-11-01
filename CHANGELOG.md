@@ -44,6 +44,11 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `query_result` adds money up exactly: a column of decimals as written (at most 15 digits) is
+  `DECIMAL`, whose `sum`, `total` and `avg` (a window's too) add up in Python's `decimal`, and a
+  number in an answer is written as SQLite writes a `REAL` (15 significant digits). 6,000
+  two-decimal refunds summed to `32266.149999999998` (ADV-2).
+
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand

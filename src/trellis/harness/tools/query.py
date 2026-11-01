@@ -5,9 +5,14 @@ instead of the model paging thousands of rows into its context and adding them u
 No sandbox and no Code Mode needed, and no dependency: Python's own SQLite (``sqlite3``), in
 memory. The kept text becomes the table ``result``: a JSON array of objects (or the first such
 array a JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one
-row per line (``line``). A column whose every value is a whole number is ``INTEGER``, a number
+row per line (``line``). A column whose every value is a whole number is ``INTEGER``, a decimal
+written with at most :data:`DECIMAL_DIGITS` digits (``12.50``, money) ``DECIMAL``, another number
 ``REAL``, else ``TEXT`` (a code with a leading zero, or an id past 64 bits, keeps its exact
-text); a nested value is its JSON text (``json_extract`` reads it).
+text); a nested value is its JSON text (``json_extract`` reads it). A ``DECIMAL`` column adds up
+exactly, as written (``sum``, ``total`` and ``avg`` over decimals, a window's too: SQLite has no
+decimal type, so it keeps the column ``REAL`` and its sums in Python's ``decimal``; an engine
+with one keeps it as its own ``DECIMAL``), and every number a query answers with is written as
+SQLite writes a ``REAL`` (15 significant digits): ``32266.15``, never ``32266.149999999998``.
 
 Only reading is allowed: an authorizer admits ``SELECT`` (``WITH`` included), reading the table
 and calling functions — never a write, ``ATTACH`` (no other file, no network), a ``PRAGMA`` or
@@ -42,6 +47,7 @@ import statistics
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
 from typing import Any, Final
 
 from trellis.harness.runtime import current
@@ -98,6 +104,15 @@ _NAME: Final = re.compile(r"[^0-9A-Za-z_]+")
 _LEADING_ZERO: Final = re.compile(r"^[-+]?0\d")
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
+#: The most digits a ``DECIMAL`` value has: a float keeps 15 exactly (its text read back is the
+#: same), so the column can be stored ``REAL`` where an engine has no decimal type.
+DECIMAL_DIGITS: Final = 15
+#: A decimal as written: a sign, digits, a point and digits — no exponent.
+_DECIMAL: Final = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)")
+#: How each kind is stored in SQLite: it has no decimal type (:class:`_ExactSum` adds its values).
+_STORED: Final = {"DECIMAL": "REAL"}
+#: What SQLite writes a whole ``REAL`` as (``36.0``): its ``%!.15g``.
+_WHOLE: Final = re.compile(r"-?\d+")
 
 
 def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
@@ -256,13 +271,86 @@ def _answer(
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(names)
-    writer.writerows(rows[:ROWS])
+    writer.writerows([[_shown(v) for v in row] for row in rows[:ROWS]])
     shown = out.getvalue().rstrip("\n")
     if len(shown) > OUTPUT_CHARS:
         shown = shown[:OUTPUT_CHARS] + f"\n…[cut at {OUTPUT_CHARS} characters: aggregate more]"
     elif len(rows) > ROWS:
         shown += f"\n…[only the first {ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     return shown
+
+
+def _shown(value: Any) -> Any:
+    """A cell of a query's answer as it is written: a float as SQLite writes a ``REAL``
+    (``%!.15g``: 15 significant digits, a whole one with ``.0``), so the binary tail of a sum,
+    a product or a ratio (``59.970000000000006``) is not read as a figure."""
+    if not isinstance(value, float):
+        return value
+    shown = format(value, ".15g")
+    return f"{shown}.0" if _WHOLE.fullmatch(shown) else shown
+
+
+class _ExactSum:
+    """``sum``, ``total`` and ``avg`` as SQLite means them — over the numbers of a group or a
+    window frame — added up in Python's ``decimal``, each ``REAL`` by its shortest text: a
+    ``DECIMAL`` column's values as written, so two-decimal money adds up to its decimal figure
+    (SQLite's own compensated sum still ends ``…149999999998`` or ``…99999992``). A text that
+    is no number counts as 0, as in SQLite."""
+
+    def __init__(self) -> None:
+        self.added = Decimal(0)
+        self.count = 0
+        self.fractional = 0  # the values added that were not whole numbers
+
+    @staticmethod
+    def _of(value: Any) -> Decimal | None:
+        if value is None or isinstance(value, int):
+            return None if value is None else Decimal(value)
+        if isinstance(value, float):
+            return Decimal(repr(value))
+        with contextlib.suppress(ArithmeticError):
+            return Decimal(str(value).strip())
+        return Decimal(0)
+
+    def step(self, value: Any) -> None:
+        found = self._of(value)
+        if found is not None:
+            self.added += found
+            self.count += 1
+            self.fractional += not isinstance(value, int)
+
+    def inverse(self, value: Any) -> None:
+        found = self._of(value)
+        if found is not None:
+            self.added -= found
+            self.count -= 1
+            self.fractional -= not isinstance(value, int)
+
+    def finalize(self) -> Any:
+        return self.value()
+
+    def value(self) -> Any:
+        if not self.count:
+            return None
+        return float(self.added) if self.fractional else int(self.added)
+
+
+class _ExactTotal(_ExactSum):
+    def value(self) -> Any:
+        return float(self.added)
+
+
+class _ExactAvg(_ExactSum):
+    def value(self) -> Any:
+        return float(self.added / self.count) if self.count else None
+
+
+#: The sums a query over a ``DECIMAL`` column computes exactly, in place of SQLite's own.
+EXACT: Final[tuple[tuple[str, type], ...]] = (
+    ("sum", _ExactSum),
+    ("total", _ExactTotal),
+    ("avg", _ExactAvg),
+)
 
 
 def _loaded(db: sqlite3.Connection, texts: Mapping[str, str], own: str, deadline: float) -> None:
@@ -275,8 +363,12 @@ def _loaded(db: sqlite3.Connection, texts: Mapping[str, str], own: str, deadline
     size = int(db.execute("PRAGMA page_size").fetchone()[0])
     db.execute(f"PRAGMA main.max_page_count = {DB_BYTES // size}")
     db.execute(f"PRAGMA temp.cache_size = -{TEMP_CACHE_BYTES // 1024}")
+    decimal = False
     for name, text in texts.items():
-        _table(db, name, text)
+        decimal = _table(db, name, text) or decimal
+    if decimal:  # its sums exact, as written (a window's too)
+        for name, made in EXACT:
+            db.create_window_function(name, 1, made)
     db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
     db.commit()
     if time.monotonic() > deadline:
@@ -388,15 +480,17 @@ AGGREGATES: Final[tuple[tuple[str, int, type], ...]] = (
 )
 
 
-def _table(db: sqlite3.Connection, name: str, text: str) -> None:
-    """``text`` as the table ``name``: typed columns (see the module), its rows."""
+def _table(db: sqlite3.Connection, name: str, text: str) -> bool:
+    """``text`` as the table ``name``: typed columns (see the module), its rows; whether one of
+    its columns is ``DECIMAL``."""
     columns, rows = rows_of(text)
     names = column_names(columns)
     kinds = [_kind([r[n] for r in rows]) for n in range(len(names))]
-    typed = ", ".join(f'"{n}" {k}' for n, k in zip(names, kinds, strict=True))
+    typed = ", ".join(f'"{n}" {_STORED.get(k, k)}' for n, k in zip(names, kinds, strict=True))
     db.execute(f'CREATE TABLE "{name}" ({typed})')
     marks = ", ".join("?" for _ in names)
     db.executemany(f'INSERT INTO "{name}" VALUES ({marks})', [_typed(r, kinds) for r in rows])
+    return "DECIMAL" in kinds
 
 
 def _json_rows(text: str) -> list[Mapping[str, Any]] | None:
@@ -441,13 +535,26 @@ def column_names(columns: Sequence[str]) -> list[str]:
 
 
 def _kind(values: Sequence[Any]) -> str:
-    """``INTEGER`` when every value is a whole number, ``REAL`` a number, else ``TEXT``."""
+    """``INTEGER`` when every value is a whole number, ``DECIMAL`` a decimal as written
+    (:func:`_decimal`), ``REAL`` a number, else ``TEXT``."""
     present = [v for v in values if v not in (None, "")]
     if present and all(_number(v, whole=True) for v in present):
         return "INTEGER"
+    if present and all(_decimal(v) for v in present):
+        return "DECIMAL"
     if present and all(_number(v, whole=False) for v in present):
         return "REAL"
     return "TEXT"
+
+
+def _decimal(value: Any) -> bool:
+    """Whether a cell is a decimal as written — digits and a point, no exponent, at most
+    :data:`DECIMAL_DIGITS` digits (a JSON number by its shortest text) — so a float keeps it
+    exactly and its text reads back the same."""
+    text = repr(value) if isinstance(value, float) else str(value).strip()
+    if not _DECIMAL.fullmatch(text) or _LEADING_ZERO.match(text):
+        return False
+    return len(text.lstrip("+-").replace(".", "").lstrip("0")) <= DECIMAL_DIGITS
 
 
 def _number(value: Any, *, whole: bool) -> bool:
@@ -477,7 +584,7 @@ def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:
             out.append(None)
         elif kind == "INTEGER":
             out.append(int(str(value).strip()))
-        elif kind == "REAL":
+        elif kind in ("REAL", "DECIMAL"):
             out.append(float(str(value).strip()))
         else:
             out.append(value)
