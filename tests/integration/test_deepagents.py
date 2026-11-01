@@ -3,13 +3,15 @@ wraps it — with its planning tools, its virtual filesystem and a harness tool 
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, tool
-from trellis.contracts import RunStatus
+from trellis.contracts import RunEventType, RunStatus
 
 refunded: list[str] = []
 
@@ -79,3 +81,34 @@ async def test_a_tool_of_the_deep_agents_own_asking_with_interrupt_offers_what_i
     thread = await harness.conversation(user="u1", thread="sales-1")
     state = await graph.aget_state({"configurable": {"thread_id": thread}})
     assert any(getattr(m, "content", None) == "a,b" for m in state.values["messages"])
+
+
+async def test_its_file_tools_on_a_disk_are_governed_as_any_tool(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """On a backend outside the graph's state (a disk: the graph has no ``files`` channel), Deep
+    Agents' file tools change real files: each call is governed, journaled and on the run's
+    events, its risk a read or a write — as ``ReAct(backend=)`` has them. On its default backend
+    they only change the graph's state, and stay out of the run's tool calls."""
+    from deepagents.backends import FilesystemBackend
+
+    disk = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    turns = [
+        ("write_file", {"file_path": "/a.txt", "content": "hi"}),
+        ("read_file", {"file_path": "/a.txt"}),
+        "done",
+    ]
+    for backend, governed in ((disk, True), (None, False)):
+        graph = create_deep_agent(
+            model=ScriptedChatModel(turns=list(turns)),
+            backend=backend,
+            checkpointer=InMemorySaver(),
+        )
+        events = [e async for e in harness.wrap(graph, id=f"files-{governed}").stream("w", user="u")]
+        called = {
+            e.data["tool"]: e.data["status"]
+            for e in events
+            if e.type is RunEventType.TOOL_CALL_RESULT
+        }
+        assert called == ({"write_file": "ok", "read_file": "ok"} if governed else {}), called
+    assert (tmp_path / "a.txt").read_text() == "hi"

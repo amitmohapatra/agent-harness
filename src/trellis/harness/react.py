@@ -80,10 +80,6 @@ CLEARED: Final = (
     "[result cleared to keep the context small: "
     'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
 )
-#: Deep Agents' file tools that read, and those that change files: on a backend outside the
-#: graph's state they are governed as any tool, with these risks.
-FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
-FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
 #: What ``ReAct`` and :func:`middleware` say of a switch they no longer take (``removed``).
 _NO_GUIDANCE: Final = (
     "the tool guidance was removed, measured as no better and slower: say how to choose among "
@@ -575,14 +571,13 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
-    from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE
+    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, outside_state
 
     runs = supports_execution(backend)
     for tool in graph_tools(graph):
         marks: dict[str, Any] = {}
-        if outside and tool.name in FILE_READS | FILE_WRITES:
-            risk = "read" if tool.name in FILE_READS else "write"
-            marks = {OUTSIDE_STATE: True, "side_effects": risk}
+        if outside and tool.name in FILE_TOOLS:
+            marks = outside_state(tool.name)
         elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
             marks = {MACHINERY: True}
         if marks:
