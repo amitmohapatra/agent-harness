@@ -127,6 +127,12 @@ KEYLESS: Final[dict[str, str]] = {BEARER: NO_KEY}
 BIFROST_CLIENT_RETRIES: Final = 0
 #: How many chat models made of routed names are kept (per route, name, effort, event loop).
 ROUTED_KEPT: Final = 64
+#: Anthropic's own API. As an OpenAI-compatible endpoint (``LLM_BASE_URL`` its ``/v1``) it is
+#: its OpenAI SDK compatibility layer, which drops prompt caching ("Prompt caching is not
+#: supported, but it is supported in the Anthropic SDKs":
+#: https://platform.claude.com/docs/en/api/openai-sdk): its models are made with Anthropic's own
+#: client, on the same endpoint and key (:meth:`OpenAICompatible.chat_model`).
+ANTHROPIC_API: Final = "https://api.anthropic.com"
 
 
 class ModelGateway(ABC):
@@ -191,6 +197,11 @@ class ModelGateway(ABC):
         """Say once what this route means for the environment's provider keys (nothing by
         default)."""
         return None
+
+    def notes(self) -> list[str]:
+        """What ``doctor`` says of how this route calls its models, beyond its name and auth
+        (nothing by default)."""
+        return []
 
 
 def split(model: str) -> tuple[str | None, str]:
@@ -270,18 +281,32 @@ def _chat(model: str, effort: str | None, auth: httpx.Auth | None = None, **more
     )
 
 
+def _anthropic(model: str, effort: str | None, url: str, key: str | None) -> Any:
+    """A ``ChatAnthropic`` of ``model`` on Anthropic's API at ``url`` with ``key``."""
+    from langchain_anthropic import ChatAnthropic  # noqa: PLC0415 - the react extra's
+
+    effort_given = {"reasoning_effort": effort} if effort is not None else {}
+    return ChatAnthropic(model_name=model, base_url=url, api_key=key, **effort_given)  # type: ignore[call-arg,arg-type]
+
+
 class OpenAICompatible(ModelGateway):
     """An OpenAI-compatible endpoint (``LLM_BASE_URL``): model names as given, on its chat
     completions, authenticated by ``LLM_AUTH``'s strategy; models only, the client's own
-    retries."""
+    retries. Anthropic's own API (:data:`ANTHROPIC_API`) is called with Anthropic's client
+    instead, which keeps its prompt cache, unless ``LLM_GATEWAY`` names this route
+    (``forced``: the OpenAI-compatible client asked for)."""
 
     name = "openai-compatible"
     title = "OpenAI-compatible endpoint"
     capabilities = frozenset({Capability.MODELS})
     url: str
 
-    def __init__(self, url: str, key: str | None = None, auth: str = BEARER) -> None:
+    def __init__(
+        self, url: str, key: str | None = None, auth: str = BEARER, *, forced: bool = False
+    ) -> None:
         super().__init__(url, key, auth)
+        #: the OpenAI-compatible client asked for by name (``LLM_GATEWAY``), whatever the endpoint
+        self.forced = forced
 
     @classmethod
     def of(cls, settings: Settings) -> Self:
@@ -303,7 +328,7 @@ class OpenAICompatible(ModelGateway):
             raise ConfigurationError(
                 f"LLM_AUTH={auth} signs with its own credentials: unset LLM_API_KEY"
             )
-        return cls(url, settings.llm_api_key, auth)
+        return cls(url, settings.llm_api_key, auth, forced=settings.llm_gateway == cls.name)
 
     @property
     def origin(self) -> str:
@@ -332,7 +357,28 @@ class OpenAICompatible(ModelGateway):
         bearer key (the client sends it), the login's strategy otherwise."""
         return None if self.auth in KEYLESS else self.http_auth
 
+    @property
+    def anthropic(self) -> bool:
+        """Whether its models are made with Anthropic's own client: the endpoint is Anthropic's
+        API, reached with a bearer key, and the OpenAI-compatible client was not asked for."""
+        return (
+            not self.forced
+            and self.origin == ANTHROPIC_API
+            and self.auth == BEARER
+            and self.key is not None
+        )
+
+    def notes(self) -> list[str]:
+        if not self.anthropic:
+            return []
+        return [
+            "client: Anthropic's own, on its API (its OpenAI compatibility layer drops prompt "
+            "caching); LLM_GATEWAY=openai-compatible keeps the OpenAI-compatible client"
+        ]
+
     def chat_model(self, model: str, *, effort: str | None) -> Any:
+        if self.anthropic:
+            return _anthropic(self.routed(model), effort, self.origin, self.key)
         return _chat(
             self.routed(model),
             effort,
@@ -592,7 +638,9 @@ def _resolved(model: str, effort: str | None) -> Any:
         made = per_loop(_MADE, ROUTED_KEPT)
     except RuntimeError:  # no event loop: a sync call
         made = _MADE_NO_LOOP
-    key = (gateway.name, gateway.url, gateway.key, gateway.auth, model, effort)
+    # a route that keeps the OpenAI-compatible client when asked (``forced``) makes another one
+    forced = getattr(gateway, "forced", False)
+    key = (gateway.name, gateway.url, gateway.key, gateway.auth, forced, model, effort)
     found = made.get(key)
     if found is None:
         found = made[key] = gateway.chat_model(model, effort=effort)

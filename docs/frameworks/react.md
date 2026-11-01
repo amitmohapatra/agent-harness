@@ -104,8 +104,10 @@ The names are Deep Agents' where both have one. In four tiers:
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
-  calls the run makes (LangChain's `ModelCallLimitMiddleware`: at the limit the run ends with
-  its message, "Model call limits exceeded"), identical calls in a row that stop the run, the
+  calls the run makes that may call tools (LangChain's `ModelCallLimitMiddleware` counts them;
+  at the limit the model is called once more, told the limit is reached and offered no tool, and
+  its answer — what it found, what is left — is the run's, a `step_limit` warning on the
+  stream), identical calls in a row that stop the run, the
   most one model call may take (within what is left of the run's `run_timeout=`/`deadline=`; a
   tool's own `call_timeout` bounds a tool call). A cap on the whole run's tool calls, across
   its attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)); a spent
@@ -217,7 +219,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order. With no `read_file` of the graph's own (no backend), a result over 80,000 characters is kept in the run and previewed, and `read_file` and `query_result` (read-only SQL over its rows) are offered once one is ([tools.md](../tools.md#large-results)); with a backend, `query_result` runs over the result Deep Agents saved in the state |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed and a failure was met again (the same tool, the same error): the model is told so and called once more with no tool (`tool_choice="none"`), so the user is told what went wrong; no answer then stops the run with a `ModelError`. Failures that each differ are a model correcting itself, bounded by `max_steps` |
-| `ModelCallLimitMiddleware` (LangChain) | `max_steps` model calls; past them the run ends with LangChain's message (no extra call) |
+| `ModelCallLimitMiddleware` (LangChain, as `AnswerAtLimit`) | `max_steps` model calls; then one more, offered no tool, whose answer ends the run (one extra call at most; LangChain's own limit one call later is the backstop) |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
 | `ContextEditingMiddleware` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_file` (the call's id as its path) in their place — the one clearing pass — only when it frees a tenth of the window, so a prompt cache breaks rarely |
 | `ReadTools` | `read_file` offered once a result was cleared, the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered it from the start reads nothing, again and again; a cleared result is paged from the graph's state as a kept one is (100 lines, 20,000 characters a page) |
@@ -230,10 +232,10 @@ resume after a pause, a crash or a requeue continues the graph where it stopped.
 Last of what changes a request, where Deep Agents puts its own, both bases have `PromptCache`:
 LangChain's `AnthropicPromptCachingMiddleware` (the one you give `ReAct(middleware=)`, its
 settings kept) run on the chat model the call is made with — a `ChatAnthropic`, or a model name
-routed to Anthropic's own SDK — so the tools, the instructions, the request's end and the
+routed to Anthropic's own SDK or to Anthropic's API as an OpenAI-compatible endpoint — so the tools, the instructions, the request's end and the
 answer that ends the history are marked (4 breakpoints). Any other model's request is sent as
-it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); an OpenAI-compatible
-endpoint's chat completions carry no breakpoints.
+it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); any other
+OpenAI-compatible endpoint's chat completions carry no breakpoints.
 
 A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `ModelHooks` and
 `PromptCache` too (its own of those names kept), and a model name of its own is routed as
