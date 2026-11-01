@@ -36,6 +36,13 @@ own model work follows the harness's configuration.
 
 ### Changed
 
+- The context's line about earlier tool values that are out of date now asks the model to
+  call a tool again only for a value the question needs, and still never to answer with an
+  earlier one (`snapshots.NOTE`). It said "call them again; never answer from the earlier
+  ones", and on a turn that needed none of them ("Put that in a PDF for finance") ReAct
+  re-fetched every input and often dropped why it could not make the file. Haiku, three
+  repeats: that turn 1/3 -> 3/3 (4 of 10 across every ReAct run on main); the freshness
+  cases 27/27 turns before and after.
 - The tool hints narrow what the model is offered only from 30 tools in the run
   (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
@@ -52,6 +59,22 @@ own model work follows the harness's configuration.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
+- A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
+  answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
+  SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
+  the limit is reached, for one turn with no tool. Kimi ended the turn with no answer, the
+  reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in the same
+  session. A `step_limit` warning says so on the stream. Both are told the limit is for this
+  turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's "This run has
+  reached its limit", a model answered the conversation's next turn "I've reached the
+  tool-call limit" without calling a tool.
+- When memory holds nothing for a question (or only part of it) and the run offers
+  `memory_search`, the note that says so now also tells the model to search the user's
+  earlier conversations first (`kinds=["message"]`) before saying a detail is missing
+  (`agent.EARLIER_CHATS`). Told only to offer to look it up, every adapter asked the user
+  again for what they had said in an earlier chat ("the cardigan in that same colour, but in
+  cotton"). Haiku, ReAct, three repeats: that turn went from 0/3 to 3/3 right, and the turns
+  the note reaches went from 15/18 to 18/18, at about half a model call more each.
 - `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
   their results, not only its question and answer — so a follow-up has the figures behind an
   earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
@@ -171,6 +194,22 @@ own model work follows the harness's configuration.
   ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
 
 ### Added
+
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
+- A sandbox's files for the user: the command tool says that files written in `outputs/` are
+  given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
+  store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
+  sandbox is deleted.
+
+- The sandbox's environment card: `sandbox_exec`, and Deep Agents' `execute` under
+  `ReAct(backend=sandbox())`, are described with the image's Python version and installed
+  distributions, and with no network, that nothing else can be installed
+  (`SandboxSource.card`). The card is read once per process in a sandbox made for it alone.
+  [sandbox.md](docs/sandbox.md) has an image recipe that installs from your index
+  (`PIP_INDEX_URL`, `UV_INDEX_URL`, a build secret for credentials).
 
 - AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
   to the model beside the agent's own (one of the agent's by the same name wins, with a

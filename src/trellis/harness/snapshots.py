@@ -38,7 +38,8 @@ EARLIER: Final = (
 #: What the context says of the tools whose replayed results are out of date.
 NOTE: Final = (
     "The values {tools} returned in earlier turns are out of date (older than they stay "
-    "current): call {tools} again for the current values; never answer from the earlier ones."
+    "current): for a value the question needs, call its tool again; never answer with an "
+    "earlier one."
 )
 #: The time format of a fetch time: to the second, UTC.
 TIME: Final = "%Y-%m-%dT%H:%M:%SZ"

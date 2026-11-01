@@ -401,6 +401,64 @@ async def test_the_harness_tools_are_loaded_from_the_first_step(
     assert servers["erp"] == erp
 
 
+async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A query that reaches ``max_turns`` ends ``error_max_turns``, with no answer. As a
+    ``ReAct`` run at ``max_steps`` and an OpenAI Agents run at ``max_turns`` do, the run asks
+    once more: its session resumed (Claude's own ``resume``), told the limit is reached
+    (``budget.LIMIT``), one turn and no tool. Its answer is the run's, said as a
+    ``step_limit`` warning."""
+    from trellis.harness.budget import TURN_LIMIT
+
+    refunds.clear()
+    script = [
+        {"tool": "refund", "args": {"order": "o1"}},
+        {"tool": "refund", "args": {"order": "o2"}},
+        {"text": "never"},
+    ]
+    target = options(tmp_path, script, max_turns=1)
+    target.env["FAKE_CLAUDE_AT_LIMIT"] = "Refunded o1; o2 is left undone."
+    agent = arm(harness.wrap(target, id="limited"), [tool(refund.fn, side_effects="write")])
+    events = [e async for e in agent.stream("refund o1 and o2", user="u1")]
+    done = events[-1]
+    assert done.type is RunEventType.RUN_FINISHED and done.error is None
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["Refunded o1; o2 is left undone."] and refunds == ["o1"]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
+    assert warned == ["stopped: the turn limit (1) was reached"]
+    last = started_with(tmp_path)  # the last query the CLI was started with
+    # the session keeps it: told it holds for this turn only, a later turn calls tools again
+    assert last["prompt"] == TURN_LIMIT.format(limit=1) and last["resume"] is not None
+    assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
+
+
+async def test_a_last_query_at_the_limit_that_gives_no_answer_leaves_the_error(
+    harness: Harness, tmp_path: Path
+) -> None:
+    target = options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "x"}],
+                     max_turns=1)  # fmt: skip
+    target.env["FAKE_CLAUDE_AT_LIMIT"] = ""
+    agent = arm(harness.wrap(target, id="limited-2"), [tool(refund.fn, side_effects="write")])
+    result = await agent.run("refund o3", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "maximum number of turns" in result.error.message
+
+
+async def test_a_query_stopped_by_its_own_budget_keeps_its_error(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Only the turn limit is answered once more: a query the CLI stopped at the options' own
+    ``max_budget_usd`` ends with the CLI's error, as before."""
+    target = options(tmp_path, [{"tool": "refund", "args": {"order": "o6"}}, {"text": "x"}],
+                     max_budget_usd=0.01)  # fmt: skip
+    target.env["FAKE_CLAUDE_COST"] = "0.02"
+    agent = arm(harness.wrap(target, id="own-budget"), [tool(refund.fn, side_effects="write")])
+    result = await agent.run("refund o6", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "maximum budget" in result.error.message
+
+
 #: a result over ``tools.results.MAX_CHARS``, and where the run keeps it
 LONG = "\n".join(f"row {n}" for n in range(1, 30_001))
 KEPT = f"/large_tool_results/{content_key('result', LONG)}"

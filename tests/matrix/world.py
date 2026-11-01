@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -50,7 +51,7 @@ from tests.support.gateway import URL as GATEWAY_URL
 from tests.support.gateway import FakeGateway
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
-from trellis import Harness, ReAct, Settings, tool
+from trellis import Harness, ReAct, Settings, current, tool
 from trellis.contracts import (
     Interrupt,
     InterruptReason,
@@ -249,6 +250,44 @@ class _Handle:
     thread: str | None = None
 
 
+class RunClocks:
+    """The clocks a cell's runs keep their time limits on: every ``asyncio.timeout`` opened while
+    the cell runs, by the task that opened it (an attempt opens its run's, ``pipeline``), so the
+    cell lets a run's limit pass at the moment it chooses (:meth:`run_out`) — not when the wall
+    clock does, which a loaded runner passed before the run even reached its tool."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._opened: weakref.WeakKeyDictionary[asyncio.Timeout, asyncio.Task[Any] | None]
+        self._opened = weakref.WeakKeyDictionary()
+        opening = asyncio.timeout
+
+        def timeout(delay: float | None) -> asyncio.Timeout:
+            clock = opening(delay)
+            self._opened[clock] = asyncio.current_task()
+            return clock
+
+        monkeypatch.setattr(asyncio, "timeout", timeout)
+
+    def run_out(self) -> None:
+        """The time limit of the run this code works in passes now: its attempt's clock — opened
+        in the attempt's task, due when the run must stop (``Runtime.ends_at``) — runs out at
+        the event loop's next turn, and the harness ends the run ``TIMEOUT`` as at any limit."""
+        runtime = current()
+        assert runtime is not None and runtime.ends_at is not None, "not in a run with a limit"
+        due = [
+            clock
+            for clock, task in self._opened.items()
+            if task is runtime.running_in
+            and (when := clock.when()) is not None
+            and when >= runtime.ends_at
+            and not clock.expired()
+        ]
+        assert due, f"run {runtime.run_id}: no clock of its time limit"
+        now = asyncio.get_running_loop().time()
+        for clock in due:
+            clock.reschedule(now)
+
+
 class World:
     """One cell (see the module)."""
 
@@ -304,6 +343,8 @@ class World:
         self._tap(monkeypatch)
         #: what every scripted model was sent and offered
         self.models = ModelLog(monkeypatch)
+        #: the runs' time limits, which a cell lets pass when it chooses
+        self.clocks = RunClocks(monkeypatch)
         #: the tools each Claude or Kimi run was given (its CLI lists them itself)
         self.claude_offered: list[list[str]] = []
         self.claude_described: dict[str, str] = {}
