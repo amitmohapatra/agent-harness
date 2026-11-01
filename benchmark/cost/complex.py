@@ -2670,6 +2670,8 @@ _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+#: A Markdown table's row: what a set answer shows as its evidence (every candidate's figure).
+_TABLE_ROW: Final = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 #: A date written as ISO 8601 ("2026-10-29"): its month and day are no figures of the answer.
 _ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
@@ -2878,6 +2880,10 @@ def score(
     # a set's wrong member named only as on the other side of the line is no member; a right
     # figure's earlier value, said as earlier, is not the answer
     said = _NOT_IN.sub(" ", a) if k == "set" else a
+    if k == "set" and not missing:
+        prose = _TABLE_ROW.sub(" ", said)
+        if all(_has_text(prose, options) for options in expect.value):
+            said = prose  # the answer is in its prose; a table of every candidate is evidence
     if k in ("number", "record") and not missing:
         said = _EARLIER.sub(" ", said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]

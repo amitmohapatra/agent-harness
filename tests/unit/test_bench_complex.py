@@ -481,6 +481,22 @@ async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
     assert not cx.score(turn.expect, failed + " About 240 units.", [], turn.text, told)["correct"]
 
 
+def test_a_set_answered_in_prose_may_show_every_candidate_in_a_table() -> None:
+    """bf3-past-04 t1, Claude: "Only one South store was under your alert line: S26", then a
+    table of every south store's revenue. The table is the evidence, not the answer."""
+    case = next(c for c in breakfix.cases() if c.id == "bf3-past-04")
+    turn = case.turns[1]
+    assert turn.expect is not None and turn.expect.kind == "set"
+    table = (
+        "| Store | Sept 2026 revenue |\n|---|---|\n| S02 | £58,451.26 |\n| S22 | £205,983.47 |\n"
+        "| **S26** | **£39,481.85** |\n| S34 | £48,184.00 |"
+    )
+    said = f"Only one South store was under your £45,000 line in September 2026: S26.\n\n{table}"
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    wrong = f"S26 and S34 were under your line in September 2026.\n\n{table}"
+    assert not cx.score(turn.expect, wrong, [], turn.text)["correct"]
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",
