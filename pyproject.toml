@@ -142,6 +142,8 @@ known-first-party = ["trellis", "benchmark"]
 "benchmark/**" = ["PLC0415"]
 # the distractor servers' table, one kind of record a line
 "benchmark/cost/catalog.py" = ["E501"]
+# the tool-chain cases' table, one case a line
+"benchmark/tool_chains/cases.py" = ["E501"]
 # Adapters import their framework on first use, never at module import.
 "src/trellis/harness/adapters/**" = ["PLC0415"]
 # Each bridge imports its framework when its adapter first uses it.
