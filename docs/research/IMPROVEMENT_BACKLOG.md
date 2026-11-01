@@ -46,8 +46,9 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | Sources, steps, tools, seconds, approvals of an earlier answer | in flight: `claude/cool-maxwell-w5avo8-explain` (#59), `-explain2` (#62, arm D) | audit B1, B2, B5, B6; [SELF_EXPLANATION.md](SELF_EXPLANATION.md) |
 | Explain test fixed first (template, memory-off floor, prompt capture, strict scorer) | in flight: `-explain2` | [SELF_EXPLANATION.md](SELF_EXPLANATION.md#fix-four-flaws-in-the-test-before-re-measuring) |
 | Pilot arm E (shortlist 2–5: tool names, worked example, repeated-call wording, confidence/why from the record) | next, one change at a time | [shortlist](SELF_EXPLANATION.md#shortlist-to-test-against-main-one-change-at-a-time) |
-| Why a step was taken; how sure the answer is | later (after arm D) | audit B3, B4 |
-| What changed since last time (tool values) | later (needs fetch time) | audit B7 |
+| Why a step was taken; how sure the answer is | in flight: `-explain2` (memory's steps list: `from step N` on a call whose argument an earlier result returned; an evidence line per turn — calls that succeeded, sources and how many calls name each, values out of date — graded high/medium/low from the record alone) | audit B3, B4; explain pilot on a small hosted model: strict 27/27 as arm D, controls 6/6, context sufficient 27/27, turn-2 input 13,199 → 11,898 tokens |
+| Earlier turns' results as data cards (the result kept for `read_file` and `query_result`) | dropped: failed the keep rule | explain pilot: turn-2 input −35% (13,199 → 8,628), but strict 27/27 → 26/27 and more model calls and seconds: the model read the card in its own earlier turn as all it had seen and disowned that answer |
+| What changed since last time (tool values) | later (the fetch time is now in the run record: `-explain2`) | audit B7 |
 
 ## Live data and large results
 
@@ -110,7 +111,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | A model profile for a model LangChain's route does not know (an Anthropic model on the OpenAI-compatible route refuses `temperature`): look the model up in the models.dev data that LangChain's installed provider packages ship (data, not rules on names), else use one documented profile setting | later | [ADR 0004](../adr/0004-provider-neutral-models.md) |
 | Test-order flake: `tests/integration/test_fit_window.py` fails when it runs after the unit suite, on main too. Fix it: nothing may fail | next | reported against main; reproduce first |
-| Memory draft #64: CI was red before its last push, and one merge commit lacks the commit trailer. Fix both before the merge | later | memory #64 |
+| Memory draft #64: CI was red before its last push (the complexity ratchet: `replay_window`), and one merge commit lacks the commit trailer | CI fixed on `-explain2` (split in three); the trailer cannot be added without rewriting shared history | memory #64 |
 
 ## Safety and privacy
 

@@ -316,6 +316,8 @@ class FakeMemoryService:
             for key in ("tool_calls", "tool_call_id"):
                 if key in m:
                     message[key] = m[key]
+            if recorded := (m.get("custom_metadata") or {}).get("run_record"):
+                message["run_record"] = recorded  # the caller's run record of it
             out.append(message)
         return out
 

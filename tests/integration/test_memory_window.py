@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import re
 from typing import Any
 
 import pytest
@@ -23,6 +22,7 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.identity import conversation_key
 from trellis.harness.middleware import ASKED_WITH
@@ -99,9 +99,10 @@ async def test_a_tool_call_comes_back_with_its_result(
     [call] = messages[1]["tool_calls"]
     assert call["function"]["name"] == "stock" and '"sku": "a"' in call["function"]["arguments"]
     assert messages[2]["tool_call_id"] == call["id"]
-    # a dated snapshot, out of date already (a tool's data is live unless it says otherwise)
+    # out of date already (a tool's data is live unless it says otherwise); when it was
+    # fetched is the run record's to say, not the result's
     said = messages[2]["content"]
-    assert re.fullmatch(r"\[snapshot of stock from [0-9TZ:-]+: out of date[^\]]*\]\n7", said)
+    assert said == snapshots.STALE.format(tool="stock") + "\n7"
     assert messages[3]["content"] == "7 units."
 
 
@@ -212,7 +213,7 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
     assert kinds == ["user", "function_call", "function_call_output", "assistant", "user"]
     call, output = said[1], said[2]
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
-    assert re.fullmatch(r"\[snapshot of lookup from [0-9TZ:-]+\]\nresult a", output["output"])
+    assert output["output"] == "result a"  # its fetch time is in its run record
     # memory's thread is the session: the context carries no window besides it
     assert all("window_format" not in c.body for c in memory_service.named("context"))
 

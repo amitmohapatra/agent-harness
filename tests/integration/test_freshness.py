@@ -122,9 +122,11 @@ async def test_a_replayed_result_says_which_tool_fetched_it_and_when(
     assert result.status is RunStatus.SUCCESS, result.error
     [told] = replayed(model.requests[-1])
     stored = [m for m in memory_service.threads[KEPT] if m["role"] == "TOOL"]
-    # kept so: any later turn reads which tool fetched it and when
-    assert stored[0]["content"] == "[snapshot of get_stock from 2026-10-30T09:00:00Z]\n40"
-    assert told.startswith("[snapshot of get_stock from 2026-10-30T09:00:00Z: out of date")
+    # which tool fetched it and when: its run record, the one place it is kept
+    assert stored[0]["content"] == "40"
+    facts = stored[0]["custom_metadata"]["run_record"]
+    assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
+    assert told == snapshots.STALE.format(tool="get_stock") + "\n40"
     assert "out of date" in context(model.requests[-1])  # live by default: call it again
 
 
@@ -140,7 +142,10 @@ CASES = {
 
 @pytest.mark.parametrize("case", list(CASES))
 async def test_a_live_value_past_its_max_age_is_fetched_again(
-    memory_harness: Harness, monkeypatch: pytest.MonkeyPatch, case: str
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
 ) -> None:
     declared, later, stale = CASES[case]
     get_stock = stock_tool(**declared)
@@ -160,11 +165,14 @@ async def test_a_live_value_past_its_max_age_is_fetched_again(
     assert result.status is RunStatus.SUCCESS and result.answer == "7 units.", result.error
     asked = model.requests[2]  # the second turn's first request
     [told] = replayed(asked)
-    assert told.startswith("[snapshot of get_stock from 2026-10-30T09:00:00Z")
+    assert told.endswith("40") and "2026-10-30" not in told  # the fetch time: the run record's
     assert ("out of date" in told) is stale
     assert ("get_stock" in context(asked) and "out of date" in context(asked)) is stale
     assert "get_stock" in [t["function"]["name"] for t in asked["tools"]]  # still offered
     assert get_stock.calls == ["SKU-00123", "SKU-00123"]
+    # the run record says how long the value stays current; a static tool's never goes stale
+    first = next(m for m in memory_service.threads[KEPT] if m["role"] == "TOOL")
+    assert ("max_age" in first["custom_metadata"]["run_record"]) is (case != "static")
 
 
 class Annotated:

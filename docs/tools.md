@@ -209,9 +209,10 @@ value is as good as a new one); `freshness="live"` also says the default in the 
 description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
 `side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
 
-Where memory owns the conversation, every tool result a run writes to it starts with
-`[snapshot of <tool> from <UTC time>]`, so a later turn replays when (and by which tool) each
-value was fetched — the model can say where a number came from. A replayed result past its
+Where memory owns the conversation, when each tool result was fetched is kept in one place:
+the run record of its call (`custom_metadata["run_record"]["fetched"]`, UTC, with its tool's
+`max_age`), which the memory service's steps list shows on the call's line — the model can say
+where a number came from and when, and the result's own text is never stamped. A replayed result past its
 tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
 same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
 fetches the value again instead of answering from the old one, and the fresh result, with the
