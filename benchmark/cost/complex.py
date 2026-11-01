@@ -3066,9 +3066,27 @@ class Trace(Hooks):
                 "args": dict(call.args),
                 "status": outcome.status.value,
                 "run": runtime.run_id if runtime is not None else None,
+                # what a failed call told the model (:func:`said_in`)
+                **(
+                    {"error": str(outcome.output)[:ERROR_CHARS]}
+                    if outcome.status.value in ("error", "timeout") and outcome.output
+                    else {}
+                ),
             }
         )
         return outcome
+
+
+#: The most of a failed call's error a turn's record keeps.
+ERROR_CHARS: Final = 500
+
+
+def said_in(requests: Sequence[dict[str, Any]], calls: Sequence[dict[str, Any]]) -> str:
+    """What the run was told, as the scorer reads it (``context``): every captured request's
+    messages, and the errors its failed calls returned - for Kimi and Claude the captured
+    requests are not the CLI's own, so a tool's error is read from the call itself."""
+    sent = [_texts(m) for q in requests for m in q.get("messages") or []]
+    return "\n".join([*sent, *(c["error"] for c in calls if c.get("error"))])
 
 
 # --------------------------------------------------------------------------- running
@@ -3416,9 +3434,7 @@ async def run_case(
             }
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
-                said = "\n".join(
-                    _texts(m) for q in captured.requests for m in q.get("messages") or []
-                )
+                said = said_in(captured.requests, calls)
                 row["score"] = score(turn.expect, answer, records, turn.text, said)
             records.append(row)
             requests += [

@@ -455,6 +455,32 @@ def test_an_iso_date_in_an_abstain_answer_is_no_made_up_figure() -> None:
     assert not cx.score(turn.expect, said + " Your target is 61%.", [], turn.text)["correct"]
 
 
+async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
+    """Kimi and Claude: the captured requests do not hold the harness's tool results (the
+    CLI's own requests are not seen), so the error a failed call returned ("503 Service
+    Unavailable") is read from the turn's own calls; a figure nothing returned is still not."""
+    from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
+
+    trace = cx.Trace()
+    error = '{"error": "503 Service Unavailable (maintenance window)"}'
+    await trace.after_tool(
+        ToolCall(tool="demand_forecast", args={"sku": "SKU-00001"}),
+        ToolOutcome(tool="demand_forecast", status=ToolStatus.ERROR, output=error),
+    )
+    await trace.after_tool(
+        ToolCall(tool="sku_details", args={"sku": "SKU-00001"}),
+        ToolOutcome(tool="sku_details", status=ToolStatus.OK, output="unit cost 41.20"),
+    )
+    told = cx.said_in([], trace.calls)
+    assert "503 Service Unavailable" in told and "41.20" not in told  # errors only
+    case = next(c for c in breakfix.cases() if c.id == "bf3-explain-03")
+    turn = case.turns[0]
+    assert turn.expect is not None
+    failed = "I couldn't get the forecast: the service returned 503 Service Unavailable twice."
+    assert cx.score(turn.expect, failed, [], turn.text, told)["correct"]
+    assert not cx.score(turn.expect, failed + " About 240 units.", [], turn.text, told)["correct"]
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",
