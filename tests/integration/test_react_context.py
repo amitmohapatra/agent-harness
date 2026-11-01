@@ -14,7 +14,7 @@ from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
 from trellis.harness.automatic import JournalBackend
-from trellis.harness.middleware import ASKED_WITH
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.react import CLEARED
 
 

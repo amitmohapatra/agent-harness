@@ -21,7 +21,8 @@ table's columns; a run with a sandbox is also told the result is a file there to
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
 
 from trellis.harness.journal import content_key
@@ -40,7 +41,10 @@ TABLE_ROWS: Final = 30
 #: What a table read whole says after its rows (then :data:`QUERY`).
 TABLED: Final = "These {rows} rows are also saved at {path}. "
 #: Where a kept result is read (Deep Agents' ``/large_tool_results/<call id>``).
-PREFIX: Final = "/large_tool_results"
+PREFIX: Final = query.KEPT_PREFIX.rstrip("/")
+#: The most characters of results the conversations' earlier turns saved that an agent keeps
+#: in this process for their later turns (:class:`Conversations`: what one query may load).
+KEPT_CHARS: Final = query.LOAD_CHARS
 #: The longest line read as one, and the most of a line a preview shows.
 MAX_LINE: Final = 5_000
 PREVIEW_LINE: Final = 1_000
@@ -200,7 +204,42 @@ def coding_tool() -> str | None:
 def kept() -> bool:
     """Whether the current run keeps a result to read (``read_file`` is offered then)."""
     runtime = current()
-    return runtime is not None and bool(runtime.replay.journal.results)
+    return runtime is not None and bool(query.saved(runtime))
+
+
+class Conversations:
+    """The results each conversation's turns saved, kept in this process for its later turns
+    (``Agent.results``) — as a framework's own thread keeps them (Deep Agents' files in its
+    state) — the least recently used conversation forgotten past :data:`KEPT_CHARS` in all. A
+    turn on another worker, or after a restart, finds none: a path read then says so
+    (:data:`GONE`)."""
+
+    def __init__(self, most: int = KEPT_CHARS) -> None:
+        self.most = most
+        self.chars = 0
+        self._kept: OrderedDict[str, tuple[dict[str, str], dict[str, str]]] = OrderedDict()
+
+    def of(self, conversation: str) -> tuple[dict[str, str], dict[str, str]]:
+        """The results ``conversation``'s earlier turns saved, by path, and the tool each came
+        from (its table's name in a query)."""
+        found = self._kept.get(conversation)
+        if found is None:
+            return {}, {}
+        self._kept.move_to_end(conversation)
+        return found
+
+    def add(self, conversation: str, texts: Mapping[str, str], tools: Mapping[str, str]) -> None:
+        """A turn's saved results (``texts``) and their tools, kept for ``conversation``."""
+        kept, named = self._kept.setdefault(conversation, ({}, {}))
+        self._kept.move_to_end(conversation)
+        for path, text in texts.items():
+            if path not in kept:
+                kept[path] = text
+                self.chars += len(text)
+        named.update({p: t for p, t in tools.items() if p in kept})
+        while self.chars > self.most:
+            _, (gone, _) = self._kept.popitem(last=False)
+            self.chars -= sum(map(len, gone.values()))
 
 
 def read(args: dict[str, Any], *, text: str | None = None) -> str:
@@ -222,9 +261,9 @@ def read_file(
     runtime = current()
     path = "/" + file_path.lstrip("/")
     if text is None and runtime is not None:
-        text = runtime.replay.journal.results.get(path)
+        text = query.saved(runtime).get(path)
     if text is None:
-        return f"Error: File '{path}' not found"
+        return query.not_found(path)
     lines = _lines(text)
     start = max(0, offset)
     if start >= len(lines):
