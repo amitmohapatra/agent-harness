@@ -4,10 +4,10 @@ same instructions and model. A new cost feature lands as one more entry of :data
 
 * ``baseline`` — the plain tool-calling loop, everything off: LangChain's ``create_agent``
   with only what runs the harness's tools and bounds the loop (``HarnessTools``,
-  ``StallGuard``, ``StepLimit``, ``PatchToolCallsMiddleware``, ``ModelHooks``), no context
-  editing, no summarization, no automatic feature (a large result is still kept and paged:
-  ``HarnessTools`` runs the harness's tools with the convention every adapter's model reads,
-  ``tools.results``); ``without={"code_mode", "tool_search"}``.
+  ``StallGuard``, LangChain's ``ModelCallLimitMiddleware``, ``PatchToolCallsMiddleware``,
+  ``ModelHooks``), no context editing, no summarization, no automatic feature (a large result
+  is still kept and paged: ``HarnessTools`` runs the harness's tools with the convention every
+  adapter's model reads, ``tools.results``); ``without={"code_mode", "tool_search"}``.
 * ``main`` — ``ReAct(...)`` as this branch builds it, nothing changed: with no Deep Agents
   capability asked for, LangChain's ``create_agent`` with ``trellis.middleware()`` (and Deep
   Agents' ``PatchToolCallsMiddleware``) — planning on a long task, older results cleared past
@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Final, cast
 
 from trellis import ReAct
-from trellis.harness.react import PLACED, defaults_off, defaults_on
+from trellis.harness.react import PLACED, defaults_off
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ def baseline(setup: Setup) -> tuple[Any, dict[str, Any]]:
         middleware=[
             ours.HarnessTools(),
             ours.StallGuard(ours.MAX_REPEATS),
-            ours.StepLimit(setup.max_steps),
+            ours.step_limit(setup.max_steps, scoped=True),
             PatchToolCallsMiddleware(),
             ours.ModelHooks(),
         ],
@@ -89,7 +89,6 @@ def main(
     setup: Setup,
     *,
     off: tuple[str, ...] = (),
-    on: tuple[str, ...] = (),
     window: int | None = None,
     deep: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
@@ -97,7 +96,7 @@ def main(
     from trellis.harness.automatic import JournalBackend
 
     named = PIECES | AUTOMATIC
-    with defaults_off(*(named[name] for name in off)), defaults_on(*on):
+    with defaults_off(*(named[name] for name in off)):
         target = ReAct(
             setup.system,
             setup.model,
@@ -195,11 +194,6 @@ VARIANTS: Final[dict[str, Variant]] = {
         "pieces",
         "create_agent with middleware() and Deep Agents' pieces attached, gated per call",
         pieces,
-    ),
-    "main+selector": Variant(
-        "main+selector",
-        "main with LangChain's tool selector when no hints and over 20 tools",
-        functools.partial(main, on=("ToolSelection",)),
     ),
     "main@16k": Variant(
         "main@16k",

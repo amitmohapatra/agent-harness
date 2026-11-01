@@ -44,14 +44,35 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
+  says the file is the run's own scratch copy, which the user cannot open or download
+  (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
+  graph's state and told the user to open it (break-and-fix round 1, Deep Agents).
+- A conversation is no longer lost when memory fails mid-chat. Where memory replays the
+  conversation (its window) and its context call fails (an outage, the circuit open), the
+  earlier turns come from the run store, as with memory off; before, the model was sent the
+  question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
+- OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
+  on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
+  that ended the run with no answer (ADV-8).
+
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
   and got them wrong.
+- A Docker sandbox's anonymous volumes (an image's `VOLUME`) are removed with it: before, each
+  run of such an image left one volume behind (50 runs, 50 volumes; now none).
+
 - A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
   the service refuses a larger recorded output (422), so the call's record was lost and the
   service never learned from it. The output is recorded cut to fit, saying so
   (`clients.memory.recorded_output`).
+
+### Changed
+
+- The note the model gets when memory holds nothing (or only part) for the question says
+  what an honest answer does: name the detail it does not have, and offer to look it up or
+  ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
 
 ### Added
 
@@ -82,6 +103,18 @@ own model work follows the harness's configuration.
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
   its cut naming the `read_file` call that reads on from there.
+- `query_result` runs on DuckDB when the new `query` extra is installed (in `all`), and on
+  Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
+  one contract on both (the description names the engine; the same tables, column typing,
+  `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
+  Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
+  JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
+  query builds is at most 64 MB, and a query past its time is interrupted by a watcher
+  thread on either engine.
 - `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
   of the run's saved results — each a table named by its tool, so one query joins them — with
   formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
@@ -136,6 +169,34 @@ own model work follows the harness's configuration.
 - A conformance suite over every registered route, auth strategy and profile against stubs of
   OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
   a Google token refresh and an AWS SigV4 signature recomputed from the specification.
+
+### Removed
+
+- `automatic.ToolSelection`, `react.defaults_on` and the `benchmark.cost` variant
+  `main+selector`: a harness fallback to LangChain's `LLMToolSelectorMiddleware` when memory
+  gave no hints, which ADR 0003 §6 rules out (one owner of tool narrowing: memory's hints). A
+  team adds `LLMToolSelectorMiddleware` through `ReAct(middleware=)` itself.
+
+### Changed
+
+- A model call's HTTP status is retryable exactly when it is in bifrost-sdk's `RETRYABLE`
+  (408, 409, 425, 429, 500, 502, 503, 504), the set the gateway client and the memory service
+  use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
+  425 is now retryable; 501, 505 and the other 5xx are not.
+
+### Removed (one clearing pass, one read-back tool)
+
+- `read_result`, `READ_RESULT`, `READ_LIMIT`, `FIT_CLEARED` and `FitWindow`'s clearing of older
+  results: LangChain's `ClearToolUsesEdit` is the one clearing pass, and its placeholder names
+  `read_file` with the cleared call's id as its path (`/large_tool_results/<call id>`, Deep
+  Agents' own), paged from the graph's state with the limits every kept result uses (100 lines,
+  20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
+  naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
+  placeholder naming `read_result`, a tool that request did not offer.
+- `FitWindow(turns=False)` (ReAct on Deep Agents: a summarization after it) leaves tool results
+  to Deep Agents too: its overflow path offloads a result whole to its backend. Before, both cut
+  the same result, so a sandbox held it twice (the harness's whole copy, written in for code,
+  and Deep Agents' offload of the cut text).
 
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
