@@ -134,10 +134,16 @@ def test_a_call_is_found_from_the_end() -> None:
     assert mw._calling(again, "new") == (len(again) - 1, again[-1])
 
 
-async def test_read_result_reads_the_latest_result_of_an_id() -> None:
-    read = mw.read_result()
+def test_a_cleared_result_is_the_latest_result_of_its_id() -> None:
     messages = [ToolMessage("first", tool_call_id="c"), ToolMessage("again", tool_call_id="c")]
-    assert await read.coroutine(id="c", state={"messages": messages}) == "again"  # type: ignore[attr-defined]
+    state = {"messages": messages}
+    assert mw._cleared_result(state, "/large_tool_results/c") == "again"
+    assert mw._cleared_result(state, "/large_tool_results/x") is None
+    assert mw._cleared_result(state, "/elsewhere/c") is None
+    assert mw._cleared_result(None, "/large_tool_results/c") is None
+    # evicted by Deep Agents to its backend: its own read_file reads that file
+    evicted = {"messages": [ToolMessage("Tool result too large, ...", tool_call_id="c")]}
+    assert mw._cleared_result(evicted, "/large_tool_results/c") is None
 
 
 # --------------------------------------------------------------------------- A5
