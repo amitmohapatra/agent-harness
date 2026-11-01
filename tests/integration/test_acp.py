@@ -596,6 +596,40 @@ async def test_a_process_that_ends_mid_turn_fails_the_run_with_its_stderr(
     assert "out of memory" in result.error.message and "exit 3" in result.error.message
 
 
+def wait_times_out_as_the_process_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every wait for an agent's process ends with the process gone and its pipes closed, yet
+    raises ``TimeoutError``: asyncio's race when a timed wait's deadline falls in the moment
+    the process ends (the wait's wake-up is lost to the timeout). The ACP SDK's shutdown then
+    signals the process, and asyncio raises ``ProcessLookupError``: it is already gone."""
+    real = asyncio.subprocess.Process.wait
+
+    async def gone(self: asyncio.subprocess.Process) -> int:
+        await real(self)
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", gone)
+
+
+async def test_a_process_already_gone_when_the_attempt_stops_it_keeps_the_answer(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wait_times_out_as_the_process_ends(monkeypatch)
+    agent = harness.wrap(fake(tmp_path, [{"text": "done"}]), id="gone")
+    result = await agent.run("x", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "done"
+
+
+async def test_a_process_already_gone_when_a_failed_attempt_stops_it_keeps_the_failure(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wait_times_out_as_the_process_ends(monkeypatch)
+    agent = harness.wrap(fake(tmp_path, [{"crash": "out of memory"}]), id="crash")
+    result = await agent.run("x", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "out of memory" in result.error.message and "exit 3" in result.error.message
+
+
 async def test_a_turn_ended_at_the_step_limit_is_asked_once_more(
     harness: Harness, tmp_path: Path
 ) -> None:
