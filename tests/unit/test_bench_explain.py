@@ -40,6 +40,8 @@ class Reader(Script):
     def next(self, body: dict[str, Any]) -> Any:
         messages = body["messages"]
         asked = [m["content"] for m in messages if m["role"] == "user"][-1]
+        if isinstance(asked, list):  # the memory context comes first, then the question
+            asked = asked[-1]["text"]
         if messages[-1]["role"] == "tool":
             return "ACME closed at 123.45 USD."
         return FIRST_CALLS.get(asked) or ANSWERS.get(asked, "I do not know.")
