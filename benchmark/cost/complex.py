@@ -2642,6 +2642,11 @@ _NOT_IN: Final = re.compile(
     r"(?:[^.\n]|\.(?=\S))*",
     re.IGNORECASE,
 )
+#: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
+_EARLIER: Final = re.compile(
+    r"(?:[^.\n]|\.(?=\S))*\b(?:earlier|previously|before|down from|up from)\b(?:[^.\n]|\.(?=\S))*",
+    re.IGNORECASE,
+)
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
 _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
@@ -2811,8 +2816,11 @@ def score(
             made_up.append(fake.group(0))
     elif k == "judge":
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
-    # a set's wrong member named only as on the other side of the line is no member
+    # a set's wrong member named only as on the other side of the line is no member; a right
+    # figure's earlier value, said as earlier, is not the answer
     said = _NOT_IN.sub(" ", a) if k == "set" else a
+    if k in ("number", "record") and not missing:
+        said = _EARLIER.sub(" ", said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's

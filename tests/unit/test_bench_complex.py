@@ -683,3 +683,19 @@ def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead()
     assert cx.score(turn.expect, form, [], turn.text)["correct"]
     bare = "I can't create a downloadable chart. I have no tool that produces image exports."
     assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
+
+
+def test_a_current_figure_may_name_the_earlier_one_as_earlier() -> None:
+    """freshness-01 (ReAct on main, 3 of 3): "The current total is **29 units** ... This is
+    down from the 40 I reported earlier" was scored as giving the stale 40. An answer that
+    gives the stale figure as the answer still fails."""
+    case = next(c for c in cx.cases() if c.id == "freshness-01")
+    turn = case.turns[1]
+    now = str(int(turn.expect.value))
+    old = turn.expect.forbidden[0]
+    right = f"The current total is **{now} units**. This is down from the {old} I reported earlier."
+    assert cx.score(turn.expect, right, [], turn.text)["correct"], right
+    assert not cx.score(turn.expect, f"We have {old} units on hand.", [], turn.text)["correct"]
+    assert not cx.score(turn.expect, f"{old} units now; {now} were reserved.", [], turn.text)[
+        "correct"
+    ]
