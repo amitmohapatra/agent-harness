@@ -458,7 +458,10 @@ async def _cancelled(
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
         settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
         identity, events = runtime.identity, runtime.events
-        if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
+        ended = settles and await _settle_cancelled(
+            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
+        )
+        if ended:
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
@@ -540,7 +543,12 @@ async def _concluded(
         return await _paused(agent, runtime, journal, paused, extracted)
     if runtime.cancelled is not None:
         await _settle_cancelled(
-            agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
+            agent,
+            runtime.identity,
+            runtime.events,
+            runtime.worker_id,
+            reason=runtime.cancelled,
+            spent=budget.spent(runtime),
         )
         said = _transcript(runtime, extracted, RunStatus.CANCELLED)
         await agent.recorded_run(runtime, said)  # what it said so far
@@ -831,7 +839,7 @@ async def _paused(
 
     def last() -> None:
         events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
-        events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
+        events.finished(RunOutcome.INTERRUPT, interrupt=interrupt, spent=budget.spent(runtime))
 
     await events.settle(
         last,
@@ -865,7 +873,7 @@ async def _failed(
 
     def last() -> None:
         events.emit(RunEventType.RUN_ERROR, error=error)
-        events.finished(outcome, error=error)
+        events.finished(outcome, error=error, spent=budget.spent(runtime))
 
     await events.settle(last, lambda: _ended(agent, runtime, status, error=error))
     metrics.run_finished(runtime.agent_id, outcome.value)
@@ -881,7 +889,9 @@ async def _succeeded(
     if runtime.budget_spent is not None:
         return await _partial(agent, runtime, extracted)
     await runtime.events.settle(
-        lambda: runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer)),
+        lambda: runtime.events.finished(
+            RunOutcome.SUCCESS, result=jsonable(answer), spent=budget.spent(runtime)
+        ),
         lambda: _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer)),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
@@ -906,7 +916,9 @@ async def _partial(agent: Agent, runtime: Runtime, extracted: Extracted) -> Resu
     )
     runtime.events.warning("budget", error.message)
     await runtime.events.settle(
-        lambda: runtime.events.finished(RunOutcome.PARTIAL, result=jsonable(answer)),
+        lambda: runtime.events.finished(
+            RunOutcome.PARTIAL, result=jsonable(answer), spent=budget.spent(runtime)
+        ),
         # the run record carries no error for a PARTIAL run (the contract): the warning event
         # and the recorded outcome say why
         lambda: _ended(agent, runtime, RunStatus.PARTIAL, output=jsonable(answer)),
@@ -1043,11 +1055,13 @@ async def _settle_cancelled(
     events: RunEvents,
     worker_id: str | None,
     *,
+    spent: dict[str, float],
     reason: str | None = None,
 ) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
-    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log), and
-    say whether it was ended here (not ended, or taken over, elsewhere already)."""
+    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
+    what it ``spent`` until then), and say whether it was ended here (not ended, or taken
+    over, elsewhere already)."""
 
     async def write() -> bool:
         try:
@@ -1061,7 +1075,9 @@ async def _settle_cancelled(
 
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)
-    said: dict[str, Any] = {} if reason is None else {"reason": reason}
+    said: dict[str, Any] = {"spent": spent}
+    if reason is not None:
+        said["reason"] = reason
     ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
     return ended

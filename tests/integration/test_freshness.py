@@ -266,3 +266,68 @@ async def test_a_live_tool_whose_value_is_out_of_date_stays_offered_when_hints_n
     offered = [t["function"]["name"] for t in model.requests[-1]["tools"]]
     assert "catalog" in offered and "get_stock" in offered
     assert "t0" not in offered  # narrowed: the hinted tool, and the live one out of date
+
+
+async def test_a_framework_kept_thread_marks_an_earlier_live_result_out_of_date(
+    harness: Harness,
+) -> None:
+    """A ``create_agent`` graph keeps its own thread (its checkpointer), so no memory window
+    stamps the earlier turn's result: the model was sent the old stock as it was, and answered
+    from it. The earlier turn's result of a live tool is marked out of date in the request (the
+    graph's state is unchanged), so the model fetches it again."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    get_stock = stock_tool()
+
+    @tool(side_effects="read", freshness="static")
+    def catalogue(sku: str) -> int:
+        """A SKU's catalogue pack size (reference data)."""
+        return 40
+
+    model = ScriptedChatModel(
+        turns=[
+            [("get_stock", {"sku": "SKU-00123"}), ("catalogue", {"sku": "SKU-00123"})],
+            "40",
+            ("get_stock", {"sku": "SKU-00123"}),
+            "7",
+        ]
+    )
+    graph = create_agent(model, tools=[], middleware=middleware(), checkpointer=InMemorySaver())
+    setattr(graph, TOOLS_ATTRIBUTE, [get_stock, catalogue])
+    agent = harness.wrap(graph, id="kept-thread")
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    result = await agent.run("and now?", user="u1", thread=THREAD)
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = [str(m.content) for m in model.seen[2] if m.type == "tool"]
+    assert sent[0].startswith(snapshots.EARLIER.format(tool="get_stock")) and sent[0].endswith("40")
+    assert sent[1] == "40"  # a static tool's earlier value stays as it was
+    assert get_stock.calls == ["SKU-00123", "SKU-00123"]
+
+
+async def test_a_framework_kept_threads_live_tool_stays_offered_when_hints_narrow(
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
+) -> None:
+    """The hints name another tool: the live tool whose earlier value the thread replays is
+    offered again on the next turn, so the model can fetch it."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    get_stock = stock_tool()
+    memory_service.candidates = ["t1"]
+    model = ScriptedChatModel(turns=[("get_stock", {"sku": "SKU-00123"}), "40", "7"])
+    graph = create_agent(model, tools=[], middleware=middleware(), checkpointer=InMemorySaver())
+    setattr(graph, TOOLS_ATTRIBUTE, [get_stock, *many(6)])
+    agent = memory_harness.wrap(graph, id="kept-narrowed")
+    await agent.run("stock of SKU-00123?", user="u1", thread=THREAD)
+    assert "get_stock" not in model.requests[0]["tools"]  # narrowed to the hinted tool
+    await agent.run("and now?", user="u1", thread=THREAD)
+    assert "get_stock" in model.requests[2]["tools"]
