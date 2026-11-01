@@ -336,6 +336,25 @@ async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
     assert kid.final  # it stopped with its parent
 
 
+async def test_a_childs_own_time_limit_holds_inside_a_parent_that_has_one(
+    harness: Harness,
+) -> None:
+    """A helper wrapped with its own limit (``h.wrap(run_timeout=)``) times out at it, also
+    when its parent has a longer limit of its own (found by the adversarial matrix, X09)."""
+
+    async def slow(input: str, agent: Runtime) -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    child = harness.wrap(slow, id="slow", run_timeout=0.2)
+    model = ScriptedChat([("slow", {"message": "x"}), "the scan timed out"])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="timed"), [child])
+    result = await asyncio.wait_for(parent.run("x", user="u", run_timeout=20), 10)
+    assert result.status is RunStatus.SUCCESS, (result.status, result.error)
+    [kid] = await children(harness, result.run_id)
+    assert kid.status is RunStatus.TIMEOUT and kid.timeout_seconds == 0.2
+
+
 async def test_a_childs_spans_are_in_its_parents_trace_under_the_call(
     harness: Harness, spans: InMemorySpanExporter
 ) -> None:

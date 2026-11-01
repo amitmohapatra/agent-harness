@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Final
 
+from tests.matrix.adversarial import ADVERSARIAL
 from tests.matrix.dimensions import SELECTION_BY_ID, SELECTIONS
 from tests.matrix.extensions import EXTENSIONS
 from tests.matrix.features import FEATURES, SELECTION
@@ -49,14 +50,28 @@ def _on(*switches: str) -> Callable[[str, str, str, str, Selection], bool]:
     return lambda feature, adapter, way, mode, selection: set(switches) <= selection.on
 
 
-#: The real failures this matrix found and that are not fixed yet (none now: BUG-1, Claude
+#: The real failures this matrix found and that are not fixed yet (the adversarial rows' below; BUG-1, Claude
 #: running a call the CLI made after a pause, was fixed by the Claude session and governance
 #: work; BUG-2 to BUG-10 by their own commits): where each holds (feature ids, adapters, ways,
 #: modes, and a test on the selection — ``_on`` writes one), the bug, and how it fails (``raises``: any other failure of
 #: the cell is still a failure). The reproduction of each is its cell's id
 #: (``pytest tests/matrix -k <cell>``) and the script in the bug's ``why``. Remove an entry
 #: when its bug is fixed: its cells then XPASS and fail the suite until it is.
-KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = []
+KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
+    # the adversarial rows' findings (tests/matrix/adversarial.py; the backlog's Adversarial
+    # suite section has each as an issue)
+    (
+        {"features": {"X06"}, "adapters": {"middleware"}},
+        Bug(
+            "ADV-4m",
+            "the stall's last call offers no tool by tool_choice='none' only when the request has "
+            "tools; this cell's planned model is bound with none on every call and calls lookup "
+            "regardless, so it answers the last call with a call too (a test double that a "
+            "provider would refuse; ReAct's gateway double honours tool_choice='none' and passes)",
+            raises=AssertionError,
+        ),
+    ),
+]
 
 
 def _known(feature: str, adapter: str, way: str, mode: str, selection: Selection) -> Bug | None:
@@ -138,7 +153,7 @@ def on_in(feature: Feature, way: str, selection: Selection) -> bool:
 
 def cells() -> Iterator[Cell]:
     everything = SELECTION_BY_ID["all"]
-    for feature in [*FEATURES, SELECTION, *EXTENSIONS]:
+    for feature in [*FEATURES, SELECTION, *EXTENSIONS, *ADVERSARIAL]:
         for adapter in ADAPTERS:
             for way in WAYS:
                 for mode in MODES:

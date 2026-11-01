@@ -18,6 +18,8 @@ they are in ``<to>.key.jsonl``, by ``packet``):
 * ``answer`` — the answer under test;
 * ``ground_truth`` — the value (or rubric) and how it was computed;
 * ``strict`` — the strict scorer's verdict (``correct``, ``missing``, ``made_up``);
+* ``harness_checks`` — the harness's own checks of the turn (``complex.checked``: how its run
+  ended, what the model was and was not sent);
 * ``verdict`` — the form the judge fills: ``answer_correct`` and ``context_sufficient``
   (true/false), ``missing`` (what the input lacked), ``made_up`` (claims the input does not
   support).
@@ -130,6 +132,9 @@ def packets(run: str, *, max_chars: int = 60_000, arm: str = "") -> tuple[list[d
                         ),
                     },
                     "strict": t.get("score"),
+                    # the harness's own checks of the turn (how it ended, what the model was
+                    # sent): what the context lacked, before the judge looks
+                    "harness_checks": t.get("checks", []),
                     "verdict": {
                         "answer_correct": None,
                         "context_sufficient": None,
