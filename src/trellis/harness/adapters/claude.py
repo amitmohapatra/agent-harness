@@ -554,9 +554,6 @@ def _options(
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
-    narrowed = _narrowed(runtime, options.disallowed_tools)
-    if narrowed is not None:
-        changes["disallowed_tools"] = narrowed
     if session is not None:
         changes["resume"] = session
     env = routed_env(options.env, runtime)
@@ -589,17 +586,6 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
     kept = [line for line in lines if line.partition(":")[0].strip().lower() not in ours]
     given[CUSTOM_HEADERS] = "\n".join([*kept, *(f"{k}: {v}" for k, v in ours.items())])
     return given
-
-
-def _narrowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str] | None:
-    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer
-    (the tool hints' narrowing: Claude's built-ins and MCP tools too, for the whole query);
-    ``None`` when nothing is narrowed."""
-    if runtime.offered is None:
-        return None
-    given = list(denied or ())
-    hidden = [n for n in runtime.native if not runtime.offers(n) and n not in given]
-    return [*given, *hidden] if hidden else None
 
 
 def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:
