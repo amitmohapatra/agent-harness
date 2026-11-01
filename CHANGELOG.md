@@ -169,6 +169,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
+
 - AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
   to the model beside the agent's own (one of the agent's by the same name wins, with a
   warning); a call streams its `TOOL_CALL_*` events and pauses the run (an interrupt whose
