@@ -25,6 +25,7 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.identity import conversation_key
+from trellis.harness.middleware import ASKED_WITH
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -75,7 +76,7 @@ async def test_the_window_is_the_conversation_itself_and_the_last_turn_is_in_it(
     # question, and no transcript in it
     assert [m["content"] for m in last["messages"] if m["role"] == "system"] == ["s"]
     context = last["messages"][-1]["content"][0]["text"]
-    assert context.startswith(memory_service.context_text)
+    assert context.startswith(ASKED_WITH.split("{context}")[0] + memory_service.context_text)
     assert "Recent conversation" not in context
     asked = memory_service.named("context")
     assert all(c.body["window_format"] == "messages" for c in asked)
@@ -131,7 +132,7 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
         assert messages[0] == {"role": "system", "content": "s"}
         context, question = messages[-1]["content"]
         assert messages[-1]["role"] == "user" and question == {"type": "text", "text": text}
-        assert context["text"].startswith(f"Facts for: {text}")
+        assert context["text"].startswith(ASKED_WITH.split("{context}")[0] + f"Facts for: {text}")
     for earlier, later in itertools.pairwise(firsts):
         assert later[: len(earlier) - 1] == earlier[:-1]  # the history, as it was sent
 

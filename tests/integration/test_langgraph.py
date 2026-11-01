@@ -19,6 +19,7 @@ from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
 from trellis.harness.harness import LOCAL_TENANT
 from trellis.harness.identity import conversation_key
+from trellis.harness.middleware import ASKED_WITH
 
 executed: list[str] = []
 
@@ -191,7 +192,7 @@ async def test_the_memory_context_comes_with_the_question(
     # after the history a prompt cache keeps (audit K1): the question's first part
     assert [m.type for m in sent] == ["system", "human"]
     assert sent[1].content == [
-        {"type": "text", "text": memory_service.context_text},
+        {"type": "text", "text": ASKED_WITH.format(context=memory_service.context_text)},
         {"type": "text", "text": "how to reach me?"},
     ]
 

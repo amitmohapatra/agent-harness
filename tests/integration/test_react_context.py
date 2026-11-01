@@ -13,6 +13,7 @@ from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
 from trellis.harness.automatic import JournalBackend
+from trellis.harness.middleware import ASKED_WITH
 from trellis.harness.react import CLEARED
 
 
@@ -99,7 +100,7 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     assert "SESSION INTENT: take notes." in summary["content"]
     # the task, and the memory context pushed with it, stay ahead of the summary
     assert after[1]["content"] == [
-        {"type": "text", "text": "The user prefers email."},
+        {"type": "text", "text": ASKED_WITH.format(context="The user prefers email.")},
         {"type": "text", "text": "take five notes"},
     ]
     assert after[2] is summary
