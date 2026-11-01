@@ -188,8 +188,8 @@ async def test_turns_run_at_once_on_one_thread_are_each_recorded_whole(
 
 
 async def test_with_memory_down_the_run_goes_on_and_the_turn_is_queued() -> None:
-    """As memory fails today: a warning, no context, the transcript queued - no attempt to
-    write it before the run returns, and no other fallback."""
+    """As memory fails: a warning, no context, the transcript queued - no attempt to write it
+    before the run returns (a first turn has no earlier turns for the run store to give)."""
     service = FakeMemoryService(fail={"context", "messages"})
     async with Harness(config=Settings(), memory=service.client()) as h:
         model = ScriptedChat(["ok"])
@@ -205,6 +205,47 @@ async def test_with_memory_down_the_run_goes_on_and_the_turn_is_queued() -> None
         assert _said(model.script.requests[-1]) == [("user", "hi")]
         await h.writes.drain()
         assert h.writes.failed == 1  # the transcript, tried by the queue alone and reported
+
+
+async def test_with_memory_down_mid_conversation_the_earlier_turns_come_from_the_run_store() -> (
+    None
+):
+    """Memory answered the first turn and fails on the second (an outage, a circuit open):
+    the conversation is not lost - its earlier turns come from the run store, each one's
+    question and answer, as with memory off."""
+    service = FakeMemoryService()
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        model = ScriptedChat(["noted: tides", "you said tides"])
+        agent = h.wrap(create_agent(model, tools=[]), id="outage")
+        await agent.run("remember tides", user="u1", thread=THREAD)
+        service.fail = {"context", "messages"}
+        events = [e async for e in agent.stream("what did I say?", user="u1", thread=THREAD)]
+        warnings = [
+            e.data["code"]
+            for e in events
+            if e.type is RunEventType.CUSTOM and e.data["name"] == "warning"
+        ]
+        assert "memory_unavailable" in warnings
+        assert _said(model.script.requests[-1]) == [
+            ("user", "remember tides"),
+            ("assistant", "noted: tides"),
+            ("user", "what did I say?"),
+        ]
+
+
+async def test_with_memory_down_a_thread_the_framework_keeps_is_not_given_twice() -> None:
+    """The graph keeps its own thread (a durable checkpointer): memory failing adds nothing."""
+    service = FakeMemoryService()
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        model = ScriptedChat(["noted: tides", "you said tides"])
+        graph = create_agent(model, tools=[], checkpointer=own_thread())
+        agent = h.wrap(graph, id="kept-outage")
+        await agent.run("remember tides", user="u1", thread=THREAD)
+        service.fail = {"context", "messages"}
+        await agent.run("what did I say?", user="u1", thread=THREAD)
+        said = _said(model.script.requests[-1])
+        assert said.count(("user", "remember tides")) == 1
+        assert said[-1] == ("user", "what did I say?")
 
 
 async def test_a_turn_whose_write_fails_is_queued_and_delivered() -> None:

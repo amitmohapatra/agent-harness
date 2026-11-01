@@ -940,16 +940,18 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
 @pytest.mark.parametrize(
     ("status", "note"),
     [
-        ("INSUFFICIENT", "say you do not know it; do not guess"),
-        ("INCOMPLETE", "Say what you do not know rather than fill the gap"),
+        ("INSUFFICIENT", "Memory holds nothing about this question"),
+        ("INCOMPLETE", "Memory covers only part of this question"),
         ("COMPLETE", None),
     ],
 )
 async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     memory_harness: Harness, memory_service: FakeMemoryService, status: str, note: str | None
 ) -> None:
-    """Abstention: memory with no evidence for the question must turn into "I don't know",
-    not a confident guess; the harness says so to the model with the context."""
+    """Abstention: memory with no evidence for the question must turn into an honest "I don't
+    know", not a confident guess; the harness says so to the model with the context — and
+    what an honest answer does: it names the detail it does not have and offers to look it up
+    or to be told it (a bare "I don't know" leaves the user nowhere)."""
     memory_service.evidence_status = status
     model = ScriptedChat(["I don't know your sister's name."])
     agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
@@ -960,6 +962,8 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
         assert "## Memory" not in system
     else:
         assert note in system
+        assert "say which detail you do not have" in system
+        assert "offer to look it up" in system and "ask the user for it" in system
     [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
     assert loaded.data["evidence_status"] == status
 
