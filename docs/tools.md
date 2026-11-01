@@ -11,7 +11,7 @@ catalog.
 | Where from | Tools | Side effects |
 |---|---|---|
 | **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does. Code Mode is for the gateway's servers | the server's annotations, as above |
+| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does; a server's resources are read with one tool, `<server>-read_resource` ([MCP resources](#a-servers-resources-mcp-resources)). Code Mode is for the gateway's servers | the server's annotations, as above |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `call_timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, call_timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `call_timeout` seconds per exchange | `"write"` |
 | a wrapped agent, in a `ReAct`'s `subagents=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
@@ -54,6 +54,27 @@ the server is answered at once. On the MCP protocol of 2026-07-28 the question c
 the call's result and the call is made again with the answer; before it, the server's question
 is a request of its own that names no call, so a question that comes while several calls to
 the same server are under way is refused, the server told why.
+
+### A server's resources: MCP resources
+
+An `mcp(...)` server that says it has resources (its `resources` capability) and lists at least
+one gets one more tool, `<server>-read_resource` (`tools/resources.py`), a read:
+
+- its description is the map of what there is: one line per resource (URI, name, description,
+  type, when the server says it last changed: `lastModified`) and template (its
+  `{placeholders}` to fill in), at most 20, then a line saying there is more;
+- `read_resource(uri=...)` reads one resource: its text, a binary one described (its type and
+  size), a template's URI with its placeholders filled in; an unknown URI is an error the model
+  reads;
+- `read_resource()` with no URI lists every resource and template (every page), as rows.
+
+What it reads is a tool result like any other, with no store of its own: governed, journaled,
+and a large one kept in the run, previewed, paged with `read_file` and queried with
+`query_result` ([below](#large-results)) — a CSV resource of 20,000 rows is counted and summed
+in SQL, on every adapter that keeps results. Its data is live ([freshness](#values-that-change-freshness)):
+replayed on a later turn it is a dated snapshot. The listing is read again with the tools
+(every `TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
+none.
 
 ## Tool choice: what helps the model pick the right tool
 
@@ -129,7 +150,10 @@ should check, the journal keeps that, and the call is never run again blind.
 A result longer than 80,000 characters (20,000 tokens) is not what the model reads: it is
 saved as a file, and the model reads where (`/large_tool_results/<id>`) with a head-and-tail
 preview, then pages the rest with `read_file` (`file_path`, `offset` the line to start from,
-`limit` the most lines). One convention everywhere, automatic, nothing to configure:
+`limit` the most lines). The note with it says the path is the run's own working copy, for
+`read_file` and `query_result`: the user cannot open or download it, so the model does not
+offer it as an export (`results.PRIVATE`). One convention everywhere, automatic, nothing to
+configure:
 
 | Target | Who cuts | Where the whole result is kept |
 |---|---|---|
@@ -176,8 +200,12 @@ has to. In order of preference:
    writes its SQL. Every result the run saved is a table named by the tool that returned it
    (`result` is the file asked about), so one query joins results of several tools; a JSON
    array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
-   `|`), else one row per line, with whole-number, number and text columns typed alike on
-   both engines (a code such as `007`, or an id past 64 bits, stays text). Besides arithmetic,
+   `|`), else one row per line, with whole-number, decimal, number and text columns typed
+   alike on both engines (a code such as `007`, or an id past 64 bits, stays text). A decimal
+   column (digits and a point as written, at most 15 digits: money) adds up exactly — DuckDB's
+   own `DECIMAL`; on SQLite `sum`, `total` and `avg`, a window's too, in Python's `decimal` —
+   and every number an answer holds is written as SQLite writes a `REAL` (15 significant
+   digits): `32266.15`, never `32266.149999999998`. Besides arithmetic,
    `CASE`, math, date and window functions (a moving average, `lag` for growth), it has
    `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `julianday(d)`, `corr`,
    `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` on both. Only reading runs (one
@@ -187,8 +215,9 @@ has to. In order of preference:
    most 5 s (a cancelled run interrupts it), loads at most 64 MB of its own run's results
    (never another run's), holds at most 512 MB (DuckDB's `memory_limit`; SQLite's pages, and
    8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
-   and 20,000 characters — the model reads the small answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
-   its result) is fetched to its last page in one call (`tools/pages.py`, at most 200 pages),
+   and 20,000 characters — the model reads the small answer, never the rows. A tool declared
+   `paged=True` (a cursor argument; `next_cursor` in its result) is fetched to its last page in
+   one call (`tools/pages.py`, at most 200 pages),
    so its rows are queried whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
    result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
@@ -209,9 +238,10 @@ value is as good as a new one); `freshness="live"` also says the default in the 
 description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
 `side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
 
-Where memory owns the conversation, every tool result a run writes to it starts with
-`[snapshot of <tool> from <UTC time>]`, so a later turn replays when (and by which tool) each
-value was fetched — the model can say where a number came from. A replayed result past its
+Where memory owns the conversation, when each tool result was fetched is kept in one place:
+the run record of its call (`custom_metadata["run_record"]["fetched"]`, UTC, with its tool's
+`max_age`), which the memory service's steps list shows on the call's line — the model can say
+where a number came from and when, and the result's own text is never stamped. A replayed result past its
 tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
 same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
 fetches the value again instead of answering from the old one, and the fresh result, with the

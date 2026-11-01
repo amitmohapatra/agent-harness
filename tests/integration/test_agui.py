@@ -484,6 +484,11 @@ async def test_a_run_id_must_be_new_and_well_formed(client: httpx.AsyncClient) -
     assert odd.status_code == 422
 
 
+async def test_a_blank_message_is_refused_before_a_run_opens(client: httpx.AsyncClient) -> None:
+    refused = await client.post(f"{PATH}/run", json=body("  \n\t "))
+    assert refused.status_code == 422 and "blank" in refused.json()["detail"]
+
+
 async def test_without_a_user_message_the_agent_gets_the_state(client: httpx.AsyncClient) -> None:
     payload = {
         "threadId": "t1",

@@ -231,16 +231,19 @@ class _Surface:
             raise HTTPException(422, f"forwardedProps.mode: {exc}") from exc
         payload = body.latest_user_text() or body.state
         attached = await self._attached(body, user, tenant)
-        record = await agent._opened(
-            payload,
-            user=user,
-            thread=body.thread_id,
-            tenant=tenant,
-            run_id=body.run_id,
-            document_ids=attached or None,
-            mode=mode,
-            app=_frontend(body),
-        )
+        try:
+            record = await agent._opened(
+                payload,
+                user=user,
+                thread=body.thread_id,
+                tenant=tenant,
+                run_id=body.run_id,
+                document_ids=attached or None,
+                mode=mode,
+                app=_frontend(body),
+            )
+        except ConfigurationError as exc:  # a blank message: no run
+            raise HTTPException(422, str(exc)) from exc
         buffer = self.hub.open(record.run_id, user)
         self._launch(
             buffer,

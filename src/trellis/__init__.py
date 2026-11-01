@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from trellis.harness.settings import Settings
     from trellis.harness.skills import deep_agent
     from trellis.harness.tools.ask import ask_user
+    from trellis.harness.tools.base import Citation
     from trellis.harness.tools.mcp import mcp, stdio
     from trellis.harness.tools.sources import a2a, openapi, tool
 
@@ -48,6 +49,7 @@ _EXPORTS = {
     "OutputKind": "trellis.harness.hooks",
     "tool": "trellis.harness.tools.sources",
     "ask_user": "trellis.harness.tools.ask",
+    "Citation": "trellis.harness.tools.base",
     "a2a": "trellis.harness.tools.sources",
     "openapi": "trellis.harness.tools.sources",
     "mcp": "trellis.harness.tools.mcp",
@@ -80,6 +82,7 @@ __all__ = [
     "Agent",
     "Ask",
     "Budget",
+    "Citation",
     "Deny",
     "Harness",
     "Hooks",

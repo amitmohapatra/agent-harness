@@ -177,6 +177,16 @@ async def test_a_run_streams_to_completion_and_the_task_is_the_run(
     assert record is not None and record.status is RunStatus.SUCCESS and record.user_id == "u1"
 
 
+async def test_a_blank_message_is_a_rejected_task_and_no_run(
+    served: tuple[Client, Harness],
+) -> None:
+    client, harness = served
+    responses = await send(client, "  \n ")
+    assert states(responses)[-1] == TaskState.TASK_STATE_REJECTED
+    assert any("blank" in t for t in status_texts(responses))
+    assert await harness.runs.get(task_id_of(responses)) is None
+
+
 async def test_identity_comes_from_the_header_and_the_thread_is_the_context(
     served: tuple[Client, Harness],
 ) -> None:
