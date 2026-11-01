@@ -87,6 +87,14 @@ own model work follows the harness's configuration.
   (A2A) are the run's `mode` (queue, interrupt, steer). A call's paused `TOOL_CALL_RESULT` is
   no longer sent on AG-UI: the call has no result until the run resumes. New dependency:
   `jsonpatch`.
+- A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
+  `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
+  else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
+  `<tenant>/<user>/<conversation>/<run>/`, names it in the run's journal and announces it (the
+  `file` event); `serve_chat` serves it to the run's own user at
+  `GET {path}/runs/{run_id}/files/{name}`: a 5-minute signed link where the store signs, else
+  streamed. Stored only: never parsed or remembered. New dependency: `fsspec`.
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
@@ -159,6 +167,20 @@ own model work follows the harness's configuration.
   (408, 409, 425, 429, 500, 502, 503, 504), the set the gateway client and the memory service
   use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
   425 is now retryable; 501, 505 and the other 5xx are not.
+
+### Removed (one clearing pass, one read-back tool)
+
+- `read_result`, `READ_RESULT`, `READ_LIMIT`, `FIT_CLEARED` and `FitWindow`'s clearing of older
+  results: LangChain's `ClearToolUsesEdit` is the one clearing pass, and its placeholder names
+  `read_file` with the cleared call's id as its path (`/large_tool_results/<call id>`, Deep
+  Agents' own), paged from the graph's state with the limits every kept result uses (100 lines,
+  20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
+  naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
+  placeholder naming `read_result`, a tool that request did not offer.
+- `FitWindow(turns=False)` (ReAct on Deep Agents: a summarization after it) leaves tool results
+  to Deep Agents too: its overflow path offloads a result whole to its backend. Before, both cut
+  the same result, so a sandbox held it twice (the harness's whole copy, written in for code,
+  and Deep Agents' offload of the cut text).
 
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 

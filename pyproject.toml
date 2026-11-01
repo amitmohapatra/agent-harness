@@ -32,6 +32,7 @@ dependencies = [
   "tenacity>=9.1",
   # the front end's shared state, streamed as JSON Patches (RFC 6902): `frontend.py`
   "jsonpatch>=1.33",
+  "fsspec>=2024.6",
 ]
 
 [project.scripts]
