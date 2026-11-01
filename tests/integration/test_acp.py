@@ -596,6 +596,19 @@ async def test_a_process_that_ends_mid_turn_fails_the_run_with_its_stderr(
     assert "out of memory" in result.error.message and "exit 3" in result.error.message
 
 
+async def test_a_turn_ended_at_the_step_limit_is_asked_once_more(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi ends a turn at its step limit with no answer, the reason only in its log: the run
+    asks once more in the same session, and says so on the stream."""
+    script = [{"step_limit": 1}, {"text": "the answer at the limit"}]
+    agent = harness.wrap(fake(tmp_path, script), id="limited")
+    events = [e async for e in agent.stream("work", user="u1")]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
+    assert warned == ["stopped: the step limit (1) was reached"]
+    assert events[-1].data.get("result") == "the answer at the limit"
+
+
 async def test_a_refusal_fails_the_run(harness: Harness, tmp_path: Path) -> None:
     result = await harness.wrap(fake(tmp_path, [{"stop": "refusal"}]), id="no").run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
