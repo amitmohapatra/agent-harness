@@ -94,6 +94,13 @@ CUT: Final = {
 }
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
+#: What a model that stalled — the same call with the same arguments over and over — is told,
+#: for its one answer without tools (``middleware.StallGuard``; every adapter's loop).
+STALLED: Final = (
+    "You called {tool} with the same arguments {times} times in a row and it did not give you "
+    "what you need: do not call it again. Do not call tools: answer now with what you have, and "
+    "say what went wrong."
+)
 
 
 async def call(

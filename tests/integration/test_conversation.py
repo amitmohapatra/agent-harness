@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +24,8 @@ from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunEventType, RunStatus
-from trellis.harness import conversation
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
+from trellis.harness import conversation, snapshots
 from trellis.harness.bounded import LRU
 from trellis.harness.conversation import (
     Mode,
@@ -111,13 +112,14 @@ async def test_a_follow_up_has_the_conversation(
 
 @pytest.mark.parametrize("window", [32_000, None])
 async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
-    harness: Harness, window: int | None
+    harness: Harness, window: int | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADV-7: a follow-up ("why was that?") needs the figures behind the earlier answer, not
     only its question and answer. With memory off and a known window, ``ReAct``'s history is
     each earlier turn whole — its tool calls and their results, kept in this process — which
-    ``FitWindow`` and clearing fit to the window; with no window known (nothing would fit it),
-    its question and answer, as before."""
+    ``FitWindow`` and clearing fit to the window, a result past its tool's age marked out of
+    date as memory's window marks it; with no window known (nothing would fit it), its
+    question and answer, as before."""
 
     @tool(side_effects="read")
     def supplier(sku: str) -> str:
@@ -128,8 +130,11 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
     model = ScriptedChat([*turns, "I do not know."])
     react = ReAct(system_prompt="You work.", model=model, context_window=window)
     agent = arm(harness.wrap(react, id=f"whole-{window}", without={"memory"}), [supplier])
+    fetched = datetime(2026, 10, 30, 9, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(snapshots, "now", lambda: fetched)
     first = await agent.run("Who supplies NV-1?", user="ada", thread=THREAD)
     assert first.status is RunStatus.SUCCESS, first.error
+    monkeypatch.setattr(snapshots, "now", lambda: fetched + timedelta(hours=1))
     second = await agent.run("Why is its lead time so long?", user="ada", thread=THREAD)
     assert second.status is RunStatus.SUCCESS, second.error
     sent = json.dumps(model.requests[-1]["messages"])
@@ -138,11 +143,36 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
         assert "21 days" not in sent
         return
     assert "21 days" in sent  # the tool result behind the answer
+    assert json.dumps(snapshots.STALE.format(tool="supplier"))[1:-1] in sent  # live data
     roles = [m["role"] for m in model.requests[-1]["messages"]]
     assert roles[1:] == ["user", "assistant", "tool", "assistant", "user"], roles
     other = await agent.run("Why so long?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS
     assert "21 days" not in json.dumps(model.requests[-1]["messages"])  # another user's chat
+
+
+@pytest.mark.parametrize("framework", MODELLED)
+async def test_a_blank_message_is_no_run_and_never_reaches_the_thread(
+    memory_harness: Harness, tmp_path: Path, framework: str
+) -> None:
+    """An empty or whitespace-only message is refused before a run opens (ADV-1): a provider
+    refuses a blank user message (Anthropic does), and kept in the thread it would fail every
+    later turn. Nothing is sent to the model, nothing recorded; the next message goes on."""
+    seen: list[Any] = []
+    target, tools = await BUILDERS[framework](memory_harness, [], tmp_path, [], seen=seen)
+    agent = arm(memory_harness.wrap(target, id=f"blank-{framework}", without={"memory"}), tools)
+    for blank in ("", "  \n\t "):
+        with pytest.raises(ConfigurationError, match="blank"):
+            await agent.run(blank, user="ada", thread=THREAD)
+        with pytest.raises(ConfigurationError, match="blank"):
+            [e async for e in agent.stream(blank, user="ada", thread=THREAD)]
+        with pytest.raises(ConfigurationError, match="blank"):
+            await agent.start(blank, user="ada", thread=THREAD)
+    assert runs_in_order(memory_harness) == []  # no run opened
+    forget(seen)
+    after = await agent.run("What is the locker code?", user="ada", thread=THREAD)
+    assert after.status is RunStatus.SUCCESS, after.error
+    assert "What is the locker code?" in told(seen)
 
 
 async def test_a_function_reads_the_earlier_turns_as_its_history(harness: Harness) -> None:

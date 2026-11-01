@@ -150,6 +150,18 @@ async def _kimi_endpoints_stopped() -> None:
     await detached()
 
 
+@pytest.fixture(params=["duckdb", "sqlite"])
+def engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The engine ``query_result`` runs on (``tools.query.ENGINE``): a test that takes this
+    runs on each, DuckDB (the ``query`` extra, which the dev environment installs) and the
+    SQLite fallback."""
+    from trellis.harness.tools import query
+
+    made = query.DuckDB() if request.param == "duckdb" else query.SQLite()
+    monkeypatch.setattr(query, "ENGINE", made)
+    return request.param
+
+
 @pytest.fixture
 async def harness() -> AsyncIterator[Harness]:
     async with Harness(config=Settings()) as h:

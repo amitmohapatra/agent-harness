@@ -39,6 +39,8 @@ from trellis.harness import telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
+from trellis.harness.files import EVENT as FILE_EVENT
+from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
@@ -192,7 +194,7 @@ class Runtime:
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
     #: when each tool call of this attempt returned, by its reference (the framework's call
-    #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
+    #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
     fetched: dict[str, datetime] = field(default_factory=dict)
     #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
     #: its table's name in a query (``tools.query.tables``)
@@ -566,6 +568,27 @@ class Runtime:
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
         )
+
+    def files_folder(self) -> str:
+        """Where this run's files are kept in the store: its tenant, user, conversation and run
+        (``files.scope``)."""
+        return scope(self.tenant, self.user, self.conversation, self.run_id)
+
+    async def save_file(
+        self, name: str, data: bytes, *, source: str, content_type: str | None = None
+    ) -> StoredFile:
+        """Keep ``data`` as the file ``name`` for the run's user (``harness.files``: stored, never
+        parsed or remembered), named in the run's journal and announced on its stream (the
+        ``file`` event: the file's name, size, media type, source), where AG-UI serves it
+        (``GET .../runs/{run_id}/files/{name}``). ``source``: what made it (a tool's name)."""
+        stored = await self.agent.harness.files.put(
+            self.files_folder(), name, data, source=source, content_type=content_type
+        )
+        kept = self.replay.journal.files
+        kept[:] = [f for f in kept if f["name"] != name] + [stored.model_dump()]
+        announced = stored.model_dump(exclude={"name"})
+        self.events.custom(FILE_EVENT, file=stored.name, **announced)
+        return stored
 
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any
