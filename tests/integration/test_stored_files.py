@@ -70,13 +70,21 @@ def deleted(root: Path, name: str) -> None:
     next(root.rglob(name)).unlink()
 
 
+def text(content: Any) -> str:
+    """A message's content as text: a question's parts joined (the memory context is sent as
+    the question's first part, audit K1)."""
+    if isinstance(content, list):
+        return "\n".join(str(part.get("text", "")) for part in content)
+    return str(content)
+
+
 def told(model: ScriptedChat, n: int = 0) -> str:
     """Everything request ``n`` holds, as text."""
-    return "\n".join(str(m.get("content")) for m in model.requests[n]["messages"])
+    return "\n".join(text(m.get("content")) for m in model.requests[n]["messages"])
 
 
 def last(model: ScriptedChat, n: int) -> str:
-    return str(model.requests[n]["messages"][-1]["content"])
+    return text(model.requests[n]["messages"][-1]["content"])
 
 
 def offered(model: ScriptedChat, n: int) -> list[str]:

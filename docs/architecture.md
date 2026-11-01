@@ -164,8 +164,8 @@ src/trellis/
     features.py        without=: the features a run or an agent turns off (Feature)
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
-    middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
-                       StallGuard, ReadTools, read_result, FitWindow;
+    middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, step_limit,
+                       StallGuard, ReadTools, FitWindow;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
@@ -434,8 +434,8 @@ flowchart LR
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
-| `ReAct` (a `create_agent` graph — `create_deep_agent` on demand — with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread; a `create_agent` / Deep Agents graph sends it with the question, after the history |
+| `ReAct` (a `create_agent` graph — `create_deep_agent` on demand — with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | with the turn's question, after the history a prompt cache keeps |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through a `PreToolUse` hook | per run | a `UserPromptSubmit` hook |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
@@ -462,10 +462,10 @@ flowchart TB
     pt["PatchToolCallsMiddleware · Deep Agents<br/>(before the agent) unanswered calls answered"]
     pl["TodoListMiddleware, LongTaskTools · harness<br/>planning and the scratch tools on a long task"]
     ht["HarnessTools, GovernTools · harness<br/>the run's tools per call; every call governed"]
-    sg["StallGuard, StepLimit, Budgeted · harness<br/>max_repeats, max_steps, the budget's stop"]
+    sg["StallGuard, Budgeted · harness; ModelCallLimitMiddleware · LangChain<br/>max_repeats, max_steps, the budget's stop"]
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
-    rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
+    rt["ReadTools · harness<br/>read_file offered once needed"]
     yours["yours: middleware=[...]<br/>(HumanInTheLoopMiddleware, PII, a tool selector...)"]
     mh["ModelHooks · harness<br/>chat span, call_timeout, on_error,<br/>pinned prompt, unparsable calls answered"]
     tail["Deep Agents' tail<br/>prompt caching, memory files, unsupported content"]

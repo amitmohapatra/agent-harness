@@ -15,6 +15,7 @@ import functools
 import importlib.util
 import io
 from collections.abc import Iterable, Sequence
+from decimal import Decimal
 from typing import Any, Final
 
 from trellis.harness.runtime import Runtime
@@ -73,7 +74,7 @@ def written(kind: str, columns: Sequence[str], rows: Iterable[Sequence[Any]]) ->
     count = 0
     for count, row in enumerate(rows, start=1):
         _under(count)
-        writer.writerow(row)
+        writer.writerow([_text(v) for v in row])
     return text.getvalue().encode(), count
 
 
@@ -83,8 +84,19 @@ def _under(count: int) -> None:
 
 
 def _cell(value: Any) -> Any:
-    """A value as an Excel cell takes it: a number, text or a boolean as it is, else its text."""
+    """A value as an Excel cell takes it: a number (DuckDB's decimal too), text or a boolean as
+    it is, else its text."""
+    if isinstance(value, Decimal):
+        return float(value)
     return value if value is None or isinstance(value, int | float | str | bool) else str(value)
+
+
+def _text(value: Any) -> Any:
+    """A value as a CSV cell writes it: a boolean as SQL and JSON write it (DuckDB's; SQLite's
+    are 0 and 1), else as it is (a decimal exact, as the engine computed it)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
 
 
 __all__ = [

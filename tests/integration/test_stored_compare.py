@@ -91,6 +91,7 @@ def python_diff() -> str:
 @pytest.mark.parametrize(
     "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
 )
+@pytest.mark.usefixtures("engine")  # the kept Excel file's rows loaded on DuckDB and SQLite
 async def test_a_later_run_diffs_the_file_against_todays_data_in_one_query(
     harness: Harness, root: Path, clock: list[datetime], framework: str, tmp_path: Path
 ) -> None:
