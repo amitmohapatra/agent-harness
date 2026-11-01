@@ -56,6 +56,9 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
+  with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
+  with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
@@ -137,6 +140,9 @@ own model work follows the harness's configuration.
 - A model looping on one call is stopped on every adapter: the tool bridge does not run the
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+  OpenAI Agents offers no tool on the turn after (its `FunctionTool.is_enabled`), so the
+  model's reply is the run's answer: it looped on to the SDK's `max_turns` (10) and answered
+  about the limit, or ended `ERROR` when that last call made no answer.
 
 - A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
   `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error

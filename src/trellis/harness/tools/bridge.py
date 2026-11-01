@@ -349,6 +349,14 @@ def _repeated(runtime: Runtime, tool: Tool, key: str) -> ToolOutcome | None:
     )
 
 
+def stalled(runtime: Runtime) -> bool:
+    """Whether the run's latest harness tool call was refused as a loop (:func:`_repeated`): a
+    framework that offers its tools per turn offers none until another call is made, so the
+    model's reply to :data:`STALLED` is its answer (OpenAI Agents' ``FunctionTool.is_enabled``,
+    as ``StallGuard``'s last call is offered no tool)."""
+    return runtime.repeating[1] >= MAX_REPEATS
+
+
 def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any], key: str) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
