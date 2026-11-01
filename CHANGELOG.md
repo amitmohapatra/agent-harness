@@ -53,6 +53,16 @@ own model work follows the harness's configuration.
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
   cap. It is counted now when the harness keeps no usage log of the agent.
+- The Claude Agent SDK loads the harness's tools from the first step. Claude Code defers every
+  MCP server's tools behind its `ToolSearch` unless the server's config says `alwaysLoad`, so
+  each turn's model saw only the tool names and spent a step loading them (a model that called
+  one unloaded got a validation error and called it again). The harness's `trellis` server now
+  says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
+  memory's `tool_search`). A team's own servers keep the CLI's deferral.
+- A Deep Agent of yours on a backend outside its state (a disk, a store, a sandbox) had its
+  file tools run ungoverned: a `write_file` changed a real file with no journal, record or
+  approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
+  (`middleware.declare_files`, marked when the graph is wrapped).
 - An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
   is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
   it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
@@ -63,9 +73,26 @@ own model work follows the harness's configuration.
   the instructions with this one. The model now gets it as the first part of the turn's
   question, after the history; the graph's state is unchanged. With a prompt-caching
   middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
-  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  answer ending the history is marked too (`middleware.history_marked`, audit K1). The
   context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
   long context does not read as one more saved note.
+- Anthropic's prompt cache is on for every Anthropic chat model `ReAct` is given, on
+  LangChain's loop and on Deep Agents'. A model name (routed to the provider's own SDK) is not
+  a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` skipped it, and plain
+  `ReAct` had no caching middleware at all: nothing was cached. `middleware.PromptCache` runs
+  LangChain's middleware (one given to `ReAct(middleware=)`, its settings kept) on the chat
+  model the call is made with, in Deep Agents' own one's place, and marks the answer that
+  ends the history. Any other provider's request is unchanged. The small hosted model by name,
+  18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- A live tool's value from an earlier turn reads as out of date in every adapter, not only
+  where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
+  its own thread (its checkpointer), so its earlier results are marked in the request it sends
+  (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
+  marks them as memory's window does. In both, the tool stays offered.
+- A model looping on one call is stopped on every adapter: the tool bridge does not run the
+  same call a third time in a row and tells the model to answer with what it has (a `stalled`
+  warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
@@ -162,6 +189,10 @@ own model work follows the harness's configuration.
   names and dates, the step count, seconds within a tolerance), with the made-up claims and
   leaked template tags counted, every model request kept, and `--render` checking what a
   llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
+- What a finished run spent is on its end: every `RUN_FINISHED` carries `data.spent` (tokens,
+  cached tokens, dollars, model calls, tool calls — its sub-agents' runs and earlier attempts
+  included), which agent-runs' event log keeps (ADV-11).
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,

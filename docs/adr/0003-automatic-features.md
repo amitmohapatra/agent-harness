@@ -48,7 +48,9 @@ long tasks; a short task must keep sending exactly that.
    * dollars — the gateway's per-call cost (Bifrost's `usage.cost`); the price table is the
      benchmark's own (`benchmark/cost/prices.py`);
    * model retries, fallbacks and prompt caching — the gateway (Bifrost's provider retries, the
-     virtual key's fallbacks, `prompt_cache.auto_inject`); the client makes one attempt;
+     virtual key's fallbacks, `prompt_cache.auto_inject`); the client makes one attempt. On the
+     provider's own SDK, Anthropic's prompt cache is LangChain's
+     `AnthropicPromptCachingMiddleware` (`middleware.PromptCache`, for a model name too);
    * structured output — LangChain's `response_format`;
    * a run's cost cap — the harness's journal counter, only when `budget=` is given; a tenant's
      or a team's budget is Bifrost's;
@@ -74,7 +76,9 @@ long tasks; a short task must keep sending exactly that.
    per-step effort policy, the in-graph prompt cache, fallbacks from code, the structured-output
    repair, the `task` helper, compaction saved to memory, `compact_conversation`, rewind and
    fork, and the default budget. Each had an owner elsewhere or no evidenced need; reopen one
-   only with a measurement that shows a non-inferior gain.
+   only with a measurement that shows a non-inferior gain. (The prompt cache was reopened as
+   LangChain's own middleware for the provider's own SDK: on the small hosted model, cached
+   share 0 → 0.87, uncached input −87%, accuracy within noise.)
 
 ## Consequences
 
