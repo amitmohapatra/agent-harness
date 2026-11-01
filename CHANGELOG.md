@@ -53,8 +53,11 @@ own model work follows the harness's configuration.
   MCP server's tools behind its `ToolSearch` unless the server's config says `alwaysLoad`, so
   each turn's model saw only the tool names and spent a step loading them (a model that called
   one unloaded got a validation error and called it again). The harness's `trellis` server now
-  says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
-  memory's `tool_search`). A team's own servers keep the CLI's deferral.
+  says `alwaysLoad` below 30 harness tools; from 30 Claude Code's own tool search chooses. The
+  tools sit in Claude's cached prompt prefix, so every turn of a conversation now offers the
+  same ones, sorted by name: the hints narrow nothing for Claude (they still name the tools
+  that fit, in the context). Narrowed per turn, the set rewrote the prefix every turn. A
+  team's own servers keep the CLI's deferral.
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no

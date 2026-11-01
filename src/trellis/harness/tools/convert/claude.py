@@ -9,11 +9,14 @@ preview naming where; the server's ``read_file`` pages it. The CLI lists a serve
 when its session starts (the SDK carries no ``list_changed``), so ``read_file`` is listed from
 the start: before a result was kept it finds nothing to read.
 
-The server's config says ``alwaysLoad``: Claude Code otherwise defers every MCP server's tools
-behind its ``ToolSearch`` (the model is told their names only, and spends a step loading them
-before it can call one). Which tools a run offers is the harness's choice (the tool hints'
-narrowing, memory's ``tool_search``), made before the query: they are the tools to load. A
-team's own servers keep the CLI's deferral.
+The tools sit in Claude's cached prompt prefix, so a conversation's turns offer the same ones,
+sorted by name (the adapter narrows nothing: ``ClaudeAdapter.narrows``; the hints name the
+tools that fit in the context): a set that changed from turn to turn rewrote the whole prefix
+every turn. Below ``agent.NARROW_FROM`` tools the server's config says ``alwaysLoad``: Claude
+Code otherwise defers every MCP server's tools behind its ``ToolSearch`` (the model is told
+their names only, and spends a step loading them before it can call one). From there the
+choice is Claude's own tool search, deferral as the CLI does it. A team's own servers keep the
+CLI's deferral.
 """
 
 from __future__ import annotations
@@ -39,8 +42,12 @@ WAITING: Final = "Waiting for a person's approval."
 
 
 def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
-    readers = [_reader(*r) for r in results.READERS]
-    server = create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
+    from trellis.harness.agent import NARROW_FROM
+
+    offered = [*(_one(t) for t in tools), *(_reader(*r) for r in results.READERS)]
+    server = create_sdk_mcp_server(SERVER, tools=sorted(offered, key=lambda t: t.name))
+    if len(tools) >= NARROW_FROM:  # Claude's own tool search finds what a turn needs
+        return server
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 
 

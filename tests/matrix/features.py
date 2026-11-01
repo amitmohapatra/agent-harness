@@ -77,6 +77,9 @@ MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_s
 MCP_RESOURCES_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_resources_server.py"
 
 # --------------------------------------------------------------------------- not applicable
+#: The adapters whose tools the hints never narrow: Claude's sit in its cached prompt prefix, so
+#: every turn offers the same ones (a large set left to Claude Code's own tool search).
+STABLE_TOOLS: Final = frozenset({"claude"})
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
 #: What a LangChain graph is built with natively (ReAct's defaults), when it wants it.
 NATIVE_CONTEXT: Final = NA(
@@ -655,7 +658,7 @@ async def hints(w: World) -> None:
     offered = w.models.offered() or w.claude_offered
     assert offered, "the model was never offered anything"
     narrowed = all("note" not in names for names in offered)
-    if w.on:
+    if w.on and w.adapter not in STABLE_TOOLS:
         assert narrowed and all("lookup" in names for names in offered), offered
     else:
         assert not narrowed, offered
@@ -685,7 +688,7 @@ async def chains(w: World) -> None:
     assert offered, "the model was never offered anything"
     assert all({"find_sku", "get_stock"} <= set(names) for names in offered), offered
     narrowed = all("note" not in names for names in offered)
-    assert narrowed == w.on, offered
+    assert narrowed == (w.on and w.adapter not in STABLE_TOOLS), offered
 
 
 # --------------------------------------------------------------------------- gateway

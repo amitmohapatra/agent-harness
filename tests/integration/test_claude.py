@@ -13,7 +13,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
 from tests.support.arm import arm
-from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
+from tests.support.memory import FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED, native_spec
@@ -68,7 +68,7 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert refunds == ["o1"]
     cli = started_with(tmp_path)
     # read_file is listed from the start: the CLI lists a server's tools once
-    assert cli["tools"] == ["refund", "read_file", "query_result"] and cli["allowed_tools"] is None
+    assert cli["tools"] == ["query_result", "read_file", "refund"] and cli["allowed_tools"] is None
     assert cli["permission_prompt_tool"] is None  # the harness's PreToolUse hook decides
     assert cli["system_prompt"] == "You refund."
     assert target.mcp_servers == {}  # the team's options are untouched
@@ -322,25 +322,53 @@ async def test_without_memory_no_context_hook_is_registered(
     assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
 
 
-async def test_the_hints_narrow_the_tools_for_the_run(
+async def test_a_conversations_turns_offer_claude_the_same_tools(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:
+    """The tools a query offers sit in Claude's cached prompt prefix: a set that changed from
+    turn to turn (the hints narrowing each turn's) rewrote the whole prefix every turn. Every
+    turn of a conversation offers the same tools, in the same order, and disallows the same
+    built-ins; the hints still name the tools that fit, in the context."""
+
     def make(i: int) -> Any:
         def lookup(key: str) -> str:
             return f"t{i}"
 
         return tool(lookup, name=f"t{i}", side_effects="read")
 
-    memory_service.candidates = ["t2", "t5"]
+    agent = arm(memory_harness.wrap(options(tmp_path, [{"text": "done"}]), id="n"),
+                [make(i) for i in range(6)])  # fmt: skip
+    offered = []
+    for candidates in (["t2", "t5"], ["t0", "Read"]):
+        memory_service.candidates = candidates
+        await agent.run("x", user="u1", thread="c")
+        cli = started_with(tmp_path)
+        offered.append((cli["tools"], cli["disallowed_tools"], cli["mcp_config"]))
+    assert offered[0] == offered[1]
+    tools, _, _ = offered[0]
+    assert tools == sorted(tools) and {f"t{i}" for i in range(6)} <= set(tools)
+
+
+async def test_a_large_tool_set_is_left_to_claudes_own_tool_search(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """From ``agent.NARROW_FROM`` harness tools the server is not loaded up front: Claude Code's
+    own ``ToolSearch`` finds the ones a turn needs (its deferral), with the same tools offered
+    every turn."""
+    from trellis.harness.agent import NARROW_FROM
+
+    def make(i: int) -> Any:
+        def lookup(key: str) -> str:
+            return f"t{i}"
+
+        return tool(lookup, name=f"t{i}", side_effects="read")
+
     target = options(tmp_path, [{"text": "done"}])
-    await arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)]).run("x", user="u1")
-    assert started_with(tmp_path)["tools"] == [
-        "t2",
-        "t5",
-        *MEMORY_TOOLS,
-        "read_file",
-        "query_result",
-    ]
+    await arm(harness.wrap(target, id="big"), [make(i) for i in range(NARROW_FROM)]).run(
+        "x", user="u1"
+    )
+    servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
+    assert servers["trellis"] == {"type": "sdk", "name": "trellis"}
 
 
 async def test_streaming_carries_the_assistant_text(harness: Harness, tmp_path: Path) -> None:

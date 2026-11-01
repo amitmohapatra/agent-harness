@@ -198,7 +198,9 @@ class ClaudeAdapter:
     name: ClassVar[str] = "claude_agent_sdk"
     tool_format: ToolFormat = "claude"
     fixed_tools: bool = False
-    narrows: Narrowing = "run"
+    #: the tools sit in Claude's cached prompt prefix: every turn offers the same ones, a large
+    #: set left to Claude's own tool search (``tools.convert.claude``)
+    narrows: Narrowing = "none"
     #: a query takes one prompt, not a conversation: memory's window is in the context's text
     replays_history = False
     #: with memory off, the conversation's earlier turns are in the context's text too

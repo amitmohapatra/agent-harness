@@ -326,9 +326,11 @@ async def test_a_governed_mcp_server_passes_through_outside_a_run_and_reports_er
 # --------------------------------------------------------------------------- Claude
 
 
-async def test_claudes_own_tools_the_hints_leave_out_are_disallowed_for_the_query(
+async def test_claudes_own_tools_stay_offered_whatever_the_hints(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
 ) -> None:
+    """Claude's tools sit in its cached prompt prefix: the hints narrow none of them (a set
+    changed per turn rewrote the prefix every turn); the team's own ``disallowed_tools`` stay."""
     from claude_agent_sdk import ClaudeAgentOptions
 
     from tests.integration.test_claude import CLI
@@ -341,10 +343,7 @@ async def test_claudes_own_tools_the_hints_leave_out_are_disallowed_for_the_quer
         env={"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)},
     )
     await memory_harness.wrap(options, id="claude-narrowed").run("read it", user="u1")
-    disallowed = json.loads(record.read_text())["disallowed_tools"].split(",")
-    assert disallowed[0] == "WebFetch"  # theirs first, kept
-    assert "Glob" in disallowed and "Read" not in disallowed
-    assert "Agent" not in disallowed and "Task" not in disallowed  # helpers stay
+    assert json.loads(record.read_text())["disallowed_tools"] == "WebFetch"
 
 
 # --------------------------------------------------------------------------- the set
