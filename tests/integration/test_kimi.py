@@ -282,3 +282,45 @@ async def test_kimi_reads_the_runs_skills(
     assert done.status is RunStatus.SUCCESS, done.error
     sent = json.dumps(endpoint.requests[0])
     assert "sql-review" in sent and "Reviews SQL queries for joins." in sent
+
+
+async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi has its own ``Read``; the harness's ``read_file`` (its MCP server, over the run's
+    journal) is kept for a large result, by measurement: the result is not written into the
+    agent's workspace (the user's working directory, which another worker resuming the run
+    does not have, and a second store beside the journal), and a page is at most
+    ``PAGE_CHARS`` where Kimi's ``Read`` returns up to 100,000 characters at once by default."""
+    from trellis.harness.journal import content_key
+    from trellis.harness.tools import results
+
+    big = "sku,units\n" + "\n".join(f"s{n},{n % 7}" for n in range(12_000))
+    assert len(big) > results.MAX_CHARS
+
+    @tool(side_effects="read")
+    def rows() -> str:
+        """Every row."""
+        return big
+
+    path = f"{results.PREFIX}/{content_key('result', big)}"
+    work = tmp_path / "kimi-work"
+    endpoint.plan = [("rows", {}), ("read_file", {"file_path": path})]
+    agent = arm(harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-big"), [rows])
+    result = await agent.run("count the rows", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    told = [text_of(m.get("content")) for m in endpoint.requests[-1]["messages"]]
+    stub, page = next(t for t in told if path in t), told[-1]
+    assert "Tool result too large" in stub  # the stub names the journal's path ...
+    assert sorted(p.name for p in work.iterdir()) == []  # ... and nothing is in the workspace
+    assert "  1  sku,units" in page and "more lines: read_file(" in page
+    assert len(page) <= results.PAGE_CHARS + 200
+    # the native path, for the record: the same rows as a workspace file, read by Kimi's Read
+    (work / "rows.csv").write_text(big)
+    endpoint.plan = [("Read", {"path": "rows.csv"})]
+    native = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-native").run(
+        "count the rows", user="u1"
+    )
+    assert native.status is RunStatus.SUCCESS, native.error
+    read = text_of(endpoint.requests[-1]["messages"][-1].get("content"))
+    assert len(read) >= 4 * results.PAGE_CHARS  # one call: over four of the harness's pages
