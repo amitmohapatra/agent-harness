@@ -52,6 +52,11 @@ own model work follows the harness's configuration.
   conversation (its window) and its context call fails (an outage, the circuit open), the
   earlier turns come from the run store, as with memory off; before, the model was sent the
   question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
+- `query_result` adds money up exactly, on both engines: a column of decimals as written (at most
+  15 digits) is `DECIMAL` — DuckDB's own `DECIMAL(p, s)`; on SQLite a `REAL` whose `sum`,
+  `total` and `avg` (a window's too) add up in Python's `decimal` — and a number in an answer
+  is written as SQLite writes a `REAL` (15 significant digits). 6,000 two-decimal refunds
+  summed to `32266.149999999998` (ADV-2).
 - OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
   on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
   that ended the run with no answer (ADV-8).

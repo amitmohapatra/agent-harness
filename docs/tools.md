@@ -176,8 +176,12 @@ has to. In order of preference:
    writes its SQL. Every result the run saved is a table named by the tool that returned it
    (`result` is the file asked about), so one query joins results of several tools; a JSON
    array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
-   `|`), else one row per line, with whole-number, number and text columns typed alike on
-   both engines (a code such as `007`, or an id past 64 bits, stays text). Besides arithmetic,
+   `|`), else one row per line, with whole-number, decimal, number and text columns typed
+   alike on both engines (a code such as `007`, or an id past 64 bits, stays text). A decimal
+   column (digits and a point as written, at most 15 digits: money) adds up exactly — DuckDB's
+   own `DECIMAL`; on SQLite `sum`, `total` and `avg`, a window's too, in Python's `decimal` —
+   and every number an answer holds is written as SQLite writes a `REAL` (15 significant
+   digits): `32266.15`, never `32266.149999999998`. Besides arithmetic,
    `CASE`, math, date and window functions (a moving average, `lag` for growth), it has
    `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `julianday(d)`, `corr`,
    `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` on both. Only reading runs (one
@@ -187,8 +191,9 @@ has to. In order of preference:
    most 5 s (a cancelled run interrupts it), loads at most 64 MB of its own run's results
    (never another run's), holds at most 512 MB (DuckDB's `memory_limit`; SQLite's pages, and
    8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
-   and 20,000 characters — the model reads the small answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
-   its result) is fetched to its last page in one call (`tools/pages.py`, at most 200 pages),
+   and 20,000 characters — the model reads the small answer, never the rows. A tool declared
+   `paged=True` (a cursor argument; `next_cursor` in its result) is fetched to its last page in
+   one call (`tools/pages.py`, at most 200 pages),
    so its rows are queried whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
    result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
