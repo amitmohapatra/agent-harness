@@ -25,7 +25,9 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 
 | Gap | Status | Evidence |
 |---|---|---|
-| Follow-ups with pronouns: the memory query is the raw latest message | next (after the window work lands): query = latest message + the previous user turn when short | audit A1, M1 |
+| Follow-ups with pronouns: the memory query is the raw latest message | in review: memory #66 — a short question whose own search is weak is searched again with the thread's previous question (follow-ups top-3 10 → 14/15, topic changes unchanged, `benchmark/follow_ups.py`) | audit A1, M1 |
+| Honest "I don't know": the abstain note names the missing detail and offers to look it up or ask; it reaches the model in every adapter (matrix F41a) | done (#89) | audit I6, M2 |
+| The abstain note is skipped whenever a tool hint reaches 0.5, and the memory service's hints claim 0.63–0.74 for questions no tool answers ("What's my sister's name?" → `find_sku` 0.74): with any tools, the note almost never reaches the model (0/12 requests on the complex suite's nodata cases) | next: calibrate the hint confidence (memory) or gate the note on the hinted tool's fit, then measure | audit I6, B13 |
 | Messages sent mid-run (steer, interrupt, queue), memory-off history, stable message ids, session continuity | exists (#64) | audit A6, G6 |
 | `mode` (queue / interrupt / steer) on AG-UI, A2A and `start()`: today only `run()` and `stream()` take it | next | #64 |
 | A steered message reaches OpenAI Agents and Claude models but is recorded after the question in their transcripts: record messages in the order they came | later | #64 |
@@ -53,7 +55,10 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 |---|---|---|
 | Values that change fetched fresh; replayed results dated; a stale tool kept offered | in flight: `claude/cool-maxwell-w5avo8-data` (freshness: `tool(freshness="live", max_age=)`, dated snapshots) | audit C1, C2, M5 |
 | Plain `ReAct` cuts a large result with no way back | in flight: `-data` (results kept and paged by every adapter, `FitWindow` cut says where the rest is) | audit D1, M4 |
-| Summation/aggregation without a sandbox: tool-side aggregation parameters, then a read-only query over saved results (a library, e.g. DuckDB with external access off), then a sandbox or Code Mode | in flight: `-data` (kept results written into the run's sandbox; `--classes aggregate`) | audit D2, E4 |
+| Summation/aggregation without a sandbox: tool-side aggregation parameters, then a read-only query over saved results, then a sandbox or Code Mode | exists (#66: `query_result` on SQLite) | audit D2, E4 |
+| `query_result` on DuckDB when installed (a `query` extra), SQLite as the fallback: the same tables, typing rules, function names and limits on both | next | [QUERY_ENGINE.md](QUERY_ENGINE.md), [ADR 0007](../adr/0007-query-engine.md): ties SQLite on accuracy (18/18), bounds a query's memory, a call 2x faster at 50k rows and 4.5x at 500k, 8 calls at once 6 to 9.5x faster |
+| An id past 64 bits rounded (CSV) or failing the load (JSON) in `query_result` | in flight: #83 | [QUERY_ENGINE.md](QUERY_ENGINE.md) value fidelity |
+| SQLite fallback: a query's own values are not memory-bounded (+370 MB in 0.7 s); a run's results are parsed again on every query | later (after the DuckDB switch) | [QUERY_ENGINE.md](QUERY_ENGINE.md) safety and load |
 | Agent-written memories copying a tool value | later | audit C3 |
 
 ## Tools
