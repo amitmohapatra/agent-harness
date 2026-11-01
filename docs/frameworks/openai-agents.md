@@ -71,6 +71,9 @@ which the SDK hands the model as the tool's error. `Runner.run`'s own arguments 
 agent's) — `max_turns`, `run_config`, `context`, `session`... The harness gives `Runner.run` the
 agent, its input and its hooks itself: `starting_agent`, `input` and `hooks` are refused, and so
 is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+A call to a tool the model made up is an error the model reads (`Tool '<name>' not found.`) and
+the run goes on, as on every other adapter: the harness sets the SDK's own
+`RunConfig.tool_not_found_behavior="return_error_to_model"` on every run.
 
 ```python
 agent = h.wrap(
@@ -126,7 +129,7 @@ record).
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
 | Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[..., src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`). A plain `Agent` has no skills slot (openai-agents 0.22): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`) |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}` |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends with one last answer — the last agent called once more, told the limit is reached and given no tool, as `ReAct` at `max_steps` (the SDK's own `max_turns` error handler; your `error_handlers=` replaces it) |
 
 ## Native or ours: skills, prompts, sandbox
 

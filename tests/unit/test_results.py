@@ -11,7 +11,7 @@ import pytest
 
 from trellis.harness import runtime as runtime_module
 from trellis.harness.journal import Journal, content_key
-from trellis.harness.tools import results
+from trellis.harness.tools import query, results
 from trellis.harness.tools.results import MAX_CHARS, PAGE_CHARS, kept, read, read_file, readable
 
 
@@ -38,7 +38,8 @@ def test_a_result_within_the_limit_is_read_as_it_is(journal: Journal) -> None:
 def test_outside_a_run_nothing_is_cut_or_kept() -> None:
     assert readable("x" * (MAX_CHARS + 1)) == "x" * (MAX_CHARS + 1)
     assert not kept()
-    assert read_file("/large_tool_results/abc") == "Error: File '/large_tool_results/abc' not found"
+    assert read_file("/large_tool_results/abc") == query.GONE.format(path="/large_tool_results/abc")
+    assert read_file("/elsewhere") == "Error: File '/elsewhere' not found"
 
 
 def test_a_large_result_is_kept_and_previewed_by_its_head_and_tail(journal: Journal) -> None:

@@ -19,6 +19,7 @@ from trellis.harness import budget
 from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.journal import content_key
 from trellis.harness.tools.bridge import SAME_CALL
 
@@ -127,13 +128,18 @@ async def test_streaming_emits_text_deltas(harness: Harness) -> None:
     assert "".join(deltas) == "all good here" and len(deltas) == 3
 
 
-async def test_the_context_is_a_system_message_and_memory_tools_are_added(
+async def test_the_context_is_marked_off_in_the_question_and_memory_tools_are_added(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedModel([("memory_search", {"query": "prefs"}), "email"])
     agent = memory_harness.wrap(Agent(name="m", model=model), id="m")
     assert (await agent.run("how to reach me?", user="u1")).answer == "email"
-    assert model.inputs[0][0] == {"role": "system", "content": memory_service.context_text}
+    asked = model.inputs[0][-1]
+    assert asked["role"] == "user" and [p["text"] for p in asked["content"]] == [
+        ASKED_WITH.format(context=memory_service.context_text),
+        "how to reach me?",
+    ]
+    assert not any(i.get("role") == "system" for i in model.inputs[0])
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
 
 
@@ -157,9 +163,10 @@ async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     agent = arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
-    assert model.tools[0] == ["t2", *memory_tools]  # the agent's own eta is no candidate
+    # offered in name order, the agent's own among them, as every other adapter offers them
+    assert model.tools[0] == sorted(["t2", *memory_tools])  # the agent's own eta is no candidate
     # tool_search found t4 and the agent's own eta: both offered from then on
-    assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]
+    assert model.tools[1] == sorted(["eta", "t2", "t4", *memory_tools])
 
 
 async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(
@@ -438,9 +445,9 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
     triage, billing, _ = _desk(model)
     agent = arm(memory_harness.wrap(triage, id="desk"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "checked"
-    assert model.tools[0] == ["t2", *MEMORY_TOOLS]
+    assert model.tools[0] == sorted(["t2", *MEMORY_TOOLS])
     # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)
-    assert model.tools[1] == MEMORY_TOOLS
+    assert model.tools[1] == sorted(MEMORY_TOOLS)
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
     assert [t.name for t in billing.tools] == ["refund"]  # yours, unchanged
 
@@ -631,3 +638,80 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
         ("call_1_4", SAME_CALL.format(first="call_1")),
         ("call_1_5", SAME_CALL.format(first="call_1_1")),
     ]
+
+
+@tool(side_effects="read")
+def look(topic: str) -> str:
+    """Facts about a topic."""
+    return f"facts about {topic}"
+
+
+async def test_at_its_turn_limit_a_run_ends_with_one_last_answer(harness: Harness) -> None:
+    """``max_turns`` reached: the last agent is called once more, told the limit is reached and
+    given no tool (the SDK's own ``max_turns`` error handler), and its answer is the run's — as
+    a ``ReAct`` run's at ``max_steps`` — not ``MaxTurnsExceeded`` with no answer."""
+    turns: list[Any] = [("look", {"topic": f"t{n}"}) for n in range(3)]
+    model = ScriptedModel([*turns, "found t0 to t2; t3 is left"])
+    target = Agent(name="looper", instructions="Look.", model=model)
+    agent = arm(harness.wrap(target, id="turns", framework_options={"max_turns": 3}), [look])
+    events = [e async for e in agent.stream("x", user="u")]
+    assert events[-1].data["result"] == "found t0 to t2; t3 is left", events[-1]
+    assert len(model.inputs) == 4  # one call past the limit
+    assert model.tools[-1] == []  # offered no tool
+    assert json.dumps(model.inputs[-1][-1]) == json.dumps(
+        {"role": "user", "content": budget.LIMIT.format(limit=3)}
+    )
+    warned = [e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("code")]
+    assert warned[-1]["code"] == "step_limit"
+
+
+async def test_a_structured_answer_or_a_teams_handler_keeps_its_way(harness: Harness) -> None:
+    from pydantic import BaseModel
+
+    class Plan(BaseModel):
+        steps: list[str]
+
+    model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
+    target = Agent(name="planner", instructions="Plan.", model=model, output_type=Plan)
+    options = {"max_turns": 2}
+    agent = arm(harness.wrap(target, id="planner", framework_options=options), [look])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Max turns (2) exceeded" in result.error.message
+
+    model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
+    target = Agent(name="looper", instructions="Look.", model=model)
+    theirs = {"max_turns": lambda given: "ours, not the harness's"}
+    agent = arm(
+        harness.wrap(
+            target, id="own", framework_options={"max_turns": 2, "error_handlers": theirs}
+        ),
+        [look],
+    )
+    result = await agent.run("x", user="u")
+    assert result.answer == "ours, not the harness's"
+
+
+async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) -> None:
+    model = ScriptedModel([("look", {"topic": "a"}), ("look", {"topic": "b"})])  # then nothing
+    target = Agent(name="looper", instructions="Look.", model=model)
+    agent = arm(harness.wrap(target, id="dry", framework_options={"max_turns": 2}), [look])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Max turns (2) exceeded" in result.error.message
+
+
+async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on(
+    harness: Harness,
+) -> None:
+    """A call to a tool that does not exist is answered, as on every other adapter, by the
+    SDK's own ``tool_not_found_behavior="return_error_to_model"`` — not a ``ModelBehaviorError``
+    that ends the run (ADV-8)."""
+    model = ScriptedModel([("ship_all", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped"])
+    target = Agent(name="shipper", instructions="You ship orders.", model=model)
+    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    result = await agent.run("ship o1", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "shipped" and done == ["o1"]
+    told = json.dumps(model.inputs[1], default=str)
+    assert "Tool 'ship_all' not found" in told, told[-400:]

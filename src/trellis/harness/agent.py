@@ -46,6 +46,7 @@ from trellis.contracts import (
 from trellis.harness import (
     compat,
     conversation,
+    frontend,
     history,
     pipeline,
     sandbox,
@@ -54,10 +55,13 @@ from trellis.harness import (
 )
 from trellis.harness.adapters import detect
 from trellis.harness.adapters.base import (
+    FIT_SHARE,
     FRAMEWORK_OPTIONS,
+    PROMPT_METADATA,
     context_window,
     declared_tools,
     merged,
+    metadata_of,
     model_name,
 )
 from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
@@ -88,6 +92,7 @@ from trellis.harness.evals import (
     sampled,
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
+from trellis.harness.frontend import FRONTEND, Frontend
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
@@ -97,7 +102,8 @@ from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools.base import Source, Tool, arguments_problem, max_age
+from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -120,6 +126,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: What a reply is left room for when the replayed conversation's budget is sized from the
+#: model's window (:func:`conversation_budget`), in tokens.
+REPLY_TOKENS: Final = 1024
+#: The fewest and most tokens the memory service sizes a conversation window to.
+CONVERSATION_TOKENS: Final = (100, 1_000_000)
 #: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
 #: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
 #: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
@@ -142,21 +153,53 @@ TURN_WRITE_SECONDS: Final = 5.0
 #: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
 #: and its next turn starts a new one.
 SESSIONS_KEPT: Final = 128
+#: Why a blank message (empty, or whitespace only) opens no run: there is nothing to answer, a
+#: provider refuses a blank user message (Anthropic does), and kept in the thread it would fail
+#: every later turn of it.
+BLANK: Final = (
+    "the message is blank (empty or whitespace only): there is nothing to answer, so no run is "
+    "opened and nothing is sent to the model"
+)
 #: What the model is told when memory has nothing for the question (``evidence_status``
-#: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
-#: the user's history, instead of a confident guess the memory never held. Not when a hinted
-#: tool answers the question (its confidence at least :data:`NARROW_FLOOR`): told "do not
-#: guess", a weak model searched memory in loops instead of calling it.
+#: INSUFFICIENT) or only part of it (INCOMPLETE): for what depends on the user's history, an
+#: honest "I don't know" instead of a confident guess the memory never held — one that names
+#: the detail it does not have and offers to look it up or to be told it, so the user knows
+#: what is missing and what to do next. Not when a hinted tool answers the question (its
+#: confidence at least :data:`NARROW_FLOOR`): told "do not guess", a weak model searched
+#: memory in loops instead of calling it.
 ABSTAIN_NOTES: Final = {
     "INSUFFICIENT": (
         "## Memory\nMemory holds nothing about this question. If the answer depends on "
-        "something the user told you before, say you do not know it; do not guess."
+        "something the user told you before, do not guess: say which detail you do not "
+        "have, and offer to look it up or ask the user for it."
     ),
     "INCOMPLETE": (
-        "## Memory\nMemory covers only part of this question, or someone else. Say what "
-        "you do not know rather than fill the gap."
+        "## Memory\nMemory covers only part of this question, or someone else. Answer the "
+        "part it covers; for the rest, do not fill the gap: say which detail you do not "
+        "have, and offer to look it up or ask the user for it."
     ),
 }
+
+#: The memory service's search tool, and what the note says of it when the run offers it: a
+#: detail the user gave in an earlier conversation is there, and memory's context for this
+#: question does not reach it.
+SEARCH_TOOL: Final = "memory_search"
+EARLIER_CHATS: Final = (
+    "It may be in one of the user's earlier conversations: search them first (memory_search "
+    'with kinds ["message"]) before you say a detail is missing.'
+)
+
+
+def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:
+    """The tokens the replayed conversation may take of a model reading ``window`` tokens: what
+    one request may hold (:data:`~trellis.harness.adapters.base.FIT_SHARE` of it, as
+    ``FitWindow`` fits it) less what else the request ``holds`` (its instructions, tools and
+    question), the memory context's ``context`` budget and :data:`REPLY_TOKENS`, within what
+    the service takes (:data:`CONVERSATION_TOKENS`); ``None`` when the window is not known."""
+    if not window:
+        return None
+    low, high = CONVERSATION_TOKENS
+    return max(low, min(high, int(window * FIT_SHARE) - holds - context - REPLY_TOKENS))
 
 
 class Agent:
@@ -227,8 +270,13 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
-        #: the pushed context's token budget: a share of the model's window when it is known
-        self.context_budget = context_budget(context_window(target))
+        #: the model's window when it is known, and the pushed context's token budget: a share
+        #: of it
+        self.model_window = context_window(target)
+        self.context_budget = context_budget(self.model_window)
+        #: the instructions' text, when the builder says it (``ReAct``): what the replayed
+        #: conversation's budget leaves room for
+        self.instructions: str | None = metadata_of(target).get(PROMPT_METADATA)
         #: the name of the agent's model when its builder says it (``ReAct``): what the
         #: memory service is told with the endpoint, with its profile
         self.model = model_name(target)
@@ -248,6 +296,9 @@ class Agent:
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
         self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
+        #: the large results each conversation's turns saved in this process (``tools.results``):
+        #: its later turns read and query them where its history names them (``pipeline``)
+        self.results = Conversations()
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -642,7 +693,12 @@ class Agent:
         record: RunRecord,
         resolution: InterruptResolution,
         listener: Callable[[RunEvent], None] | None = None,
+        *,
+        app: Frontend | None = None,
     ) -> Result:
+        """The answered run's next attempt, in this process (a run that came from the queue
+        goes back to it). ``app``: what its front end gives it now, over what the run kept
+        (a surface's resume: the front end's current state)."""
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
             await cancel_children(
@@ -656,6 +712,9 @@ class Agent:
         if resumed.status is not RunStatus.RUNNING:
             # cancelled, or back on the queue for a worker (a run that came from the queue)
             return Result(run_id=record.run_id, status=resumed.status)
+        if app is not None:
+            given = {**resumed.metadata, FRONTEND: app.kept()}
+            resumed = resumed.model_copy(update={"metadata": given})
         return await pipeline.attempt(
             self, resumed, record.input, journal=journal, resolution=resolution, listener=listener
         )
@@ -802,7 +861,9 @@ class Agent:
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
         tools — none, with a warning, when the memory service cannot list them — less the
-        tools of what the run is without (``without=``: its MCP tools...)."""
+        tools of what the run is without (``without=``: its MCP tools...); and the tools the
+        run's front end declared (``frontend.py``), but one named as one of those, which is
+        said in a warning."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -814,7 +875,14 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        return [t for t in tools if t.feature is None or runtime.uses(t.feature)]
+        tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
+        if runtime.frontend is not None and runtime.frontend.tools:
+            theirs, taken = runtime.frontend.offered({t.name for t in tools})
+            if taken:
+                said = ", ".join(taken)
+                runtime.events.warning("frontend_tools", f"the agent's own tools win: {said}")
+            tools.extend(theirs)
+        return tools
 
     async def native_tools(self, runtime: Runtime) -> dict[str, ToolSpec]:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
@@ -846,36 +914,55 @@ class Agent:
     async def push(self, runtime: Runtime) -> PromptContext | None:
         """What is pushed into the framework's input, in the runtime's context: the memory
         context (:meth:`remembered`), returned when there is one — or, with memory off, the
-        conversation's earlier turns (:meth:`recalled`)."""
+        conversation's earlier turns (:meth:`recalled`) — and after it the front end's
+        context and state (``frontend.rendered``), which take at most
+        :data:`~trellis.harness.frontend.SHARE` of the context's token budget, the memory
+        context the rest."""
+        app, used = frontend.rendered(
+            runtime.frontend, runtime.state, int(self.context_budget * frontend.SHARE)
+        )
+        pushed = None
         if runtime.run_memory is None:
             await self.recalled(runtime)
-            return None
-        return await self.remembered(runtime)
+        else:
+            pushed = await self.remembered(runtime, budget=self.context_budget - used)
+        if app:
+            runtime.context = "\n\n".join(p for p in (runtime.pushed_context, app) if p)
+        return pushed
 
     async def recalled(self, runtime: Runtime) -> None:
-        """With memory off, the conversation's earlier turns from the run store
-        (``conversation.earlier``: each one's question and answer) — only where nothing else
-        keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
-        a session of the run's, a conversation on OpenAI's servers) or continues the session
-        it kept for the conversation's last turn (``Runtime.continued``). A target that takes
-        messages (``Adapter.history_in == "messages"``) gets them as its own (a function as
-        ``agent.history``); the others in the context's text."""
+        """With memory off (or unreachable where it replays the conversation), the
+        conversation's earlier turns from the run store (``conversation.earlier``: each one's
+        question and answer; whole — its tool calls and their results too, as kept here — for a
+        target that takes messages and fits each request to a known window: ``ReAct``'s
+        ``FitWindow`` and clearing, a result past its tool's age marked out of date as memory's
+        window marks it) — only where nothing else keeps them (ADR 0005): not where the
+        framework keeps its own thread (a checkpointer, a session of the run's, a conversation
+        on OpenAI's servers) or continues the session it kept for the conversation's last turn
+        (``Runtime.continued``). A target that takes messages (``Adapter.history_in ==
+        "messages"``) gets them as its own (a function as ``agent.history``); the others in the
+        context's text."""
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if runtime.continued or (store is not None and store is not history.MEMORY_THREAD):
             return
+        whole = self.adapter.history_in == "messages" and self.model_window is not None
         try:
-            earlier = await conversation.earlier(runtime)
+            earlier = await conversation.earlier(runtime, whole=whole)
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return
         if not earlier:
             return
         if self.adapter.history_in == "messages":
-            runtime.history = earlier
+            runtime.history, _ = snapshots.out_of_date(
+                earlier, lambda name: snapshots.declared_max_age(runtime, name)
+            )
         else:
             runtime.context = conversation.rendered(earlier)
 
-    async def remembered(self, runtime: Runtime) -> PromptContext | None:
+    async def remembered(
+        self, runtime: Runtime, *, budget: int | None = None
+    ) -> PromptContext | None:
         """The memory context for this run, in the runtime. Asked with the run's tool set —
         the harness's tools and the ones its framework gives the model itself
         (``Runtime.native``: an OpenAI Agents agent's own, hosted, MCP and handoff tools,
@@ -887,7 +974,8 @@ class Agent:
         (``Toolbox.indexed``); hints below :data:`NARROW_FLOOR` narrow nothing; the tools
         behind Code Mode are asked about too, and a hint naming one keeps the meta-tools that
         reach it; a hinted tool keeps its chain (``Toolbox.related``: the tools its output
-        feeds, and those whose output it needs). A failure is a warning."""
+        feeds, and those whose output it needs). ``budget``: its tokens (else the agent's
+        :attr:`context_budget`). A failure is a warning."""
         memory = runtime.run_memory
         if memory is None or not runtime.task or not runtime.uses("memory_push"):
             return None
@@ -898,6 +986,7 @@ class Agent:
         if hints:
             await box.indexed()
         window = self.window(runtime)
+        replayed = self.conversation_budget(runtime) if window is Window.MESSAGES else None
         with retrieval_span(runtime.task) as span:
             try:
                 pushed = await memory.context(
@@ -905,18 +994,22 @@ class Agent:
                     tools=[*own, *behind] or None,
                     window=window,
                     hints=hints,
-                    budget=self.context_budget,
+                    budget=self.context_budget if budget is None else budget,
+                    conversation_budget=replayed,
                     document_ids=runtime.document_ids,
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
+                if window is not Window.NONE:
+                    # memory replays the conversation: without it, the run store's turns do
+                    await self.recalled(runtime)
                 return None
             output(span, pushed.rendered)
         stale: list[str] = []
         if window is Window.MESSAGES:
             runtime.history, stale = snapshots.out_of_date(
                 from_window(pushed.conversation.messages if pushed.conversation else []),
-                lambda name: _max_age(runtime, name),
+                lambda name: snapshots.declared_max_age(runtime, name),
             )
         # candidates the model is offered — the hints, and the tools the context names (the
         # plan of a skill learned for the task lists its steps); no hint, or none confident
@@ -948,6 +1041,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
+        if note is not None and SEARCH_TOOL in runtime.toolbox:
+            note = f"{note}\n{EARLIER_CHATS}"
         parts = (pushed.rendered, note, snapshots.note(stale))
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
@@ -956,6 +1051,32 @@ class Agent:
             data={"chars": len(rendered), "evidence_status": status},
         )
         return pushed
+
+    def conversation_budget(self, runtime: Runtime) -> int | None:
+        """The tokens the conversation memory replays may take: what the run's next request
+        leaves of the model's window once its instructions, offered tools and question are
+        in (LangChain's ``count_tokens_approximately``), with the memory context's budget and a
+        reply's room kept (:func:`conversation_budget`); ``None`` when the window is not
+        known (the service's default). Only a framework that replays messages asks it, so
+        LangChain is there to count with."""
+        from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415 - extra
+        from langchain_core.messages.utils import count_tokens_approximately  # noqa: PLC0415
+
+        specs = [t.spec for t in runtime.toolbox.values()] + list(runtime.native.values())
+        tools: list[Any] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": s.name,
+                    "description": s.description,
+                    "parameters": s.input_schema,
+                },
+            }
+            for s in specs
+        ]
+        said = [SystemMessage(self.instructions or ""), HumanMessage(runtime.task)]
+        holds = count_tokens_approximately(said, tools=tools)
+        return conversation_budget(self.model_window, holds=holds, context=self.context_budget)
 
     def unreached(self, runtime: Runtime) -> None:
         """The memory context pushed for ``runtime`` reached nothing: the adapter found no
@@ -1016,12 +1137,17 @@ class Agent:
         """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
         owns the conversation (``history.owner``), it is written before the run returns, so
         the next turn's window holds it wherever that turn runs; a write that fails there is
-        queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled). With memory
+        off it is kept in this process for the conversation's later turns (``Agent.results``,
+        ``conversation.earlier``)."""
         memory = runtime.run_memory
-        if memory is None or not runtime.uses("records") or not messages:
+        if not messages or (memory is not None and not runtime.uses("records")):
             return
-        # each tool result says which tool returned it and when: a later turn replays it so
-        messages = snapshots.stamped(messages, runtime.fetched)
+        if memory is None:
+            # nothing keeps the conversation: its later turns read this one here (``earlier``)
+            if runtime.parent is None and runtime.conversation != runtime.run_id:
+                self.results.said(runtime.conversation, runtime.run_id, messages)
+            return
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:
             try:
@@ -1189,11 +1315,12 @@ class Agent:
         document_ids: Sequence[str] | None = None,
         parent: Runtime | None = None,
         mode: Mode = Mode.QUEUE,
+        app: Frontend | None = None,
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
         record keeps their JSON. (Surfaces pass their own ``run_id`` when the protocol names
-        the run.)"""
+        the run, and what its front end gave it, ``app``.)"""
         start = await self._start(
             input,
             user=user,
@@ -1208,6 +1335,7 @@ class Agent:
             framework_options=framework_options,
             document_ids=document_ids,
             parent=parent,
+            app=app,
         )
         live = None
         if mode is Mode.STEER and parent is None and thread:
@@ -1240,13 +1368,15 @@ class Agent:
         priority: int = 0,
         concurrency_key: str | None = None,
         document_ids: Sequence[str] | None = None,
+        app: Frontend | None = None,
     ) -> RunStart:
         """``record_input`` keeps an in-process run's input as JSON (it may be any object);
         a queued run's input already is. The run's time limit (else the agent's), deadline,
         its budget, the agent's version, what it is ``without``, its framework options that are
         JSON, the
-        documents its context draws on (``document_ids``), and how a queued run waits its turn
-        (``priority``, ``concurrency_key``) go with it when there are any. A run started
+        documents its context draws on (``document_ids``), what its front end gave it
+        (``app``), and how a queued run waits its turn (``priority``, ``concurrency_key``) go
+        with it when there are any. A run started
         inside another (``parent``: a sub-agent's, a nested ``run``/``stream``/``start``) is
         its child: its record names the parent and the agent group of the
         tree, and it takes the parent's tenant, thread, documents, deadline (the earlier of
@@ -1254,6 +1384,8 @@ class Agent:
         parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
+        if isinstance(input, str) and not input.strip():
+            raise ConfigurationError(BLANK)
         run_id = run_id or new_id("run_")
         turned_off = features(without)
         if parent is not None:
@@ -1264,6 +1396,8 @@ class Agent:
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
         metadata = self._metadata(turned_off, framework_options, document_ids, budget)
+        if app is not None and (kept := app.kept()):
+            metadata[FRONTEND] = kept
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {
@@ -1401,14 +1535,6 @@ def _json(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
-
-
-def _max_age(runtime: Runtime, name: str) -> float | None:
-    """How long a value of the run's tool ``name`` stays current, as it declared it (``None``:
-    it did not say, or it is not the run's tool)."""
-    found = runtime.toolbox.get(name)
-    spec = found.spec if found is not None else runtime.native.get(name)
-    return None if spec is None else max_age(spec)
 
 
 def _pull(agent: Agent) -> frozenset[str]:

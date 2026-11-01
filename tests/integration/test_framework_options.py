@@ -23,6 +23,7 @@ from tests.support.planned import Call
 from trellis import Harness, tool
 from trellis.contracts import ConfigurationError, RunOutcome, RunStatus
 from trellis.harness import agent as agent_module
+from trellis.harness import budget
 from trellis.harness.runs import LocalRuns
 
 #: Each framework's own limit on a run's steps, below what one tool call needs, and what its
@@ -30,8 +31,8 @@ from trellis.harness.runs import LocalRuns
 TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
-    "claude_agent_sdk": ({"max_turns": 1}, "Reached maximum number of turns"),
+    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    "claude_agent_sdk": ({"max_turns": 1}, "the turn limit (1) was reached"),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "langgraph": {"recursion_limit": 50},
@@ -40,6 +41,14 @@ ROOMY: Final[dict[str, dict[str, Any]]] = {
     "claude_agent_sdk": {"max_turns": 20},
 }
 PLAN: Final[list[Call]] = [("lookup", {"topic": "tides"})]
+
+
+def stopped(events: list[Any]) -> str:
+    """What a run its framework's limit stopped says: its error — or, where the run answers at
+    its limit (OpenAI Agents' ``max_turns``: one last answer), its ``step_limit`` warning."""
+    error = events[-1].error
+    said = [e.data.get("message", "") for e in events if e.data.get("code") == "step_limit"]
+    return error.message if error is not None else " ".join(said)
 
 
 @tool(side_effects="read")
@@ -62,9 +71,9 @@ async def test_the_options_reach_the_frameworks_run_call_a_runs_over_its_agents(
     tight, said = TIGHT[framework]
     target, tools = await BUILDERS[framework](harness, [lookup], tmp_path, PLAN)
     agent = arm(harness.wrap(target, id="limited", framework_options=tight), tools)
-    failed = await agent.run("tides?", user="u")  # the agent's own limit
-    assert failed.status is RunStatus.ERROR and failed.error is not None
-    assert said in failed.error.message
+    ended = [e async for e in agent.stream("tides?", user="u")]  # the agent's own limit
+    assert said in stopped(ended), ended[-3:]
+    failed = ended[-1]
     roomy = ROOMY[framework]
     if streaming:
         events = [e async for e in agent.stream("tides?", user="u", framework_options=roomy)]
@@ -86,7 +95,10 @@ async def test_a_queued_runs_options_are_kept_for_its_worker_and_its_resume(
     """One turn: the first attempt pauses on the approval in it; the resumed attempt, which
     re-runs the turn and needs a second, ends where the framework's limit says."""
     plan: list[Call] = [("confirm", {"step": "go"}), ("lookup", {"topic": "tides"})]
-    target, tools = await BUILDERS["openai_agents"](harness, [confirm, lookup], tmp_path, plan)
+    seen: list[Any] = []
+    target, tools = await BUILDERS["openai_agents"](
+        harness, [confirm, lookup], tmp_path, plan, seen=seen
+    )
     agent = arm(harness.wrap(target, id="queued"), tools)
     with pytest.raises(ConfigurationError, match=r"as JSON, and 'context' is not"):
         await agent.start("tides?", user="u", framework_options={"context": object()})
@@ -99,6 +111,9 @@ async def test_a_queued_runs_options_are_kept_for_its_worker_and_its_resume(
     await agent.resume(paused.awaiting.interrupt_id, "approve", reviewer="ops")
     assert await worker.run_once()
     ended = await handle.status()
+    # at the limit the model is asked for a last answer; this planned one calls a tool
+    # instead, so the SDK's own error stands
+    assert budget.LIMIT.format(limit=1) in json.dumps(seen[-1].inputs[-1])
     assert ended.status is RunStatus.ERROR and ended.error is not None
     assert "Max turns (1) exceeded" in ended.error.message
 
@@ -245,7 +260,8 @@ async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_op
 async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target, tools = await BUILDERS["openai_agents"](harness, [lookup], tmp_path, PLAN)
+    seen: list[Any] = []
+    target, tools = await BUILDERS["openai_agents"](harness, [lookup], tmp_path, PLAN, seen=seen)
     agent = arm(harness.wrap(target, id="nightly", run_timeout=60), tools)
     with pytest.raises(ConfigurationError, match="as JSON"):
         await agent.schedule("manual", user="ada", input="x", framework_options={"c": object()})
@@ -276,8 +292,8 @@ async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     run = fired[0]
     assert run.metadata == {**schedule.metadata, "schedule_id": schedule.schedule_id}
     assert (run.timeout_seconds, run.priority, run.concurrency_key) == (30, 5, "nightly")
-    assert run.status is RunStatus.ERROR and run.error is not None  # its options reached it
-    assert "Max turns (1) exceeded" in run.error.message
+    assert run.status is RunStatus.SUCCESS, run.error  # its options reached it: the limit's
+    assert budget.LIMIT.format(limit=1) in json.dumps(seen[-1].inputs[-1])  # last answer
     monkeypatch.setattr(agent_module, "SCHEDULES_QUEUE", False)  # contracts before 0.6.1
     with pytest.raises(ConfigurationError, match=r"schedule\(priority=\) needs trellis-contracts"):
         await agent.schedule("manual", user="ada", input="y", priority=1)

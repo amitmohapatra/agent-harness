@@ -54,6 +54,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
+from trellis.harness.agent import ABSTAIN_NOTES
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
@@ -70,6 +71,10 @@ from trellis.harness.tools.results import MAX_LINE
 CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
+#: A real MCP server that asks the person in the middle of a call (MCP elicitation).
+MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
+#: A real MCP server with resources (MCP resources).
+MCP_RESOURCES_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_resources_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -83,6 +88,10 @@ ONE_CALL_AT_A_TIME: Final = NA(
     "the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)"
 )
 NO_TEXT_OUTSIDE_STREAMS: Final = NA("nothing is streamed: no listener in this mode")
+FIXED_GRAPH: Final = NA(
+    "a graph built with its tools offers those: build it with trellis.middleware() (or use "
+    "ReAct) for a run's own tools, a front end's among them"
+)
 
 
 def only_modes(*modes: str, reason: str) -> dict[str, Note]:
@@ -288,41 +297,24 @@ async def cancel(w: World) -> None:
     assert finished[-1].outcome is not None and finished[-1].outcome.value == "cancelled"
 
 
-#: The run time limit of ``run_timeout``: it must run out in the tool, after the model asked
-#: for it, not before the first model call. A run reaches its tool in ~10-40 ms here, but a
-#: loaded CI runner (8 shards at once) was measured past 0.4 s before the first model call
-#: (the run then timed out with no model called): 2 s leaves that margin five times over, and
-#: ``hold`` holds far longer, so the limit still ends the run.
-RUN_LIMIT: Final = 2.0
-#: Kimi Code takes ~1.8 s to start here (a Node program, before it answers ``initialize``), once
-#: per attempt, and far longer on a loaded CI runner: the run's limit leaves this much for each
-#: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
-#: within the run's one limit; ``hold`` holds longer than either limit.
-KIMI_START_SECONDS: Final = 6.0
-#: ``elsewhere`` hands the run to another process, which builds the graph before its first model
-#: call, all within the run's one limit: on a loaded CI runner that has taken past 2 s (Deep
-#: Agents' graph, ReAct's), so the run timed out before its tool started. The hand-off gets its
-#: own margin; ``hold`` holds longer than the limit with it.
-HANDOFF_SECONDS: Final = 6.0
-
-
-def run_limit(w: World) -> float:
-    handoff = w.mode == "elsewhere"
-    if w.adapter != "kimi":
-        return RUN_LIMIT + (HANDOFF_SECONDS if handoff else 0.0)
-    starts = 2 if handoff else 1
-    return RUN_LIMIT + starts * KIMI_START_SECONDS
+#: The run time limit of ``run_timeout``: an hour, which the wall clock never reaches in a cell
+#: (the cell fails first, ``RUN_LIMIT_SECONDS``). It runs out where the cell means it to, in
+#: ``hold`` — which the model asked for — because ``hold`` lets it pass as it starts
+#: (``RunClocks.run_out``): never before, however long a loaded runner takes to reach the tool
+#: (graph builds, Kimi Code starting, the hand-off to another process). A limit of seconds on
+#: the wall clock ran out there first on loaded CI runners, whatever margin it was given.
+RUN_LIMIT: Final = 3600.0
 
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run_timeout=run_limit(w))
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run_timeout=RUN_LIMIT)
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == run_limit(w)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
     # the limit ran out where the cell means it to: in the tool, which the model asked for
-    assert d.started.is_set() and d.ran("hold") == []
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 # --------------------------------------------------------------------------- sub-agents
@@ -505,6 +497,22 @@ async def push(w: World) -> None:
     assert o.answer == "Done. facts about contact"
 
 
+async def abstains(w: World) -> None:
+    """Memory with nothing for the question (``evidence_status`` INSUFFICIENT) and no tool
+    hinted with confidence: the note that says so — name what is missing, offer to look it
+    up — reaches the model with the context, in every adapter."""
+    w.memory_service.evidence_status = "INSUFFICIENT"
+    w.memory_service.top_confidence = 0.3  # under NARROW_FLOOR: no tool answers it for sure
+    d = Desk()
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
+    note = ABSTAIN_NOTES["INSUFFICIENT"]
+    if w.on:
+        assert json.dumps(note)[1:-1] in w.said() or note in w.said(), "the note never arrived"
+    else:
+        assert "## Memory" not in w.said()
+    assert o.answer == "Done. facts about contact"
+
+
 async def push_function(w: World) -> None:
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
         async def reads(input: str, agent: Runtime) -> str:
@@ -555,6 +563,29 @@ async def pull(w: World) -> None:
     assert "the user prefers email" in o.text, o.answer
     [searched] = w.memory_service.named("call_agent_tool")
     assert searched.path["name"] == "memory_search" and searched.body["args"] == search
+
+
+async def forget_said(w: World) -> None:
+    """Forget by chat: what the user said, which the service refuses an agent, is asked about
+    through the approval path and, approved, forgotten as the user — in every adapter."""
+    if not w.on:
+        return  # no memory tools: F42 checks none is offered
+    w.memory_service.memories["mem_said"] = {
+        "content": "I live at 12 Baker Street.",
+        "memory_type": "SEMANTIC",
+        "visibility": "PRIVATE",
+        "user": USER,
+        "current": True,
+        "created_at": "2026-10-01T09:00:00Z",
+        "supersedes": None,
+        "superseded_by": None,
+    }
+    o = (await w.go([Desk().lookup()], [("memory_forget", {"id": "mem_said"})])).succeeded()
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert asked == ["memory_forget"] and "mem_said" in o.pauses[0].question, o.pauses
+    [forgot] = w.memory_service.named("forget")
+    assert forgot.path["memory_id"] == "mem_said" and not forgot.scope.get("agent_id")
+    assert not w.memory_service.memories["mem_said"]["current"]
 
 
 async def records(w: World) -> None:
@@ -667,6 +698,37 @@ async def mcp_servers(w: World) -> None:
     o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
     assert "note at a.md" in o.text, o.answer
     assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
+
+
+async def mcp_asks(w: World) -> None:
+    """An MCP server of the agent's own asks the person in the middle of a call (MCP
+    elicitation): the run pauses as an ``ask`` does (a pick from the server's values is a
+    choice), and the answer goes back to the server, whose call then ends."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_ASKING_SERVER)), name="shop")
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.reason is InterruptReason.CHOICE:
+            return "answer", "L"
+        return approve_all(interrupt)
+
+    o = await w.go([d.lookup(), server], [("shop-order", {"item": "shirt"})], answer=answer)
+    o.succeeded()
+    asked = [p for p in o.pauses if p.reason is InterruptReason.CHOICE]
+    assert [(p.question, p.options) for p in asked] == [("Which size of shirt?", ["S", "L"])]
+    assert "ordered shirt in size L" in o.text, o.answer
+    assert [r["status"] for r in o.results("shop-order")][-1:] == ["ok"]  # after the pause
+
+
+async def mcp_resources(w: World) -> None:
+    """An MCP server of the agent's own with resources: one read tool, its description the
+    map of what there is, a resource read by its URI as any tool's result."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_RESOURCES_SERVER)), name="docs")
+    o = await w.go([d.lookup(), server], [("docs-read_resource", {"uri": "docs://handbook"})])
+    o.succeeded()
+    assert "Ship on Tuesdays." in o.text, o.answer
+    assert [r["status"] for r in o.results("docs-read_resource")] == ["ok"]
 
 
 async def prompts(w: World) -> None:
@@ -868,6 +930,37 @@ async def agui_surface(w: World) -> None:
     from trellis.harness.agui.sse import decode
 
     assert decode(replay.text) == w.outcomes[-1].surface[1:]
+
+
+#: A tool the AG-UI client declares (a CopilotKit frontend action): the app runs it.
+PICK_COLOR: Final = {
+    "name": "pick_color",
+    "description": "Ask the person to pick a color in the app.",
+    "parameters": {"type": "object", "properties": {"hint": {"type": "string"}}},
+}
+
+
+async def frontend_tools(w: World) -> None:
+    from trellis.harness.frontend import FRONTEND_TOOL
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if FRONTEND_TOOL in (interrupt.payload or {}):
+            return "answer", "red"  # what the app's picker returned
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("pick_color", {"hint": "warm"})]
+    o = (await w.go([], plan, answer=answer, frontend={"tools": [PICK_COLOR]})).succeeded()
+    [asked] = o.pauses
+    assert asked.tool_call is not None and asked.tool_call.tool == "pick_color", asked
+    assert asked.tool_call.args == {"hint": "warm"}
+    assert o.answer == "Done. red", o.answer  # the model read the app's result
+    events = [e for _, e in o.surface]
+    started = [e for e in events if e["type"] == "TOOL_CALL_START"]
+    assert started and started[0]["toolCallName"] == "pick_color", started
+    paused = [e for e in events if e.get("outcome", {}).get("type") == "interrupt"]
+    [entry] = paused[0]["outcome"]["interrupts"]
+    assert entry["reason"] == FRONTEND_TOOL
+    assert entry["toolCallId"] == started[0]["toolCallId"]
 
 
 async def a2a_surface(w: World) -> None:
@@ -1232,6 +1325,16 @@ FEATURES: Final[list[Feature]] = [
         way2=way2.push,
     ),
     Feature(
+        "F41a",
+        "memory push: nothing remembered for the question, the model is told so",
+        "F41",
+        "the memory service (its evidence status)",
+        abstains,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("its code reads agent.context: no model is told anything")},
+        way2=NA("the harness's note: Way 2 reads the service's evidence status itself"),
+    ),
+    Feature(
         "F41f",
         "memory push: a function target reads agent.context",
         "F41",
@@ -1264,6 +1367,16 @@ FEATURES: Final[list[Feature]] = [
         way2=NA(
             "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
         ),
+    ),
+    Feature(
+        "F42d",
+        "memory pull: forgetting what the user said asks, then forgets it as them",
+        "F42",
+        "the memory service (its refusal names the user's statement)",
+        forget_said,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("a function target calls memory_forget itself, as any tool")},
+        way2=NA("the harness's approval path: Way 2 calls the service, which refuses the agent"),
     ),
     Feature(
         "F43",
@@ -1321,6 +1434,22 @@ FEATURES: Final[list[Feature]] = [
         "ReAct(tools=[mcp(stdio(...))]) or mcp('https://...')",
         mcp_servers,
         way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
+    ),
+    Feature(
+        "F18e",
+        "MCP elicitation: a server's question in a call pauses the run, the answer goes back",
+        "N2",
+        "automatic for mcp(...) servers (the client says it can be asked)",
+        mcp_asks,
+        way2=NA("Way 2 gives the MCP SDK's client an elicitation callback of its own"),
+    ),
+    Feature(
+        "F18r",
+        "MCP resources: a server's resources read by one tool whose description maps them",
+        "N2",
+        "automatic for mcp(...) servers that have resources",
+        mcp_resources,
+        way2=NA("Way 2 reads a server's resources with the MCP SDK's client itself"),
     ),
     Feature(
         "F19",
@@ -1395,6 +1524,19 @@ FEATURES: Final[list[Feature]] = [
         "agent.serve_chat(app)",
         agui_surface,
         modes=only_modes("agui", reason="the AG-UI surface is its own mode"),
+        way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
+    ),
+    Feature(
+        "F62t",
+        "AG-UI frontend tools: offered, called, run by the app, its result read",
+        "F62 (backlog: AG-UI frontend tools)",
+        "RunAgentInput.tools",
+        frontend_tools,
+        modes=only_modes("agui", reason="frontend tools come with an AG-UI request"),
+        adapters={
+            "langgraph": FIXED_GRAPH,
+            "deepagents": FIXED_GRAPH,
+        },
         way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
     ),
     Feature(
@@ -1507,11 +1649,13 @@ async def hook_runs(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": run_limit(w)})
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run={"run_timeout": RUN_LIMIT})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == run_limit(w)
-    assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
+    # it ran out in the tool (``RUN_LIMIT``)
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 async def run_options_queue(w: World) -> None:
@@ -1541,11 +1685,14 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
-    "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
-    # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
-    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
+    # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
+    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    # Claude and Kimi answer at their limit too: asked once more, in the same session
+    "claude": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, "the step limit (1) was reached"),
 }
+#: The adapters whose run answers once more at the framework's limit (a ``step_limit`` warning).
+ANSWER_AT_LIMIT: Final = frozenset({"openai_agents", "claude", "kimi"})
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
     "middleware": {"recursion_limit": 50},
@@ -1572,7 +1719,16 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
+    if w.adapter in ANSWER_AT_LIMIT and (w.adapter != "openai_agents" or w.mode != "elsewhere"):
+        # one last answer at the limit, its warning on the stream; elsewhere the resumed turn's
+        # planned last call is a tool, so the SDK's own error stands (test_framework_options)
+        o.succeeded()
+        warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
+        assert any(said in m for m in warned), o.custom(WARNING)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
+    if w.adapter == "openai_agents":
+        said = "Max turns (1) exceeded"
     assert said in o.record.error.message, o.record.error.message
 
 

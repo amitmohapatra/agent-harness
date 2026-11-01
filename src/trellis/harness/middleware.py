@@ -21,16 +21,20 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   call may take (``timeout``, and what is left of the run's time), the gateway's stored prompt
   pinned for the run (``prompt``: journaled, sent as headers, on the span), and the model
   client's errors as a :class:`~trellis.contracts.ModelError` saying whether it may pass;
-* :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``,
-  which ends the run with its message at the limit;
+* :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``
+  (:class:`AnswerAtLimit`), then one more that answers, offered no tool;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
-  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
-  within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
-* :func:`read_result` — the tool that reads an earlier result back by its call's id: what a
-  ``ContextEditingMiddleware`` placeholder points to (the state keeps the result whole);
+  steps, or :data:`ERROR_STREAK` steps in which every call failed and a failure repeated, stop
+  the run (a repeat within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
+* :class:`ReadTools` — ``read_file`` offered once there is something to read back: a large
+  result kept, a file in the graph's state, or a result LangChain's ``ClearToolUsesEdit``
+  cleared (paged from the graph's state by its call's id, which keeps it whole);
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
   in the run's journal (``thread_id`` is the run): a resume — in any worker, after a pause or
   a crash — continues where the graph stopped, without asking the model again;
+* :class:`PromptCache` — Anthropic's prompt cache (LangChain's
+  ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model however it is given, a
+  model name the harness routes too, and the answer that ends the history marked with it;
 * :func:`narrowing` — not given by anyone: the harness runs a ``create_agent`` graph built
   without :class:`HarnessTools` as a copy whose model calls are offered only the tools the run
   offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
@@ -63,18 +67,22 @@ from collections.abc import (
     Sequence,
 )
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Final, NotRequired, cast, get_args
 
+from bifrost_sdk import RETRYABLE
 from langchain.agents.factory import _chain_async_model_call_handlers
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
+    ClearToolUsesEdit,
     ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
 )
+from langchain.agents.middleware.context_editing import TokenCounter
 from langchain.agents.middleware.types import (
+    ModelCallResult,
     PrivateStateAttr,
     hook_config,
 )
@@ -102,7 +110,6 @@ from langgraph.checkpoint.base import (
     get_checkpoint_metadata,
 )
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
-from langgraph.prebuilt import InjectedState
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
 
@@ -118,12 +125,16 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
+    budget,
+    snapshots,
 )
+from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
-from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
@@ -131,8 +142,17 @@ from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import bridge, query, results
-from trellis.harness.tools.base import SideEffects, Tool, arguments_of, data_of, not_run
+from trellis.harness.tools import bridge, query, results, stored
+from trellis.harness.tools.base import (
+    SideEffects,
+    Sourced,
+    Tool,
+    arguments_of,
+    citations,
+    data_of,
+    max_age,
+    not_run,
+)
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
@@ -144,21 +164,21 @@ MAX_STEPS: Final = 12
 #: Consecutive steps making the same call with the same arguments that stop the run.
 MAX_REPEATS: Final = 3
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
-#: error or a timeout) that stop the run.
+#: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
-#: The tool that reads a cleared result back by its call's id (:func:`read_result`), and the
-#: most it reads at once, in characters.
-READ_RESULT: Final = "read_result"
-#: Deep Agents' tool that reads a large result saved as a file.
+#: Deep Agents' tool that reads a large result saved as a file — and, by the path
+#: ``/large_tool_results/<call id>`` (Deep Agents' own), a result cleared from the request.
 READ_FILE: Final = "read_file"
-READ_LIMIT: Final = 20_000
+#: What a model whose every call failed in a row is told, for its one answer without tools.
+FAILING: Final = (
+    "Every tool call failed in the last {steps} steps. Do not call tools: answer now with what "
+    "you have, and say what failed."
+)
 #: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
 FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
 #: handler (:func:`narrowing`).
 HANDLER: Final = "awrap_model_call_handler"
-#: The openai client's statuses a call may pass after (its own retry rule).
-RETRYABLE_STATUS: Final = frozenset({408, 409, 429})
 
 
 # --------------------------------------------------------------------------- tools
@@ -194,7 +214,6 @@ TOOLSETS: Final = 64
 STATE_TOOLS: Final = frozenset(
     {
         "write_todos",
-        "read_result",
         "ls",
         "read_file",
         "write_file",
@@ -204,9 +223,59 @@ STATE_TOOLS: Final = frozenset(
         "grep",
     }
 )
+#: The state tools that write a file, and what their result then says of it: the run's own
+#: scratch copy, which the user cannot reach (asked for a chart, a model saved an SVG in the
+#: graph's state and told the user to open it).
+SCRATCH_WRITES: Final = frozenset({"write_file", "edit_file"})
+#: The runs whose model was told :data:`SCRATCH_NOTE` (once a run, however many it writes).
+_SCRATCH_SAID: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
+SCRATCH_NOTE: Final = (
+    "This file is in this run's own scratch space: the user cannot open or download it, so "
+    "never offer it to them as a file; give them its content instead."
+)
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
+#: Deep Agents' file tools that read, and those that change files: on a backend outside the
+#: graph's state they are governed as any tool, with these risks (:func:`outside_state`).
+FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
+FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
+FILE_TOOLS: Final = FILE_READS | FILE_WRITES
+#: The graph state channel Deep Agents keeps its files in: a graph has it when its file tools'
+#: backend keeps files in the graph's state (``StateBackend``, alone or a route of a composite).
+FILES_CHANNEL: Final = "files"
+
+
+def outside_state(name: str) -> dict[str, Any]:
+    """The marks of a Deep Agents file tool ``name`` on a backend outside the graph's state:
+    governed (:data:`OUTSIDE_STATE`), a read or a write."""
+    return {OUTSIDE_STATE: True, "side_effects": "read" if name in FILE_READS else "write"}
+
+
+def declare_files(graph: Any) -> None:
+    """Deep Agents' file tools of ``graph`` and of its ``task`` sub-agents' graphs, marked
+    :func:`outside_state` in each graph whose files are not its state (no
+    :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
+    ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
+    is: those calls only change the state, which its checkpoint keeps."""
+    from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
+        TASK_TOOL,
+        bound_tools,
+        subagent_graphs,
+    )
+
+    pending = [graph]  # a sub-agent's graph is compiled before the graph running it: no cycle
+    while pending:
+        found = pending.pop()
+        outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
+        for tool in bound_tools(found):
+            name = getattr(tool, "name", None)
+            if outside and name in FILE_TOOLS and not (tool.metadata or {}).get(OUTSIDE_STATE):
+                tool.metadata = {**(tool.metadata or {}), **outside_state(name)}
+            elif name == TASK_TOOL:
+                pending.extend(subagent_graphs(tool))
+
+
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
 #: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
 #: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
@@ -235,6 +304,42 @@ class GovernTools(AgentMiddleware):
 _GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing", default=None)
 
 
+def _scratch_said(
+    runtime: Runtime, tool: str, done: ToolMessage | Command[Any]
+) -> ToolMessage | Command[Any]:
+    """A state tool's result: the run's first scratch write that worked says
+    :data:`SCRATCH_NOTE` (once a run: its history keeps saying it)."""
+    if tool not in SCRATCH_WRITES or runtime.run_id in _SCRATCH_SAID:
+        return done
+    noted = _scratch_noted(done)
+    if noted is not done:
+        _SCRATCH_SAID.add(runtime.run_id)
+    return noted
+
+
+def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[Any]:
+    """A scratch write's result with :data:`SCRATCH_NOTE` after it: on its message, or on the
+    message of the ``Command`` that also updates the graph's files (Deep Agents' state
+    backend). A failed write is left as it is."""
+
+    def noted(m: Any) -> Any:
+        if not isinstance(m, ToolMessage) or m.status == "error" or not isinstance(m.content, str):
+            return m
+        return m.model_copy(update={"content": f"{m.content}\n{SCRATCH_NOTE}"})
+
+    if isinstance(done, ToolMessage):
+        return noted(done)
+    update = done.update
+    if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
+        return done
+    said = [noted(m) for m in update["messages"]]
+    if all(a is b for a, b in zip(said, update["messages"], strict=True)):
+        return done
+    return Command(
+        graph=done.graph, update={**update, "messages": said}, resume=done.resume, goto=done.goto
+    )
+
+
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
@@ -254,13 +359,10 @@ async def governed_call(
     runtime = current()
     call = request.tool_call
     own = request.tool
-    if (
-        runtime is None
-        or own is None
-        or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
-        or _GOVERNING.get() == (call["name"], str(call["id"]))
-    ):
+    if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
+    if call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE):
+        return _scratch_said(runtime, call["name"], await handler(request))
     _, step = _step_of(request)
     first = _repeats(step).get(str(call["id"]))
     if first is not None:
@@ -281,7 +383,9 @@ async def governed_call(
         if isinstance(done, ToolMessage) and done.status == "error":
             raise ToolError(text_of(done.content), source="tools")
         produced.append(done)
-        return text_of(_told(done))
+        # a content_and_artifact tool's artifact: the sources of its result, when it names any
+        cited = citations(getattr(done, "artifact", None))
+        return Sourced(text_of(_told(done)), cited) if cited else text_of(_told(done))
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
         return await handler(request.override(tool_call={**call, "args": args}))
@@ -321,6 +425,37 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
     return not any(getattr(t, "name", None) == READ_FILE for t in tools)
 
 
+def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:
+    """``messages`` (a thread the framework keeps, as the model is sent it) with each result
+    from before the latest user message of a live tool of the run (``max_age`` 0: every
+    earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
+    already stamped (a memory window's replay), or of a tool whose value stays current a while
+    (its age is not known here) or for good, is left as it is."""
+    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    called = {
+        c["id"]: c["name"]
+        for m in messages[:asked]
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
+    }
+    out = list(messages)
+    stale: set[str] = set()
+    for n, m in enumerate(messages[:asked]):
+        if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
+            continue
+        tool = called.get(m.tool_call_id) or m.name or ""
+        found = runtime.toolbox.get(tool)
+        spec = found.spec if found is not None else runtime.native.get(tool)
+        marked = m.content.startswith(snapshots.STALE.format(tool=tool))  # memory's replay
+        if spec is None or marked or max_age(spec) != 0:
+            continue
+        stale.add(tool)
+        # the request's copy is marked, never the graph's state: each call marks it anew
+        mark = snapshots.EARLIER.format(tool=tool)
+        out[n] = m.model_copy(update={"content": f"{mark}\n{m.content}"})
+    return out, stale
+
+
 async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
     """A call reading a result the run keeps, answered: ``read_file`` with its page (the graph
     has no ``read_file`` of its own, or the path is one the run keeps: a result cut to fit the
@@ -330,15 +465,36 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
-    kept = path in runtime.replay.journal.results
+    # a result the run can read (its own, its conversation's earlier turns'), or a file kept
+    # for its user (``tools.stored``): the harness's
+    kept = path in query.saved(runtime) or stored.is_stored(path)
     said: str | None = None
-    if call["name"] == READ_FILE and (request.tool is None or kept):
-        said = results.read(args)
+    cleared = None if kept else _cleared_result(request.state, path)
+    if call["name"] == READ_FILE and cleared is not None:
+        said = results.read(args, text=cleared)
+    elif call["name"] == READ_FILE and (request.tool is None or kept):
+        said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
+
+
+def _cleared_result(state: Any, path: str) -> str | None:
+    """The whole text of a tool result the request no longer shows (LangChain's
+    ``ClearToolUsesEdit`` cleared it: the graph's state keeps it), named by Deep Agents' path
+    for its call (``/large_tool_results/<call id>``) — ``None`` for any other path, and for a
+    result Deep Agents evicted to its backend (its own ``read_file`` reads that file)."""
+    prefix = results.PREFIX + "/"
+    if not path.startswith(prefix) or not isinstance(state, Mapping):
+        return None
+    ident = path[len(prefix) :]
+    for message in reversed(state.get("messages") or ()):
+        if isinstance(message, ToolMessage) and message.tool_call_id == ident:
+            text = message.text
+            return None if text.startswith(results.EVICTED) else text
+    return None
 
 
 def _state_file(state: Any, path: str) -> str | None:
@@ -367,9 +523,11 @@ def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) ->
     )
 
 
-#: The harness's ``read_file`` and ``query_result`` as LangChain tools.
+#: The harness's ``read_file`` and ``query_result`` as LangChain tools; and as a run that saves a
+#: query's result as a file is offered them (``results.SAVING``), made once each.
 READERS: Final = {r[0]: _reader(*r) for r in results.READERS}
 READ_FILE_TOOL: Final = READERS[READ_FILE]
+SAVING: Final = {**READERS, query.QUERY_RESULT: _reader(*results.SAVING[1])}
 #: The runs a :class:`HarnessTools` offers the harness's tools to (:func:`_paged`).
 _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
@@ -535,11 +693,19 @@ class HarnessTools(AgentMiddleware):
         if harness is None:
             harness = self._tools[runtime] = self._converted(runtime)
         _PAGED.add(runtime)
+        # a thread the framework keeps: an earlier turn's live value is out of date, and its
+        # tool stays offered (the memory window's replay is stamped where it is read)
+        messages, stale = _earlier(runtime, request.messages)
+        if stale:
+            request = request.override(messages=messages)
+            if runtime.offered is not None:
+                runtime.offered |= stale
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         if _saved(request.state):  # a large result kept: read in pages, or queried
             names = {_named(t) for t in own}
-            offered.extend(t for name, t in READERS.items() if name not in names)
+            readers = SAVING if query.saving(runtime) else READERS
+            offered.extend(t for name, t in readers.items() if name not in names)
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
@@ -715,8 +881,10 @@ async def _narrow(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
-    """A model call offered only the tools the run offers (:func:`_offered`)."""
-    return await handler(_offered(request, current()))
+    """A model call offered only the tools the run offers (:func:`_offered`), the memory
+    context sent with the question (:func:`with_question`), the end of the history marked
+    when a caching middleware marks the request (:func:`history_marked`)."""
+    return await handler(history_marked(with_question(_offered(request, current()))))
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
@@ -814,7 +982,8 @@ class ModelHooks(AgentMiddleware):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         runtime = current()
-        request = self._in_order(_with_task(_unbroken(_offered(request, runtime))), runtime)
+        request = _with_task(_unbroken(_offered(request, runtime)))
+        request = self._in_order(with_question(request), runtime)
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
@@ -916,6 +1085,152 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     return request.override(messages=[*kept, *messages]) if kept else request
 
 
+def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the pushed memory context (the system message
+    :data:`~trellis.harness.adapters.langgraph.CONTEXT_MESSAGE_ID`) sent as the first part of
+    this turn's question rather than ahead of the history. It is new for every question, and a
+    provider's prompt cache keeps only what a request shares with an earlier one from its start:
+    so the next turn's request repeats this one's history as it was sent (audit K1). It is a
+    part of the user's message, never a system message after the first: some providers refuse
+    one there. Only the request changes; the conversation the graph keeps does not. The
+    question is the latest user message the graph's state holds (a spent budget's last word
+    is not). The context is marked off (``history.ASKED_WITH``): after a long one, a model read
+    the question as one more saved note. A cache that keeps only what a request marks keeps
+    the history too (:func:`history_marked`)."""
+    messages = list(request.messages)
+    at = next(
+        (
+            n
+            for n, m in enumerate(messages)
+            if isinstance(m, SystemMessage) and m.id == CONTEXT_MESSAGE_ID
+        ),
+        None,
+    )
+    if at is None:
+        return request
+    kept = {m.id for m in request.state.get("messages", []) if m.id is not None}
+    asked = next(
+        (
+            n
+            for n in range(len(messages) - 1, at, -1)
+            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+        ),
+        None,
+    )
+    if asked is None:
+        return request
+    question = messages[asked]
+    said = (
+        question.content
+        if isinstance(question.content, list)
+        else [{"type": "text", "text": question.content}]
+    )
+    told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
+    messages[asked] = question.model_copy(update={"content": told})
+    del messages[at]
+    return request.override(messages=messages)
+
+
+def history_marked(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the answer that ends the history — just before the latest question the
+    graph's state holds (a spent budget's last word is not one), the end of what the next
+    turn repeats — given the request's cache breakpoint, for a cache that keeps only what a
+    request marks (Anthropic's: a prompt-caching middleware sets the request's
+    ``cache_control``, :class:`PromptCache`); the request as it is without one."""
+    marker = request.model_settings.get("cache_control")
+    if not marker:
+        return request
+    messages = list(request.messages)
+    kept = {m.id for m in request.state.get("messages", []) if m.id is not None}
+    asked = next(
+        (
+            n
+            for n in range(len(messages) - 1, 0, -1)
+            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+        ),
+        None,
+    )
+    if asked is None:
+        return request
+    answer = _answer_marked(messages[asked - 1], marker)
+    if answer is messages[asked - 1]:
+        return request
+    messages[asked - 1] = answer
+    return request.override(messages=messages)
+
+
+class PromptCache(AgentMiddleware):
+    """Anthropic's prompt cache for every Anthropic chat model, however it is given: a
+    ``ChatAnthropic``, or a model name the harness routes (``gateways.routed_chat_model``) whose
+    route makes one of it now (the provider's own SDK). LangChain's
+    ``AnthropicPromptCachingMiddleware`` (``native``: the one given to ``ReAct``, else its
+    defaults) decides on the chat model the call is made with and marks what it marks — the
+    tools, the instructions, the request's own breakpoint — and the answer that ends the
+    history gets the same mark (:func:`history_marked`): 4 breakpoints, Anthropic's most. Any
+    other chat model's request is sent as it was. Named as LangChain's, it stands in Deep
+    Agents' place for it (Deep Agents replaces a middleware of the same name), last of what
+    changes the request."""
+
+    def __init__(self, native: AgentMiddleware | None = None) -> None:
+        super().__init__()
+        if native is None:
+            from langchain_anthropic.middleware import (  # noqa: PLC0415 - Deep Agents' own
+                AnthropicPromptCachingMiddleware,
+            )
+
+            native = AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")
+        self.native = native
+
+    @property
+    def name(self) -> str:
+        return CACHING
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelCallResult[Any]:
+        given = request.model
+
+        async def sent(marked: ModelRequest[Any]) -> ModelResponse[Any]:
+            return await handler(history_marked(marked).override(model=given))
+
+        made = cast(Any, given).resolved() if routed(given) else given
+        return await self.native.awrap_model_call(request.override(model=made), sent)
+
+
+#: The name of LangChain's Anthropic prompt-caching middleware, which :class:`PromptCache` has.
+CACHING: Final = "AnthropicPromptCachingMiddleware"
+
+
+def prompt_cache(given: Sequence[Any]) -> tuple[PromptCache, list[Any]]:
+    """The :class:`PromptCache` a graph is built with — around LangChain's caching middleware
+    among ``given``, its settings kept, else around its defaults — and the rest of ``given``."""
+    own = [m for m in given if m.name == CACHING]
+    rest = [m for m in given if m.name != CACHING]
+    return PromptCache(own[0] if own else None), rest
+
+
+def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
+    """The answer that ends the history with a cache breakpoint (``marker``) on its last text
+    part; any other message (a call, a result) as it is, and so is an answer that has one."""
+    if not isinstance(answer, AIMessage) or answer.tool_calls:
+        return answer
+    content = answer.content
+    parts: list[Any] = (
+        list(content) if isinstance(content, list) else [{"type": "text", "text": content}]
+    )
+    texts = [
+        n
+        for n, p in enumerate(parts)
+        if isinstance(p, dict) and p.get("type") == "text" and p.get("text")
+    ]
+    if not texts or any(isinstance(p, dict) and "cache_control" in p for p in parts):
+        return answer
+    parts[texts[-1]] = {**parts[texts[-1]], "cache_control": marker}
+    return answer.model_copy(update={"content": parts})
+
+
 def _summary(message: BaseMessage) -> bool:
     return isinstance(message, HumanMessage) and (
         message.additional_kwargs.get("lc_source") == "summarization"
@@ -938,8 +1253,9 @@ async def _limited(runtime: Runtime | None, seconds: float | None) -> AsyncItera
 
 def model_error(exc: Exception, timeout: float | None = None) -> Exception:
     """A failed model call as the harness reports it: out of time, or the openai client's
-    error, as a :class:`ModelError` that says whether a retry may pass (the client's own rule:
-    no answer, a timeout, 408, 409, 429, 5xx); anything else as it is."""
+    error, as a :class:`ModelError` that says whether a retry may pass (no answer, a timeout,
+    or a status in bifrost-sdk's ``RETRYABLE``, the set the gateway client and the memory
+    service retry on); anything else as it is."""
     if isinstance(exc, TimeoutError):
         within = "" if timeout is None else f" within {timeout:g}s"
         return ModelTimeout(
@@ -955,7 +1271,7 @@ def model_error(exc: Exception, timeout: float | None = None) -> Exception:
         return ModelError(f"the model call failed: {exc}", source="langgraph", retryable=True)
     if isinstance(exc, openai.APIStatusError):
         status = exc.status_code
-        retryable = status in RETRYABLE_STATUS or status >= 500
+        retryable = status in RETRYABLE  # bifrost-sdk's: the one set every model call retries on
         return ModelError(
             f"the model call failed ({status}): {exc.message}",
             source="langgraph",
@@ -1014,21 +1330,57 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 def step_limit(
     max_steps: int = MAX_STEPS, *, scoped: bool = False
 ) -> AgentMiddleware[Any, Any, Any]:
-    """At most ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``
-    (``exit_behavior="end"``: past them the run ends with LangChain's message saying the limit
-    was reached; LangChain has no exit that asks the model for an answer). ``scoped``: counted
-    per thread (a ``ReAct`` graph's thread is its run, so a resume keeps the count), else per
-    invocation (``middleware()`` in a graph whose thread outlives a run)."""
+    """At most ``max_steps`` model calls that may call tools, then one that answers
+    (:class:`AnswerAtLimit`). ``scoped``: counted per thread (a ``ReAct`` graph's thread is its run,
+    so a resume keeps the count), else per invocation (``middleware()`` in a graph whose thread
+    outlives a run)."""
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise ConfigurationError("max_steps is a number of model calls from 1")
-    counted = {"thread_limit" if scoped else "run_limit": max_steps}
-    return ModelCallLimitMiddleware(exit_behavior="end", **counted)
+    return AnswerAtLimit(max_steps, scoped=scoped)
+
+
+class AnswerAtLimit(ModelCallLimitMiddleware):
+    """LangChain's own ``ModelCallLimitMiddleware`` counting the model calls, which after
+    ``max_steps`` of them makes one more — the model told the limit is reached
+    (``budget.LIMIT``) and offered no tool, as :class:`StallGuard` does on a stall
+    (:func:`_answer_now`) — so the run ends with an answer saying what was found and what is
+    left, not LangChain's "Model call limits exceeded" message. LangChain's limit, one call
+    past ``max_steps``, stays the backstop (its ``exit_behavior="end"``). Named as LangChain's
+    (a ``ReAct(middleware=)`` of that name is refused, naming ``max_steps=``)."""
+
+    def __init__(self, max_steps: int, *, scoped: bool) -> None:
+        self.max_steps = max_steps
+        self.counted = "thread_model_call_count" if scoped else "run_model_call_count"
+        limit = {"thread_limit" if scoped else "run_limit": max_steps + 1}
+        super().__init__(exit_behavior="end", **limit)
+
+    @property
+    def name(self) -> str:
+        return ModelCallLimitMiddleware.__name__
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        if request.state.get(self.counted, 0) < self.max_steps:
+            return await handler(request)
+        return await _answer_now(
+            request,
+            handler,
+            budget.LIMIT.format(limit=self.max_steps),
+            f"stopped: the step limit ({self.max_steps}) was reached",
+            warning="step_limit",
+        )
 
 
 class StallGuard(AgentMiddleware):
-    """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
-    in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed (a malformed one among them)."""
+    """A run that goes nowhere ends with one answer: the same call with the same arguments in
+    ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
+    consecutive steps in which every call failed (a malformed one among them) and a failure
+    was met again (:func:`_failing`). The model is told so (``bridge.STALLED``,
+    :data:`FAILING`) and called once more, offered no tool (``tool_choice="none"``), so the
+    user is told what went wrong; no answer then stops the run (``ModelError``)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -1044,9 +1396,11 @@ class StallGuard(AgentMiddleware):
         history = request.state.get("messages", [])
         failing = _failing(history)
         if failing >= ERROR_STREAK:
-            raise ModelError(
+            return await _answer_now(
+                request,
+                handler,
+                FAILING.format(steps=failing),
                 f"stopped: every tool call failed in {failing} consecutive steps",
-                source="langgraph",
             )
         reply = await handler(request)
         message = _ai(reply)
@@ -1061,12 +1415,39 @@ class StallGuard(AgentMiddleware):
                         break
                     streak += 1
                 if streak >= self.max_repeats:
-                    raise ModelError(
+                    return await _answer_now(
+                        request,
+                        handler,
+                        bridge.STALLED.format(tool=call["name"], times=streak),
                         f"stopped: the model called {call['name']!r} with the same arguments "
                         f"{streak} times in a row (a stall)",
-                        source="langgraph",
                     )
         return reply
+
+
+async def _answer_now(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    told: str,
+    stopped: str,
+    *,
+    warning: str = "stalled",
+) -> ModelResponse[Any]:
+    """The model called once more, told ``told`` and offered no tool; its answer (``warning``
+    on the run's stream), or the run stopped (``ModelError(stopped)``) when it gives none."""
+    last = request.override(
+        messages=[*request.messages, HumanMessage(content=told)],
+        tool_choice="none" if request.tools else request.tool_choice,
+    )
+    reply = await handler(last)
+    message = _ai(reply)
+    if message is None or message.tool_calls or not message.text:
+        raise ModelError(stopped, source="langgraph")
+    runtime = current()
+    log.warning("run %s %s", runtime.run_id if runtime else "-", stopped)
+    if runtime is not None:
+        runtime.events.warning(warning, stopped)
+    return reply
 
 
 def _call_key(call: Any) -> str:
@@ -1091,99 +1472,74 @@ def _steps(history: Sequence[AnyMessage]) -> Iterator[set[str]]:
 
 
 def _failing(history: Sequence[AnyMessage]) -> int:
-    """How many of the latest steps had every call fail: read from the end, a step's results
-    (after it) before the step, as far as the first step with a call that did not fail."""
-    statuses: dict[str, str] = {}
+    """How many of the latest steps had every call fail — when a failure among them repeats
+    (the same tool failing with the same error), else 0: a model whose every failed call
+    failed differently read each error and is correcting itself (a wrong type, then a missing
+    argument, then a made-up name), which only the step limit bounds; one that meets an error
+    it met before is making no progress (OpenHands' stuck detector counts the same action
+    meeting the same error). Read from the end, a step's results (after it) before the step,
+    as far as the first step with a call that did not fail."""
+    results: dict[str, ToolMessage] = {}
     streak = 0
+    met: set[str] = set()
+    repeated = False
     for message in _turn_back(history):
         if isinstance(message, ToolMessage):
-            statuses[message.tool_call_id] = message.status
+            results[message.tool_call_id] = message
             continue
         if not isinstance(message, AIMessage):
             continue
         repeats = _repeats(message)  # a repeat did not run: its first call's status counts
-        made = [statuses.get(c["id"] or "") for c in message.tool_calls if c["id"] not in repeats]
-        if not made or any(s != "error" for s in made):
+        made = [
+            (c["name"], results.get(c["id"] or ""))
+            for c in message.tool_calls
+            if c["id"] not in repeats
+        ]
+        failed = [(name, r) for name, r in made if r is not None and r.status == "error"]
+        if not made or len(failed) < len(made):
             break
         streak += 1
-    return streak
+        failures = {content_key("failure", name, r.text) for name, r in failed}
+        repeated = repeated or bool(failures & met)
+        met |= failures
+    return streak if repeated else 0
 
 
 # --------------------------------------------------------------------------- results
-def read_result(most: int = READ_LIMIT) -> BaseTool:
-    """The ``read_result`` tool: part of an earlier tool result, by the id of the call that
-    returned it — what a result ``ContextEditingMiddleware`` cleared from the request (the graph's
-    state keeps it whole) is read again with, at most ``most`` characters at a time."""
-
-    async def read(
-        id: str,
-        state: Annotated[dict[str, Any], InjectedState],
-        offset: int = 0,
-        limit: int = most,
-    ) -> str:
-        """Read an earlier tool result that was cleared to keep the context small, by the id
-        of the call that returned it (from offset, at most limit characters)."""
-        text = next(
-            (
-                m.content
-                for m in reversed(state.get("messages", []))
-                if isinstance(m, ToolMessage) and m.tool_call_id == id
-            ),
-            None,
-        )
-        if not isinstance(text, str):
-            return f"there is no result {id!r} to read"
-        start = max(0, offset)
-        end = start + min(max(1, limit), most)
-        part = text[start:end]
-        if end < len(text):
-            part += (
-                f'\n…[{len(text) - end} more characters: {READ_RESULT}(id="{id}", offset={end})]'
-            )
-        return part
-
-    return StructuredTool.from_function(coroutine=read, name=READ_RESULT)
-
-
 class ReadTools(AgentMiddleware):
-    """The tools that read back what was put aside, offered once there is something to read:
-    ``read_result`` (:func:`read_result`, which it adds to the graph) once a result reads as
-    ``placeholder`` (cleared by a ``ContextEditingMiddleware``), and Deep Agents' ``read_file``
-    once the graph's state holds a file (a large result saved, a summarized history) — a small
-    model offered them from the start reads nothing, again and again. Both stay callable.
-    ``placeholder=None``: no ``read_result`` (nothing is cleared); ``files=True``: ``read_file``
-    always offered (its files are outside the graph's state: a disk, a store, a sandbox, the
-    skills)."""
+    """``read_file``, the one tool that reads back what was put aside, offered once there is
+    something to read: once a result reads as ``placeholder`` (cleared by LangChain's
+    ``ClearToolUsesEdit``: ``read_file`` pages it from the graph's state by its call's id, the
+    harness's own when the graph has none), once the graph's state holds a file (a large result
+    saved, a summarized history) or the run keeps a result — a small model offered it from the
+    start reads nothing, again and again. ``files=True``: ``read_file`` always offered (its
+    files are outside the graph's state: a disk, a store, a sandbox, the skills)."""
 
     def __init__(self, placeholder: str | None, *, files: bool = False) -> None:
         super().__init__()
         self.placeholder = placeholder
         self.files = files
-        self.tools = [read_result()] if placeholder is not None else []
 
     async def awrap_model_call(
         self,
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        unused = set()
-        if not self.files and not request.state.get("files") and not results.kept():
-            unused.add(READ_FILE)
-        if self.placeholder is None or not any(
+        tools = list(request.tools)
+        has = any(_named(t) == READ_FILE for t in tools)
+        if self.placeholder is not None and any(
             isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
         ):
-            unused.add(READ_RESULT)
-        kept = [t for t in request.tools if _named(t) not in unused]
+            if not has:  # a result was cleared: read_file reads it back
+                tools.append(READ_FILE_TOOL)
+        elif has and not (self.files or request.state.get("files") or results.kept()):
+            tools = [t for t in tools if _named(t) != READ_FILE]
         return await handler(
-            request if len(kept) == len(request.tools) else request.override(tools=kept)
+            request if tools == list(request.tools) else request.override(tools=tools)
         )
 
 
 # --------------------------------------------------------------------------- the window
-#: What one model call's request may hold, as a share of the window: what Deep Agents'
-#: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
-#: :class:`FitWindow` fitted is one the summarization after it never refuses.
-FIT_SHARE: Final = 0.95
 #: Tools a narrowing keeps at least, beside the ones the run already used (then the
 #: descriptions are compacted before any of them is dropped).
 FIT_KEEP: Final = 8
@@ -1191,8 +1547,6 @@ FIT_KEEP: Final = 8
 FIT_DESCRIPTION: Final = 120
 #: The characters a cut result's marker takes at most (its size, and where the rest is read).
 CUT_MARKER: Final = 192
-#: What a tool result cleared to fit reads as (``read_result`` reads it back: the state keeps it).
-FIT_CLEARED: Final = "[result cleared to fit the model's window: read_result(id=<this call's id>)]"
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
 #: how often each fired in this process (a bounded counter: these keys only).
 FIT_STEPS: Final = ("tools", "descriptions", "results", "turns", "memory")
@@ -1229,6 +1583,29 @@ class ContextTooLarge(ModelError):
     code = "CONTEXT_TOO_LARGE"
 
 
+@dataclass(slots=True)
+class ThisTurnsResults(ClearToolUsesEdit):
+    """LangChain's ``ClearToolUsesEdit`` for the turn under way: past its ``trigger`` (counted
+    over the whole request, as LangChain counts it), it clears the older results of the calls
+    made since the user's latest message, never those of the earlier turns before it. The
+    conversation the memory service replays was sized for the request it goes into (its
+    budget is what the window leaves: ``Agent.conversation_budget``), so clearing its results
+    at the turn's start would only undo that; a request still over the window is fitted by
+    :class:`FitWindow`, which leaves older turns out first."""
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
+        start = next(
+            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+            0,
+        )
+        turn = messages[start:]
+        earlier = count_tokens(messages[:start]) if start else 0
+        ClearToolUsesEdit.apply(
+            replace(self, trigger=self.trigger - earlier), turn, count_tokens=count_tokens
+        )
+        messages[start:] = turn
+
+
 class FitWindow(AgentMiddleware):
     """A model call never fails because its request does not fit the window. Before each call,
     when the request (its messages, instructions and tools, counted as Deep Agents counts them)
@@ -1241,9 +1618,12 @@ class FitWindow(AgentMiddleware):
        request, at least :data:`FIT_KEEP`;
     2. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
        parameter descriptions);
-    3. ``results`` — older tool results cleared (``read_result`` reads them back), then the
-       tools narrowed past :data:`FIT_KEEP`, then the longest results cut to their head and
-       tail;
+    3. ``results`` — the tools narrowed past :data:`FIT_KEEP`, then the longest results cut
+       to their head and tail, each kept whole and its cut naming where ``read_file`` reads the
+       rest (clearing older results is LangChain's ``ClearToolUsesEdit``'s, before it: one
+       clearing pass). ``turns=False`` (a Deep Agents summarization after it) leaves the
+       results to it too: it offloads a result whole to its backend and reads it back with its
+       own ``read_file``, so a result is stored once, where its sandbox's code reads it;
     4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
        to a summarization after it: ``ReAct``'s summarizes them);
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
@@ -1325,6 +1705,11 @@ class FitWindow(AgentMiddleware):
                 reply = max(reply, value)
         return max(0, int(window * FIT_SHARE) - reply)
 
+    def _results(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+        """The longest results cut (:func:`_cut`) — none with a summarization after it, whose
+        own overflow handling offloads them whole (Deep Agents')."""
+        return _cut(request, budget) if self.turns else request
+
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
@@ -1332,7 +1717,7 @@ class FitWindow(AgentMiddleware):
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: _cut(_narrowed(_cleared(r), b, runtime, least=0, before=before), b),
+            lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
             lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
@@ -1470,18 +1855,6 @@ def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
     for spec in (function.get("parameters") or {}).get("properties", {}).values():
         spec.pop("description", None)
     return found
-
-
-def _cleared(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """The request with the tool results before the latest model step cleared."""
-    messages = list(request.messages)
-    last = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
-    changed = False
-    for n, message in enumerate(messages[:last]):
-        if isinstance(message, ToolMessage) and message.content != FIT_CLEARED:
-            messages[n] = message.model_copy(update={"content": FIT_CLEARED})
-            changed = True
-    return request.override(messages=messages) if changed else request
 
 
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
@@ -1884,6 +2257,5 @@ __all__ = [
     "RunCheckpointer",
     "StallGuard",
     "model_error",
-    "read_result",
     "step_limit",
 ]

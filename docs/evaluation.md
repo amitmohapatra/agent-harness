@@ -346,7 +346,7 @@ make bench-cost BENCH_ARGS="--model provider/model --repeats 3"
 |---|---|
 | Tasks | ten, from the tool-choice sets the live suite uses — the store set ([`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py)) and the held-out help desk and travel sets (`tests/live/heldout.py`): six short (two parts, a change behind approval, a read that sounds like a change), three long (four and five parts, each served by its own tool) and a large result — a help desk export of about 100,000 characters, past what `ReAct` pages. The report gives every figure for all of them and by length |
 | Catalogues | 10, 50, 100 and 500 tools (`--sizes`): each set's own tools, then distractors — 500 synthetic but realistic MCP-style tools (`<server>-<tool>`) of 25 servers (code hosting, CRM, billing, HR, monitoring, DNS...), list / get / create / update / delete of four kinds of record each, every one described and with a typed, described JSON schema; none is about the tasks' domains. The order is fixed, so a run is reproducible |
-| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "tool_search"}`). `main`: `ReAct` as it is built — `create_agent` with `middleware()`: context editing, the request fitted to the window, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `deep`: `ReAct` on Deep Agents (a backend given) — result paging, summarization, its long-task files and helper. `pieces`: `create_agent` with Deep Agents' pieces attached and offered per call. `deep-paging`, `deep-context_editing`, `deep-summarization`: `deep` with that one piece off. `--suite classes`: ten tasks per class (simple, multi-step, wide, a large result, a chain of two to four dependent calls) and a mixed ten for `--sizes 50,100`; `--memory`: the environment's memory service on. A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
+| Variants | `baseline`: plain tools, everything off (`create_agent` with only what runs the harness's tools and bounds the loop; `without={"code_mode", "tool_search"}`). `main`: `ReAct` as it is built — `create_agent` with `middleware()`: context editing, the request fitted to the window, Code Mode where it applies (gateway MCP servers; the catalogues here are the agent's own tools, so it does not). `deep`: `ReAct` on Deep Agents (a backend given) — result paging, summarization, its long-task files and helper. `pieces`: `create_agent` with Deep Agents' pieces attached and offered per call. `deep-paging`, `deep-context_editing`, `deep-summarization`: `deep` with that one piece off. `--suite classes`: ten tasks per class (simple, multi-step, wide, a large result, a chain of two to four dependent calls) and a mixed ten for `--sizes 50,100`; `--memory`: the environment's memory service on. `--suite explain`: two-turn conversations, memory on, whose second turn asks about the first answer, scored strictly against turn 1's journal record, with made-up claims and leaked template tags counted and every model request kept (`benchmark/cost/explain.py`; `--pick`, `--arm`, `--render`). A new feature is one more entry of `benchmark/cost/variants.py`, measured against these (`--variants`) |
 | Per run | input, output and cached tokens (as the model reports them), model calls (every chat model call of the run, a summarization's included) and each call's seconds (the report gives their p50 and p95 per cell), wall time, the CPU seconds of the benchmark's own process and of each `--watch name=pid` process (the model server, the gateway; the report adds each one's peak memory), `tool_coverage` (the share of the task's needed tools called; for a run that ended in an error, from the calls it made) and task success (every needed tool called, no broader one, every other check of the task passed — `contains`, `picks`: the store the answer concludes on, not the first it names) |
 | Cost | `benchmark/cost/prices.py`: dollars per million tokens, cached input and cache writes priced apart, each price with its source and the date it was read. A model not in the table is reported with its tokens and no dollars; `--price-as` prices the same tokens at listed models' rates as well (an estimate: their tokenizers count differently) |
 | Report | `build/bench-cost.json` (every run, each cell's means and 95% intervals — Student's t over the runs) and `build/bench-cost.md` (the table), written after every cell |
@@ -408,6 +408,40 @@ only one report measured is listed, not failed.
 configured (the repository variable `BENCH_LLM_BASE_URL` and the secret
 `BENCH_LLM_API_KEY`, a Bifrost; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
+
+## Tool-chain benchmark
+
+`python -m benchmark.tool_chains --model <name> --arms react,react-cold,react-warm` measures
+dependent tool calls, where one call's output (an id, a name, a date) is the next call's
+input. The world is a retail allocation system (`benchmark/tool_chains/world.py`). It has
+fifteen read-only tools with typed outputs, plus distractors up to `--size` (50 by default).
+The 42 cases (`cases.py`) cover fourteen shapes:
+
+- chains two, three and five calls deep, one of them passing on a date;
+- fan-out (one result feeds several calls) and fan-in (several results combined);
+- a middle step that fails once and is retried, and one that stays down and must be reported
+  with no date made up;
+- an id read from a result of about 110,000 characters, which the run keeps and pages;
+- a follow-up turn that reuses the ids of the chain before it.
+
+Each shape has two `train` cases and one reworded `heldout` case. Answers are scored exactly:
+figures as numbers, and ids, names and dates as written. The arms:
+
+- `react`, `langgraph` (`create_agent` running the harness's tools) and `deep` run with memory
+  off;
+- `react-cold` uses the memory service of `MEMORY_URL` with nothing learned. Its tool hints
+  narrow the tools offered from 30 tools on;
+- `react-warm` first runs the train split `--train-passes` times as one agent. A person
+  confirms each correct run (`h.feedback`), and the tenant administrator approves the verdicts,
+  because only a verified outcome teaches. The memory service's learning job then learns the
+  plans before the cases run.
+
+The report (`<out>.json`, `.md`) gives per arm and split: accuracy, model and tool calls,
+tokens, seconds, dollars, the cases where a needed tool was narrowed away, and the cases whose
+model was offered a learned skill. It also lists the skills learned. Without a model, it checks
+the narrowing: for each needed tool of a case kept as the only hint, which of the case's other
+tools the links keep offered. `--scripted` replays the gold calls with no model, and
+`--max-usd` caps the spend.
 
 ## Thread-history benchmark
 

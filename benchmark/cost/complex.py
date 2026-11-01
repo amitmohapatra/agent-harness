@@ -66,7 +66,7 @@ from benchmark.cost import prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
-from trellis.contracts import ToolCall, ToolOutcome
+from trellis.contracts import RunStatus, ToolCall, ToolOutcome
 
 Call = tuple[str, dict[str, Any]]
 
@@ -169,6 +169,8 @@ class Probe:
 #: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
 #: busy-conversation modes (``trellis.harness.conversation.Mode``).
 BUSY: Final = ("queue", "interrupt", "steer")
+#: Who approves a turn's paused call (``Turn.approve``).
+REVIEWER: Final = "trellis-bench-reviewer"
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,10 @@ class Turn:
     #: sent while the turn before it works (once that one's first tool call started), with
     #: this busy-conversation mode (:data:`BUSY`); ``None``: after it ended
     mode: str | None = None
+    #: its run pauses for a person's approval (a call that asks one: forgetting what the user
+    #: said, ``harness._forgotten``) and is resumed approved; the turn is the resumed run, and
+    #: its ``asks`` check says it paused (with memory on: the memory tools are memory's)
+    approve: bool = False
 
 
 @dataclass(frozen=True)
@@ -2648,6 +2654,11 @@ _NOT_IN: Final = re.compile(
     r"(?:[^.\n]|\.(?=\S))*",
     re.IGNORECASE,
 )
+#: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
+_EARLIER: Final = re.compile(
+    r"(?:[^.\n]|\.(?=\S))*\b(?:earlier|previously|before|down from|up from)\b(?:[^.\n]|\.(?=\S))*",
+    re.IGNORECASE,
+)
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
 _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
@@ -2830,8 +2841,11 @@ def score(
             made_up.append(fake.group(0))
     elif k == "judge":
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
-    # a set's wrong member named only as on the other side of the line is no member
+    # a set's wrong member named only as on the other side of the line is no member; a right
+    # figure's earlier value, said as earlier, is not the answer
     said = _NOT_IN.sub(" ", a) if k == "set" else a
+    if k in ("number", "record") and not missing:
+        said = _EARLIER.sub(" ", said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's
@@ -3174,7 +3188,8 @@ def _accounting_hook() -> None:
 def scripted_model(case: Case) -> Any:
     """The existing scripted chat model (``tests.support.chat_model``), replaying the case's
     gold calls and reference answers: proves the pipeline, not a model. A ``keyed`` case's
-    answers each call by the message it answers (``KeyedChatModel``)."""
+    answers each call by the message it answers (``KeyedChatModel``). Each reply reports the
+    request it was sent as its input tokens, counted as the harness counts one, and 50 out."""
     from tests.support.chat_model import KeyedChatModel, ScriptedChatModel
 
     if case.keyed:
@@ -3197,8 +3212,8 @@ def scripted_model(case: Case) -> Any:
             )
             for task, rounds in case.helpers
         ]
-        return KeyedChatModel(turns=[], script=script, spends=(1000, 50))
-    return ScriptedChatModel(turns=case.script(), spends=(1000, 50))
+        return KeyedChatModel(turns=[], script=script, spends=(None, 50))
+    return ScriptedChatModel(turns=case.script(), spends=(None, 50))
 
 
 async def run_case(
@@ -3257,13 +3272,19 @@ async def run_case(
         remembers, and no other case's (nor an earlier run's) leak into it."""
         return f"{t.user or runner.USER}-{tag}-{case.id}"
 
+    paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+
     async def asked(t: Turn) -> Any:
-        return await agent.run(
+        result = await agent.run(
             t.text,
             user=user_of(t),
             thread=f"cx-{tag}-{case.id}-{t.thread}",
             mode=t.mode or "queue",
         )
+        if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
+            paused.add(id(t))
+            result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+        return result
 
     i = 0
     while i < len(case.turns):
@@ -3345,6 +3366,18 @@ async def run_case(
                 "seconds": seconds,
                 "checks": checked(
                     turn, status, captured.requests, captured.calls, calls=calls, history=history
+                )
+                + (
+                    [
+                        {
+                            "check": "asks",
+                            "ok": id(turn) in paused,
+                            "why": "the run asks a person, then goes on approved",
+                            "found": "paused" if id(turn) in paused else "no pause",
+                        }
+                    ]
+                    if turn.approve and history == "memory"
+                    else []
                 ),
             }
             if turn.expect is not None:

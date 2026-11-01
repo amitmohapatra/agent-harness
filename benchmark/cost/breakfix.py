@@ -22,6 +22,9 @@ from benchmark.cost import retail as r
 CATEGORIES: Final = ("bf_past", "bf_analytics", "bf_explain", "bf_mixed", "bf_cantdo", "bf_clarify")
 #: Another person of the same tenant: what they said is never this user's.
 OTHER_USER: Final = "trellis-bench-colleague"
+#: The memory of bf3-past-02's approval as the scripted model names it (a model reads the id
+#: its memory context shows).
+SUP12_APPROVAL: Final = "mem_sup12_approval"
 
 Q2: Final = {"start": "2026-04-01", "end": "2026-06-30"}
 Q3: Final = {"start": "2026-07-01", "end": "2026-09-30"}
@@ -366,7 +369,7 @@ def cases() -> list[Any]:
                  expect=cx.record(nq3, tol={"units": 0})),
             Turn("Plot its weekly units as a chart image I can paste into a slide.",
                  expect=cx.cannot(FAKE_CHART,
-                                  r"table|weekly|figures|numbers|instead|list",
+                                  r"table|weekly|figures|numbers|instead|list|here(?: is|'s) the",
                                   "I can't make an image here: there is no code execution, files or images in this setup. "
                                   "I can give the weekly figures as a table instead.")),
             Turn("Fine — then its best month of Q3 by units, and that month's units.",
@@ -800,8 +803,11 @@ def cases() -> list[Any]:
         "bf3-past-02", "bf_past", 3,
         (
             Turn("I'm approving the SUP-12 contract renewal.", reply="Noted."),
+            # forgetting what the user said asks a person (harness._forgotten): the run pauses,
+            # is approved, and goes on; the approve-then-revoke history stays for the last turn
             Turn("Hold on: revoke my SUP-12 renewal approval until the audit is done.",
-                 reply="Noted: revoked pending the audit.", thread="b"),
+                 ((("memory_forget", {"id": SUP12_APPROVAL}),),),
+                 reply="Noted: revoked pending the audit.", thread="b", approve=True),
             Turn("SUP-12's renewal is approved.", user=OTHER_USER, reply="Noted.", thread="c"),
             Turn("Have I approved the SUP-12 renewal right now?",
                  expect=cx.judge("Says no: the user approved it, then revoked the approval "

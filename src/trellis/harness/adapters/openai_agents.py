@@ -29,7 +29,8 @@
   arguments, is approved in the same attempt instead of asking again;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
   ``run_config``, ``context``...), except the ones the harness gives itself
-  (:data:`OWN_ARGUMENTS`), which are refused.
+  (:data:`OWN_ARGUMENTS`), which are refused; a call to a tool the model made up is an error
+  the model reads (``RunConfig.tool_not_found_behavior``), as on every other adapter.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.harness import budget
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -72,7 +74,7 @@ from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.gateways import Capability, per_loop
-from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answered
+from trellis.harness.history import ASKED_WITH, MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
@@ -375,7 +377,12 @@ def governed_agents(
                 _ungoverned_inside(agent_id, tool)
             own.append(governed(ran or tool, helpers))
         carried = {getattr(t, "name", None) for t in agent.tools}
-        copy.tools = [*own, *(t for t in extra if t.name not in carried)]
+        # in name order, as every other adapter offers them: a stable prefix for a prompt
+        # cache, and no tool first only because it was declared first
+        copy.tools = sorted(
+            [*own, *(t for t in extra if t.name not in carried)],
+            key=lambda t: str(getattr(t, "name", "")),
+        )
         copy.mcp_servers = [GovernedServer.of(s) for s in agent.mcp_servers]
         handoffs = []
         for handoff in agent.handoffs:
@@ -638,7 +645,114 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return _routed(runtime, target, _steering(runtime, options))
+    told = _told_unknown_tools(options)
+    asked = _asked_with(runtime, told)
+    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked)))
+
+
+def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the SDK's own ``max_turns`` error handler (``Runner.run``'s
+    ``error_handlers``), unless the run gives its own: a run that reaches its turn limit ends
+    with one last answer, as a ``ReAct`` run at ``max_steps`` does (``middleware.AnswerAtLimit``) —
+    the last agent called once more, told the limit is reached (``budget.LIMIT``) and given no
+    tool, through the run's own config and hooks — not a ``MaxTurnsExceeded`` error with no
+    answer. An agent that answers in a structured type, or a last call that gives no answer,
+    leaves the SDK's error."""
+    from agents import Runner
+    from agents.run_config import DEFAULT_MAX_TURNS
+
+    limit = options.get("max_turns") or DEFAULT_MAX_TURNS
+
+    async def last_answer(given: Any) -> str | None:
+        agent = given.run_data.last_agent
+        if agent.output_type not in (None, str):
+            return None
+        told: Any = {"role": "user", "content": budget.LIMIT.format(limit=limit)}
+        bare = agent.clone(tools=[], handoffs=[], mcp_servers=[])
+        try:
+            result = await Runner.run(
+                bare,
+                [*given.run_data.history, told],
+                max_turns=1,
+                hooks=_hooks(),
+                run_config=options.get("run_config"),
+                context=given.context.context,
+            )
+        except Exception as exc:
+            log.warning("run %s: no last answer at the turn limit: %s", runtime.run_id, exc)
+            return None
+        stopped = f"stopped: the turn limit ({limit}) was reached"
+        log.warning("run %s %s", runtime.run_id, stopped)
+        runtime.events.warning("step_limit", stopped)
+        return str(result.final_output)
+
+    handlers = dict(options.get("error_handlers") or {})
+    handlers.setdefault("max_turns", last_answer)
+    return {**options, "error_handlers": handlers}
+
+
+def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:
+    """The options with a call to a tool the model made up answered as an error the model
+    reads, so the run goes on — as on every other adapter — and not a ``ModelBehaviorError``
+    that ends it: the SDK's own ``RunConfig.tool_not_found_behavior="return_error_to_model"``
+    (its message: ``Tool '<name>' not found.``)."""
+    from agents import RunConfig
+
+    config = options.get("run_config") or RunConfig()
+    told = dataclasses.replace(config, tool_not_found_behavior="return_error_to_model")
+    return {**options, "run_config": told}
+
+
+def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the pushed memory context sent as the first part of the user's turn,
+    marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
+    (``middleware.with_question``), and not as a system message of its own
+    (``RunConfig.call_model_input_filter``, after the run's own filter). Only the model's input
+    changes; the input a session keeps does not. Haiku, a question 14 products match: given
+    the context as its own system message it answered for one of them 9 times in 10, given it
+    in the user's turn it asked which one was meant."""
+    from agents import RunConfig
+    from agents.run_config import ModelInputData
+
+    context = runtime.pushed_context
+    if not context:
+        return options
+    config = options.get("run_config") or RunConfig()
+    theirs = config.call_model_input_filter
+
+    async def asked(data: Any) -> Any:
+        given = data.model_data
+        if theirs is not None:
+            given = theirs(data)
+            if inspect.isawaitable(given):
+                given = await given
+        items: list[Any] = list(given.input)
+        at = next(
+            (
+                n
+                for n, i in enumerate(items)
+                if isinstance(i, dict) and i.get("role") == "system" and i.get("content") == context
+            ),
+            None,
+        )
+        question = next(
+            (
+                n
+                for n in range(len(items) - 1, at if at is not None else len(items), -1)
+                if isinstance(items[n], dict) and items[n].get("role") == "user"
+            ),
+            None,
+        )
+        if at is None or question is None:
+            return given
+        said = items[question].get("content")
+        parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
+        marked = {"type": "input_text", "text": ASKED_WITH.format(context=context)}
+        items[question] = {**items[question], "content": [marked, *parts]}
+        del items[at]
+        return ModelInputData(input=items, instructions=given.instructions)
+
+    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=asked)}
 
 
 def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:

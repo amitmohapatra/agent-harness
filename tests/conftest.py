@@ -33,6 +33,14 @@ def no_spool_on_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def files_of_this_test(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: Any) -> None:
+    """The files a test's runs keep with no ``TRELLIS_FILES_URL`` (the XDG data folder) are in
+    a folder of the test's own, never this machine's: a run is told of the files kept for its
+    user (``tools.stored``), and no test sees another's."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("data")))
+
+
+@pytest.fixture(autouse=True)
 def no_real_claude(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """A Claude Agent SDK client a test starts without the scripted CLI (``cli_path``) must
     reach no model: looking for the real CLI fails the test. Live tests run the real CLI."""
@@ -148,6 +156,18 @@ async def _kimi_endpoints_stopped() -> None:
     from tests.support.kimi import detached
 
     await detached()
+
+
+@pytest.fixture(params=["duckdb", "sqlite"])
+def engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The engine ``query_result`` runs on (``tools.query.ENGINE``): a test that takes this
+    runs on each, DuckDB (the ``query`` extra, which the dev environment installs) and the
+    SQLite fallback."""
+    from trellis.harness.tools import query
+
+    made = query.DuckDB() if request.param == "duckdb" else query.SQLite()
+    monkeypatch.setattr(query, "ENGINE", made)
+    return request.param
 
 
 @pytest.fixture
