@@ -111,11 +111,10 @@ async def test_a_queued_runs_options_are_kept_for_its_worker_and_its_resume(
     await agent.resume(paused.awaiting.interrupt_id, "approve", reviewer="ops")
     assert await worker.run_once()
     ended = await handle.status()
-    # at the limit the model is asked for a last answer; this planned one calls a tool
-    # instead, so the SDK's own error stands
+    # at the limit the model is asked for a last answer, offered no tool: its answer ends it
     assert budget.LIMIT.format(limit=1) in json.dumps(seen[-1].inputs[-1])
-    assert ended.status is RunStatus.ERROR and ended.error is not None
-    assert "Max turns (1) exceeded" in ended.error.message
+    assert seen[-1].tools[-1] == []
+    assert ended.status is RunStatus.SUCCESS and ended.output == "Done. confirmed go", ended
 
 
 async def test_an_object_reaches_the_first_attempt_and_the_record_keeps_the_json(
