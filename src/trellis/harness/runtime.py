@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import time
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
+import jsonpatch
 from pydantic import BaseModel
 
 from trellis.contracts import (
@@ -31,6 +33,7 @@ from trellis.contracts import (
     InterruptResolution,
     ModelError,
     Option,
+    RunEventType,
     ToolCall,
     ToolError,
     ToolSpec,
@@ -52,6 +55,7 @@ if TYPE_CHECKING:
     from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.conversation import Steer
+    from trellis.harness.frontend import Frontend
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
@@ -96,10 +100,11 @@ _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=Non
 @dataclass(frozen=True, slots=True)
 class _Call:
     """The tool or model call the code running now is in: when it must end (``time.monotonic``)
-    and, for a tool call, its idempotency key."""
+    and, for a tool call, its idempotency key and the id the run's stream gives it."""
 
     ends: float | None
     key: str | None
+    ref: str | None = None
 
 
 _call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
@@ -251,6 +256,33 @@ class Runtime:
     _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
     #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
     stalled: ModelTimeout | None = None
+    #: what the run's front end gave it: its tools, context and state (``frontend.py``)
+    frontend: Frontend | None = None
+    _state: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.frontend is not None:
+            self._state = copy.deepcopy(self.frontend.state)
+
+    # ------------------------------------------------------------------ the front end's state
+    @property
+    def state(self) -> Any:
+        """The front end's shared state (AG-UI ``state``) as the run has it now; ``None``
+        without one. Set it to change it: each change is streamed — ``STATE_DELTA`` (a JSON
+        Patch from the state before) or, where either is not a JSON object or array,
+        ``STATE_SNAPSHOT``."""
+        return self._state
+
+    @state.setter
+    def state(self, value: Any) -> None:
+        if value == self._state:
+            return
+        operations = _patch(self._state, value)
+        self._state = copy.deepcopy(value)  # a change made in place later is a change too
+        if operations is None:
+            self.events.emit(RunEventType.STATE_SNAPSHOT, data={"snapshot": self._state})
+        else:
+            self.events.emit(RunEventType.STATE_DELTA, data={"delta": operations})
 
     # ------------------------------------------------------------------ the memory context
     @property
@@ -386,6 +418,13 @@ class Runtime:
         call = _call.get()
         return call.key if call is not None else None
 
+    @property
+    def call_id(self) -> str | None:
+        """Inside a tool call: the id its ``TOOL_CALL_*`` events carry (the framework's call
+        id, else the run's and the call's step). ``None`` outside a tool call."""
+        call = _call.get()
+        return call.ref if call is not None else None
+
     def remaining(self) -> float | None:
         """The seconds the code running now may still take: what is left of the run's time
         (its ``timeout`` and ``deadline``) and of the tool or model call it is in; ``None``
@@ -398,15 +437,16 @@ class Runtime:
 
     @contextlib.asynccontextmanager
     async def limited(
-        self, seconds: float | None, *, key: str | None = None
+        self, seconds: float | None, *, key: str | None = None, ref: str | None = None
     ) -> AsyncIterator[None]:
-        """The code inside — a tool call (``key``: its idempotency key) or a model call —
+        """The code inside — a tool call (``key``: its idempotency key, ``ref``: its id on the
+        stream) or a model call —
         takes at most ``seconds`` (``None``: no limit of its own), or raises ``TimeoutError``;
         the run's own time bounds it as well (the pipeline stops the run)."""
         own = None if seconds is None else time.monotonic() + seconds
         outer = _call.get()
         ends = [t for t in (own, outer.ends if outer else None) if t is not None]
-        token = _call.set(_Call(min(ends) if ends else None, key))
+        token = _call.set(_Call(min(ends) if ends else None, key, ref))
         try:
             async with asyncio.timeout(seconds):
                 yield
@@ -642,6 +682,14 @@ MARKER: Final = "trellis_interrupt"
 #: earlier call of the same model step paused (``middleware.HarnessTools``): no question —
 #: the call runs, in its turn, when the run resumes.
 DEFERRED: Final = "trellis_deferred"
+
+
+def _patch(before: Any, after: Any) -> list[dict[str, Any]] | None:
+    """The JSON Patch from ``before`` to ``after`` (RFC 6902), or ``None`` where it cannot be
+    one (either is not a JSON object or array: a snapshot says it then)."""
+    if not isinstance(before, (dict, list)) or not isinstance(after, (dict, list)):
+        return None
+    return list(jsonpatch.make_patch(before, after).patch)
 
 
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:
