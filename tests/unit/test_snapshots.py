@@ -68,3 +68,16 @@ def test_a_tools_declared_age_is_read_from_the_run() -> None:
 
 def test_the_time_is_utc() -> None:
     assert REAL_NOW().tzinfo is UTC
+
+
+def test_the_note_sends_the_model_back_only_for_what_the_question_needs() -> None:
+    """The context's line said "call get_stock, find_sku again for the current values; never
+    answer from the earlier ones". On a turn that needs none of them ("Put that in a PDF for
+    finance"), ReAct re-fetched every input and answered "I can't produce a PDF, but here is
+    the content", with no reason (break-and-fix bf3-mixed-01, 3 of 3 on Haiku). It now asks
+    for a call only for a value the question needs, and still never an answer from an
+    earlier one."""
+    said = str(snapshots.note(["get_stock", "find_sku"]))
+    assert "for a value the question needs, call its tool again" in said
+    assert "never answer with an earlier one" in said
+    assert "again for the current values;" not in said
