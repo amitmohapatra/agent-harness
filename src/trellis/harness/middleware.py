@@ -24,8 +24,8 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
 * :func:`step_limit` — ``max_steps`` model calls: LangChain's own ``ModelCallLimitMiddleware``,
   which ends the run with its message at the limit;
 * :class:`StallGuard` — the same call with the same arguments in ``max_repeats`` consecutive
-  steps, or :data:`ERROR_STREAK` steps in which every call failed, stop the run (a repeat
-  within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
+  steps, or :data:`ERROR_STREAK` steps in which every call failed and a failure repeated, stop
+  the run (a repeat within one step runs once: :class:`HarnessTools`, :func:`governed_call`);
 * :class:`ReadTools` — ``read_file`` offered once there is something to read back: a large
   result kept, a file in the graph's state, or a result LangChain's ``ClearToolUsesEdit``
   cleared (paged from the graph's state by its call's id, which keeps it whole);
@@ -121,7 +121,7 @@ from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
-from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
@@ -145,7 +145,7 @@ MAX_STEPS: Final = 12
 #: Consecutive steps making the same call with the same arguments that stop the run.
 MAX_REPEATS: Final = 3
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
-#: error or a timeout) that stop the run.
+#: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
 #: Deep Agents' tool that reads a large result saved as a file — and, by the path
 #: ``/large_tool_results/<call id>`` (Deep Agents' own), a result cleared from the request.
@@ -199,6 +199,16 @@ STATE_TOOLS: Final = frozenset(
         "grep",
     }
 )
+#: The state tools that write a file, and what their result then says of it: the run's own
+#: scratch copy, which the user cannot reach (asked for a chart, a model saved an SVG in the
+#: graph's state and told the user to open it).
+SCRATCH_WRITES: Final = frozenset({"write_file", "edit_file"})
+#: The runs whose model was told :data:`SCRATCH_NOTE` (once a run, however many it writes).
+_SCRATCH_SAID: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
+SCRATCH_NOTE: Final = (
+    "This file is in this run's own scratch space: the user cannot open or download it, so "
+    "never offer it to them as a file; give them its content instead."
+)
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
@@ -230,6 +240,42 @@ class GovernTools(AgentMiddleware):
 _GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing", default=None)
 
 
+def _scratch_said(
+    runtime: Runtime, tool: str, done: ToolMessage | Command[Any]
+) -> ToolMessage | Command[Any]:
+    """A state tool's result: the run's first scratch write that worked says
+    :data:`SCRATCH_NOTE` (once a run: its history keeps saying it)."""
+    if tool not in SCRATCH_WRITES or runtime.run_id in _SCRATCH_SAID:
+        return done
+    noted = _scratch_noted(done)
+    if noted is not done:
+        _SCRATCH_SAID.add(runtime.run_id)
+    return noted
+
+
+def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[Any]:
+    """A scratch write's result with :data:`SCRATCH_NOTE` after it: on its message, or on the
+    message of the ``Command`` that also updates the graph's files (Deep Agents' state
+    backend). A failed write is left as it is."""
+
+    def noted(m: Any) -> Any:
+        if not isinstance(m, ToolMessage) or m.status == "error" or not isinstance(m.content, str):
+            return m
+        return m.model_copy(update={"content": f"{m.content}\n{SCRATCH_NOTE}"})
+
+    if isinstance(done, ToolMessage):
+        return noted(done)
+    update = done.update
+    if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
+        return done
+    said = [noted(m) for m in update["messages"]]
+    if all(a is b for a, b in zip(said, update["messages"], strict=True)):
+        return done
+    return Command(
+        graph=done.graph, update={**update, "messages": said}, resume=done.resume, goto=done.goto
+    )
+
+
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
@@ -249,13 +295,10 @@ async def governed_call(
     runtime = current()
     call = request.tool_call
     own = request.tool
-    if (
-        runtime is None
-        or own is None
-        or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
-        or _GOVERNING.get() == (call["name"], str(call["id"]))
-    ):
+    if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
+    if call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE):
+        return _scratch_said(runtime, call["name"], await handler(request))
     _, step = _step_of(request)
     first = _repeats(step).get(str(call["id"]))
     if first is not None:
@@ -1125,7 +1168,8 @@ def step_limit(
 class StallGuard(AgentMiddleware):
     """A run that goes nowhere stops (``ModelError``): the same call with the same arguments
     in ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
-    consecutive steps in which every call failed (a malformed one among them)."""
+    consecutive steps in which every call failed (a malformed one among them) and a failure
+    was met again (:func:`_failing`)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
         super().__init__()
@@ -1188,22 +1232,37 @@ def _steps(history: Sequence[AnyMessage]) -> Iterator[set[str]]:
 
 
 def _failing(history: Sequence[AnyMessage]) -> int:
-    """How many of the latest steps had every call fail: read from the end, a step's results
-    (after it) before the step, as far as the first step with a call that did not fail."""
-    statuses: dict[str, str] = {}
+    """How many of the latest steps had every call fail — when a failure among them repeats
+    (the same tool failing with the same error), else 0: a model whose every failed call
+    failed differently read each error and is correcting itself (a wrong type, then a missing
+    argument, then a made-up name), which only the step limit bounds; one that meets an error
+    it met before is making no progress (OpenHands' stuck detector counts the same action
+    meeting the same error). Read from the end, a step's results (after it) before the step,
+    as far as the first step with a call that did not fail."""
+    results: dict[str, ToolMessage] = {}
     streak = 0
+    met: set[str] = set()
+    repeated = False
     for message in _turn_back(history):
         if isinstance(message, ToolMessage):
-            statuses[message.tool_call_id] = message.status
+            results[message.tool_call_id] = message
             continue
         if not isinstance(message, AIMessage):
             continue
         repeats = _repeats(message)  # a repeat did not run: its first call's status counts
-        made = [statuses.get(c["id"] or "") for c in message.tool_calls if c["id"] not in repeats]
-        if not made or any(s != "error" for s in made):
+        made = [
+            (c["name"], results.get(c["id"] or ""))
+            for c in message.tool_calls
+            if c["id"] not in repeats
+        ]
+        failed = [(name, r) for name, r in made if r is not None and r.status == "error"]
+        if not made or len(failed) < len(made):
             break
         streak += 1
-    return streak
+        failures = {content_key("failure", name, r.text) for name, r in failed}
+        repeated = repeated or bool(failures & met)
+        met |= failures
+    return streak if repeated else 0
 
 
 # --------------------------------------------------------------------------- results
