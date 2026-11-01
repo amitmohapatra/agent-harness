@@ -217,7 +217,7 @@ graph. A webhook on `run.paused` tells the reviewer's UI instead of polling ([ru
 | the tools' governance | `governed(...)` on each tool | every harness tool, automatically |
 | time limits, retries | `governed(..., timeout=)` on each tool; your model client's timeout; `RunStart.timeout_seconds` (agent-runs ends the run) | `@tool(call_timeout=)`, `ReAct(call_timeout=)`, `run(timeout=, deadline=)`; reads retried, unknown writes never re-run, after a crash too |
 | recording | your `recorded` and `history.add` | the transcript, every tool call and the outcome, queued in the background with a spool |
-| memory push | your `SystemMessage` | a leading system message with a fixed id, one per checkpointed thread |
+| memory push | your `SystemMessage` | a leading system message with a fixed id, one per checkpointed thread; a `create_agent` graph sends it with the question, after the history a prompt cache keeps |
 | evaluation | `judge(...)` where you choose | `h.wrap(judges=[...])` on a sampled share, in the background |
 | serving | yours | `serve_chat` (AG-UI) and `serve_a2a` |
 
