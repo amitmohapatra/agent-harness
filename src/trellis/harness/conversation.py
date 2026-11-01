@@ -122,12 +122,14 @@ def identified(said: Sequence[Said], runtime: Runtime) -> list[Said]:
 
 
 # --------------------------------------------------------------------------- earlier turns
-async def earlier(runtime: Runtime) -> list[Said]:
+async def earlier(runtime: Runtime, *, whole: bool = False) -> list[Said]:
     """The conversation's earlier turns, oldest first, as the run store keeps them: each
     turn's question and answer (a cancelled turn's question alone), of this agent, tenant,
     user and thread — the run's own and other users' left out — at most
-    :data:`EARLIER_RUNS` turns. A run with no conversation of its own, or a child run, has
-    none."""
+    :data:`EARLIER_RUNS` turns. ``whole``: a turn this process kept the transcript of
+    (``Agent.results``) is that transcript — its tool calls and their results too, the
+    figures behind its answer — for a follow-up ("why was that?", "redo it with X"). A run
+    with no conversation of its own, or a child run, has none."""
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
@@ -147,9 +149,16 @@ async def earlier(runtime: Runtime) -> list[Said]:
             records.append(record)
     records.sort(key=lambda r: r.created_at)
     conversation = runtime.conversation
+    kept = runtime.agent.results.turns(conversation) if whole else {}
     history: list[Said] = []
     previous: Any = None
     for record in records:
+        # a run steered into another ran no attempt of its own: it has no transcript kept
+        transcript = kept.get(record.run_id) if record.status in ANSWERED else None
+        if transcript:
+            history.extend(transcript)
+            previous = record
+            continue
         asked = Said(Speaker.USER, _text(record.input), id=question_id(conversation, record.run_id))
         answer = record.output if record.status in ANSWERED else None
         if (
