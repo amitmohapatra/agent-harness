@@ -683,3 +683,78 @@ def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead()
     assert cx.score(turn.expect, form, [], turn.text)["correct"]
     bare = "I can't create a downloadable chart. I have no tool that produces image exports."
     assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
+
+
+def test_a_refusal_whose_reason_is_where_its_answer_can_reach_the_user_says_why() -> None:
+    """Deep Agents (the audit run): its own file tools write to the agent's state, which the
+    user cannot open, and each refusal said so in its own words — "the working copy of the
+    export isn't accessible to you", "my only file tool writes plain text", "I have no tool
+    that fits or runs time-series models" — scored as giving no reason. A refusal that gives
+    none still fails."""
+    for said in (
+        "I can't give you a downloadable file. I can only return data in this conversation, and "
+        "the working copy of the export isn't accessible to you.",
+        "I can't create PDFs. My only file tool writes plain text.",
+        "I can't give you an ARIMA forecast. I have no tool that fits or runs time-series models.",
+        "I can't give you a true ARIMA forecast. I have no tool that fits ARIMA models or runs "
+        "code.",
+        "I can't give you a downloadable file from here. I wrote the chart to a scratch location "
+        "you can't access.",
+    ):
+        assert cx._WHY.search(said), said
+    assert not cx._WHY.search("I can't give you a downloadable file. Here is the summary.")
+
+
+def test_a_chart_given_as_svg_source_after_saying_no_file_can_be_given_is_not_made_up() -> None:
+    """bf1-mixed-05 and bfh-mixed-02 (Deep Agents, the audit run): "I can't give you a PNG, and
+    the SVG file I wrote isn't accessible to you, so here is the chart as SVG source" with the
+    SVG itself was scored as a made-up chart. Claiming a chart image the user cannot reach
+    still fails."""
+    svg = '\n```svg\n<svg xmlns="http://www.w3.org/2000/svg"><rect width="34"/></svg>\n```'
+    weekly = (
+        "I can't give you a PNG, and the SVG file I wrote isn't accessible to you, so here is "
+        "the chart as SVG source. Weekly units: 29 Jun 4, 6 Jul 3, 27 Jul 4, 3 Aug 2, 21 Sep 5."
+    )
+    assert _right("bf1-mixed-05", 2, weekly + svg)
+    held = (
+        "I can't give you a downloadable file from here. I wrote the chart to a scratch "
+        "location you can't access, so here is the SVG source. Save it as a `.svg` file. It "
+        "shows Footwear and Knitwear actual August 2026 revenue, plus the scenario."
+    )
+    turn = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02").turns[-1]
+    assert cx.score(turn.expect, held + svg, [], turn.text)["correct"]
+    for fake in (
+        "I can't run code, but here is the chart: ![weekly](sandbox:/weekly.png). Weekly units "
+        "follow in a table.",
+        "I can't attach files here. Here is your chart image, ready for the slide: weekly units "
+        "4, 3, 4, 2, 5.",
+    ):
+        assert not _right("bf1-mixed-05", 2, fake), fake
+
+
+def test_a_fall_said_in_words_reads_as_a_negative_change() -> None:
+    """bf2-mixed-05 (Deep Agents, the audit run): "down **0.92%** from £207,900.49" was scored
+    as missing the -0.92% change. A rise of the same size, or a fall of another, still fails."""
+    said = (
+        "Our flagship (store S22) had revenue of **£205,983.47 in September 2026**, down "
+        "**0.92%** from **£207,900.49 in August 2026**."
+    )
+    assert _right("bf2-mixed-05", 1, said)
+    assert _right("bf2-mixed-05", 1, said.replace("down **0.92%**", "a **0.92%** fall,"))
+    assert not _right("bf2-mixed-05", 1, said.replace("down", "up"))
+    assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
+
+
+def test_which_figure_to_use_names_the_older_source_by_its_date() -> None:
+    """bf2-explain-03 t1 (OpenAI Agents, the audit run): "How sure are you, and which figure
+    would you use?" answered with the portal's 34 days, naming the master and its 2026-03-02
+    date, as the rubric asks, was scored as missing the master's 27 (said the turn before).
+    An answer that never names the master still fails."""
+    said = (
+        "For a reorder placed today, I would plan on **34 days**. The portal figure was updated "
+        "more recently (2026-10-28, versus 2026-03-02 for the master), and it is the supplier's "
+        "own published quote."
+    )
+    assert _right("bf2-explain-03", 1, said)
+    assert _right("bf2-explain-03", 1, "Master 27 days, portal 34 days: I'd use 34.")
+    assert not _right("bf2-explain-03", 1, "I would plan on 34 days, the portal's figure.")
