@@ -149,6 +149,10 @@ known-first-party = ["trellis", "benchmark"]
 "benchmark/**" = ["PLC0415"]
 # the distractor servers' table, one kind of record a line
 "benchmark/cost/catalog.py" = ["E501"]
+# the complex suite's case table (a turn a line) and its world's name tables; its tools take
+# the model's named arguments, as many as a query has filters
+"benchmark/cost/complex.py" = ["E501", "PLR0912", "PLR0915"]
+"benchmark/cost/retail.py" = ["E501", "PLR0917"]
 # the tool-chain cases' table, one case a line
 "benchmark/tool_chains/cases.py" = ["E501"]
 # Adapters import their framework on first use, never at module import.
