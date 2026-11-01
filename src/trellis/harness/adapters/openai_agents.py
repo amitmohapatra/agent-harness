@@ -29,7 +29,8 @@
   arguments, is approved in the same attempt instead of asking again;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
   ``run_config``, ``context``...), except the ones the harness gives itself
-  (:data:`OWN_ARGUMENTS`), which are refused.
+  (:data:`OWN_ARGUMENTS`), which are refused; a call to a tool the model made up is an error
+  the model reads (``RunConfig.tool_not_found_behavior``), as on every other adapter.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     NativePause,
@@ -68,15 +70,15 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
-from trellis.harness.bridges.session import MemorySession
+from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.gateways import Capability, per_loop
-from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker
+from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool
-from trellis.harness.tools.mcp import side_effects_of
+from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool, data_of
+from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
 
@@ -152,6 +154,9 @@ class OpenAIAgentsAdapter:
     #: its history comes through its session: the run's own, or the memory service's thread
     #: (``bridges.session.MemorySession``), never as messages in the input
     replays_history = False
+    #: with memory off and no session, the conversation's earlier turns come as input items
+    history_in: HistoryIn = "messages"
+    sessions = False
 
     def __init__(self) -> None:
         #: the tools the agents declare (:meth:`native`), once read
@@ -163,10 +168,16 @@ class OpenAIAgentsAdapter:
         memory on is given (``bridges.session``)."""
         return _thread_store(options)
 
+    def steers(self, target: Any) -> bool:
+        """Every agent: a steered message joins the input of its next model call
+        (``RunConfig.call_model_input_filter``, :func:`_steering`)."""
+        return True
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:
-        system = [{"role": "system", "content": context}] if context else []
+        system: list[Any] = [{"role": "system", "content": context}] if context else []
+        system += [item for said in answered(history) for item in input_items(said)]
         if isinstance(input, str):
             return [*system, {"role": "user", "content": input}] if system else input
         if isinstance(input, list):
@@ -453,6 +464,7 @@ def _governed_server() -> type:
                 source="mcp",
                 server=self.name,
                 side_effects=side_effects_of(self._annotations.get(tool_name)),
+                **data_of(self._annotations.get(tool_name), strict=False),
             )
             outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
             if outcome.ok and isinstance(outcome.output, dict):
@@ -577,6 +589,7 @@ async def _listed(server: Any) -> list[ToolSpec]:
             source="mcp",
             server=server.name,
             side_effects=side_effects_of(tool.annotations),
+            **data_of_listed(tool),
         )
         for tool in tools
     ]
@@ -626,7 +639,46 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return _routed(runtime, target, options)
+    return _routed(runtime, target, _steering(runtime, _told_unknown_tools(options)))
+
+
+def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:
+    """The options with a call to a tool the model made up answered as an error the model
+    reads, so the run goes on — as on every other adapter — and not a ``ModelBehaviorError``
+    that ends it: the SDK's own ``RunConfig.tool_not_found_behavior="return_error_to_model"``
+    (its message: ``Tool '<name>' not found.``)."""
+    from agents import RunConfig
+
+    config = options.get("run_config") or RunConfig()
+    told = dataclasses.replace(config, tool_not_found_behavior="return_error_to_model")
+    return {**options, "run_config": told}
+
+
+def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the messages steered into the run (``Runtime.steered``) joining the
+    input of each model call where they were taken, as the user's
+    (``RunConfig.call_model_input_filter``, after the run's own filter): the SDK keeps a
+    filter's input for that call only, so each call is given them again, in place."""
+    from agents import RunConfig
+    from agents.run_config import ModelInputData
+
+    config = options.get("run_config") or RunConfig()
+    theirs = config.call_model_input_filter
+    kept: list[tuple[int, dict[str, Any]]] = []
+
+    async def steered(data: Any) -> Any:
+        given = data.model_data
+        if theirs is not None:
+            given = theirs(data)
+            if inspect.isawaitable(given):
+                given = await given
+        items: list[Any] = list(given.input)
+        kept.extend((len(items), {"role": "user", "content": s.text}) for s in runtime.steered())
+        for offset, (at, item) in enumerate(kept):
+            items.insert(at + offset, item)
+        return ModelInputData(input=items, instructions=given.instructions)
+
+    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=steered)}
 
 
 def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:

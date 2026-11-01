@@ -71,6 +71,9 @@ which the SDK hands the model as the tool's error. `Runner.run`'s own arguments 
 agent's) — `max_turns`, `run_config`, `context`, `session`... The harness gives `Runner.run` the
 agent, its input and its hooks itself: `starting_agent`, `input` and `hooks` are refused, and so
 is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+A call to a tool the model made up is an error the model reads (`Tool '<name>' not found.`) and
+the run goes on, as on every other adapter: the harness sets the SDK's own
+`RunConfig.tool_not_found_behavior="return_error_to_model"` on every run.
 
 ```python
 agent = h.wrap(
@@ -111,7 +114,7 @@ agent = h.wrap(
 | MCP servers | the agent's own `mcp_servers` (and its handed-off agents'): their tools are of the run's tool set as each server lists them, and each call goes through governance (the tool's annotations for its risk, the catalog's word over them), the journal and the record, on a copy of the server; a call that pauses the run stops the SDK's run |
 | Hosted tools | file search, web search, the code interpreter, image generation, a hosted MCP server's tools: recorded as the run's tool calls with what they were asked, what they found and the step's duration; of the tool set and the catalog; run by the provider inside the model's step, so not approvable |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
-| Tool hints | from 5 tools, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used — your own function tools as the harness's (their own `is_enabled` asked first); handoffs and agent tools are never narrowed away |
+| Tool hints | from 30 tools in the run, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used — your own function tools as the harness's (their own `is_enabled` asked first); handoffs and agent tools are never narrowed away |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target ([evaluation.md](../evaluation.md), [observability.md](../observability.md)) |
 | Hooks | the tool and run hooks as for every target; a model call is the SDK's own: the agent's `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`), which run under `h.wrap` as they do without it ([hooks.md](../hooks.md)) |
@@ -183,6 +186,13 @@ each side-effecting harness call), `schedule`, `serve_chat`, `serve_a2a`, `a2a(u
 [runs.md](../runs.md), [surfaces.md](../surfaces.md), [evaluation.md](../evaluation.md), and
 [examples/06_scenarios/runs_every_framework.py](../../examples/06_scenarios/runs_every_framework.py)
 (an agent of every framework queued, one worker for all).
+
+## Conversations
+
+With memory off and no `session` of yours, a run of a conversation is given its earlier turns
+from the run store as input items before the question ([runs.md](../runs.md#earlier-turns-with-memory-off)). `mode="steer"` adds the
+message as a user item to each later model call's input (`RunConfig.call_model_input_filter`,
+after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 ## Limits
 

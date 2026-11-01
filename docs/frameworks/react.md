@@ -104,11 +104,12 @@ The names are Deep Agents' where both have one. In four tiers:
   ([sandbox.md](../sandbox.md)). Files outside the graph's state are the agent's from the start
   and governed as any tool (the reads read, the others write; the catalog may say more).
 * `max_steps` (12), `max_repeats` (3, at least 2), `call_timeout` — the loop's bounds: model
-  calls with tools in one invocation then one without, identical calls in a row that stop the
-  run, the most one model call may take (within what is left of the run's
-  `run_timeout=`/`deadline=`; a tool's own `call_timeout` bounds a tool call). `max_steps` is a
-  loop guard counted again each invocation; a cap on the whole run's tool calls, across its
-  attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)).
+  calls the run makes (LangChain's `ModelCallLimitMiddleware`: at the limit the run ends with
+  its message, "Model call limits exceeded"), identical calls in a row that stop the run, the
+  most one model call may take (within what is left of the run's `run_timeout=`/`deadline=`; a
+  tool's own `call_timeout` bounds a tool call). A cap on the whole run's tool calls, across
+  its attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)); a spent
+  budget asks the model for one last answer.
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
   LangChain profile (`model.profile["max_input_tokens"]`). When neither says, the window-scaled
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
@@ -117,7 +118,7 @@ The names are Deep Agents' where both have one. In four tiers:
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
-  refused, naming the parameter that sets it (`StepLimit`: `max_steps`, `StallGuard`:
+  refused, naming the parameter that sets it (`ModelCallLimitMiddleware`: `max_steps`, `StallGuard`:
   `max_repeats`, `ModelHooks`: `call_timeout` and `system_prompt`, `TodoListMiddleware`: the
   planning a long task gets...), and `middleware()` itself is refused: ReAct already has it.
   One named as Deep Agents' replaces it, as Deep Agents does.
@@ -176,7 +177,7 @@ result as a file and the model went looking. Deep Agents' capabilities stay a pa
 | Capability | When |
 |---|---|
 | planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
-| `read_result` | once an older result was cleared past half the window |
+| `read_file` | once an older result was cleared past half the window (by its call's id: `/large_tool_results/<call id>`), a large result was kept, or the graph's state holds a file |
 | file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
 | `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict; on a long task, Deep Agents' general-purpose helper too |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
@@ -185,7 +186,9 @@ On Deep Agents, the scratch files and the general-purpose helper are offered on 
 (on the graph's state), `read_file` once a result was saved as a file, and each capability's
 guidance travels in its tool's description, offered that turn — never in the instructions — so
 the system prompt is the same from the first call to the last and a provider's prompt cache
-keeps its prefix.
+keeps its prefix. A run's first scratch write on the graph's state says, in its result, that the file is the
+run's own scratch copy, which the user cannot open or download (`middleware.SCRATCH_NOTE`):
+asked for a chart, a model had saved an SVG there and told the user to open it.
 
 ## The middleware
 
@@ -211,19 +214,19 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | Middleware | What it does |
 |---|---|
 | `TodoListMiddleware` (LangChain), `LongTaskTools` | a long task — from the model's third call of an invocation, or at once when the request asks for steps (a list of three items or more, "step by step", "a plan"), on a known window of at least 32,000 tokens — is offered planning (`write_todos`) and, on the default backend, Deep Agents' scratch file tools and its general-purpose helper; a shorter task is sent none of them (together about 2,600 tokens a call) |
-| `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order |
+| `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order. With no `read_file` of the graph's own (no backend), a result over 80,000 characters is kept in the run and previewed, and `read_file` and `query_result` (read-only SQL over its rows) are offered once one is ([tools.md](../tools.md#large-results)); with a backend, `query_result` runs over the result Deep Agents saved in the state |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
-| `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed, stop the run with a `ModelError` |
-| `StepLimit` | after `max_steps` model calls one more, with `tool_choice: "none"`, for the best answer with what it has; a `warning` event (`max_steps`) says so |
+| `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed and a failure was met again (the same tool, the same error): the model is told so and called once more with no tool (`tool_choice="none"`), so the user is told what went wrong; no answer then stops the run with a `ModelError`. Failures that each differ are a model correcting itself, bounded by `max_steps` |
+| `ModelCallLimitMiddleware` (LangChain) | `max_steps` model calls; past them the run ends with LangChain's message (no extra call) |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
-| `ContextEditingMiddleware` (LangChain) + `read_result` | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_result` in their place — only when it frees a tenth of the window, so a prompt cache breaks rarely |
-| `ReadTools` | `read_result` offered once a result was cleared, `read_file` once the graph's state holds a file (always, on a backend outside it): a small model offered them from the start reads nothing, again and again |
+| `ContextEditingMiddleware` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_file` (the call's id as its path) in their place — the one clearing pass — only when it frees a tenth of the window, so a prompt cache breaks rarely |
+| `ReadTools` | `read_file` offered once a result was cleared, the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered it from the start reads nothing, again and again; a cleared result is paged from the graph's state as a kept one is (100 lines, 20,000 characters a page) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
-| `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, a 408, 409, 429 or 5xx |
+| `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped. A declarative
-sub-agent is given `StallGuard`, `StepLimit` and `ModelHooks` too (its own of those names kept),
+sub-agent is given `StallGuard`, `ModelCallLimitMiddleware` and `ModelHooks` too (its own of those names kept),
 and a model name of its own is routed as `ReAct`'s.
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
@@ -304,7 +307,7 @@ smaller, step by step, only as far as it must, in this order:
 |---|---|---|
 | `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
-| `results` | older tool results cleared (`read_result` reads them back), the longest cut to head and tail | the latest |
+| `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
 | `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
@@ -336,7 +339,7 @@ plus memory context did not fit 8,192 tokens (the server refused them; the fact 
 in the context's best-ranked items): 9/10 answered right with the memory context trimmed, 10/10
 with it whole on 16,384; without the step none of the ten fits the window. LangChain's
 `LLMToolSelectorMiddleware` on the same 50 tools completed 6/10 (coverage 0.60): it is not a
-default (`automatic.ToolSelection`, for a measurement).
+default, and the harness has no fallback to it; a team adds it through `middleware=`.
 
 ## What else is automatic
 
@@ -348,7 +351,6 @@ default (`automatic.ToolSelection`, for a measurement).
 | Model steps | the graph's checkpoint is the run's: a resume continues from the last step, so the model is not asked again for what it already decided |
 | Several calls in one step | the read-only calls run at once; the others one at a time, in the model's order; a call that pauses lets the others finish (journaled) before the run pauses, and the pauses of one step come one by one; a call the step repeats (same tool, same arguments) runs once, each repeat told to read the first one's result ([reliability.md](../reliability.md#calls-made-at-once)) |
 | Sub-agents | each call a child run, Deep Agents' through `task` and the wrapped and A2A agents as tools ([above](#sub-agents-and-child-runs)) |
-| Wide tasks | on a large model, a request of several independent items of one kind is offered `delegate`: helpers that only read, at once, merged for the model to check ([below](#helpers-at-once-delegate)) |
 | Learned skills | the ones the agent learned, with its memory context ([skills.md](../skills.md#learned-skills)); Deep Agents' `skills=` beside them |
 | Store | a `StoreBackend` (and `runtime.store`) is the memory service's, wrapped |
 | Records, grounding, judges, tracing, trajectory | as for every target |
@@ -402,62 +404,6 @@ lead = ReAct(
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
-
-## Helpers at once: delegate
-
-**What.** A tool `ReAct` offers by itself, `delegate`: the model hands independent parts of the
-task to helpers that work at once, each in a fresh context, and reads their answers together.
-Its jobs take the fields of Deep Agents' `task` tool:
-
-```json
-{"jobs": [
-  {"role": "an analyst", "description": "Apple's 2024 revenue, from its 10-K"},
-  {"subagent_type": "research", "description": "Microsoft's 2024 revenue, from its 10-K"}
-]}
-```
-
-`description` is the part, with everything the helper needs (it sees nothing else);
-`subagent_type` names one of the agent's wrapped sub-agents (`subagents=[h.wrap(...)]`), and
-`role` makes a general helper: the agent itself, told its role and its part. One job is one
-helper, for context isolation; up to 16 at once.
-
-**When it is offered** — read without a model call, from the user's latest message and the
-model (`automatic.Delegation`):
-
-| | Offered |
-|---|---|
-| A wide request: 4 or more items of one kind, as a list or "each / every / compare / across" over them | yes, on a large model |
-| Steps that build on each other ("then", "finally", "step by step") | no |
-| A request to change something (create, update, send, refund...) | no: writes stay the agent's, one at a time |
-| Fewer than 4 items | no |
-| A small model: a window under 32,000 tokens or not known, a Granite model, a name of 14B parameters or fewer | no |
-| A helper's own run | no: helpers do not delegate again |
-
-Until it is offered the model is sent neither the tool nor its definition (the prompt prefix is
-unchanged), as the long-task tools are held. Explicit `subagents=` stay what they were: each is
-also a tool of its own, and `delegate` names the wrapped ones as its `subagent_type`.
-
-**Automatic.**
-
-* **Helpers only read.** Each job's run is marked a helper's (`Runtime.delegated`): it is given
-  only the tools that read, and a call of one that does more — as governance sees it, the
-  catalog's risk over the tool's own — is refused without asking anyone. A sub-agent that may
-  change anything is refused as a job (call it on its own). The agent merges, and writes.
-* **At once, adaptively.** Every job is a child run under the process's adaptive limit of child
-  runs ([runs.md](../runs.md#child-runs-at-once-and-the-task-tree)): it waits for a slot, is on
-  the run's task tree, and works at most what is left of the run's time less what the run keeps
-  to merge and reply (half of it, at most 5 s). Its spending is the run's budget's.
-* **Merged.** One result, in the jobs' order: each job's helper, status (`success`, `partial`,
-  `error`, `timeout`, `refused`, `skipped`, `cancelled`) and answer or error, with how many
-  answered and a note to check the answers against each other. Identical jobs run once.
-* **Durable.** A job's run is named by the call and the job, so a resumed or re-run call finds
-  every finished helper's answer in its record; one helper's question to a person pauses the
-  run, as a sub-agent's does, once the others are done.
-
-**On failure.** A helper that fails, times out or is refused is reported so in the merge; the
-others are not affected. Once the run's budget is spent or its time is up, the jobs not started
-are `skipped` (early stop). Cancelling the run cancels every helper's run. A call with no job,
-or more than 16, is an error the model reads.
 
 ## Where sandbox, skills and hooks go
 

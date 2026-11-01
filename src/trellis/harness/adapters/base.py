@@ -68,6 +68,7 @@ def merged(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
 
 ToolFormat = Literal["langchain", "openai_agents", "claude", "mcp", "none"]
 Narrowing = Literal["turn", "run", "none"]
+HistoryIn = Literal["messages", "context"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +124,20 @@ class Adapter(Protocol):
     #: the framework takes a conversation's history as its own messages (``prepare_input``'s
     #: ``history``); else memory's window comes in the context's text
     replays_history: bool
+    #: where a conversation's earlier turns from the run store go, with memory off
+    #: (``Agent.recalled``): its own messages (``prepare_input``'s ``history``; a function's
+    #: ``agent.history``), or the context's text
+    history_in: HistoryIn
+    #: the framework keeps a session of its own (the journal's ``session``), which the
+    #: conversation's next turn continues (``Agent.sessions``, ADR 0005)
+    sessions: bool
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None: ...
+
+    def steers(self, target: Any) -> bool:
+        """Whether ``target`` takes a message between two of its steps (``mode="steer"``,
+        ``Runtime.steered``): its framework has a hook there the harness uses."""
+        ...
 
     def prepare_input(
         self,
@@ -216,9 +229,15 @@ def query_of(input: Any) -> str:
 #: either name, or a LangChain chat model's ``profile["max_input_tokens"]``.
 WINDOW_ATTRIBUTES: Final = ("context_window", "max_input_tokens")
 #: What a graph ``ReAct(...)`` built says of itself in its config's metadata: its gateway
-#: model's name (when it was given one) and its context window.
+#: model's name (when it was given one), its context window and its instructions' text (what
+#: the replayed conversation's budget leaves room for).
 MODEL_METADATA: Final = "trellis_model"
 WINDOW_METADATA: Final = "trellis_context_window"
+PROMPT_METADATA: Final = "trellis_system_prompt"
+#: What one model call's request may hold, as a share of the window: what Deep Agents'
+#: summarization budgets (its ``_input_budget``: 95%, less the reply's tokens), so a request
+#: ``FitWindow`` fitted is one the summarization after it never refuses.
+FIT_SHARE: Final = 0.95
 
 
 #: The attribute a graph ``ReAct(...)`` built carries its declared tools on (``tools=``, its

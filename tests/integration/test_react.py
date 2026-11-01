@@ -17,6 +17,7 @@ from deepagents.middleware.summarization import _DeepAgentsSummarizationMiddlewa
 from langchain.agents.middleware import (
     AgentMiddleware,
     ContextEditingMiddleware,
+    ModelCallLimitMiddleware,
     SummarizationMiddleware,
     TodoListMiddleware,
 )
@@ -78,12 +79,12 @@ async def test_structured_output_is_the_native_response_format(harness: Harness)
     assert record is not None and record.output == {"sku": "a", "units": 7}
 
 
-async def test_at_the_step_limit_a_structured_answer_is_the_only_tool(harness: Harness) -> None:
+async def test_a_structured_answer_at_the_last_step_is_the_runs(harness: Harness) -> None:
     model = ScriptedChat([("stock", {"sku": "a"}), ("Answer", {"sku": "a", "units": 7})])
-    target = ReAct(system_prompt="s", model=model, response_format=Answer, max_steps=1)
+    target = ReAct(system_prompt="s", model=model, response_format=Answer, max_steps=2)
     result = await arm(harness.wrap(target, id="last"), [stock]).run("a?", user="u1")
     assert result.answer == Answer(sku="a", units=7)
-    assert names(model.requests[-1]) == ["Answer"]  # its own tool, no other
+    assert len(model.requests) == 2
 
 
 async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
@@ -93,16 +94,16 @@ async def test_an_unknown_tool_is_told_to_the_model(harness: Harness) -> None:
     assert "nope is not a valid tool" in model.requests[1]["messages"][-1]["content"]
 
 
-async def test_a_loop_that_never_answers_is_stopped(harness: Harness) -> None:
-    # asked once more without tools at the step limit, the model still calls a tool
+async def test_a_loop_that_never_answers_ends_at_the_step_limit(harness: Harness) -> None:
     model = ScriptedChat([*[("stock", {"sku": sku}) for sku in "abc"], ("stock", {"sku": "d"})])
     agent = arm(
         harness.wrap(ReAct(system_prompt="s", model=model, max_steps=3), id="loop"), [stock]
     )
     result = await agent.run("x", user="u1")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "stopped after 3 model calls without an answer"
-    assert model.requests[-1]["tool_choice"] == "none"
+    # LangChain's ModelCallLimitMiddleware, counted over the run (its thread): its message
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "Model call limits exceeded: thread limit (3/3)"
+    assert len(model.requests) == 3
 
 
 @respx.mock
@@ -238,13 +239,15 @@ class Named(AgentMiddleware):
 
 
 def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> None:
-    defaults = [Named("A"), Named("StepLimit"), Named("ModelHooks")]
+    defaults = [Named("A"), Named("ModelCallLimitMiddleware"), Named("ModelHooks")]
     extra, more = Named("C"), Named("D")
     stack = stacked(defaults, [extra, more])
-    assert [m.name for m in stack] == ["A", "StepLimit", "C", "D", "ModelHooks"]
+    assert [m.name for m in stack] == ["A", "ModelCallLimitMiddleware", "C", "D", "ModelHooks"]
     assert stacked(defaults, []) == defaults
-    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
-        stacked(defaults, [Named("StepLimit")])
+    with pytest.raises(
+        ConfigurationError, match=r"ModelCallLimitMiddleware is the harness's \(max_steps=\)"
+    ):
+        stacked(defaults, [Named("ModelCallLimitMiddleware")])
     with pytest.raises(ConfigurationError, match=r"A is the harness's \(always on\)"):
         stacked(defaults, [Named("A")])
 
@@ -264,8 +267,10 @@ async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None
     mine = SummarizationMiddleware(model, trigger=("messages", 100))
     graph = ReAct(system_prompt="s", model=model, middleware=[mine])
     assert "SummarizationMiddleware.before_model" in graph.nodes  # LangChain's, in its place
-    with pytest.raises(ConfigurationError, match=r"StepLimit is the harness's \(max_steps=\)"):
-        ReAct(system_prompt="s", model=model, middleware=[ours.StepLimit(3)])
+    with pytest.raises(
+        ConfigurationError, match=r"ModelCallLimitMiddleware is the harness's \(max_steps=\)"
+    ):
+        ReAct(system_prompt="s", model=model, middleware=[ModelCallLimitMiddleware(run_limit=3)])
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 2.5, "3", None])
@@ -305,7 +310,6 @@ async def test_the_middleware_run_in_their_order(
         (FilesystemMiddleware, "files"),
         (ours.HarnessTools, "tools"),
         (ours.StallGuard, "stall"),
-        (ours.StepLimit, "steps"),
         (ContextEditingMiddleware, "clear"),
         (_DeepAgentsSummarizationMiddleware, "summary"),
         (Mine, "mine"),
@@ -323,7 +327,7 @@ async def test_the_middleware_run_in_their_order(
     await arm(harness.wrap(graph, id="order"), [stock]).run("x", user="u")
     # Deep Agents' files first, the harness's next; Deep Agents' summarization after what
     # narrows the tools, so it counts what is sent
-    model_order = ["files", "tools", "stall", "steps", "clear", "summary", "mine", "hooks"]
+    model_order = ["files", "tools", "stall", "clear", "summary", "mine", "hooks"]
     first_call = [s.split()[1] for s in seen[: len(model_order)]]
     assert first_call == model_order  # outermost first: ModelHooks sees what is sent
     tool_calls = [s for s in seen if s.startswith("tool ")]
@@ -444,7 +448,8 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
     assert len(told) < 10_000  # a preview, not the result
     assert "0123456789" in model.requests[2]["messages"][-1]["content"]
     offered = [[t["function"]["name"] for t in r.get("tools", [])] for r in model.requests]
-    assert offered == [["dump"], ["dump", "read_file"], ["dump", "read_file"]]  # once saved
+    once_saved = ["dump", "query_result", "read_file"]  # query_result: SQL over its rows
+    assert offered == [["dump"], once_saved, once_saved]
 
 
 async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:

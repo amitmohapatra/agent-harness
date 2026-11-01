@@ -28,7 +28,7 @@ from trellis.contracts import (
 from trellis.contracts import Feedback as Decision
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance.catalog import MemoryCatalog
-from trellis.harness.history import Said, Speaker, recorded, said_of
+from trellis.harness.history import MESSAGE_ID, Said, Speaker, recorded, said_of
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory import MemoryClient, MemoryContext
 from trellis.memory.errors import NotFoundError
@@ -52,8 +52,18 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
 #: ``Tools.hints``, which passes the run's toolbox.
 TOOL_SEARCH: Final = "tool_search"
+#: The pull tool that forgets a memory. The service lets an agent forget only what it wrote:
+#: what the user said, it refuses for :data:`USERS_OWN` (the harness asks a person, then
+#: forgets it as the user: ``harness._forgotten``).
+FORGET: Final = "memory_forget"
+#: The service's reason for refusing an agent the user's own statement.
+USERS_OWN: Final = "users_own_statement"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
+#: The largest recorded tool output the memory service takes (its ``POST /v1/tools/invocations``
+#: ``output``: "at most 256 KiB of JSON"; a larger one is refused with a 422 and the call's
+#: record is lost): a larger output is recorded cut to it (:func:`recorded_output`).
+RECORDED_OUTPUT_MAX_BYTES: Final = 256 * 1024
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
 #: The keys of a run's own outcome record's metadata that keep what its pushed context showed —
@@ -165,6 +175,28 @@ class Memory:
         return None
 
 
+def _source_id(said: Said, run_id: str, attempt: int, index: int) -> str:
+    """The id the service de-duplicates ``said`` by: its harness id, else its run and place."""
+    if said.id is not None:
+        return said.id
+    if said.role is Speaker.USER:
+        return f"{run_id}:user:{index}"
+    return f"{run_id}:{attempt}:msg:{index}"
+
+
+def _identified(said: Said, run_id: str) -> dict[str, Any]:
+    """The message as the service stores it (:func:`recorded`), its ``custom_metadata`` with
+    its harness id when it has one: the id, the run, and the tool call it answers (a result)
+    or the first it makes (an assistant's calls)."""
+    message = recorded(said)
+    if said.id is None:
+        return message
+    call = said.tool_call_id or (said.tool_calls[0].id if said.tool_calls else None)
+    linked = {MESSAGE_ID: said.id, "run_id": run_id} | ({"tool_call_id": call} if call else {})
+    message["custom_metadata"] = message.get("custom_metadata", {}) | linked
+    return message
+
+
 class RunMemory:
     """The calls one run makes, in its scope."""
 
@@ -189,13 +221,15 @@ class RunMemory:
         window: Window,
         hints: bool,
         budget: int = CONTEXT_TOKEN_BUDGET,
+        conversation_budget: int | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> PromptContext:
         """What the prompt gets (at most ``budget`` tokens): with the agent's ``tools``, the
         skills it learned for the task and - unless ``hints`` is off - the tools that fit.
         ``window``: the thread's recent messages left out (``Window.NONE``: the framework
         keeps them itself), in the rendered text (``RENDERED``), or verbatim as
-        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own.
+        ``conversation.messages`` (``MESSAGES``) for the framework to replay as its own,
+        within ``conversation_budget`` tokens (``None``: the service's default).
         ``document_ids`` narrows the documents its passages come from to those (``None``:
         every one the scope may read)."""
         return await self.ctx.context(
@@ -206,6 +240,7 @@ class RunMemory:
             window=window is not Window.NONE,
             window_format="messages" if window is Window.MESSAGES else "rendered",
             document_ids=document_ids,
+            conversation_token_budget=conversation_budget,
         )
 
     # ------------------------------------------------------------------ pull
@@ -222,16 +257,18 @@ class RunMemory:
     # ------------------------------------------------------------------ records
     async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:
         """One attempt's transcript - its tool calls and their results with it - in one
-        request. Each message names itself (the run for the question, which every attempt
-        asks; the attempt and position for what the agent said), and the service stores a
-        message it has seen before once."""
+        request. Each message names itself by its harness id (``Said.id``, the same on every
+        attempt: ``conversation.identified``), so a resumed attempt that sends the first
+        one's messages again has each stored once: the service stores a message it has seen
+        before once. A message with no harness id (a helper's turns) names itself by its run
+        (the question) or by its attempt and position. A message with its harness id
+        carries it in its ``custom_metadata`` too, with the run it was said in and the tool
+        call it makes or answers (one level: the service allows two)."""
         batch = [
-            recorded(said)
+            _identified(said, run_id)
             | {
                 "source_system": SOURCE_SYSTEM,
-                "source_message_id": f"{run_id}:user:{index}"
-                if said.role is Speaker.USER
-                else f"{run_id}:{attempt}:msg:{index}",
+                "source_message_id": _source_id(said, run_id, attempt, index),
             }
             for index, said in enumerate(messages)
         ]
@@ -241,7 +278,7 @@ class RunMemory:
         await self.ctx.record_tool(
             call.tool,
             call.args,
-            output=outcome.output,
+            output=recorded_output(outcome.output),
             status=outcome.status.value,
             error_class=outcome.error_class,
             latency_ms=outcome.latency_ms,
@@ -388,3 +425,18 @@ def _agent_tool(tool: AgentTool) -> ToolSpec:
         source="memory",
         side_effects="read" if tool.name in READ_ONLY_TOOLS else "write",
     )
+
+
+def recorded_output(output: Any) -> Any:
+    """``output`` as the memory service records it: as it is when its JSON fits
+    :data:`RECORDED_OUTPUT_MAX_BYTES`; else its JSON cut to fit, as text that ends by saying
+    so (the service keeps the text's head as the call's summary and archives the rest), so the
+    call is still recorded and learned from. One serialisation; the cut text fits whatever the
+    output's size."""
+    text = json.dumps(output, default=str)
+    size = len(text.encode("utf-8"))
+    if size <= RECORDED_OUTPUT_MAX_BYTES:
+        return output
+    # the cut text is sent as a JSON string (quotes and escapes): half the limit leaves room
+    cut = text.encode("utf-8")[: RECORDED_OUTPUT_MAX_BYTES // 2].decode("utf-8", "ignore")
+    return f"{cut}... ({size} bytes; cut to the service's limit)"

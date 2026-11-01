@@ -34,8 +34,180 @@ own model work follows the harness's configuration.
   graph's own state with `thread_id=await h.conversation(user=, thread=)`. AG-UI answers an
   interrupt only for the user whose run it is (`404` for another user's thread named alike).
 
+### Changed
+
+- The tool hints narrow what the model is offered only from 30 tools in the run
+  (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
+  still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
+  looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
+  every adapter.
+- A stall no longer ends the run with no answer. A stall is the same call with the same
+  arguments in `max_repeats` steps, or every call failing in 3 steps in a row. The model is
+  now told so and called once more with no tool, as `StepLimit`'s last step is. The user
+  gets an answer that says what went wrong, for example that the tool timed out. The run
+  still stops (`ModelError`) when that call gives no answer.
+
+### Fixed
+
+- The memory context no longer breaks a provider's prompt cache from one turn to the next.
+  A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
+  question, as a system message ahead of the history, so the next turn shared nothing past
+  the instructions with this one. The model now gets it as the first part of the turn's
+  question, after the history; the graph's state is unchanged. With a prompt-caching
+  middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
+  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
+  long context does not read as one more saved note.
+- A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
+  says the file is the run's own scratch copy, which the user cannot open or download
+  (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
+  graph's state and told the user to open it (break-and-fix round 1, Deep Agents).
+- A conversation is no longer lost when memory fails mid-chat. Where memory replays the
+  conversation (its window) and its context call fails (an outage, the circuit open), the
+  earlier turns come from the run store, as with memory off; before, the model was sent the
+  question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
+- `query_result` adds money up exactly, on both engines: a column of decimals as written (at most
+  15 digits) is `DECIMAL` — DuckDB's own `DECIMAL(p, s)`; on SQLite a `REAL` whose `sum`,
+  `total` and `avg` (a window's too) add up in Python's `decimal` — and a number in an answer
+  is written as SQLite writes a `REAL` (15 significant digits). 6,000 two-decimal refunds
+  summed to `32266.149999999998` (ADV-2).
+- OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
+  on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
+  that ended the run with no answer (ADV-8).
+- A blank message (empty, or whitespace only) opens no run: `run`, `stream` and `start` raise
+  `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
+  model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
+  would fail every later turn (ADV-1).
+- `StallGuard`: three steps in a row in which every call failed stop the run only when a failure
+  among them repeats (the same tool, the same error). A model correcting itself — a wrong type,
+  then a missing argument, then a made-up tool name, then the right call — goes on to its
+  answer, bounded by `max_steps` (ADV-5).
+
+- A kept large result's note says its path is the run's own working copy, which the user
+  cannot open or download (`results.PRIVATE`). Asked for an Excel export, a model told the
+  user the rows were "saved as CSV at /large_tool_results/…, open it in Excel".
+- A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
+  counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
+  result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
+  and got them wrong.
+- A Docker sandbox's anonymous volumes (an image's `VOLUME`) are removed with it: before, each
+  run of such an image left one volume behind (50 runs, 50 volumes; now none).
+
+- A tool call whose output is over 256 KiB of JSON is recorded with the memory service again:
+  the service refuses a larger recorded output (422), so the call's record was lost and the
+  service never learned from it. The output is recorded cut to fit, saying so
+  (`clients.memory.recorded_output`).
+
+### Changed
+
+- The note the model gets when memory holds nothing (or only part) for the question says
+  what an honest answer does: name the detail it does not have, and offer to look it up or
+  ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
+
 ### Added
 
+- MCP elicitation: an `mcp(...)` server that asks the person in the middle of a call pauses
+  the run as `ask` does — one field of a few values a choice (a dropdown), any other form a
+  form with the server's schema (a `format: date` field a date picker), a link a choice — and
+  the answer goes back to the server when the run resumes, on both MCP protocol eras
+  (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
+- MCP resources: an `mcp(...)` server that has resources gets `<server>-read_resource`, its
+  description the map of what there is (resources and templates, at most 20, with the server's
+  `lastModified`); it reads one by its URI (a binary one described) or, given none, lists them
+  all as rows. A large resource is kept, paged and queried as any large result (`tools/resources.py`;
+  [tools.md](docs/tools.md#a-servers-resources-mcp-resources)).
+- A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
+  `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
+  else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
+  `<tenant>/<user>/<conversation>/<run>/`, names it in the run's journal and announces it (the
+  `file` event); `serve_chat` serves it to the run's own user at
+  `GET {path}/runs/{run_id}/files/{name}`: a 5-minute signed link where the store signs, else
+  streamed. Stored only: never parsed or remembered. New dependency: `fsspec`.
+
+- Forget by chat: `memory_forget` of what the user said ("forget my address"), which the memory
+  service refuses an agent, asks a person through the approval path (the run pauses as any
+  call that asks does) and, approved, forgets it as the user; rejected, the model reads why.
+  A memory the agent wrote is forgotten at once, as before. Needs the memory service to name
+  the memory it refuses (`details.memory_id`); an older one's refusal stays the error it was.
+- Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
+  returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
+  (also a LangChain tool's own artifact); the model reads the content alone and the call's
+  outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- The turn written to memory carries its run record (`Said.facts`, under
+  `custom_metadata["run_record"]`, plain values): each tool result its call's status, seconds,
+  sources (the trajectory's outcome of the same call), when it was fetched (`fetched`, UTC)
+  and its tool's `max_age`; the turn's last message the run's status, seconds and approvals —
+  what the memory service's steps list of the turn shows, with its evidence line for "why" and
+  "how sure" (trellis-memory 0.6.2). The fetch time is said there only: a tool result written
+  to memory is no longer stamped `[snapshot of <tool> from <UTC time>]`, and a replayed result
+  past its tool's age is marked out of date from its run record.
+- A `ReAct` agent with a known window sizes the conversation the memory service replays
+  (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
+  window, as `FitWindow` fits it) less its instructions, offered tools and question
+  (LangChain's `count_tokens_approximately`), the memory context's budget and 1,024 tokens for
+  the reply (`Agent.conversation_budget`). Tool-result clearing (`ThisTurnsResults`, LangChain's
+  `ClearToolUsesEdit`) clears only the turn under way's older results, never the replayed
+  turns' that memory already sized.
+- The cost benchmark's `--suite explain`: two-turn conversations, memory on, whose second turn
+  asks about the first answer (its steps, sources, tools, time, approvals...) or is an ordinary
+  follow-up, scored strictly against turn 1's own journal record (exact tool names, source
+  names and dates, the step count, seconds within a tolerance), with the made-up claims and
+  leaked template tags counted, every model request kept, and `--render` checking what a
+  llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
+- Large results in `ReAct` without a backend and in a `create_agent` graph with
+  `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
+  and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
+  its cut naming the `read_file` call that reads on from there.
+- `query_result` runs on DuckDB when the new `query` extra is installed (in `all`), and on
+  Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
+  one contract on both (the description names the engine; the same tables, column typing,
+  `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
+  Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
+  JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
+  query builds is at most 64 MB, and a query past its time is interrupted by a watcher
+  thread on either engine.
+- `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
+  of the run's saved results — each a table named by its tool, so one query joins them — with
+  formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
+  `regr_*`), offered with `read_file` on every adapter, bounded in time, input, sort memory and
+  answer (`tools.query`). A tool declared `paged=True` is fetched to its last page in one call
+  (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
+- Freshness: a tool's data is live by default; `tool(max_age=)`, `tool(freshness="static")`
+  (or `"live"`), a LangChain tool's `metadata`, an MCP tool's `_meta` say otherwise
+  (`tools.base.data_of`). Tool results replayed from memory's thread past the tool's age
+  (their fetch time is in their run record) are marked out of
+  date, the context says so, and the tool stays offered (`trellis.harness.snapshots`).
+- `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
+- Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
+  from the schemas the tools publish (a function's return annotation, now its
+  `ToolSpec.output_schema`; an MCP tool's `outputSchema`), said at the end of each linked
+  tool's description (`Chains: find_sku → sku_id → get_stock.`) in every framework, and kept
+  whole when the tool hints narrow what is offered ([tools.md](docs/tools.md#tool-chains)).
+  `benchmark/cost --suite classes --classes chain` measures two- to four-call chains.
+- `docs/research/`: the improvement backlog, the evaluation protocol every change must pass to
+  be kept, the scenario coverage audit and the self-explanation research.
+- Conversations across runs ([ADR 0005](docs/adr/0005-conversations-across-runs.md)):
+  - with memory off, a run of a conversation is given its earlier turns from the run store
+    (each run's question and answer) where the framework keeps no thread of its own —
+    messages for `ReAct`, graphs and OpenAI Agents, `agent.history` for a function, the
+    context's text for Claude and ACP;
+  - `run(mode=)` / `stream(mode=)`: `"queue"` (default, as before), `"interrupt"` (cancel the
+    conversation's working run and continue), `"steer"` (give the message to the working run
+    at its next step: `HarnessTools.before_model`, OpenAI Agents `call_model_input_filter`,
+    Claude `PostToolUse`; a function, ACP or a graph without the harness's middleware waits as
+    `"queue"`, said once — `Adapter.steers`);
+  - one id per message (`conversation.message_id`): the AG-UI text message and
+    `TOOL_CALL_RESULT` ids, and each message's `custom_metadata` in the memory service
+    (`message_id`, `run_id`, `tool_call_id`), stable across a resume;
+  - a Claude Agent SDK or ACP conversation continues its last turn's session in this process
+    (`agent.sessions`).
+  - `HarnessTools` (in `ReAct` and `middleware()`) has a `before_model` hook: one more
+    LangGraph step per model call, so a `recursion_limit` set to the bare minimum needs one
+    more.
 - `h.conversation(user=, thread=)`: the key a user's conversation keeps its state under.
 - `OpenAICompatible`, `Bifrost(OpenAICompatible)` and `ProviderSDK` routes, selected by
   `LLM_GATEWAY` from one registry that packages extend under the entry-point group
@@ -52,6 +224,34 @@ own model work follows the harness's configuration.
 - A conformance suite over every registered route, auth strategy and profile against stubs of
   OpenAI's chat completions, the Anthropic, Gemini, Ollama and Bifrost endpoints that speak it,
   a Google token refresh and an AWS SigV4 signature recomputed from the specification.
+
+### Removed
+
+- `automatic.ToolSelection`, `react.defaults_on` and the `benchmark.cost` variant
+  `main+selector`: a harness fallback to LangChain's `LLMToolSelectorMiddleware` when memory
+  gave no hints, which ADR 0003 §6 rules out (one owner of tool narrowing: memory's hints). A
+  team adds `LLMToolSelectorMiddleware` through `ReAct(middleware=)` itself.
+
+### Changed
+
+- A model call's HTTP status is retryable exactly when it is in bifrost-sdk's `RETRYABLE`
+  (408, 409, 425, 429, 500, 502, 503, 504), the set the gateway client and the memory service
+  use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
+  425 is now retryable; 501, 505 and the other 5xx are not.
+
+### Removed (one clearing pass, one read-back tool)
+
+- `read_result`, `READ_RESULT`, `READ_LIMIT`, `FIT_CLEARED` and `FitWindow`'s clearing of older
+  results: LangChain's `ClearToolUsesEdit` is the one clearing pass, and its placeholder names
+  `read_file` with the cleared call's id as its path (`/large_tool_results/<call id>`, Deep
+  Agents' own), paged from the graph's state with the limits every kept result uses (100 lines,
+  20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
+  naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
+  placeholder naming `read_result`, a tool that request did not offer.
+- `FitWindow(turns=False)` (ReAct on Deep Agents: a summarization after it) leaves tool results
+  to Deep Agents too: its overflow path offloads a result whole to its backend. Before, both cut
+  the same result, so a sandbox held it twice (the harness's whole copy, written in for code,
+  and Deep Agents' offload of the cut text).
 
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
@@ -70,7 +270,7 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   failed, timed-out, refused or skipped job is reported so; identical jobs run once; the
   budget is shared and stops the fan-out early; cancelling the run cancels them; with
   `RUNS_URL` the jobs queue in agent-runs for any worker. See
-  [docs/frameworks/react.md](docs/frameworks/react.md#helpers-at-once-delegate).
+  [docs/frameworks/react.md](docs/frameworks/react.md).
 - Child runs at once, adaptively, for every engine (`trellis.harness.admission`): a parent's
   sub-agent calls, nested `agent.run`s and `delegate` jobs are admitted under an AIMD limit (1
   to 16, from 4) that rises while the container's CPU and memory (cgroup limits), the
@@ -117,6 +317,17 @@ for — and that part is exported: `trellis.middleware()` gives a `create_agent`
   adds tools). `FitWindow(optional=)` and its `guidance` step, which only dropped the tool
   guidance, go too (refused the same way). See
   [docs/adr/0002-tool-choice.md](docs/adr/0002-tool-choice.md#amendment-2026-10-28-the-guards-removed).
+- `ReAct`'s `delegate` tool (`trellis.harness.delegate`), with what only it used: the wide-task
+  and model-tier routing that offered it (`automatic.Delegation`, `wide`, `model_tier`,
+  `SMALL_PARAMS`, `SMALL_FAMILIES`), the read-only helper runs (`Runtime.delegated`, the
+  `delegated` run metadata, the read-only toolbox and the bridge's `HelperOnlyReads` refusal),
+  its agent-runs queueing of jobs, the `delegate` stream event and the `delegate_8` overhead
+  case. Deep Agents has helpers natively: its `task` tool, offered as before (a sub-agent of
+  its own, else the general-purpose helper on a long task); the model calls it several times in
+  one step for helpers at once, and LangGraph runs those calls at once. Kept for every engine:
+  the adaptive limit of child runs and the live task tree
+  ([docs/runs.md](docs/runs.md#child-runs-at-once-and-the-task-tree)), Kimi Code's
+  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`, and a sub-agent's own time limit.
 
 ### Breaking
 

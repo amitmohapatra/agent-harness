@@ -21,7 +21,6 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.events import WARNING
 from trellis.harness.middleware import (
-    FIT_CLEARED,
     FITTED,
     ContextTooLarge,
     FitWindow,
@@ -79,7 +78,7 @@ async def test_a_request_that_fits_is_sent_as_it_is() -> None:
         FitWindow(optional=("a text",))  # pyright: ignore[reportCallIssue]
 
 
-async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted() -> None:
+async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted(narrowing: None) -> None:
     tools = [lc(f"tool_{n}") for n in range(40)] + [lc("refund_order", "Refunds an order.")]
     given = request([HumanMessage("please refund order o-7")], tools)
     window = int(_size(request([HumanMessage("please refund order o-7")], tools[:12])) / 0.95)
@@ -108,8 +107,10 @@ async def test_older_results_are_cleared_cut_and_older_turns_left_out() -> None:
     ]
     out = await sent(FitWindow(6000), request(messages, [lc("a")]))
     results = [m.text for m in out.messages if isinstance(m, ToolMessage)]
-    assert FIT_CLEARED in results or len(results) == 1  # the older one cleared or left out
+    # one clearing pass (LangChain's ClearToolUsesEdit, before it): FitWindow only cuts
+    assert all("cleared" not in r for r in results)
     assert "characters cut to fit the window" in results[-1]
+    assert not hasattr(ours, "FIT_CLEARED") and not hasattr(ours, "read_result")
     assert _size(out) <= int(6000 * 0.95)
     kept = await sent(FitWindow(6000, turns=False), request(messages, [lc("a")]))
     assert kept.messages[1].text == "first"  # a summarization after it has the older turns

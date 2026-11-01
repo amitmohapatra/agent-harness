@@ -29,6 +29,7 @@ this: `a2a(url)(message, tenant=, user=)` works from any code ([blocks/a2a.md](b
 | `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. A run another replica served is read from agent-runs' event log (with `RUNS_URL`), its events numbered by their position there. |
 | `POST {path}/runs/{run_id}/cancel` | Stop the run, whatever it is doing (`agent.cancel`): `200 {"runId", "status": "CANCELLED"}`, and its stream ends with `RUN_FINISHED` and a `cancelled` outcome. Only the run's own user (`404` for anyone else's); `409` once the run ended. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
+| `GET {path}/runs/{run_id}/files/{name}` | A file the run kept for its user (`Runtime.save_file`; its `file` event names it), from the file store (`TRELLIS_FILES_URL`): a `307` to a link signed for 5 minutes where the store signs (GCS, S3, Azure), else the bytes streamed. Only the run's own user. |
 
 What the agent is asked: the latest `user` message's text (its text parts, when its content is
 a list of AG-UI content parts), or the input's `state` when there is none. Its file parts are
@@ -47,7 +48,10 @@ are still there on replay. A pause arrives as `RUN_FINISHED` with an `interrupt`
 failure as `RUN_ERROR`; a cancellation as `RUN_FINISHED` with a `cancelled` outcome. A tool
 call's arguments (`TOOL_CALL_ARGS`) and output (`TOOL_CALL_RESULT`), `CUSTOM` events, the answer
 and the interrupt arrive as they are, through the agent's `on_output` hooks
-([hooks.md](hooks.md#mask-what-the-ui-sees)).
+([hooks.md](hooks.md#mask-what-the-ui-sees)). The answer's text messages carry one
+`messageId` per run (`<run>:answer` of the conversation, digested: the same on every attempt)
+and a `TOOL_CALL_RESULT` its result's (`result:<call>`): the ids the memory service keeps the
+messages under ([ADR 0005](adr/0005-conversations-across-runs.md)).
 
 How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
 `CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`

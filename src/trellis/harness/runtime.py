@@ -39,6 +39,8 @@ from trellis.harness import telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
+from trellis.harness.files import EVENT as FILE_EVENT
+from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
@@ -49,6 +51,7 @@ if TYPE_CHECKING:
     from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.conversation import Steer
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
@@ -65,9 +68,6 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 #: The tag of a framework's own tool that hands the work to another agent
 #: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
 HELPER: Final = "helper"
-#: The ``RunStart.metadata`` key of a ``delegate`` job's run (``trellis.harness.delegate``):
-#: how deep in delegation it is. Such a run only reads.
-DELEGATED: Final = "delegated"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -138,8 +138,14 @@ class Runtime:
     #: whether the run's own code read :attr:`context` (a function target, a graph's node)
     context_read: bool = field(default=False, repr=False)
     #: where memory keeps the conversation and the framework replays it as messages: the
-    #: thread's recent messages (``[]``: none yet); ``None`` where it does not
+    #: thread's recent messages (``[]``: none yet); with memory off, the conversation's
+    #: earlier turns from the run store (``Agent.recalled``); ``None`` where it does not
     history: list[Said] | None = None
+    #: the run continues the session its framework kept for the conversation's last turn
+    #: (``Agent.sessions``: a Claude Agent SDK or ACP session), which holds the history
+    continued: bool = False
+    #: the messages given to the run with ``mode="steer"`` that its framework took, in order
+    steers: list[Steer] = field(default_factory=list)
     #: how far memory covered the question (its ``evidence_status``: ``COMPLETE``,
     #: ``INCOMPLETE``, ``INSUFFICIENT``), when a context was pushed
     evidence: str | None = None
@@ -187,6 +193,12 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: when each tool call of this attempt returned, by its reference (the framework's call
+    #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
+    fetched: dict[str, datetime] = field(default_factory=dict)
+    #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
+    #: its table's name in a query (``tools.query.tables``)
+    kept_from: dict[str, str] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
@@ -218,9 +230,6 @@ class Runtime:
     #: the most this run may spend: its own (``run(budget=)``, kept with its record), else its
     #: agent's (``h.wrap(budget=)``); ``None``: no cap
     budget: Budget | None = None
-    #: how deep this run is in a ``ReAct``'s delegation (a ``delegate`` job's run: 1; 0: not
-    #: one): it only reads — a call of a tool that does more is refused (``tools.bridge``)
-    delegated: int = 0
     #: the helpers the framework spawns in this attempt (``bridges.helpers``), once its
     #: adapter made them
     helpers: Helpers | None = None
@@ -278,6 +287,13 @@ class Runtime:
     def conversation(self) -> str:
         """The key the run's conversation keeps its state under (``Identity.conversation``)."""
         return self.identity.conversation
+
+    def steered(self) -> list[Steer]:
+        """The messages sent to the run's conversation with ``mode="steer"`` since its
+        framework last looked (at one of its steps), now taken: its answer answers them."""
+        taken = self.agent.turns.steered(self.conversation, self.run_id)
+        self.steers.extend(taken)
+        return taken
 
     @property
     def tenant(self) -> str:
@@ -550,6 +566,27 @@ class Runtime:
             props=None if decision.props is None else dict(decision.props),
         )
 
+    def files_folder(self) -> str:
+        """Where this run's files are kept in the store: its tenant, user, conversation and run
+        (``files.scope``)."""
+        return scope(self.tenant, self.user, self.conversation, self.run_id)
+
+    async def save_file(
+        self, name: str, data: bytes, *, source: str, content_type: str | None = None
+    ) -> StoredFile:
+        """Keep ``data`` as the file ``name`` for the run's user (``harness.files``: stored, never
+        parsed or remembered), named in the run's journal and announced on its stream (the
+        ``file`` event: the file's name, size, media type, source), where AG-UI serves it
+        (``GET .../runs/{run_id}/files/{name}``). ``source``: what made it (a tool's name)."""
+        stored = await self.agent.harness.files.put(
+            self.files_folder(), name, data, source=source, content_type=content_type
+        )
+        kept = self.replay.journal.files
+        kept[:] = [f for f in kept if f["name"] != name] + [stored.model_dump()]
+        announced = stored.model_dump(exclude={"name"})
+        self.events.custom(FILE_EVENT, file=stored.name, **announced)
+        return stored
+
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any
     ) -> InterruptResolution:
@@ -601,12 +638,6 @@ MARKER: Final = "trellis_interrupt"
 #: earlier call of the same model step paused (``middleware.HarnessTools``): no question —
 #: the call runs, in its turn, when the run resumes.
 DEFERRED: Final = "trellis_deferred"
-
-
-def delegated_of(metadata: dict[str, Any]) -> int:
-    """How deep in delegation a run is, from its record's metadata (:data:`DELEGATED`)."""
-    depth = metadata.get(DELEGATED)
-    return depth if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0 else 0
 
 
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:

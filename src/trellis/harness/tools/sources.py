@@ -20,10 +20,10 @@ import re
 import typing
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, overload
+from typing import Any, Final, Literal, get_args, overload
 
 import httpx
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.runtime import current
@@ -32,9 +32,16 @@ from trellis.harness.tools.base import (
     REMOTE_TIMEOUT_SECONDS,
     SideEffects,
     Source,
+    Sourced,
     Tool,
+    citations,
+    data_of,
     invoked,
 )
+
+#: How a function tool returns its result (LangChain's ``response_format``): the content the
+#: model reads, or that and an artifact — the result's sources (``tools.base.Citation``).
+ResponseFormat = Literal["content", "content_and_artifact"]
 
 #: What an OpenAPI method does, as a risk tier.
 METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
@@ -66,17 +73,31 @@ class FunctionTool:
         side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
         idempotent: bool = False,
         timeout: float | None = None,
+        response_format: ResponseFormat = "content",
+        freshness: Literal["live", "static"] | None = None,
+        max_age: float | None = None,
+        paged: bool = False,
     ) -> None:
+        if response_format not in get_args(ResponseFormat):
+            raise ConfigurationError(
+                f"response_format is 'content' or 'content_and_artifact', not {response_format!r}"
+            )
         self.fn = fn
+        self.response_format = response_format
         self.model = _arguments_model(fn)
         said, params = documented(inspect.getdoc(fn) or "")
         self.spec = ToolSpec(
             name=name or fn.__name__,
             description=description or said,
             input_schema=_described(self.model.model_json_schema(), params),
+            output_schema=output_schema(fn),
             source="local",
             side_effects=side_effects,
             idempotent=idempotent,
+            **data_of(
+                {"freshness": freshness, "max_age": max_age, "paged": paged},
+                name=name or fn.__name__,
+            ),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -90,7 +111,17 @@ class FunctionTool:
     async def _run(self, args: dict[str, Any]) -> Any:
         validated = self.model.model_validate(args)
         values = {name: getattr(validated, name) for name in type(validated).model_fields}
-        return await invoked(self.fn, **values)
+        returned = await invoked(self.fn, **values)
+        if self.response_format == "content":
+            return returned
+        if not isinstance(returned, tuple) or len(returned) != 2:
+            raise ToolError(
+                f"{self.spec.name} is a content_and_artifact tool: it returns (content, "
+                f"artifact), not a {type(returned).__name__}",
+                source="tools",
+            )
+        content, artifact = returned
+        return Sourced(content, citations(artifact))
 
 
 @overload
@@ -103,6 +134,10 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool: ...
 @overload
 def tool(
@@ -112,6 +147,10 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> Callable[[Callable[..., Any]], FunctionTool]: ...
 def tool(
     fn: Callable[..., Any] | None = None,
@@ -122,6 +161,10 @@ def tool(
     side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
     idempotent: bool = False,
     call_timeout: float | None = None,
+    response_format: ResponseFormat = "content",
+    freshness: Literal["live", "static"] | None = None,
+    max_age: float | None = None,
+    paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
     """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
 
@@ -135,6 +178,18 @@ def tool(
     in seconds (a sync function runs in a worker thread, which cannot be stopped: its result
     is dropped). A result that comes from outside the run (a person, another system) is an
     ``ask`` in the function: ``return await trellis.current().ask(question, expects=...)``.
+    ``response_format="content_and_artifact"`` (LangChain's): the function returns ``(content,
+    artifact)`` — the content the model reads, and where it came from, a
+    ``trellis.Citation(name=, date=, link=)`` or a list of them — the run keeps the sources with
+    the call (an answer's ``Result.sources``, ``docs/explanations.md``); an artifact that names
+    no source is not kept.
+    A tool's data is live by default: an earlier result of it that the conversation replays is
+    a dated snapshot, marked out of date, and the model calls it again
+    (``trellis.harness.snapshots``); ``max_age`` (the seconds a value stays current) or
+    ``freshness="static"`` (reference data that does not change) say otherwise;
+    ``freshness="live"`` says it in the tool's description too. ``paged``: it returns its rows
+    a page at a time (a cursor argument, the next cursor in its result): one call fetches every
+    page (``tools.pages``).
     """
     made = functools.partial(
         FunctionTool,
@@ -143,6 +198,10 @@ def tool(
         side_effects=side_effects,
         idempotent=idempotent,
         timeout=call_timeout,
+        response_format=response_format,
+        freshness=freshness,
+        max_age=max_age,
+        paged=paged,
     )
     return made(fn) if fn is not None else made
 
@@ -231,6 +290,23 @@ def _arguments_model(fn: Callable[..., Any]) -> type[BaseModel]:
     return create_model(  # type: ignore[call-overload]
         f"{fn.__name__}_arguments", __config__=ConfigDict(extra="forbid"), **fields
     )
+
+
+def output_schema(fn: Callable[..., Any]) -> dict[str, Any] | None:
+    """The JSON schema of what ``fn`` returns, from its return annotation (pydantic's
+    ``TypeAdapter``; an async function's, what it resolves to): what tool chains read
+    (``tools.links``). ``None`` when it declares nothing, ``Any`` or ``None``, a name that
+    cannot be resolved, or a type no schema says."""
+    try:
+        returned = typing.get_type_hints(fn).get("return", inspect.Signature.empty)
+    except Exception:
+        returned = inspect.signature(fn).return_annotation
+    if returned in (inspect.Signature.empty, Any, None, type(None)) or isinstance(returned, str):
+        return None
+    try:
+        return TypeAdapter(returned).json_schema()
+    except Exception:  # a type pydantic has no schema for: nothing is said of it
+        return None
 
 
 # --------------------------------------------------------------------------- A2A

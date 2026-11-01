@@ -6,7 +6,10 @@
   replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
   the checkpointer already holds. Where memory keeps the conversation instead, its recent
   messages follow the context as LangChain's own — ``HumanMessage``, ``AIMessage`` with its
-  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay;
+  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay. A
+  ``create_agent`` graph (``ReAct``'s, Deep Agents') sends its model the context as the first
+  part of the turn's question instead, after the history a prompt cache keeps
+  (``middleware.with_question``);
 * transcript: the messages the run added after the question — tool calls and their results
   with the answer — so the conversation memory keeps replays as the framework's would;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
@@ -70,6 +73,7 @@ from typing import Any, ClassVar, Final
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     NativePause,
@@ -114,6 +118,8 @@ class LangGraphAdapter:
     name: ClassVar[str] = "langgraph"
 
     replays_history = True
+    history_in: HistoryIn = "messages"
+    sessions = False
 
     def __init__(self, target: Any = None) -> None:
         # every model call of the graph accounted to the run's budget, ModelHooks or not
@@ -138,6 +144,12 @@ class LangGraphAdapter:
         self.narrows: Narrowing = "turn" if per_turn else "none"
         #: the graph's own tools (:meth:`native`), once read
         self._native: list[ToolSpec] | None = None
+
+    def steers(self, target: Any) -> bool:
+        """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
+        ``HarnessTools`` takes a steered message before each model call
+        (``AgentMiddleware.before_model``); any other graph has no hook the harness owns."""
+        return HARNESS_TOOLS in (getattr(target, "channels", None) or {})
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The graph's checkpointer, unless it checkpoints into its run."""
@@ -635,13 +647,14 @@ def langchain_message(said: Said) -> Any:
 
 
 def added(messages: Sequence[Any]) -> list[Said]:
-    """What the run said after its question (the last user message): each answer with the
-    tool calls it made, and their results; ``[]`` without a question."""
+    """What the run said after its question (the last user message not steered into it): each
+    answer with the tool calls it made, and their results, and each message steered into it
+    (``middleware.STEERED``, with its id); ``[]`` without a question."""
     asked = next(
         (
             i
             for i in range(len(messages) - 1, -1, -1)
-            if getattr(messages[i], "type", None) == "human"
+            if getattr(messages[i], "type", None) == "human" and not _steered(messages[i])
         ),
         None,
     )
@@ -650,7 +663,9 @@ def added(messages: Sequence[Any]) -> list[Said]:
     out: list[Said] = []
     for m in messages[asked + 1 :]:
         kind = getattr(m, "type", None)
-        if kind == "ai":
+        if kind == "human":  # steered into the run
+            out.append(Said(Speaker.USER, _text(m), id=m.id))
+        elif kind == "ai":
             calls = tuple(
                 Called(c["id"] or "", c["name"], c.get("args") or {})
                 for c in getattr(m, "tool_calls", None) or ()
@@ -660,6 +675,12 @@ def added(messages: Sequence[Any]) -> list[Said]:
         elif kind == "tool":
             out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
     return out
+
+
+def _steered(message: Any) -> bool:
+    from trellis.harness.middleware import STEERED
+
+    return STEERED in (getattr(message, "response_metadata", None) or {})
 
 
 def _text(message: Any) -> str:

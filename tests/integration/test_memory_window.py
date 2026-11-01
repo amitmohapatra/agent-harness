@@ -7,6 +7,7 @@ returns): no drain, no worker, no blob of text in the system message."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 from typing import Any
 
 import pytest
@@ -21,8 +22,10 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.identity import conversation_key
+from trellis.harness.middleware import ASKED_WITH
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"
@@ -37,10 +40,19 @@ def stock(sku: str) -> int:
 
 
 def _said(request: dict[str, Any]) -> list[tuple[str, str]]:
-    """A chat request's messages after its system messages: (role, content)."""
+    """A chat request's messages after its system message: (role, content) — a question's own
+    words, without the memory context sent as its first part."""
     return [
-        (m["role"], m.get("content") or "") for m in request["messages"] if m["role"] != "system"
+        (m["role"], _own(m.get("content"))) for m in request["messages"] if m["role"] != "system"
     ]
+
+
+#: how the memory context sent with the question opens (``middleware.ASKED_WITH``)
+OPENED = ASKED_WITH.split("{context}")[0]
+
+
+def _own(content: Any) -> str:
+    return content[-1]["text"] if isinstance(content, list) else content or ""
 
 
 async def test_the_window_is_the_conversation_itself_and_the_last_turn_is_in_it(
@@ -64,10 +76,12 @@ async def test_the_window_is_the_conversation_itself_and_the_last_turn_is_in_it(
         ("assistant", "Tuesdays it is."),
         ("user", "What is my order number?"),
     ]
-    systems = [m["content"] for m in last["messages"] if m["role"] == "system"]
-    # the instructions, then the long-term context: one system message, and no transcript in it
-    assert systems[-1].startswith(memory_service.context_text)
-    assert "Recent conversation" not in "".join(systems)
+    # the instructions alone are the system message; the long-term context comes with the
+    # question, and no transcript in it
+    assert [m["content"] for m in last["messages"] if m["role"] == "system"] == ["s"]
+    context = last["messages"][-1]["content"][0]["text"]
+    assert context.startswith(OPENED + memory_service.context_text)
+    assert "Recent conversation" not in context
     asked = memory_service.named("context")
     assert all(c.body["window_format"] == "messages" for c in asked)
     assert memory_service.violations == []
@@ -84,8 +98,48 @@ async def test_a_tool_call_comes_back_with_its_result(
     assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant", "user"]
     [call] = messages[1]["tool_calls"]
     assert call["function"]["name"] == "stock" and '"sku": "a"' in call["function"]["arguments"]
-    assert messages[2]["tool_call_id"] == call["id"] and messages[2]["content"] == "7"
+    assert messages[2]["tool_call_id"] == call["id"]
+    # out of date already (a tool's data is live unless it says otherwise); when it was
+    # fetched is the run record's to say, not the result's
+    said = messages[2]["content"]
+    assert said == snapshots.STALE.format(tool="stock") + "\n7"
     assert messages[3]["content"] == "7 units."
+
+
+@pytest.mark.parametrize("kept", ["window", "checkpointer"])
+async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_with_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService, kept: str
+) -> None:
+    """A provider's prompt cache keeps what a request shares with the one before it, from its
+    start: the context, new for every question, comes after the history (with the question),
+    so the next turn's request repeats this one's history as it was sent (audit K1)."""
+    model = ScriptedChat(
+        [("stock", {"sku": "a"}), "7 units.", ("stock", {"sku": "b"}), "7 too.", "a and b."]
+    )
+    target: Any = (
+        ReAct(system_prompt="s", model=model)
+        if kept == "window"
+        else create_agent(model, tools=[stock], system_prompt="s", checkpointer=InMemorySaver())
+    )
+    agent = memory_harness.wrap(target, id=f"k1-{kept}")
+    if kept == "window":
+        agent = arm(agent, [stock])
+    questions = ("How many a?", "And b?", "Which did I ask about?")
+    firsts = []
+    for text in questions:
+        memory_service.context_text = f"Facts for: {text}"
+        before = len(model.script.requests)
+        result = await agent.run(text, user="u1", thread=THREAD)
+        assert result.status is RunStatus.SUCCESS, result.error
+        firsts.append(model.script.requests[before]["messages"])
+    for messages, text in zip(firsts, questions, strict=True):
+        assert [m["role"] for m in messages].count("system") == 1  # the instructions alone
+        assert messages[0] == {"role": "system", "content": "s"}
+        context, question = messages[-1]["content"]
+        assert messages[-1]["role"] == "user" and question == {"type": "text", "text": text}
+        assert context["text"].startswith(OPENED + f"Facts for: {text}")
+    for earlier, later in itertools.pairwise(firsts):
+        assert later[: len(earlier) - 1] == earlier[:-1]  # the history, as it was sent
 
 
 async def test_multilingual_turns_reach_the_model_as_said(
@@ -159,7 +213,7 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
     assert kinds == ["user", "function_call", "function_call_output", "assistant", "user"]
     call, output = said[1], said[2]
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
-    assert output["output"] == "result a"
+    assert output["output"] == "result a"  # its fetch time is in its run record
     # memory's thread is the session: the context carries no window besides it
     assert all("window_format" not in c.body for c in memory_service.named("context"))
 
@@ -183,8 +237,8 @@ async def test_turns_run_at_once_on_one_thread_are_each_recorded_whole(
 
 
 async def test_with_memory_down_the_run_goes_on_and_the_turn_is_queued() -> None:
-    """As memory fails today: a warning, no context, the transcript queued - no attempt to
-    write it before the run returns, and no other fallback."""
+    """As memory fails: a warning, no context, the transcript queued - no attempt to write it
+    before the run returns (a first turn has no earlier turns for the run store to give)."""
     service = FakeMemoryService(fail={"context", "messages"})
     async with Harness(config=Settings(), memory=service.client()) as h:
         model = ScriptedChat(["ok"])
@@ -200,6 +254,47 @@ async def test_with_memory_down_the_run_goes_on_and_the_turn_is_queued() -> None
         assert _said(model.script.requests[-1]) == [("user", "hi")]
         await h.writes.drain()
         assert h.writes.failed == 1  # the transcript, tried by the queue alone and reported
+
+
+async def test_with_memory_down_mid_conversation_the_earlier_turns_come_from_the_run_store() -> (
+    None
+):
+    """Memory answered the first turn and fails on the second (an outage, a circuit open):
+    the conversation is not lost - its earlier turns come from the run store, each one's
+    question and answer, as with memory off."""
+    service = FakeMemoryService()
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        model = ScriptedChat(["noted: tides", "you said tides"])
+        agent = h.wrap(create_agent(model, tools=[]), id="outage")
+        await agent.run("remember tides", user="u1", thread=THREAD)
+        service.fail = {"context", "messages"}
+        events = [e async for e in agent.stream("what did I say?", user="u1", thread=THREAD)]
+        warnings = [
+            e.data["code"]
+            for e in events
+            if e.type is RunEventType.CUSTOM and e.data["name"] == "warning"
+        ]
+        assert "memory_unavailable" in warnings
+        assert _said(model.script.requests[-1]) == [
+            ("user", "remember tides"),
+            ("assistant", "noted: tides"),
+            ("user", "what did I say?"),
+        ]
+
+
+async def test_with_memory_down_a_thread_the_framework_keeps_is_not_given_twice() -> None:
+    """The graph keeps its own thread (a durable checkpointer): memory failing adds nothing."""
+    service = FakeMemoryService()
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        model = ScriptedChat(["noted: tides", "you said tides"])
+        graph = create_agent(model, tools=[], checkpointer=own_thread())
+        agent = h.wrap(graph, id="kept-outage")
+        await agent.run("remember tides", user="u1", thread=THREAD)
+        service.fail = {"context", "messages"}
+        await agent.run("what did I say?", user="u1", thread=THREAD)
+        said = _said(model.script.requests[-1])
+        assert said.count(("user", "remember tides")) == 1
+        assert said[-1] == ("user", "what did I say?")
 
 
 async def test_a_turn_whose_write_fails_is_queued_and_delivered() -> None:

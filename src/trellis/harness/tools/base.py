@@ -10,6 +10,11 @@ one executor, :func:`execute` — at most its ``timeout``, a call that only read
 idempotent) tried again after an error that may pass (:func:`retried`), a sync function in a
 worker thread (:func:`invoked`), and a call that timed out told to the model as
 :func:`timed_out` says (for one that does more than read: its effect is unknown).
+
+Where a result came from travels beside it, never in what the model reads: a tool that knows
+its source returns it as LangChain's ``content_and_artifact`` does — the content, and an
+artifact that is its :class:`Citation` (or a list of them) — and the outcome keeps the
+citations in its ``metadata`` (:data:`SOURCES`), which the run's trajectory keeps.
 """
 
 from __future__ import annotations
@@ -24,6 +29,8 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal, Protocol
 
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ValidationError as PydanticError
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_after_attempt
 
 from trellis.contracts import (
@@ -37,6 +44,7 @@ from trellis.contracts import (
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.features import Feature
+from trellis.harness.tools import pages
 
 SideEffects = Literal["read", "write", "irreversible"]
 
@@ -44,6 +52,31 @@ SideEffects = Literal["read", "write", "irreversible"]
 DEFAULT_SIDE_EFFECTS: SideEffects = "write"
 
 Runner = Callable[[dict[str, Any]], Awaitable[Any]]
+
+#: How long a value a tool returns stays current, as the tool declares it beside its other
+#: metadata (``tool(freshness="live")``, ``tool(max_age=)``, a LangChain tool's ``metadata``,
+#: an MCP tool's annotations, camel case there: ``maxAge``): kept on its ``ToolSpec`` as
+#: :data:`MAX_AGE`, in seconds — 0 for a live tool, whose every earlier value is out of date.
+#: A tool that says nothing is a snapshot like any other (``None``).
+MAX_AGE: Final = "max_age"
+FRESHNESS: Final = "freshness"
+#: A tool that returns its rows a page at a time, declared so (``tool(paged=True)``, a
+#: LangChain tool's ``metadata``, an MCP tool's ``_meta``): the harness follows its cursor to
+#: the last page (``tools.pages``).
+PAGED: Final = "paged"
+LIVE: Final = "live"
+#: A tool's data that does not change (reference data): its earlier values stay current.
+STATIC: Final = "static"
+#: What a tool that declares it adds to its description, so every framework's model reads it
+#: where it reads how to use the tool.
+CHANGES: Final = (
+    "Its values change: call it again for the current value whenever one is asked for; a "
+    "value it returned earlier (in this conversation, or remembered) is out of date."
+)
+CHANGES_AFTER: Final = (
+    "Its values change: a value it returned more than {age} ago is out of date: call it "
+    "again for the current value."
+)
 
 #: A JSON schema ``type`` and the Python values that are one (a bool is not a number).
 JSON_TYPES: Final[dict[str, tuple[type, ...]]] = {
@@ -71,6 +104,43 @@ REMOTE_TIMEOUT_SECONDS: Final = 120.0
 #: (:data:`OUTCOME_UNKNOWN`), which the memory service's tool records keep.
 UNKNOWN: Final = "unknown"
 OUTCOME_UNKNOWN: Final = "OutcomeUnknown"
+#: The ``ToolOutcome.metadata`` key of the sources a call's result came from (each a
+#: :class:`Citation`, as JSON).
+SOURCES: Final = "sources"
+
+
+class Citation(BaseModel):
+    """Where a tool's result came from: what the source is called (``name``), when what it said
+    was true or published (``date``, as the source gives it) and where to find it (``link``: a
+    URL, or a reference such as a document and page)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    date: str | None = None
+    link: str | None = None
+
+
+_CITED: Final = TypeAdapter(Citation | list[Citation])
+
+
+def citations(artifact: Any) -> list[Citation]:
+    """The sources an artifact names: a :class:`Citation`, or a list of them (as objects or as
+    JSON); anything else names none (a LangChain tool's artifact may be any value)."""
+    try:
+        found = _CITED.validate_python(artifact)
+    except PydanticError:
+        return []
+    return found if isinstance(found, list) else [found]
+
+
+@dataclass(frozen=True, slots=True)
+class Sourced:
+    """What a tool's run returns when it knows where its result came from: the ``content`` the
+    model reads and the ``sources`` it came from (:func:`execute` keeps them apart)."""
+
+    content: Any
+    sources: list[Citation]
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +161,13 @@ class Tool:
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
             raise ConfigurationError(f"{self.spec.name}: a timeout is a number of seconds over 0")
+        age = (self.spec.model_extra or {}).get(MAX_AGE)  # said only of what a tool declared
+        said = CHANGES if age == 0 else CHANGES_AFTER.format(age=_duration(age or 0))
+        if age is not None and said not in self.spec.description:
+            described = f"{self.spec.description.rstrip()} {said}".strip()
+            object.__setattr__(
+                self, "spec", self.spec.model_copy(update={"description": described})
+            )
 
     @property
     def name(self) -> str:
@@ -99,6 +176,70 @@ class Tool:
     @property
     def side_effects(self) -> str:
         return self.spec.side_effects
+
+
+def max_age(spec: ToolSpec) -> float | None:
+    """How long a value the tool returns stays current, in seconds: as it declared it
+    (:data:`MAX_AGE`); ``None`` for a tool that declared its data static (reference data: an
+    earlier value is as good as a new one); else 0 — live, by default: a tool's data changes,
+    so a value of an earlier turn, a replayed window or memory is a dated snapshot."""
+    extra = spec.model_extra or {}
+    if extra.get(FRESHNESS) == STATIC:
+        return None
+    found = extra.get(MAX_AGE)
+    return float(found) if isinstance(found, int | float) and not isinstance(found, bool) else 0.0
+
+
+def data_of(declared: Any, *, name: str = "the tool", strict: bool = True) -> dict[str, Any]:
+    """What a tool declares of the data it returns, as its ``ToolSpec`` keeps it: how long it
+    stays current (``{MAX_AGE: seconds}``: ``freshness`` ``"live"``, 0, or ``max_age`` /
+    ``maxAge`` seconds) and whether it returns its rows a page at a time (``{PAGED: True}``:
+    ``paged``, fetched to completion by the harness: ``tools.pages``) — read from a
+    mapping (a LangChain tool's ``metadata``, an MCP tool's annotations on the wire), or an
+    object's attributes and pydantic extras (the MCP SDK's ``ToolAnnotations``). A value of
+    another kind is refused, naming the tool — or, not ``strict`` (what a server says of its
+    tools), not read."""
+    if declared is None:
+        return {}
+    if isinstance(declared, dict):
+        found = dict(declared)
+    else:
+        found = {**(getattr(declared, "model_extra", None) or {}), **vars_of(declared)}
+    age = next((found[k] for k in (MAX_AGE, "maxAge") if found.get(k) is not None), None)
+    freshness = found.get(FRESHNESS)
+    problem = None
+    if freshness is not None and freshness not in (LIVE, STATIC):
+        problem = f"{name}: freshness is {LIVE!r} or {STATIC!r} (or give max_age in seconds)"
+    elif age is not None and (isinstance(age, bool) or not isinstance(age, int | float) or age < 0):
+        problem = f"{name}: max_age is a number of seconds, 0 or more"
+    if problem is not None:
+        if strict:
+            raise ConfigurationError(problem)
+        return {}
+    paging = {PAGED: True} if found.get(PAGED) is True else {}
+    if freshness == STATIC:
+        return {FRESHNESS: STATIC, **paging}
+    if freshness == LIVE:
+        return {MAX_AGE: 0.0, **paging}
+    return paging if age is None else {MAX_AGE: float(age), **paging}
+
+
+def vars_of(declared: Any) -> dict[str, Any]:
+    """An object's own attributes (``__dict__``, or a ``__slots__`` class's), as a mapping."""
+    try:
+        return dict(vars(declared))
+    except TypeError:
+        return {}
+
+
+def _duration(seconds: float) -> str:
+    """Seconds as a person says them: ``30 seconds``, ``5 minutes``, ``2 hours``, ``3 days``."""
+    for unit, size in (("day", 86_400), ("hour", 3_600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            count = int(seconds // size)
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    count = round(seconds)
+    return f"{count} second{'s' if count != 1 else ''}"
 
 
 class Source(Protocol):
@@ -143,6 +284,8 @@ async def execute(
     async def once() -> Any:
         nonlocal attempts
         attempts += 1
+        if tool.spec.model_extra and tool.spec.model_extra.get(PAGED):
+            return await pages.every_page(tool.spec, args, tool.run)  # every page, as one call
         return await tool.run(args)
 
     began = time.monotonic()
@@ -175,6 +318,15 @@ async def execute(
         timeout = ToolTimeout(text, unknown=not reads)
         timeout.__cause__ = exc
         return late, timeout
+    if isinstance(output, Sourced):
+        cited = [c.model_dump(mode="json", exclude_none=True) for c in output.sources]
+        sourced = ToolOutcome(
+            tool=tool.name,
+            output=output.content,
+            attempts=attempts,
+            metadata={SOURCES: cited} if cited else {},
+        )
+        return sourced, None
     return ToolOutcome(tool=tool.name, output=output, attempts=attempts), None
 
 

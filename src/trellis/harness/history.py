@@ -23,7 +23,10 @@ When memory owns it, the history travels as messages:
 * :func:`from_window` — the memory service's window (``window_format="messages"``) as
   messages, which each adapter turns into its framework's own (``prepare_input(history=)``);
 * :func:`recorded` — a message as the memory service stores it, and :func:`said_of` back
-  from that stored form (the write spool keeps it, a restart replays it).
+  from that stored form (the write spool keeps it, a restart replays it); the run-record
+  facts a message carries (``Said.facts``: a tool result's status, seconds and sources, the
+  turn's last message the run's) go with it under ``custom_metadata`` (:data:`RUN_RECORD`),
+  which the service's steps list of the turn shows.
 
 When memory owns a conversation's history and the framework keeps no store at all, the run's
 window is the thread's recent messages as these (a store kept in RAM replays the thread itself
@@ -143,6 +146,12 @@ class Said:
     content: str
     tool_calls: tuple[Called, ...] = ()
     tool_call_id: str | None = None
+    #: what the run's record says of this message (:data:`RUN_RECORD`), when it says anything
+    facts: Mapping[str, Any] | None = None
+    #: the harness's id of the message (``conversation.message_id``): the same wherever the
+    #: message is seen — the AG-UI stream, the memory service's thread, an attempt after a
+    #: resume — ``None`` until the run's transcript names it (``conversation.identified``)
+    id: str | None = None
 
 
 #: The memory service's role of each speaker, and the reverse.
@@ -155,17 +164,22 @@ MEMORY_ROLES: Final[Mapping[Speaker, str]] = {
 SPEAKERS: Final[Mapping[str, Speaker]] = {role: speaker for speaker, role in MEMORY_ROLES.items()}
 #: The kind the memory service keeps a tool result as: not chat, but replayed with its call.
 INTERNAL: Final = "INTERNAL"
+#: The ``custom_metadata`` key the memory service reads a message's run-record facts under.
+RUN_RECORD: Final = "run_record"
+#: The ``custom_metadata`` key a stored message keeps its harness id under (``Said.id``).
+MESSAGE_ID: Final = "message_id"
 
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
-    """The memory service's window as messages, in its order (a role the window does not
-    replay is left out)."""
+    """The memory service's window as messages, in its order, each with the run record the
+    service keeps of it (``Said.facts``; a role the window does not replay is left out)."""
     return [
         Said(
             role=SPEAKERS[m.role],
             content=m.text,
             tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
             tool_call_id=m.tool_call_id,
+            facts=getattr(m, RUN_RECORD, None) or None,
         )
         for m in messages
         if m.role in SPEAKERS
@@ -181,7 +195,7 @@ def answered(said: Sequence[Said]) -> list[Said]:
     kept: list[Said] = []
     for s in said:
         whole = not s.tool_calls or all(c.id in results for c in s.tool_calls)
-        message = s if whole else Said(s.role, s.content)
+        message = s if whole else Said(s.role, s.content, id=s.id)
         if message.role is Speaker.TOOL or message.content or message.tool_calls:
             kept.append(message)
     calls = {c.id for s in kept for c in s.tool_calls}
@@ -200,6 +214,13 @@ def recorded(said: Said) -> dict[str, Any]:
         ]
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
+    metadata: dict[str, Any] = {}
+    if said.facts:
+        metadata[RUN_RECORD] = dict(said.facts)
+    if said.id is not None:
+        metadata[MESSAGE_ID] = said.id
+    if metadata:
+        message["custom_metadata"] = metadata
     return message
 
 
@@ -217,6 +238,8 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
             for c in stored.get("tool_calls") or ()
         ),
         tool_call_id=stored.get("tool_call_id"),
+        facts=(stored.get("custom_metadata") or {}).get(RUN_RECORD),
+        id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
     )
 
 
@@ -224,6 +247,8 @@ __all__ = [
     "INTERNAL",
     "IN_RAM",
     "MEMORY_THREAD",
+    "MESSAGE_ID",
+    "RUN_RECORD",
     "Called",
     "MemoryThread",
     "Owner",

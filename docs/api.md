@@ -157,9 +157,10 @@ What `h.wrap` returns.
 
 ```text
 await agent.run(input, *, user, thread=None, tenant=None, run_timeout=None, deadline=None,
-                budget=None, without=(), framework_options=None, document_ids=None) -> Result
+                budget=None, without=(), framework_options=None, document_ids=None,
+                mode="queue") -> Result
 agent.stream(...same...) -> AsyncIterator[RunEvent]
-await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
+await agent.start(...same but mode..., priority=0, concurrency_key=None) -> RunHandle
 ```
 
 | Argument | Default | What it is |
@@ -174,6 +175,7 @@ await agent.start(...same..., priority=0, concurrency_key=None) -> RunHandle
 | `without` | `()` | parts off for this run, on top of the agent's; kept with the run ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | the agent's | the framework's own options for this run, over the agent's ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 | `document_ids` | none (every document the person's scope reads) | the documents (`h.add_document(...).document_id`) the run's memory context draws its passages from, none else; kept with the run and its sub-agents' runs ([memory.md](memory.md#push)) |
+| `mode` (`run`, `stream`) | `"queue"` | what the run does while another run of its conversation works in this process: `"queue"` waits for it, `"interrupt"` cancels it and continues the conversation, `"steer"` gives the message to it at its framework's next step — that run's answer is this run's — where the target takes one, else waits as `"queue"` ([runs.md](runs.md#a-message-to-a-busy-conversation-mode)) |
 | `priority` (`start`) | `0` | -1000 to 1000: a higher one is claimed first ([runs.md](runs.md#queue-order-and-busy-conversations)) |
 | `concurrency_key` (`start`) | `thread:<conversation>` (`h.conversation(user=, thread=)`) | runs sharing one run one at a time |
 
@@ -185,6 +187,11 @@ approver is not past a `run_timeout` of an hour, and is past a `deadline` an hou
 `run` runs to the end or the first pause. `stream` yields the run's contracts `RunEvent`s up to
 `RUN_FINISHED`; closing it early cancels the run. `start` queues the run for a worker and
 returns a [RunHandle](#runhandle).
+
+A blank message — an empty input, or whitespace only — opens no run: `run`, `stream` and
+`start` raise `ConfigurationError` before anything is recorded or sent to a model (a provider
+refuses a blank user message, and kept in the thread it would fail every later turn). The AG-UI
+surface answers it `422`; over A2A the task ends `rejected`.
 
 ### agent.resume
 
@@ -251,6 +258,13 @@ seconds; a `Result`). Cancel the run with `agent.cancel(handle.id)`.
 `run_id`, `status` (`SUCCESS`, `PAUSED`, `ERROR`, `TIMEOUT`, `QUEUED`, `CANCELLED`), `answer`,
 `interrupt` (a contracts `Interrupt` when paused), `error` (a contracts `AgentError`).
 
+## Citation
+
+`Citation(name, date=None, link=None)` — where a tool's result came from: what the source is
+called, when what it said was true or published (as the source gives it), and where to find it
+(a URL, or a reference). A `content_and_artifact` tool's artifact ([tool](#tool)); the call's
+outcome keeps it in its `metadata["sources"]`, never in what the model reads.
+
 ## Runtime
 
 `Runtime` — `trellis.current()` inside a tool or a node (`None` outside a run), and the second argument of
@@ -313,7 +327,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
 | `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`sandbox()`](#sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
 | `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
-| `max_steps` | 12 | model calls with tools in one invocation, then one more without (1 or more): a loop guard, counted again each invocation. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
+| `max_steps` | 12 | model calls a run makes (1 or more): LangChain's `ModelCallLimitMiddleware`, which ends the run with its own message at the limit; counted over the run (a resume included) in `ReAct`, per invocation in `middleware()`. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
 | `call_timeout` | none | the most one model call may take, in seconds (a tool's own `call_timeout` bounds a tool call) |
 | `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
 
@@ -341,7 +355,7 @@ The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
 `create_deep_agent` graph of your own — `create_deep_agent(model, tools,
 middleware=middleware())` — the settings meaning what
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
-MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
+MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` (LangChain's model call limit), the
 run's budget, planning on a long task, older results cleared and read back (with a
 `context_window`), the request fitted to the window, and `ModelHooks` (the span, a failed
 call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). A graph
@@ -375,14 +389,16 @@ the gateway's (Bifrost's virtual-key budgets).
 
 ```text
 tool(fn, *, name=None, description=None, side_effects="write", idempotent=False,
-     call_timeout=None)
+     call_timeout=None, response_format="content")
 @tool  /  @tool(...)
 ```
 
 A Python function (sync or async) as a tool: the schema from its signature (each parameter
 described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
 repeated call with its idempotency key has its effect once; `call_timeout` seconds per call
-([tools.md](tools.md)).
+([tools.md](tools.md)). `response_format="content_and_artifact"` (LangChain's): the function
+returns `(content, artifact)` — what the model reads, and where it came from, a
+[`Citation`](#citation) or a list of them, kept with the call's outcome.
 
 ### mcp, stdio
 
@@ -494,10 +510,10 @@ defining `before_model` or `after_model` is refused.
 ## Settings
 
 `Settings(llm_base_url=, llm_api_key=, llm_gateway=, llm_auth=, api_key=, memory_url=,
-runs_url=, spool_dir=, judge_virtual_key=)` — every field optional; `Settings.from_env()` is
+runs_url=, spool_dir=, judge_virtual_key=, files_url=)` — every field optional; `Settings.from_env()` is
 what `Harness()` reads: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_GATEWAY`, `LLM_AUTH`,
 `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
-`TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`. The tools' own variables (`OTEL_*`,
+`TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_FILES_URL`. The tools' own variables (`OTEL_*`,
 `LANGFUSE_*`, the providers' keys, `DOCKER_HOST`) are read by their own SDKs. Each field, its
 variable, default and an example: [configuration.md](configuration.md#settings-and-the-environment).
 

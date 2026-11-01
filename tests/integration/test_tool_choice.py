@@ -1,5 +1,6 @@
-"""Tool choice, on a scripted model: the native tool selector among the run's tools, the
-measured selector without hints, and ``tool_coverage`` scoring each item — a paused one too."""
+"""Tool choice, on a scripted model: the native tool selector among the run's tools (the
+team's own opt-in), no harness selector without hints, and ``tool_coverage`` scoring each
+item — a paused one too."""
 
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ from langchain.agents.middleware import LLMToolSelectorMiddleware
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Harness, ReAct, tool
 from trellis.contracts import ToolCall, ToolOutcome
 from trellis.contracts import ToolStatus as Status
@@ -112,33 +112,16 @@ async def test_an_item_paused_on_a_question_is_not_scored(harness: Harness) -> N
     assert item.status == "interrupted" and item.scores == []
 
 
-async def test_the_measured_selector_picks_without_hints_past_its_threshold_keeping_used(
-    harness: Harness, memory_service: FakeMemoryService
-) -> None:
-    from trellis.harness.automatic import ToolSelection
+async def test_without_hints_no_harness_selector_narrows_the_tools(harness: Harness) -> None:
+    """One owner of tool narrowing (ADR 0003 §6): memory's hints. Without them every tool is
+    offered and no selector of the harness's makes a model call of its own: there is no
+    fallback chain (``LLMToolSelectorMiddleware`` stays the team's own opt-in, above)."""
+    from trellis.harness import automatic, react
 
-    found = [tool(lambda q: q, name=f"find_{n}", side_effects="read") for n in range(6)]
-    model = ScriptedChatModel(
-        turns=[
-            ("ToolSelectionResponse", {"tools": ["find_1"]}),
-            ("find_1", {"q": "a"}),
-            ("ToolSelectionResponse", {"tools": ["find_2"]}),
-            "found",
-        ]
-    )
-    target = ReAct("s", model, middleware=[ToolSelection(above=2, keep=1)])
-    result = await arm(harness.wrap(target, id="picks"), found).run("find a", user="u")
+    assert not hasattr(automatic, "ToolSelection") and not hasattr(react, "defaults_on")
+    found = [tool(lambda q: q, name=f"find_{n}", side_effects="read") for n in range(25)]
+    model = ScriptedChatModel(turns=["found"])
+    result = await arm(harness.wrap(ReAct("s", model), id="all"), found).run("find a", user="u")
     assert result.answer == "found", result.error
-    offered = [
-        sorted(r["tools"]) for r in model.requests if r["tools"] != ["ToolSelectionResponse"]
-    ]
-    assert offered == [["find_1"], ["find_1", "find_2"]]  # the used one kept
-    # with hints, the hints narrow: no selector call
-    memory_service.candidates = ["find_0"]
-    hinted = ScriptedChatModel(turns=["found"])
-    from trellis import Settings
-
-    async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        target = ReAct("s", hinted, middleware=[ToolSelection(above=0, keep=1)])
-        assert (await arm(h.wrap(target, id="h"), found).run("x", user="u")).answer == "found"
-    assert sorted(hinted.requests[0]["tools"]) == sorted(["find_0", *MEMORY_TOOLS])
+    [request] = model.requests  # one model call: the answer, no selector call before it
+    assert sorted(request["tools"]) == sorted(f"find_{n}" for n in range(25))

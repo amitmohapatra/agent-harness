@@ -246,13 +246,55 @@ in process (the queue holds a worker's).
 contract (`ValidationError`). A conversation's runs waiting in process across replicas are not
 held across them: queue them (`start`) for that.
 
+## A message to a busy conversation: mode
+
+**What.** `agent.run(..., mode=)` and `agent.stream(..., mode=)` say what a message does when
+another run of its conversation works in this process ([ADR 0005](adr/0005-conversations-across-runs.md)):
+
+| `mode` | What happens |
+|---|---|
+| `"queue"` (default) | it waits for the working run to end, then runs: what a second message always did |
+| `"interrupt"` | the working run is cancelled (`agent.cancel`, reason `interrupted by a newer message of the conversation`); the message takes the turn and continues the conversation — the cancelled turn's question is in its history |
+| `"steer"` | the message is given to the working run at its framework's next step, and that run's answer is the message's: its run ends `SUCCESS` with that answer, streamed under that answer's message id |
+
+Where `"steer"` reaches the working run:
+
+| Target | Steers | Its hook |
+|---|---|---|
+| `ReAct`, a graph built with `middleware()` (Deep Agents with `HarnessTools` too) | yes | `HarnessTools.before_model`: a user message before the next model call |
+| OpenAI Agents SDK | yes | `RunConfig.call_model_input_filter` (after the run's own): a user item in each later model call's input |
+| Claude Agent SDK | yes, after a tool call | a `PostToolUse` hook's `additionalContext` (a query that calls no tool takes none) |
+| a function, Kimi (ACP), a graph without the harness's middleware | no (`Adapter.steers`) | none: the message waits as `"queue"`, said once per agent |
+
+A steered message the working run never took (it ended first, or ended without an answer)
+runs as its own turn. **When.** `interrupt` for a chat whose user sends a correction; `steer`
+for a "also…" while the agent works. **On failure.** `start` takes no `mode`: a queued run waits
+by its `concurrency_key`, and a worker's run is not held in process.
+
+## Earlier turns with memory off
+
+A run of a conversation reads its earlier turns from the run store when nothing else keeps
+them — memory off (`without={"memory"}`, or no `MEMORY_URL`), and a target with no thread of
+its own (no checkpointer, no OpenAI `session`) and no session continued: each earlier run's
+question and answer (a cancelled one's question), of the same agent, tenant, user and thread,
+the newest 10, oldest first. `ReAct`, a graph and an OpenAI agent get them as their own
+messages, a function as `agent.history`, Claude and Kimi in the context's text. With memory on,
+memory's window keeps the conversation as before ([memory.md](memory.md)).
+
+## A Claude or ACP session across turns
+
+A conversation's turn on the Claude Agent SDK or an ACP agent (Kimi) continues the session its
+framework kept for the conversation's last turn in this process (`agent.sessions`, the most
+recent 128 conversations): the journal's session path a resume after a pause takes, sent the
+turn's own prompt. A turn another process runs starts a new session, with the earlier turns as
+above (memory off) or memory's window (memory on).
+
 ## Child runs at once, and the task tree
 
 **What.** Every child run the harness starts — a sub-agent's call in any framework, `agent.run`
-inside a run, a `ReAct`'s `delegate` jobs ([react.md](frameworks/react.md#helpers-at-once-delegate))
-— is admitted under one adaptive limit (`trellis.harness.admission`): a parent run has at most
-that many of its own children working at once, the rest waiting for a slot. Each child admits
-its own children, so nesting never waits on a parent's slots.
+inside a run — is admitted under one adaptive limit (`trellis.harness.admission`): a parent run
+has at most that many of its own children working at once, the rest waiting for a slot. Each
+child admits its own children, so nesting never waits on a parent's slots.
 
 **Automatic: the limit adapts (AIMD).** It starts at 4 and stays between 1 and 16. Each child
 that ends while the process is healthy raises it by `1/limit` (about one more per round of
@@ -272,31 +314,20 @@ swarm's concurrency (`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`, unless the agent's
 it); a framework that spawns its own helpers (Deep Agents' `task`, an OpenAI agent as a tool,
 Claude's sub-agents) keeps its own parallelism.
 
-**Automatic: `delegate` jobs spread over the workers.** With `RUNS_URL`, a `delegate` job is
-queued in agent-runs instead of run in this process, so any worker with room takes it (scale
-the workers on the queue's depth, its `QUEUED` runs, with KEDA or an HPA: the harness does not
-scale them). Its
-`concurrency_key` is `delegate:<parent run>:<slot>`, one per admitted slot, so agent-runs' per-key
-limit (one by default) and the parent's slots agree; its budget is an equal share of what the
-parent has left (agent-runs keeps no spending); the parent polls for its result and cancels it
-when its own time is up or it is cancelled. Without `RUNS_URL` the jobs run in this process
-under the same limit.
-
 **The task tree.** Each child is on its parent's stream (`agent.stream`, `agent.events`, AG-UI's
 `CUSTOM` events) as it goes, every framework's alike:
 
 | `CUSTOM` event `name` | Data |
 |---|---|
-| `delegate` | a `ReAct`'s fan-out: `jobs`, `runs` (identical jobs run once), `limit` |
-| `helper_queued` | waiting for a slot: `run_id`, `agent_id`, `limit`, and for a job `job`, `helper` |
+| `helper_queued` | waiting for a slot: `run_id`, `agent_id`, `limit` |
 | `helper_started` | working: `run_id`, `agent_id` (a framework's own helper: `framework`, `kind`) |
-| `helper_finished` | ended: `status` (`success`, `partial`, `error`, `timeout`, `cancelled`, `paused`, `skipped`), `seconds`, `tokens` and `cost` (the child's spending, when the harness counted it), `error` |
+| `helper_finished` | ended: `status` (`success`, `partial`, `error`, `timeout`, `cancelled`, `paused`), `seconds`, `tokens` and `cost` (the child's spending, when the harness counted it), `error` |
 
 A child's spans are in its parent's trace, so Langfuse shows the same tree.
 
 **On failure.** A child that waits for a slot past its parent's time ends `timeout` (for a
-`delegate` job, reported in the merge; for a sub-agent's call, the call's error). Cancelling
-the parent cancels its children, queued ones included.
+sub-agent's call, the call's error). Cancelling the parent cancels its children, those waiting
+for a slot included.
 
 ## A run's events from anywhere
 

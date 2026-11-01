@@ -63,8 +63,8 @@ no checkpointer is run with it. Runnable:
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
 | Hooks | the tool and run hooks as for every target; a model call is LangChain middleware, as for `create_agent`: `create_deep_agent(..., middleware=[yours, ModelHooks()])` ([hooks.md](../hooks.md)) |
 | A stored prompt of the gateway (`middleware=[ModelHooks(prompt=stored("triage"))]`) | pinned at each run's start, journaled and said (a `prompt` event, the span's `trellis.prompt.*`); each model call gets the version the run pinned ([prompts.md](../prompts.md)) |
-| Tool hints | as for a `create_agent` graph ([langgraph.md](langgraph.md#what-is-automatic)): from 5 tools, each model call of the main agent is offered only the harness tools the run offers (the hinted ones, the memory tools, those already used); Deep Agents' state tools (`ls`, `read_file`...) and `task` are always offered, its other own tools as the run offers them; a sub-agent's model is offered the tools it was built with, and their calls are governed and recorded as the run's |
-| Memory | the context as a leading system message of the main agent; a sub-agent, a child run, gets the context for its task before the task description (`## Your task`); the memory tools come with `HarnessTools` (or `await h.memory_tools()` for a sub-agent you give them to) |
+| Tool hints | as for a `create_agent` graph ([langgraph.md](langgraph.md#what-is-automatic)): from 30 tools in the run, each model call of the main agent is offered only the harness tools the run offers (the hinted ones, the memory tools, those already used); Deep Agents' state tools (`ls`, `read_file`...) and `task` are always offered, its other own tools as the run offers them; a sub-agent's model is offered the tools it was built with, and their calls are governed and recorded as the run's |
+| Memory | the context as a leading system message of the main agent, sent to the model with the turn's question, after the history a prompt cache keeps; a sub-agent, a child run, gets the context for its task before the task description (`## Your task`); the memory tools come with `HarnessTools` (or `await h.memory_tools()` for a sub-agent you give them to) |
 
 Deep Agents' own `memory=[...]` (AGENTS.md files) and `skills=[...]` are prompts it loads from
 its backend; they are independent of the memory service and can be used beside it.
@@ -124,6 +124,12 @@ A Deep Agent is a graph: `framework_options=` goes into its run's config as for 
 (`recursion_limit`, `configurable` keys, merged key by key; a `thread_id` among them is
 refused: the thread is `run(thread=)` —
 [langgraph.md](langgraph.md#the-graphs-own-run-options)).
+
+## Conversations
+
+As for [LangGraph](langgraph.md#conversations): a Deep Agent built with `HarnessTools` in its
+middleware (`ReAct`'s, or `middleware()`) takes a `mode="steer"` message before its next model
+call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 ## Limits
 

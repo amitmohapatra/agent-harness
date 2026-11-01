@@ -66,7 +66,9 @@ long tasks; a short task must keep sending exactly that.
      stays the one that already has the history, with no duplicate: a team whose framework keeps
      the thread gets it there — durably only with a durable checkpointer (an in-memory one is
      lost with its process, and workers are stateless); everything else uses the memory window,
-     which outlives any worker. Seconds per turn were dominated by how long the model wrote
+     which outlives any worker. ([ADR 0005](0005-conversations-across-runs.md) adds the case
+     with no owner — memory off, no thread of the framework's — as the run store's turns, and
+     continues a Claude or ACP session across turns.) Seconds per turn were dominated by how long the model wrote
      (6.7 and 27.7 on average, one memory-variant turn taking 397 s) and are not a comparison.
 7. **Deleted after the architecture review (2026-10-21):** the vendor-native client, the
    per-step effort policy, the in-graph prompt cache, fallbacks from code, the structured-output

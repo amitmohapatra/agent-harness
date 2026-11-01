@@ -73,7 +73,9 @@ def triage(state: Ticket) -> dict[str, str]:
   `without={"tool_search"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
-it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
+it. Where memory replays the conversation (its window), the conversation's earlier turns then
+come from the run store, each one's question and answer, as with memory off: an outage mid-chat
+does not lose the chat. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
 
 ## Pull
 
@@ -86,7 +88,7 @@ the last listing stands, and a run when they were never listed goes without them
 | `memory_search(query, kinds?, time_from?, time_to?, k?)` | memories, documents and — `kinds: ["message"]` — what was said: this conversation's messages first, then the same user's earlier conversations' (never another user's), each with its `thread_id` ([past conversations](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/guide/04-retrieval.md#past-conversations)); `kinds: ["episode"]` finds which earlier conversation, one summary each |
 | `memory_remember(...)` | store a memory verbatim |
 | `memory_update(id, content)` | replace a memory (an `[m1]` handle from the context works) |
-| `memory_forget(id)` | forget one |
+| `memory_forget(id)` | forget one: a memory the agent wrote at once; what the user said ("forget my address"), which the service refuses an agent, after a person approves it (the run pauses on an approval, as any call that asks does), then as the user |
 | `profile_edit(block, old?, new)` | edit a pinned profile block |
 | `tool_search(task)` | the next step, plan, prefill and missing arguments among the run's own tools — the harness passes the run's toolbox with the call, and offers the tools it returns (`{tools: [{name, confidence, next?, args?, missing?}], plan?}`) to the model |
 
@@ -103,8 +105,14 @@ said:
   tool calls (on the assistant message, `tool_calls`) and their results (`TOOL` messages naming
   their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
   SDK) — each message named by the harness (`source_system: trellis-harness`,
-  `source_message_id`: the run for the question, which every attempt asks, the attempt and
-  position for what the agent said), so the service stores a message it has already seen once.
+  `source_message_id`: its harness id, the same on every attempt, so a resumed attempt that
+  sends the first one's messages again has each stored once; a message with no harness id, a
+  helper's, is named by its run and position), so the service stores a message it has already
+  seen once;
+  each message's `custom_metadata` carries its harness id (`message_id`: the conversation's
+  digest of `<run>:input`, `<run>:answer`, `result:<call>` or `call:<call>` — the same id the
+  AG-UI stream says, across a resume), its `run_id` and the `tool_call_id` it answers or makes
+  ([ADR 0005](adr/0005-conversations-across-runs.md)).
   A run started with no thread — a scheduled run — is its own thread (`thread = run_id`); a run
   with one writes to its conversation's thread — keyed by the tenant, the user and the thread
   (`h.conversation(user=, thread=)`), so two users' threads named alike are two threads. Where

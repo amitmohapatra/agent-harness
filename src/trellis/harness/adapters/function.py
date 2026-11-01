@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 from trellis.contracts import InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
     Extracted,
+    HistoryIn,
     Invocation,
     Narrowing,
     Output,
@@ -32,6 +33,9 @@ class FunctionAdapter:
     narrows: Narrowing = "none"
     #: the function reads its input as it is: memory's window is in ``agent.context``
     replays_history = False
+    #: with memory off, the conversation's earlier turns are ``agent.history``
+    history_in: HistoryIn = "messages"
+    sessions = False
 
     def __init__(self) -> None:
         # the function's own LangChain chat models, where LangChain is installed: accounted to
@@ -45,6 +49,9 @@ class FunctionAdapter:
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
+
+    def steers(self, target: Any) -> bool:
+        return False  # a function has no step the harness sees between its calls
 
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()

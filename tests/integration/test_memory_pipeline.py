@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
@@ -16,6 +17,7 @@ import pytest
 import respx
 from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
@@ -26,10 +28,14 @@ from tests.unit.test_toolbox import Def
 from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import telemetry
+from trellis.harness import snapshots, telemetry
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
+from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
+from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
+from trellis.harness.middleware import ASKED_WITH
 from trellis.memory.models import ToolHints
 
 
@@ -103,7 +109,12 @@ def test_agent_runs_needs_the_memory_services_keys() -> None:
 
 
 # --------------------------------------------------------------------------- push
-async def test_push_injects_the_context_as_a_system_message(
+def pushed(request: dict[str, Any]) -> str:
+    """The memory context as a request sends it: the first part of the question."""
+    return request["messages"][1]["content"][0]["text"]
+
+
+async def test_push_sends_the_context_with_the_question(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat(["7 units"])
@@ -112,9 +123,16 @@ async def test_push_injects_the_context_as_a_system_message(
     )
     result = await agent.run("how many a?", user="u1", thread="t1")
     assert result.answer == "7 units"
-    instructions, context = model.requests[0]["messages"][:2]
+    instructions, question = model.requests[0]["messages"][:2]
     assert instructions == {"role": "system", "content": "You answer stock questions."}
-    assert context == {"role": "system", "content": memory_service.context_text}
+    # after the history a prompt cache keeps: the question's first part (audit K1)
+    assert question == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": ASKED_WITH.format(context=memory_service.context_text)},
+            {"type": "text", "text": "how many a?"},
+        ],
+    }
     [call] = memory_service.named("context")
     assert call.scope["user_id"] == "u1"
     assert call.scope["thread_id"] == conversation_key("acme", "u1", "t1")  # u1's own "t1"
@@ -136,9 +154,9 @@ async def test_a_small_toolbox_gets_its_learned_skills_and_every_tool(
     assert result.status is RunStatus.SUCCESS, result.error
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": ["t0", "t1"], "k": 8}
-    pushed = model.requests[0]["messages"][1]["content"]
-    assert "## Learned skills for this task\n- refund-an-order: t0 -> t1" in pushed
-    assert "## Tools" not in pushed
+    sent = pushed(model.requests[0])
+    assert "## Learned skills for this task\n- refund-an-order: t0 -> t1" in sent
+    assert "## Tools" not in sent
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
     assert {"t0", "t1"} <= set(offered), "no hints: every tool offered"
 
@@ -163,7 +181,7 @@ async def test_a_memory_outage_is_a_warning_not_a_failure(
 
 # --------------------------------------------------------------------------- tool hints
 async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
@@ -174,7 +192,7 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
 
     [context] = memory_service.named("context")
     assert context.body["tools"] == {"available": [f"t{i}" for i in range(6)], "k": 8}
-    assert "## Tools" in model.requests[0]["messages"][1]["content"]  # confidence/args/missing
+    assert "## Tools" in pushed(model.requests[0])  # confidence/args/missing
     offered = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     memory_tools = list(MEMORY_TOOLS)
     # the candidates and the memory tools, never all six, sorted by name
@@ -183,6 +201,34 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     # tool_search found t5 among the run's own tools: offered from the next call on, after
     # the others (the order they were first offered: a prompt cache keeps the prefix)
     assert offered[2] == [*sorted(["t1", "t3", *memory_tools]), "t5"]
+
+
+async def test_confident_hints_narrow_a_small_tool_set_not_at_all(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """Below ``NARROW_FROM`` tools every tool is offered however confident the hints: narrowing
+    a small set hid the tool a question needed (a name looked up before its id was used)."""
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {f"t{i}" for i in range(6)} <= offered
+    assert "## Tools" in pushed(model.requests[0])  # the hints still said
+
+
+async def test_confident_hints_narrow_a_large_tool_set(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    memory_service.candidates = ["t3", "t1"]
+    model = ScriptedChat(["done"])
+    tools = many(NARROW_FROM)
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), tools)
+    result = await agent.run("look up a", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
+    assert {"t1", "t3"} <= offered and "t5" not in offered
 
 
 async def test_hints_below_the_floor_narrow_nothing(
@@ -204,7 +250,11 @@ async def test_hints_below_the_floor_narrow_nothing(
 
 @pytest.mark.parametrize(("top", "narrows"), [(0.5, True), (0.49, False)])
 async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
-    memory_harness: Harness, memory_service: FakeMemoryService, top: float, narrows: bool
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    top: float,
+    narrows: bool,
+    narrowing: None,
 ) -> None:
     """B13 at ``NARROW_FLOOR``: a best hint of exactly 0.5 narrows the offer (and drops the
     abstain note: a tool answers); 0.49 narrows nothing and the note stays."""
@@ -218,12 +268,12 @@ async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
     everything = sorted([f"t{i}" for i in range(6)] + list(MEMORY_TOOLS))
     assert offered == (sorted(["t3", *MEMORY_TOOLS]) if narrows else everything)
-    noted = "## Memory" in model.requests[0]["messages"][1]["content"]
+    noted = "## Memory" in pushed(model.requests[0])
     assert noted is not narrows
 
 
 async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
-    memory_service: FakeMemoryService,
+    memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """B16/B17: the hints are asked about the tools behind Code Mode too; when one is hinted,
     the narrowing keeps the meta-tools, the only way to reach it (they were dropped)."""
@@ -244,7 +294,7 @@ async def test_a_hint_behind_code_mode_keeps_the_meta_tools_that_reach_it(
 
 
 async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The offered set is the hints, the tools the learned plan names, the used ones and the
     memory tools — never all of the run's tools while hints exist."""
@@ -259,7 +309,7 @@ async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
 
 
 async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """A graph's tools are bound when it is built: the harness runs a copy of a
     ``create_agent`` graph whose model calls offer only the tools the run offers — its own
@@ -297,7 +347,7 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
 
 
 async def test_the_hints_narrow_what_a_deep_agent_is_offered(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
     """The harness tools are those the run offers; Deep Agents' state tools (its files) are no
     tools of the run's set, and its ``task`` hands work on: they stay offered."""
@@ -434,21 +484,32 @@ async def test_an_agent_searches_what_was_said_as_the_service_offers_it(
 
 # --------------------------------------------------------------------------- records
 async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
-    memory_harness: Harness, memory_service: FakeMemoryService
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(snapshots, "now", lambda: datetime(2026, 10, 30, 9, 0, tzinfo=UTC))
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="stock"), [stock])
     result = await agent.run("how many a?", user="u1")
     await memory_harness.writes.drain()
     [batch] = memory_service.named("messages")
-    # the question, the call with its result, the answer: as a checkpoint would replay them
-    assert [(m["role"], m["content"], m["source_message_id"]) for m in batch.body["messages"]] == [
-        ("USER", "how many a?", f"{result.run_id}:user:0"),
-        ("ASSISTANT", "", f"{result.run_id}:1:msg:1"),
-        ("TOOL", "7", f"{result.run_id}:1:msg:2"),
-        ("ASSISTANT", "7 units", f"{result.run_id}:1:msg:3"),
+    # the question, the call with its result, the answer: as a checkpoint would replay them,
+    # each under its harness id (the same on every attempt)
+    sent = batch.body["messages"]
+    assert [(m["role"], m["content"]) for m in sent] == [
+        ("USER", "how many a?"),
+        ("ASSISTANT", ""),
+        ("TOOL", "7"),
+        ("ASSISTANT", "7 units"),
     ]
+    assert [m["source_message_id"] for m in sent] == [
+        m["custom_metadata"]["message_id"] for m in sent
+    ]
+    assert sent[0]["source_message_id"] == question_id(result.run_id, result.run_id)
+    assert sent[3]["source_message_id"] == answer_id(result.run_id, result.run_id)
     call, answered = batch.body["messages"][1:3]
+    # when it was fetched is in its run record, the one place it is kept (``snapshots``)
+    facts = answered["custom_metadata"]["run_record"]
+    assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
     [made] = call["tool_calls"]
     assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
     assert answered["tool_call_id"] == made["id"] and answered["kind"] == "INTERNAL"
@@ -458,6 +519,29 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert outcome.body["target_kind"] == "run" and outcome.body["target_id"] == result.run_id
     assert outcome.body["verdict"] == "confirm" and outcome.body["source"] == "system"
     assert outcome.idempotency_key == f"{result.run_id}:outcome"
+
+
+async def test_a_large_result_is_recorded_within_the_services_limit(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The service refuses a recorded output over 256 KiB (its ``TOOL_OUTPUT_MAX_BYTES``) with
+    a 422, and the call's record was lost: a large result's call is recorded with its output
+    cut to the limit, so the service still learns from the call."""
+
+    @tool(side_effects="read")
+    def sales_rows(region: str) -> list[dict[str, Any]]:
+        """Every sales line of a region."""
+        return [{"region": region, "line": n, "note": "x" * 80} for n in range(5000)]
+
+    model = ScriptedChat([("sales_rows", {"region": "north"}), "5000 lines"])
+    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="rows"), [sales_rows])
+    await agent.run("every north line?", user="u1")
+    await memory_harness.writes.drain()
+    [recorded] = memory_service.named("record_tool")
+    output = recorded.body["output"]
+    assert len(json.dumps(output).encode()) <= RECORDED_OUTPUT_MAX_BYTES
+    assert isinstance(output, str) and output.startswith('[{"region": "north", "line": 0')
+    assert output.endswith("bytes; cut to the service's limit)")
 
 
 async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
@@ -502,13 +586,48 @@ async def test_the_transcript_is_recorded_on_a_pause_and_on_a_failure(
     ]
     run = paused.run_id
     assert sent[:3] == [
-        ("USER", "ask", f"{run}:user:0"),  # on the pause
-        ("USER", "ask", f"{run}:user:0"),  # again on the resumed attempt: the service stores
-        ("ASSISTANT", "yes", f"{run}:2:msg:1"),  # it once (its source id is the same)
+        ("USER", "ask", question_id(run, run)),  # on the pause
+        ("USER", "ask", question_id(run, run)),  # again on the resumed attempt: the service
+        ("ASSISTANT", "yes", answer_id(run, run)),  # stores it once (the same source id)
     ]
     assert sent[3][:2] == ("USER", "fail")  # a failed run's question is kept too
     # a run with no thread is its own thread
     assert {b.scope["thread_id"] for b in batches} == {paused.run_id, failed.run_id}
+
+
+async def test_a_resumed_graph_run_stores_each_message_of_its_transcript_once(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A checkpointed graph run paused on an approval and resumed sends its whole transcript
+    again on the second attempt: the question, and the first attempt's assistant call. Each
+    message is stored once: the service de-duplicates by ``source_message_id``, which is the
+    message's own stable id (``conversation.identified``), not its attempt (ADR 0005 §3)."""
+
+    @tool(side_effects="irreversible")
+    def wipe(disk: str) -> str:
+        """Wipe a disk."""
+        return "wiped"
+
+    model = ScriptedChatModel(turns=[("wipe", {"disk": "d1"}), "wiped d1"])
+    graph = create_agent(
+        model,
+        tools=await native_tools(memory_harness, wipe, framework="langgraph"),
+        checkpointer=InMemorySaver(),
+    )
+    agent = memory_harness.wrap(graph, id="graph-ops")
+    paused = await agent.run("wipe d1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
+    await memory_harness.writes.drain()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
+    assert done.status is RunStatus.SUCCESS, done.error
+    await memory_harness.writes.drain()
+    stored = memory_service.threads[paused.run_id]
+    said = [(m["role"], m["content"], bool(m.get("tool_calls"))) for m in stored]
+    assert said.count(("USER", "wipe d1", False)) == 1
+    assert sum(1 for role, _, calls in said if role == "ASSISTANT" and calls) == 1, said
+    assert [r for r, _, _ in said] == ["USER", "ASSISTANT", "TOOL", "ASSISTANT"], said
+    ids = [m["custom_metadata"].get("message_id") for m in stored]
+    assert len(ids) == len(set(ids)), ids
 
 
 async def test_an_approval_decision_is_feedback_on_the_tool_call(
@@ -834,26 +953,30 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
 @pytest.mark.parametrize(
     ("status", "note"),
     [
-        ("INSUFFICIENT", "say you do not know it; do not guess"),
-        ("INCOMPLETE", "Say what you do not know rather than fill the gap"),
+        ("INSUFFICIENT", "Memory holds nothing about this question"),
+        ("INCOMPLETE", "Memory covers only part of this question"),
         ("COMPLETE", None),
     ],
 )
 async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     memory_harness: Harness, memory_service: FakeMemoryService, status: str, note: str | None
 ) -> None:
-    """Abstention: memory with no evidence for the question must turn into "I don't know",
-    not a confident guess; the harness says so to the model with the context."""
+    """Abstention: memory with no evidence for the question must turn into an honest "I don't
+    know", not a confident guess; the harness says so to the model with the context — and
+    what an honest answer does: it names the detail it does not have and offers to look it up
+    or to be told it (a bare "I don't know" leaves the user nowhere)."""
     memory_service.evidence_status = status
     model = ScriptedChat(["I don't know your sister's name."])
     agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
     events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
-    system = model.requests[0]["messages"][1]["content"]
-    assert system.startswith(memory_service.context_text)
+    system = pushed(model.requests[0])
+    assert system.startswith(ASKED_WITH.split("{context}")[0] + memory_service.context_text)
     if note is None:
         assert "## Memory" not in system
     else:
         assert note in system
+        assert "say which detail you do not have" in system
+        assert "offer to look it up" in system and "ask the user for it" in system
     [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
     assert loaded.data["evidence_status"] == status
 
@@ -868,7 +991,7 @@ async def test_no_abstain_note_when_a_hinted_tool_answers_the_question(
     model = ScriptedChat(["done"])
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
     await agent.run("what is the daily meal allowance", user="u")
-    assert "## Memory" not in model.requests[0]["messages"][1]["content"]
+    assert "## Memory" not in pushed(model.requests[0])
 
 
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(

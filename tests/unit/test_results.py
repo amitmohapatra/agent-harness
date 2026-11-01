@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from trellis.harness import runtime as runtime_module
-from trellis.harness.journal import Journal
+from trellis.harness.journal import Journal, content_key
 from trellis.harness.tools import results
 from trellis.harness.tools.results import MAX_CHARS, PAGE_CHARS, kept, read, read_file, readable
 
@@ -18,7 +19,7 @@ from trellis.harness.tools.results import MAX_CHARS, PAGE_CHARS, kept, read, rea
 def journal() -> Iterator[Journal]:
     """A run in progress: what ``tools.results`` reads of it is its journal."""
     journal = Journal()
-    run = SimpleNamespace(replay=SimpleNamespace(journal=journal))
+    run = SimpleNamespace(replay=SimpleNamespace(journal=journal), toolbox={}, native={})
     token = runtime_module._current.set(run)  # type: ignore[arg-type]
     yield journal
     runtime_module._current.reset(token)
@@ -93,3 +94,43 @@ def test_read_checks_the_arguments_the_model_wrote(journal: Journal) -> None:
     assert read({"file_path": path, "limit": 1}).startswith("1  z\n…[")
     assert read({"offset": 1}).startswith(f"{results.READ_FILE} was not run: missing required")
     assert "unknown" in read({"file_path": path, "page": 2})
+
+
+@pytest.fixture
+def run(journal: Journal) -> SimpleNamespace:
+    """The run in progress the ``journal`` fixture set (its tools: ``toolbox``, ``native``)."""
+    return runtime_module._current.get()  # type: ignore[return-value]
+
+
+def test_a_kept_text_is_named_by_its_content_and_read_on_from_where_a_cut_starts(
+    journal: Journal,
+) -> None:
+    text = "\n".join(f"row {n}" for n in range(1, 101))
+    path = results.keep(text)
+    assert path == f"/large_tool_results/{content_key('result', text)}"
+    assert journal.results == {path: text} and results.keep(text) == path  # kept once
+    two = len("row 1\nrow 2\n")
+    assert results.line_at(text, 0) == 0
+    assert results.line_at(text, two) == 2  # on a line's end: the next line
+    assert results.line_at(text, two + 2) == 2  # within a line: that line, again
+    assert path is not None and read_file(path, offset=2, limit=1).startswith("3  row 3")
+
+
+def test_outside_a_run_nothing_is_kept_and_no_code_runs() -> None:
+    assert results.keep("x") is None and results.coding_tool() is None
+
+
+@pytest.mark.parametrize(
+    ("toolbox", "native", "said"),
+    [({"sandbox_exec": 1}, {}, "sandbox_exec"), ({}, {"execute": 1}, "execute"), ({}, {}, None)],
+)
+def test_a_run_with_a_sandbox_is_told_the_kept_result_is_a_file_there_to_run_code_over(
+    run: SimpleNamespace, toolbox: dict[str, Any], native: dict[str, Any], said: str | None
+) -> None:
+    run.toolbox, run.native = toolbox, native
+    stub = readable("y\n" * MAX_CHARS)
+    path = kept_path(stub)
+    code = results.CODE.format(path=path, tool=said)
+    assert (code in stub) is (said is not None)
+    if said is not None:  # said before the preview, which a small model reads past
+        assert stub.index(code) < stub.index("Here is a preview")

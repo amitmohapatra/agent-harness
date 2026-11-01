@@ -11,7 +11,7 @@ catalog.
 | Where from | Tools | Side effects |
 |---|---|---|
 | **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. Code Mode is for the gateway's servers | the server's annotations, as above |
+| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does; a server's resources are read with one tool, `<server>-read_resource` ([MCP resources](#a-servers-resources-mcp-resources)). Code Mode is for the gateway's servers | the server's annotations, as above |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `call_timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, call_timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `call_timeout` seconds per exchange | `"write"` |
 | a wrapped agent, in a `ReAct`'s `subagents=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
@@ -34,6 +34,48 @@ effects. An administrator sets `approve_when` on
 them there ([governance.md](governance.md)). Concurrent runs that find the toolbox stale share
 one listing.
 
+### A server that asks: MCP elicitation
+
+An `mcp(...)` server may ask the person in the middle of a call (MCP elicitation): the harness
+tells the server it can be asked (the SDK's client capability, so a server asks only then), and
+a question pauses the run as `trellis.current().ask` does ([interrupts.md](interrupts.md)):
+the run's user's to answer, in their inbox, on AG-UI's interrupt, over A2A. What they are shown
+follows from the server's form (`tools/elicit.py`):
+
+| The server asks | The person is shown | The server gets |
+|---|---|---|
+| one field that picks from values (`enum`, or `oneOf` of `const` with a `title`; an `array` of them picks several) | a choice (`options`, `multiple`): a dropdown | `{field: value}` |
+| any other form (strings, numbers, booleans, a `format: date` field) | a form with the server's schema as `expects` (a date picker where the surface renders JSON Schema) | the form's content |
+| a link to open (`mode: url`) | a choice: opened it, or declined | `accept` or `decline` |
+
+A rejection is the server's `decline`; a cancel ends the run (the server is told). The answer
+is journaled as any `ask`'s: the call is made again when the run resumes (on any worker), and
+the server is answered at once. On the MCP protocol of 2026-07-28 the question comes back in
+the call's result and the call is made again with the answer; before it, the server's question
+is a request of its own that names no call, so a question that comes while several calls to
+the same server are under way is refused, the server told why.
+
+### A server's resources: MCP resources
+
+An `mcp(...)` server that says it has resources (its `resources` capability) and lists at least
+one gets one more tool, `<server>-read_resource` (`tools/resources.py`), a read:
+
+- its description is the map of what there is: one line per resource (URI, name, description,
+  type, when the server says it last changed: `lastModified`) and template (its
+  `{placeholders}` to fill in), at most 20, then a line saying there is more;
+- `read_resource(uri=...)` reads one resource: its text, a binary one described (its type and
+  size), a template's URI with its placeholders filled in; an unknown URI is an error the model
+  reads;
+- `read_resource()` with no URI lists every resource and template (every page), as rows.
+
+What it reads is a tool result like any other, with no store of its own: governed, journaled,
+and a large one kept in the run, previewed, paged with `read_file` and queried with
+`query_result` ([below](#large-results)) — a CSV resource of 20,000 rows is counted and summed
+in SQL, on every adapter that keeps results. Its data is live ([freshness](#values-that-change-freshness)):
+replayed on a later turn it is a dated snapshot. The listing is read again with the tools
+(every `TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
+none.
+
 ## Tool choice: what helps the model pick the right tool
 
 What a model chooses from is each tool's name, description and parameter schema — kept as
@@ -45,13 +87,40 @@ format. What helps it choose, whatever the source:
 |---|---|
 | **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
 | **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
-| **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
+| **Fewer tools per call** — the memory service's tool hints (they narrow from 30 tools in the run, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
+| **Tool chains** — which tool's output is another's argument (`find_sku → sku_id → get_stock`), read from the schemas the tools publish ([below](#tool-chains)) | automatic: a function's return annotation, an MCP tool's `outputSchema` |
 | **What it can do** — capabilities beyond the tools, said plainly | the instructions: `ReAct("... You cannot accept an image upload.", ...)` |
 | **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
 
 [`examples/06_scenarios/tool_choice.py`](../examples/06_scenarios/tool_choice.py) and
 `tests/live/test_live_tool_choice.py` measure tool choice per item; every framework gets the
 descriptions, the lint and the hints ([frameworks/react.md](frameworks/react.md#tool-choice)).
+
+### Tool chains
+
+When one tool's answer is another's argument — `find_sku(name)` gives a `sku_id`,
+`get_stock(sku_id)` takes it — the harness reads it from the schemas the tools publish
+(`trellis.harness.tools.links`): a field of one tool's output schema that a declared argument
+of another takes, by name and compatible type (records in a list included), or an `id` by the
+tool's noun (`find_sku`'s `id` is a `sku_id`). Generic names (`name`, `status`, `items`...)
+link nothing. Each linked tool's description then ends with its chains, in every framework:
+
+```text
+Chains: find_sku → sku_id → get_stock; get_stock → supplier_id → supplier_lead_time.
+```
+
+so a model with nothing learned yet calls them in order, and the tool hints keep a hinted
+tool's chain offered ([below](#tool-hints-what-the-model-is-offered)). The output schema is a
+function's return annotation (`-> Stock`, a pydantic model or a `TypedDict`: pydantic's
+`TypeAdapter`), an MCP server's `outputSchema`; a tool that declares none (an untyped
+function, an OpenAPI operation, a gateway's MCP tool, whose listing carries no output schema)
+links nothing — nothing is guessed. Once runs succeed, the memory service learns the chain as
+a procedure with its argument bindings (`step 1.sku_id` from step 0's output) and hands the
+next step and its arguments over with the hints. `benchmark/cost` measures chains
+(`--suite classes --classes chain`: two to four dependent calls, cold and reworded), and
+`benchmark/tool_chains` measures their shapes: depth, fan-out, fan-in, a failing step, an id in a
+large result, a follow-up
+([evaluation.md](evaluation.md#tool-chain-benchmark)).
 
 ## Every call
 
@@ -81,19 +150,107 @@ should check, the journal keeps that, and the call is never run again blind.
 A result longer than 80,000 characters (20,000 tokens) is not what the model reads: it is
 saved as a file, and the model reads where (`/large_tool_results/<id>`) with a head-and-tail
 preview, then pages the rest with `read_file` (`file_path`, `offset` the line to start from,
-`limit` the most lines). One convention everywhere, automatic, nothing to configure:
+`limit` the most lines). The note with it says the path is the run's own working copy, for
+`read_file` and `query_result`: the user cannot open or download it, so the model does not
+offer it as an export (`results.PRIVATE`). One convention everywhere, automatic, nothing to
+configure:
 
 | Target | Who cuts | Where the whole result is kept |
 |---|---|---|
-| `ReAct`, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's state |
-| a `create_agent` graph | add `FilesystemMiddleware(tools=["read_file"])` (or build it with `create_deep_agent`) | the graph's state |
-| OpenAI Agents, Claude | the harness, as Deep Agents does (`tools/results.py`; Deep Agents is not needed) | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
+| `ReAct` given a backend, Deep Agents | Deep Agents' `FilesystemMiddleware` (on by default: [react.md](frameworks/react.md#the-middleware)) | the graph's backend (its state, a disk, the run's sandbox) |
+| `ReAct` (no backend), a `create_agent` graph with `middleware()` | the harness (`HarnessTools`, as Deep Agents does: `tools/results.py`), its `read_file` offered once a result is kept | the run's journal: it stays readable for the rest of the run, across a pause and on another worker |
+| OpenAI Agents, Claude, Kimi (MCP) | the harness, the same way (Deep Agents is not needed) | the run's journal |
+| a `create_agent` graph of your own (no `middleware()`) | add `FilesystemMiddleware(tools=["read_file"])` (or build it with `create_deep_agent`) | the graph's state |
 | a function target, Way 2 | nobody: your code gets the whole result and decides what its model reads | — |
 
 On OpenAI Agents `read_file` is offered once the run keeps a result (`FunctionTool.is_enabled`);
 on Claude it is on the `trellis` server from the start (the CLI lists a server's tools once).
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
+
+Claude and Kimi have file readers of their own (Claude's `Read`, Kimi's `Read`); the harness's
+`read_file` on its server is still the one that reads a kept result, by measurement
+(`test_kimi.py::test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read`):
+writing the result into the agent's workspace instead would put a second copy in the user's
+working directory, which a resume on another worker does not have (the journal is what
+survives it), and Kimi's `Read` returns 100,000 characters at once by default — the whole
+96,899-character result, about 25,000 tokens, in one call — where a `read_file` page is 100
+lines (1,219 characters in that test) and `query_result` computes without reading rows.
+
+A result under 80,000 characters that still does not fit a small window is cut to its head
+and tail by `FitWindow`; the cut is kept the same way and says where the rest is
+(`…[N characters cut to fit the window; the rest: read_file(file_path="…", offset=L)]…`, the
+line the cut starts on), so no row is silently out of reach.
+
+### Counting, summing, ranking over a large result
+
+A model that pages 10,000 rows into its context to add them up gets the sum wrong, so it never
+has to. In order of preference:
+
+1. **the tool's own arguments** — a tool that filters, sorts, limits or aggregates on its side
+   (`max_stock`, `category`, `top`, `group_by`) answers exactly and small: say so in its
+   parameters' descriptions (the model reads every tool's schema; the lint warns about a
+   parameter with no description);
+2. **`query_result`**: offered with `read_file` whenever a result is kept, on every adapter
+   (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi):
+   a read-only SQL `SELECT` over every row, in process, no sandbox (`tools/query.py`). It runs
+   on DuckDB when the `query` extra is installed, else on Python's own SQLite (no dependency):
+   chosen by what is installed, never by a setting
+   ([ADR 0007](adr/0007-query-engine.md)); the description names the engine, so the model
+   writes its SQL. Every result the run saved is a table named by the tool that returned it
+   (`result` is the file asked about), so one query joins results of several tools; a JSON
+   array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
+   `|`), else one row per line, with whole-number, decimal, number and text columns typed
+   alike on both engines (a code such as `007`, or an id past 64 bits, stays text). A decimal
+   column (digits and a point as written, at most 15 digits: money) adds up exactly — DuckDB's
+   own `DECIMAL`; on SQLite `sum`, `total` and `avg`, a window's too, in Python's `decimal` —
+   and every number an answer holds is written as SQLite writes a `REAL` (15 significant
+   digits): `32266.15`, never `32266.149999999998`. Besides arithmetic,
+   `CASE`, math, date and window functions (a moving average, `lag` for growth), it has
+   `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `julianday(d)`, `corr`,
+   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` on both. Only reading runs (one
+   `SELECT`; never a write, another file, the network, an extension or a setting: SQLite's
+   authorizer, DuckDB locked after loading), on a database made for the query and closed
+   after it whatever happens, in a worker thread (4 at once in a process): a query runs at
+   most 5 s (a cancelled run interrupts it), loads at most 64 MB of its own run's results
+   (never another run's), holds at most 512 MB (DuckDB's `memory_limit`; SQLite's pages, and
+   8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
+   and 20,000 characters — the model reads the small answer, never the rows. A tool declared
+   `paged=True` (a cursor argument; `next_cursor` in its result) is fetched to its last page in
+   one call (`tools/pages.py`, at most 200 pages),
+   so its rows are queried whole too;
+3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
+   result in the sandbox, and `execute` runs code over it), or `agent.tools.use(sandbox().tools())`
+   on any adapter (`sandbox_exec`): every result the run keeps is written into the run's sandbox
+   at the path the model was given, before a command runs there, and the preview says so; or
+   **Code Mode** for a gateway's read-only MCP tools ([Code Mode](#code-mode)): the Starlark
+   script calls the tool and computes over what it returns inside the gateway.
+
+`benchmark/cost` measures it (`--suite classes --classes aggregate`: a count, a sum, a filter,
+a top-N and a group over 10,000 SKUs).
+
+## Values that change: freshness
+
+A tool's data is live by default: any value from an earlier turn, a replayed window or memory is
+a dated snapshot. A tool says otherwise beside its other metadata: `tool(fn, max_age=300)`
+(seconds a value stays current) or `tool(fn, freshness="static")` (reference data: an earlier
+value is as good as a new one); `freshness="live"` also says the default in the tool's
+description (`tools.base.CHANGES`). The same keys go in a LangChain tool's `metadata` (beside
+`side_effects`) and an MCP tool's `_meta` (`{"freshness": "static"}`, `{"maxAge": 300}`).
+
+Where memory owns the conversation, when each tool result was fetched is kept in one place:
+the run record of its call (`custom_metadata["run_record"]["fetched"]`, UTC, with its tool's
+`max_age`), which the memory service's steps list shows on the call's line — the model can say
+where a number came from and when, and the result's own text is never stamped. A replayed result past its
+tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
+same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
+fetches the value again instead of answering from the old one, and the fresh result, with the
+older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). A repeated
+call is answered from an earlier one only within its own model step and run, never across
+turns; `memory_search` items carry `observed_on`. The
+memory service never turns a tool's result into a long-term fact (it forms memories from what
+it was told, not from tool output), so the user's facts and preferences stay and live values do
+not.
 
 ## The run's tool set
 
@@ -115,13 +272,18 @@ The memory context is asked for with the run's tool set (not the memory tools): 
 with the skills the agent learned for the task ("Learned skills for this task", any number of
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
-(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With five or
-more tools, the model is then offered:
+(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With 30 or
+more tools in the run (`NARROW_FROM`: its own, its framework's and memory's), the model is then
+offered the following; with fewer, every tool, and the tools section still says which fit
+(narrowing a set of 20 hid a tool the question needed in about a quarter of the turns, and
+those turns went wrong two to three times as often: the holistic small-model run):
 
 * the memory tools,
 * the tools the service named (at most 8),
 * every tool the run has already called (kept in the journal across a pause),
-* whatever a `tool_search` call found during the run.
+* whatever a `tool_search` call found during the run,
+* the chain of a tool named ([tool chains](#tool-chains)): the tools its output feeds, and
+  those whose output gives an argument it requires.
 
 | Framework | Narrowing |
 |---|---|

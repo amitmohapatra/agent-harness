@@ -58,10 +58,8 @@ DECISION: Final = "decision"
 #: The ``CUSTOM`` event names of the live task tree (``admission.py``): a child run of the run
 #: waiting for a slot (``helper_queued``), working (``helper_started``) and ended
 #: (``helper_finished``: its status, seconds, tokens and cost) — every engine's (a sub-agent's
-#: call, a framework's own helper, a ``delegate`` job) — and a ``ReAct``'s fan-out of jobs
-#: (``delegate``: how many, at most how many at once).
+#: call, a framework's own helper).
 HELPER_PHASES: Final = ("queued", "started", "finished")
-DELEGATED: Final = "delegate"
 #: How much of a tool result rides on the event stream.
 PREVIEW_CHARS: Final = 2000
 
@@ -145,13 +143,16 @@ class RunEvents:
             data["delta"] = delta
         self.emit(type, message_id=message_id, data=data)
 
-    def tool(self, type: RunEventType, tool_call_id: str, **data: Any) -> None:
-        """A step of a tool call: its ``args`` and ``output``, the output a preview."""
+    def tool(
+        self, type: RunEventType, tool_call_id: str, message_id: str | None = None, **data: Any
+    ) -> None:
+        """A step of a tool call: its ``args`` and ``output``, the output a preview; its
+        result's ``message_id`` the one the result keeps (``conversation.result_id``)."""
         if self.quiet:
             return
         if "output" in data:
             data["output"] = preview(data["output"])
-        self.emit(type, tool_call_id=tool_call_id, data=data)
+        self.emit(type, tool_call_id=tool_call_id, message_id=message_id, data=data)
 
     def custom(self, name: str, **data: Any) -> None:
         if not self.quiet:

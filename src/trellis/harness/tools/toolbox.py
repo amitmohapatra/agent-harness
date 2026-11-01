@@ -22,7 +22,10 @@ Mode where it is safe.
    the catalog's risk over the tools' own, and no approval rule), when there are at least
    :data:`CODE_MODE_MIN_SERVERS` of them or :data:`CODE_MODE_MIN_TOOLS` tools between them,
    are offered as Bifrost's Code Mode meta-tools (one script instead of many calls); every
-   other tool stays a normal tool, so no script ever reaches a tool that writes.
+   other tool stays a normal tool, so no script ever reaches a tool that writes;
+5. **chains** — a tool whose output another takes as an argument, as their schemas say
+   (``tools.links``), says so in its description (``Chains: find_sku → sku_id →
+   get_stock.``), and the tool hints keep a candidate's chain offered (:meth:`Toolbox.related`).
 
 Whether a call runs, is announced or asks is not the toolbox's: governance decides it at each
 call (``trellis.harness.governance``, asked by the bridge).
@@ -34,8 +37,8 @@ import asyncio
 import functools
 import logging
 from collections import Counter, defaultdict
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ConfigurationError, ToolSpec
@@ -43,7 +46,8 @@ from trellis.harness.clients.bifrost import Gateway, code_mode_tools
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.tools.base import Source, Tool
+from trellis.harness.tools.base import Source, Tool, data_of
+from trellis.harness.tools.links import Link, chained, links, related
 from trellis.harness.tools.lint import lint
 from trellis.harness.tools.mcp import MCPSource, side_effects_of
 
@@ -174,6 +178,9 @@ class Toolbox:
         self._rules: dict[str, Rule | None] | None = None
         #: the tools Code Mode reaches through its meta-tools, as the tools were last built
         self._hidden: dict[bool, list[str]] = {}
+        #: the links between the tools (``tools.links``) and each one's required arguments
+        self._links: dict[bool, list[Link]] = {}
+        self._required: dict[bool, dict[str, list[str]]] = {}
         #: whether the first hints waited for the index already
         self._index_waited = False
 
@@ -230,7 +237,28 @@ class Toolbox:
             tools.extend(_mcp(self._gateway, listing, rules, code_mode=code_mode))
         offered = {t.name for t in tools}
         self._hidden[code_mode] = [d.name for d in listing.defs if d.name not in offered]
-        return tools
+        return self._chained(tools, code_mode=code_mode)
+
+    def _chained(self, tools: list[Tool], *, code_mode: bool) -> list[Tool]:
+        """``tools``, each that feeds or is fed by another (``tools.links``: its output is
+        another's argument, as their schemas say) saying so in its description; the links kept
+        for :meth:`related`. Code Mode's meta-tools are none of it."""
+        chainable = [t.spec for t in tools if t.feature != "code_mode"]
+        found = links(chainable)
+        self._links[code_mode] = found
+        self._required[code_mode] = {
+            s.name: list((s.input_schema or {}).get("required") or []) for s in chainable
+        }
+        if not found:
+            return tools
+        described = {s.name: s for s in chained(chainable, found)}
+        return [replace(t, spec=described.get(t.name, t.spec)) for t in tools]
+
+    def related(self, names: Collection[str], *, code_mode: bool = True) -> set[str]:
+        """The tools a chain through ``names`` needs besides them (``links.related``), as
+        :meth:`tools` last built them: what the tool hints keep offered beside a candidate."""
+        found = self._links.get(code_mode) or []
+        return related(names, found, self._required.get(code_mode) or {}) if found else set()
 
 
 def _mcp(
@@ -242,6 +270,7 @@ def _mcp(
                 d,
                 side_effects=side_effects_of(d.annotations),
                 idempotent=bool(d.annotations and d.annotations.idempotent_hint),
+                **data_of(d.annotations, strict=False),
             ),
             functools.partial(gateway.execute, d.name, clients=(d.client,)),
             feature="mcp",
