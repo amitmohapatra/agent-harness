@@ -75,7 +75,7 @@ class _Run:
         self.interrupt = (
             SimpleNamespace(
                 interrupt_id=f"int-{command}",
-                tool_call=ToolCall(call_id="c", tool="Bash", args={"command": command}),
+                tool_call=ToolCall(tool="Bash", args={"command": command}),
             )
             if command is not None
             else None
