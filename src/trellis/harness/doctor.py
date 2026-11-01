@@ -127,7 +127,6 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     if gateway.url is not None:
         key = ", with LLM_API_KEY" if gateway.key else ""
         lines.append(f"auth: {gateway.auth}{key}")
-        lines += gateway.notes()
         if keys:
             lines.append(
                 f"note: {', '.join(keys)} set, not used for model calls: the endpoint wins "
@@ -136,6 +135,7 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     else:
         said = ", ".join(keys) if keys else "none set"
         lines.append(f"provider keys: each provider's own SDK reads its own ({said})")
+    lines += gateway.notes()
     lines.append(
         "profile: each model's LangChain profile (reasoning, temperature, output tokens, "
         "tools); the memory service is told it per agent with the endpoint"
