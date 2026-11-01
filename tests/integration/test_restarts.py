@@ -69,12 +69,17 @@ def boom() -> str:
     return "fine"
 
 
-@lc_tool
-def lc_boom() -> str:
+def dies_once() -> str:
     """The worker dies here, once."""
     if crashes:
         raise crashes.pop()
     return "fine"
+
+
+@lc_tool
+def lc_boom() -> str:
+    """The worker dies here, once."""
+    return dies_once()
 
 
 lc_boom.metadata = {"side_effects": "read"}
@@ -185,17 +190,36 @@ async def test_a_budget_counts_what_was_spent_before_the_crash(
     assert str(result.answer[1]).startswith("ship was not run")
 
 
+@lc_tool
+async def lc_boom_once_refunded() -> str:
+    """The worker dies here, once — once the refund called beside it has run. The calls of one
+    model step run at once (a task each; a sync tool's body in the thread pool): without the
+    wait, the crash can land while the refund is saved as started but has not run, and the
+    next worker does not run it blind (``test_a_graphs_write_cut_by_a_crash_...``)."""
+    async with asyncio.timeout(5):
+        while not done:  # noqa: ASYNC110 - a list the refund appends to in a thread, polled
+            await asyncio.sleep(0.01)
+    return dies_once()
+
+
+lc_boom_once_refunded.metadata = {"side_effects": "read"}
+
+
 async def test_a_graphs_own_write_is_not_done_again_on_another_worker(
     workers: tuple[Harness, Harness],
 ) -> None:
     model = ScriptedChatModel(
-        turns=[[("refund", {"order": "o1"}), ("lc_boom", {})], ("lc_boom", {}), "refunded o1"]
+        turns=[
+            [("refund", {"order": "o1"}), ("lc_boom_once_refunded", {})],
+            ("lc_boom", {}),
+            "refunded o1",
+        ]
     )
 
     def graph(h: Harness) -> Any:
         return create_agent(
             model,
-            tools=[refund, lc_boom],
+            tools=[refund, lc_boom, lc_boom_once_refunded],
             middleware=[GovernTools()],
             checkpointer=RunCheckpointer(),
         )
@@ -203,6 +227,55 @@ async def test_a_graphs_own_write_is_not_done_again_on_another_worker(
     _, result = await crash_then_finish(workers, graph, "refund o1")
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1", result.error
     assert done == ["refund o1"]
+
+
+async def test_a_graphs_write_cut_by_a_crash_is_not_done_blind_on_another_worker(
+    workers: tuple[Harness, Harness],
+) -> None:
+    """The worker dies while a write called beside the crash is saved as started, not ended:
+    the next worker does not run it again — its effect is unknown, and the model reads so."""
+    began = asyncio.Event()
+
+    @lc_tool
+    async def refund_slowly(order: str) -> str:
+        """Refund an order, slowly."""
+        began.set()
+        await asyncio.sleep(60)  # under way when the worker dies
+        done.append(f"refund {order}")
+        return f"refunded {order}"
+
+    @lc_tool
+    async def lc_boom_once_begun() -> str:
+        """The worker dies here, once, while the refund beside it is under way."""
+        await began.wait()
+        return dies_once()
+
+    refund_slowly.metadata = {"side_effects": "write"}
+    lc_boom_once_begun.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(
+        turns=[
+            [("refund_slowly", {"order": "o1"}), ("lc_boom_once_begun", {})],
+            "the refund may not have gone through",
+        ]
+    )
+
+    def graph(h: Harness) -> Any:
+        return create_agent(
+            model,
+            tools=[refund_slowly, lc_boom_once_begun],
+            middleware=[GovernTools()],
+            checkpointer=RunCheckpointer(),
+        )
+
+    _, result = await crash_then_finish(workers, graph, "refund o1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert done == []  # not run blind on the second worker
+    told = next(
+        str(m.content)
+        for m in model.seen[-1]
+        if isinstance(m, ToolMessage) and m.name == "refund_slowly"
+    )
+    assert "interrupted by a crash" in told, told
 
 
 async def test_a_framework_approval_given_before_a_crash_is_not_asked_again(
