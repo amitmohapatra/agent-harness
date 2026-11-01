@@ -163,9 +163,10 @@ async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     agent = arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
-    assert model.tools[0] == ["t2", *memory_tools]  # the agent's own eta is no candidate
+    # offered in name order, the agent's own among them, as every other adapter offers them
+    assert model.tools[0] == sorted(["t2", *memory_tools])  # the agent's own eta is no candidate
     # tool_search found t4 and the agent's own eta: both offered from then on
-    assert model.tools[1] == ["eta", "t2", "t4", *memory_tools]
+    assert model.tools[1] == sorted(["eta", "t2", "t4", *memory_tools])
 
 
 async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(
@@ -444,9 +445,9 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
     triage, billing, _ = _desk(model)
     agent = arm(memory_harness.wrap(triage, id="desk"), [make(i) for i in range(6)])
     assert (await agent.run("find t2", user="u1")).answer == "checked"
-    assert model.tools[0] == ["t2", *MEMORY_TOOLS]
+    assert model.tools[0] == sorted(["t2", *MEMORY_TOOLS])
     # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)
-    assert model.tools[1] == MEMORY_TOOLS
+    assert model.tools[1] == sorted(MEMORY_TOOLS)
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
     assert [t.name for t in billing.tools] == ["refund"]  # yours, unchanged
 

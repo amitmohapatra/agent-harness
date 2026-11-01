@@ -377,7 +377,12 @@ def governed_agents(
                 _ungoverned_inside(agent_id, tool)
             own.append(governed(ran or tool, helpers))
         carried = {getattr(t, "name", None) for t in agent.tools}
-        copy.tools = [*own, *(t for t in extra if t.name not in carried)]
+        # in name order, as every other adapter offers them: a stable prefix for a prompt
+        # cache, and no tool first only because it was declared first
+        copy.tools = sorted(
+            [*own, *(t for t in extra if t.name not in carried)],
+            key=lambda t: str(getattr(t, "name", "")),
+        )
         copy.mcp_servers = [GovernedServer.of(s) for s in agent.mcp_servers]
         handoffs = []
         for handoff in agent.handoffs:
