@@ -1,10 +1,11 @@
 """``ReAct`` keeping the conversation within the model's window, with the native middleware
-sized from it: older results cleared from the request past half the window (``read_result``
-reads one again), older turns summarized near its end (the history saved where ``read_file``
+sized from it: older results cleared from the request past half the window (``read_file``
+reads one again by its call's id), older turns summarized near its end (the history saved where ``read_file``
 reads it), and a resume that asks neither the model nor the summary again."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from tests.support.arm import arm
@@ -50,7 +51,11 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
         return f"page {n} " + "w" * 2000
 
     script: list[Any] = [("page", {"n": n}) for n in range(1, 7)]
-    script += [("read_result", {"id": "call_1"}), ("publish", {"name": "book"}), "done"]
+    script += [
+        ("read_file", {"file_path": "/large_tool_results/call_1"}),
+        ("publish", {"name": "book"}),
+        "done",
+    ]
     model = ScriptedChat(script=Summarizing(script))
     target = ReAct(system_prompt="s", model=model, context_window=6000)
     agent = arm(memory_harness.wrap(target, id="book"), [page, publish])
@@ -63,9 +68,10 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     assert results[0] == CLEARED
     assert all(r.startswith("page") for r in results[-3:])  # the last three stay
     offered = [{t["function"]["name"] for t in r["tools"]} for r in model.requests]
-    assert ["read_result" in o for o in offered[: first + 1]] == [False] * first + [True]
-    read = [n for n, r in enumerate(model.requests) if "read_result" in str(r["messages"][-2])]
-    assert contents(model, read[0])[-1].startswith("page 1 ")  # read back in full
+    # the placeholder's tool, offered once a result was cleared
+    assert ["read_file" in o for o in offered[: first + 1]] == [False] * first + [True]
+    read = [n for n, r in enumerate(model.requests) if "read_file" in str(r["messages"][-2])]
+    assert contents(model, read[0])[-1] == "1  page 1 " + "w" * 2000  # read back whole
     asked = len(model.requests)
     memory_service.context_text = "remembered " * 400  # the context grows before the resume
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
@@ -116,3 +122,29 @@ async def test_a_message_list_without_a_user_message_still_runs(harness: Harness
         [{"role": "assistant", "content": "hello"}], user="u"
     )
     assert result.answer == "fine"
+
+
+async def test_every_placeholder_names_a_read_tool_the_request_offers(harness: Harness) -> None:
+    """One clearing pass, LangChain's ``ClearToolUsesEdit``; ``FitWindow`` only cuts. Whatever
+    a request's tool results say to read the rest with is a tool that request offers
+    (duplication audit A2, B2)."""
+
+    @tool(side_effects="read")
+    def page(n: int) -> str:
+        """A page of a book."""
+        return f"page {n} " + "w" * 30_000
+
+    model = ScriptedChat([("page", {"n": 1}), ("page", {"n": 2}), "done"])
+    target = ReAct(system_prompt="s", model=model, context_window=6000)
+    result = await arm(harness.wrap(target, id="fit"), [page]).run("read it", user="u")
+    assert result.answer == "done", result.error
+    named: set[str] = set()
+    for sent in model.requests:
+        offered = {t["function"]["name"] for t in sent["tools"]}
+        for m in sent["messages"]:
+            if m["role"] != "tool":
+                continue
+            for reader in re.findall(r"(\w+)\((?:id|file_path)=", str(m["content"])):
+                named.add(reader)
+                assert reader in offered, (reader, sorted(offered))
+    assert named == {"read_file"}  # one read-back tool

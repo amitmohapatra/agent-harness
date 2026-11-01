@@ -208,7 +208,7 @@ tenant's catalog, where an administrator's risk and `approve_when` govern it.
 Each call is then decided as a harness tool's is — the catalog's risk, else the tool's declared
 one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else `write` (announced) —
 asked when governance asks, journaled (a resume does not run it again), timed and traced. The
-graph's state tools (`write_todos`, `read_result`, Deep Agents' file tools on its default
+graph's state tools (`write_todos`, Deep Agents' file tools on its default
 `StateBackend`) are let through: they change only the run's own state. Deep Agents' file tools
 on a backend that writes to a real disk are not seen: give the graph governed tools instead.
 Claude Code's built-ins go through the CLI's permission callback, where the harness decides them
