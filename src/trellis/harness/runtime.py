@@ -72,6 +72,10 @@ INLINE_PAYLOAD_BYTES: Final = 16 * 1024
 #: The tag of a framework's own tool that hands the work to another agent
 #: (``adapters.base.HELPER``, kept here: the runtime imports no adapter).
 HELPER: Final = "helper"
+#: The tag of a tool the framework gives the model of itself, which the run's code did not bring
+#: (Claude Code's and Kimi's built-ins, Deep Agents' own): of the run's tool set, but not of
+#: what the narrowing counts (``adapters.base.BUILTIN``).
+BUILTIN: Final = "builtin"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -383,6 +387,13 @@ class Runtime:
         (:attr:`native`), each once — what the tool hints, ``tool_search`` and the narrowing
         choose among."""
         return list(dict.fromkeys([*self.tool_names(), *self.native]))
+
+    def own_tools(self) -> list[str]:
+        """The run's tool set (:meth:`tool_set`) less its framework's built-ins
+        (:data:`BUILTIN`): the tools the run brought — what the narrowing counts."""
+        return [
+            n for n in self.tool_set() if BUILTIN not in getattr(self.native.get(n), "tags", ())
+        ]
 
     def offers(self, name: str) -> bool:
         """Whether the model is offered ``name`` now (per turn where the framework allows): a

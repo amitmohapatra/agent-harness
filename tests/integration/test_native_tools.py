@@ -153,6 +153,30 @@ async def test_a_deep_agents_sub_agents_tools_are_of_the_run_and_governed(
     assert told["task"]["side_effects"] == "read" and "refund" in told
 
 
+async def test_a_deep_agents_own_tools_do_not_count_toward_narrowing_the_runs_own(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Deep Agents' own tools — ``task``, its file tools on a disk — are the framework's, not
+    the run's: the tools the hints narrow from (``NARROW_FROM``) are the run's own. Counted with
+    them, a run whose own tools are fewer narrowed, hiding the ones a question needed."""
+    from deepagents import create_deep_agent
+    from deepagents.backends import FilesystemBackend
+
+    from tests.integration.test_memory_pipeline import graph_tools as lookups
+    from trellis.harness.agent import NARROW_FROM
+
+    memory_service.candidates = ["t1"]
+    disk = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    probe = create_deep_agent(model=ScriptedChatModel(turns=["done"]), backend=disk)
+    framework = {t.name for t in graph_tools(probe)}
+    own = NARROW_FROM - len(framework) + 1  # with the framework's, past the threshold
+    model = ScriptedChatModel(turns=["done"])
+    graph = create_deep_agent(model=model, tools=lookups(own), backend=disk)
+    result = await memory_harness.wrap(graph, id="deep-few").run("look a up", user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert {f"t{i}" for i in range(own)} <= set(model.requests[0]["tools"])
+
+
 def test_a_task_tool_whose_code_holds_no_graphs_has_no_sub_agents() -> None:
     @langchain_tool
     def task(description: str) -> str:

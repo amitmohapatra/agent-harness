@@ -56,6 +56,11 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A framework's built-in tools no longer count toward the tool hints' narrowing threshold
+  (`NARROW_FROM`, 30): only the run's own tools do (`Runtime.own_tools`). Claude Code's and
+  Kimi's built-ins, and Deep Agents' `task` and file tools, are tagged `builtin`. Counted with
+  them, a Claude or Kimi run of 14 tools of its own narrowed, and the tool a question needed
+  (`find_sku`) was never listed for the query: 4 missed turns in the break-and-fix gate.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
