@@ -527,3 +527,13 @@ def test_a_right_answer_that_names_a_nearby_value_is_not_marked_forbidden() -> N
     assert not cx.score(turn.expect, f"{wrong} days of cover, so 52 units.", [], turn.text)[
         "correct"
     ]
+
+
+def test_an_abstention_that_could_not_find_it_says_the_data_is_not_there() -> None:
+    """bf1-past-03 (memory #76's re-measure): "I couldn't find a gross margin target for denim
+    in memory" was scored as not saying so; "can't find" already was."""
+    abstain = cx.abstain("no target set", forbidden=("61",))
+    for said in ("I couldn't find a gross margin target for denim in memory.",
+                 "I could not find one you set."):  # fmt: skip
+        assert cx.score(abstain, said, [])["correct"], said
+    assert not cx.score(abstain, "Your target is 61%.", [])["correct"]
