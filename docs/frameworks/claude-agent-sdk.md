@@ -53,7 +53,11 @@ catalog says otherwise. The harness's tools — the MCP tools the Bifrost virtua
 memory on, the memory tools — reach Claude as one more in-process MCP server named `trellis`
 (tool names `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file
 path or its JSON text); the harness's permission callback lets them through: the bridge is
-their check.
+their check. That server is loaded from the first step (its config says `alwaysLoad`): Claude
+Code otherwise defers every MCP server's tools behind its `ToolSearch`, so the model sees their
+names only and spends a step loading them. Which tools a run offers is already the harness's
+choice (the tool hints' narrowing, memory's `tool_search`); your own servers keep the CLI's
+deferral.
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 
@@ -75,6 +79,10 @@ after any of yours:
   tool the CLI asks about (an MCP server's of yours) is a write.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)).
+* **Not offered: schedules.** The CLI runs for one attempt and ends with it, so a scheduled
+  prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) would never fire: these, with
+  `CronList` and `CronDelete`, are added to the query's `disallowed_tools`, after your own.
+  Offered, Claude promised a weekly report that nothing would send.
 * **Your own `can_use_tool`** is asked by the harness's hook after its decision, with the
   arguments as they were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
   A `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.

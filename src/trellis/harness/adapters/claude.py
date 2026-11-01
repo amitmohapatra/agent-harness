@@ -124,6 +124,12 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "SlashCommand": "write",
     "Bash": "irreversible",
 }
+#: Claude Code's built-in tools whose work needs the CLI to go on running after the query: a
+#: scheduled prompt (``CronCreate``, durable or not, fires only in a session that is running
+#: then) and a wake-up (``ScheduleWakeup``). The CLI here runs for one attempt and ends with it,
+#: so they are disallowed (with the tools that list and delete the schedules): offered, Claude
+#: promised a schedule that nothing keeps.
+OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 #: The most MCP tools a Claude agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
 #: The most one message from the CLI may be (the SDK's ``max_buffer_size``: 1 MiB unless the
@@ -552,9 +558,7 @@ def _options(
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
-    narrowed = _narrowed(runtime, options.disallowed_tools)
-    if narrowed is not None:
-        changes["disallowed_tools"] = narrowed
+    changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
     env = routed_env(options.env, runtime)
@@ -589,15 +593,16 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
     return given
 
 
-def _narrowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str] | None:
-    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer
-    (the tool hints' narrowing: Claude's built-ins and MCP tools too, for the whole query);
-    ``None`` when nothing is narrowed."""
-    if runtime.offered is None:
-        return None
+def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
+    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
+    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), and those the tool hints
+    narrow away (Claude's built-ins and MCP tools too, for the whole query)."""
     given = list(denied or ())
-    hidden = [n for n in runtime.native if not runtime.offers(n) and n not in given]
-    return [*given, *hidden] if hidden else None
+    narrowed = (
+        [n for n in runtime.native if not runtime.offers(n)] if runtime.offered is not None else []
+    )
+    hidden = [n for n in (*OUTLIVES_THE_QUERY, *narrowed) if n not in given]
+    return [*given, *dict.fromkeys(hidden)]
 
 
 def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:

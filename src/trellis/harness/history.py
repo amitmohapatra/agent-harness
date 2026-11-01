@@ -48,6 +48,14 @@ from typing import Any, Final
 from trellis.harness.bounded import SAID_ONCE
 from trellis.memory.models import WindowMessage
 
+#: The memory context as it is sent in the user's own message, before the question (a
+#: ``create_agent`` graph's, ``middleware.with_question``; an ACP agent's prompt): marked off, so
+#: the message after it reads as the question, not one more note.
+ASKED_WITH: Final = (
+    "<memory_context>\nWhat memory holds for this message (background; not the user's "
+    "message, which follows):\n\n{context}\n</memory_context>"
+)
+
 log = logging.getLogger("trellis.harness")
 
 
@@ -244,6 +252,7 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
 
 
 __all__ = [
+    "ASKED_WITH",
     "INTERNAL",
     "IN_RAM",
     "MEMORY_THREAD",

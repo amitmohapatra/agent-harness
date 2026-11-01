@@ -2666,7 +2666,6 @@ SCRIPTED: Final = ("langgraph", "react", "deepagents")
 #: fix makes its turns pass, and ``test_bench_complex`` fails until its entry is removed; any
 #: other failure is a regression.
 KNOWN: Final[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {
-    "ADV-6": (("advscen-01/7", "advscen-02/6", "advscen-03/6"), ("langgraph", "react")),
     "ADV-7": (
         (
             "advconv-05/13",
@@ -2674,8 +2673,11 @@ KNOWN: Final[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {
             "advexp-02/1",
             "advexp-05/1",
             "advscen-01/6",
+            "advscen-01/7",
             "advscen-02/5",
+            "advscen-02/6",
             "advscen-03/5",
+            "advscen-03/6",
             "advfile-02/2",
         ),
         ("react",),

@@ -61,20 +61,13 @@ KNOWN: Final[list[tuple[dict[str, Any], Bug]]] = [
     # the adversarial rows' findings (tests/matrix/adversarial.py; the backlog's Adversarial
     # suite section has each as an issue)
     (
-        {"features": {"X06"}, "adapters": {"react", "middleware"}},
+        {"features": {"X06"}, "adapters": {"middleware"}},
         Bug(
-            "ADV-4",
-            "a stall (one call repeated) ends the run ERROR with no answer (StallGuard's "
-            "ModelError): the fix is in flight, #76",
-            raises=AssertionError,
-        ),
-    ),
-    (
-        {"features": {"X06"}, "adapters": {"langgraph", "deepagents", "claude"}},
-        Bug(
-            "ADV-9",
-            "nothing stops a model repeating one call where the trellis middleware is not in the "
-            "graph (a plain create_agent / create_deep_agent, the Claude CLI): all 30 calls ran",
+            "ADV-4m",
+            "the stall's last call offers no tool by tool_choice='none' only when the request has "
+            "tools; this cell's planned model is bound with none on every call and calls lookup "
+            "regardless, so it answers the last call with a call too (a test double that a "
+            "provider would refuse; ReAct's gateway double honours tool_choice='none' and passes)",
             raises=AssertionError,
         ),
     ),

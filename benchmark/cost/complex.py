@@ -3097,7 +3097,8 @@ def _accounting_hook() -> None:
 def scripted_model(case: Case) -> Any:
     """The existing scripted chat model (``tests.support.chat_model``), replaying the case's
     gold calls and reference answers: proves the pipeline, not a model. A ``keyed`` case's
-    answers each call by the message it answers (``KeyedChatModel``)."""
+    answers each call by the message it answers (``KeyedChatModel``). Each reply reports the
+    request it was sent as its input tokens, counted as the harness counts one, and 50 out."""
     from tests.support.chat_model import KeyedChatModel, ScriptedChatModel
 
     if case.keyed:
@@ -3120,8 +3121,8 @@ def scripted_model(case: Case) -> Any:
             )
             for task, rounds in case.helpers
         ]
-        return KeyedChatModel(turns=[], script=script, spends=(1000, 50))
-    return ScriptedChatModel(turns=case.script(), spends=(1000, 50))
+        return KeyedChatModel(turns=[], script=script, spends=(None, 50))
+    return ScriptedChatModel(turns=case.script(), spends=(None, 50))
 
 
 async def run_case(

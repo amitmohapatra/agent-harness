@@ -18,7 +18,7 @@ import asyncio
 from typing import Any, Final
 
 from tests.matrix.kit import Desk
-from tests.matrix.model import ADAPTERS, NA, Feature, Gap
+from tests.matrix.model import NA, Feature
 from tests.matrix.world import USER, World
 from tests.support.arm import arm
 from trellis import Runtime, current, tool
@@ -544,10 +544,9 @@ async def spending_recorded(w: World) -> None:
     d = Desk()
     o = (await w.go([d.lookup()], [("lookup", {"topic": "tides"})])).succeeded()
     finished = [e for e in o.events if e.type is RunEventType.RUN_FINISHED][-1]
-    held = {**(finished.data or {}), **o.record.metadata}
-    assert "tokens" in held or "model_calls" in held, (
-        f"no spending on the run's end: {sorted(held)}"
-    )
+    spent = (finished.data or {}).get("spent") or {}
+    assert spent.get("model_calls", 0) >= 1, f"no spending on the run's end: {finished.data}"
+    assert set(spent) >= {"tokens", "cost", "model_calls", "tool_calls"}, spent
 
 
 async def file_link(w: World) -> None:
@@ -555,13 +554,6 @@ async def file_link(w: World) -> None:
     store this probe waits on)."""
     files = getattr(w.harness(0), "files", None)
     assert files is not None, "the deployment has no file store: no run can hand its user a file"
-
-
-SPENT_GAP: Final = Gap(
-    "ADVspent",
-    "a run's tokens, model calls and cost are kept in its journal while it works and dropped at its "
-    "end: neither its RUN_FINISHED event nor its record says what it spent",
-)
 
 
 # --------------------------------------------------------------------------- the rows
@@ -730,7 +722,7 @@ ADVERSARIAL: Final = [
         "ADV (scenario jobs, cost)",
         "automatic",
         spending_recorded,
-        adapters={"function": NO_MODEL} | {a: SPENT_GAP for a in ADAPTERS if a != "function"},
+        adapters={"function": NO_MODEL},
         modes=_only("run", reason="the run's end is the same on every surface"),
         way2=NA("a block keeps no run record"),
     ),
