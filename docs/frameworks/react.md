@@ -201,7 +201,7 @@ asked for a chart, a model had saved an SVG there and told the user to open it.
 | summarization (`create_summarization_middleware`) | past 85% of the window (its own thresholds when the window is not known), the older turns summarized by one model call, the turns it replaced saved where `read_file` reads them (`/conversation_history/...`), oversized tool arguments in older turns truncated first, a context overflow summarized and retried. `ReAct` places it after the harness's middleware that narrow the tools, so it counts what the model is sent |
 | `PatchToolCallsMiddleware` | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
 | `SkillsMiddleware`, `MemoryMiddleware` | `skills=`, `memory_files=` |
-| prompt caching | Anthropic's (and Bedrock's, Fireworks') cache breakpoints, when the model is theirs |
+| prompt caching | Anthropic's (and Bedrock's, Fireworks') cache breakpoints, when the model is theirs; `ReAct` puts `PromptCache` in the Anthropic one's place ([below](#the-middleware)) |
 | `HumanInTheLoopMiddleware` | only for a `permissions` rule in `interrupt` mode (the harness asks it once, as an approval) |
 | `response_format`, parallel tool calls | LangChain's and LangGraph's |
 
@@ -225,9 +225,19 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
-resume after a pause, a crash or a requeue continues the graph where it stopped. A declarative
-sub-agent is given `StallGuard`, `ModelCallLimitMiddleware` and `ModelHooks` too (its own of those names kept),
-and a model name of its own is routed as `ReAct`'s.
+resume after a pause, a crash or a requeue continues the graph where it stopped.
+
+Last of what changes a request, where Deep Agents puts its own, both bases have `PromptCache`:
+LangChain's `AnthropicPromptCachingMiddleware` (the one you give `ReAct(middleware=)`, its
+settings kept) run on the chat model the call is made with — a `ChatAnthropic`, or a model name
+routed to Anthropic's own SDK — so the tools, the instructions, the request's end and the
+answer that ends the history are marked (4 breakpoints). Any other model's request is sent as
+it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); an OpenAI-compatible
+endpoint's chat completions carry no breakpoints.
+
+A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `ModelHooks` and
+`PromptCache` too (its own of those names kept), and a model name of its own is routed as
+`ReAct`'s.
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
 harness's is refused, `middleware()` itself among them). Each works the same in any
