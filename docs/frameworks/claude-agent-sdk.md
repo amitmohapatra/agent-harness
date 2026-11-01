@@ -75,6 +75,10 @@ after any of yours:
   tool the CLI asks about (an MCP server's of yours) is a write.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)).
+* **Not offered: schedules.** The CLI runs for one attempt and ends with it, so a scheduled
+  prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) would never fire: these, with
+  `CronList` and `CronDelete`, are added to the query's `disallowed_tools`, after your own.
+  Offered, Claude promised a weekly report that nothing would send.
 * **Your own `can_use_tool`** is asked by the harness's hook after its decision, with the
   arguments as they were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
   A `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.

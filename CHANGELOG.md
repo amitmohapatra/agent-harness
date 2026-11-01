@@ -44,6 +44,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Claude Agent SDK run no longer offers Claude Code's schedules. Its CLI runs for one attempt
+  and ends with it, so a scheduled prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) never
+  fires; offered, Claude answered "set this up every Monday" with a schedule nothing kept. They
+  join the query's `disallowed_tools` (`adapters.claude.OUTLIVES_THE_QUERY`), after the team's.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
