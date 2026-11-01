@@ -17,6 +17,7 @@ from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, to
 from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
 from trellis.harness.events import WARNING
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
@@ -127,13 +128,18 @@ async def test_streaming_emits_text_deltas(harness: Harness) -> None:
     assert "".join(deltas) == "all good here" and len(deltas) == 3
 
 
-async def test_the_context_is_a_system_message_and_memory_tools_are_added(
+async def test_the_context_is_marked_off_in_the_question_and_memory_tools_are_added(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedModel([("memory_search", {"query": "prefs"}), "email"])
     agent = memory_harness.wrap(Agent(name="m", model=model), id="m")
     assert (await agent.run("how to reach me?", user="u1")).answer == "email"
-    assert model.inputs[0][0] == {"role": "system", "content": memory_service.context_text}
+    asked = model.inputs[0][-1]
+    assert asked["role"] == "user" and [p["text"] for p in asked["content"]] == [
+        ASKED_WITH.format(context=memory_service.context_text),
+        "how to reach me?",
+    ]
+    assert not any(i.get("role") == "system" for i in model.inputs[0])
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
 
 
