@@ -30,6 +30,7 @@ class AGUIEventType(StrEnum):
     RUN_ERROR = "RUN_ERROR"
     STEP_STARTED = "STEP_STARTED"
     STEP_FINISHED = "STEP_FINISHED"
+    ACTIVITY_SNAPSHOT = "ACTIVITY_SNAPSHOT"
 
 
 class OutcomeType(StrEnum):
@@ -96,7 +97,10 @@ class AGUIEvent(_Wire):
     tool_call_id: str | None = None
     tool_call_name: str | None = None
     parent_message_id: str | None = None
-    content: str | None = None
+    #: a tool result's text; an activity's object
+    content: Any = None
+    activity_type: str | None = None
+    replace: bool | None = None
     snapshot: Any = None
     messages: list[dict[str, Any]] | None = None
     name: str | None = None

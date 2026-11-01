@@ -136,8 +136,10 @@ record).
 * **Sandbox and skills:** the SDK's `SandboxAgent` (`agents.sandbox`: `Shell`, `Filesystem`,
   `Compaction`, and the `Skills` and `Memory` capabilities; Docker, Unix-local and hosted
   clients) is the native choice for an agent that works on files and folders of skills. It runs
-  only with `RunConfig(sandbox=SandboxRunConfig(client=...))`, which `h.wrap` does not pass:
-  run it with `Runner.run` yourself and plug the blocks in
+  only with `RunConfig(sandbox=SandboxRunConfig(client=...))`: give it to `h.wrap` as
+  `framework_options={"run_config": RunConfig(sandbox=...)}`
+  (`tests/integration/test_skills.py::test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox`),
+  or run it with `Runner.run` yourself and plug the blocks in
   ([blocks/openai-agents.md](../blocks/openai-agents.md),
   [sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours),
   [skills.md](../skills.md#native-or-ours)).

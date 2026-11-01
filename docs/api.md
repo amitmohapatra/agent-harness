@@ -22,6 +22,7 @@ from trellis import (
     Runtime,
     Settings,
     a2a,
+    ask_user,
     current,
     deep_agent,
     kimi,
@@ -422,6 +423,12 @@ tools the virtual key allows are the gateway's: every run has them ([tools.md](t
 (`ReAct(subagents=[a2a(url)])`), a tool, or an async callable anywhere (`await
 a2a(url)(message, user=, tenant=)` outside a run, as the run inside one)
 ([surfaces.md](surfaces.md#calling-a2a-agents)).
+
+### ask_user
+
+`ask_user()` — a tool the model asks the person with: `ask_user(question, options=None,
+kind="text")`, `kind` one of `text`, `date`, `date_range`, `number`; the answer is its result.
+Opt-in (`ReAct(tools=[ask_user()])`) ([interrupts.md](interrupts.md#asking)).
 
 ### openapi
 

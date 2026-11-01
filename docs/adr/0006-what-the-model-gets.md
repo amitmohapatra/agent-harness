@@ -91,7 +91,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 | `execute`, Code Mode | a sandbox or Code Mode is configured | exists (`sandbox()`; `tools/toolbox.py`) |
 | provider code execution | the provider offers it and the data policy allows it | backlog |
 | `write_todos` | a long-task signal and a window of 32k or more | exists (`automatic.py`, `TodoListMiddleware`) |
-| `ask_user` | the request is ambiguous (the model decides) | in flight (#58, being measured) |
+| `ask_user` | the request is ambiguous (the model decides) | exists as an opt-in tool (`trellis.ask_user()`: options, a date, a date range, a number); offering it by default is in flight (#58, being measured) |
 
 ### 3. Per call (`ReAct` only, in the loop)
 
