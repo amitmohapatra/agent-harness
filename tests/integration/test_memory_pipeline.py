@@ -994,6 +994,38 @@ async def test_no_abstain_note_when_a_hinted_tool_answers_the_question(
     assert "## Memory" not in pushed(model.requests[0])
 
 
+async def test_nothing_in_memory_sends_the_model_to_the_users_earlier_conversations(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """What the user said or asked in an earlier conversation is not in memory's context for a
+    later one ("the cardigan in that same colour, but in cotton", a new chat: bf3-mixed-05),
+    and told only to offer to look it up, every adapter asked the user what it had been told.
+    With ``memory_search`` offered, the note says to search the earlier conversations first."""
+    memory_service.evidence_status = "INSUFFICIENT"
+    said = 'search them first (memory_search with kinds ["message"])'
+    model = ScriptedChat(["Which cardigan do you mean?"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="e")
+    await agent.run("And the cardigan in that same colour, but in cotton?", user="u")
+    assert "Memory holds nothing" in pushed(model.requests[0])
+    assert said in pushed(model.requests[0])
+
+
+async def test_the_note_names_no_search_the_run_does_not_offer(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A memory service that offers no ``memory_search``: the note for nothing in memory says
+    nothing of it."""
+    memory_service.evidence_status = "INSUFFICIENT"
+    memory_service.agent_tools = [
+        t for t in memory_service.agent_tools if t["name"] != "memory_search"
+    ]
+    model = ScriptedChat(["Which cardigan do you mean?"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="f")
+    await agent.run("And the cardigan in that same colour, but in cotton?", user="u")
+    assert "Memory holds nothing" in pushed(model.requests[0])
+    assert "memory_search" not in pushed(model.requests[0])
+
+
 async def test_a_document_added_for_a_user_is_uploaded_in_their_scope_and_indexed(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:

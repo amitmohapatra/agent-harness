@@ -49,6 +49,13 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- When memory holds nothing for a question (or only part of it) and the run offers
+  `memory_search`, the note that says so now also tells the model to search the user's
+  earlier conversations first (`kinds=["message"]`) before saying a detail is missing
+  (`agent.EARLIER_CHATS`). Told only to offer to look it up, every adapter asked the user
+  again for what they had said in an earlier chat ("the cardigan in that same colour, but in
+  cotton"). Haiku, ReAct, three repeats: that turn went from 0/3 to 3/3 right, and the turns
+  the note reaches went from 15/18 to 18/18, at about half a model call more each.
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
