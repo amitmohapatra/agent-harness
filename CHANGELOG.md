@@ -44,6 +44,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A conversation is no longer lost when memory fails mid-chat. Where memory replays the
+  conversation (its window) and its context call fails (an outage, the circuit open), the
+  earlier turns come from the run store, as with memory off; before, the model was sent the
+  question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
