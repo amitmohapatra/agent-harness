@@ -546,7 +546,7 @@ def test_an_abstention_that_could_not_find_it_says_the_data_is_not_there() -> No
 
 
 def _turn(case: str, n: int) -> Any:
-    found = next(c for c in breakfix.cases() if c.id == case).turns[n]
+    found = next(c for c in cx.cases() if c.id == case).turns[n]  # built once (cached)
     assert found.expect is not None
     return found
 
@@ -776,3 +776,46 @@ async def test_revoking_an_approval_pauses_to_forget_the_users_words_and_goes_on
     assert [c["ok"] for c in asks] == [True], revoke["checks"]
     assert revoke["status"] == "SUCCESS", revoke
     assert memory.memories[breakfix.SUP12_APPROVAL]["current"] is False  # forgotten, as the user
+
+
+def test_the_break_and_fix_cases_are_built_with_few_scans_of_the_sales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``breakfix.cases()`` picked each of its SKUs by working out every SKU's reorder quantity,
+    each a scan of the sales lines, and worked out the same average again for every pick:
+    20,443 scans and ~10 s a build (over 40 s on a busy runner), so the scorer tests that look
+    a turn up ran past their time limit. A pick stops at the SKU it needs, and a SKU's average
+    is worked out once."""
+    r.world()
+    scans: list[int] = []
+    real = r.selected
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        scans.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(r, "selected", counted)
+    breakfix.cases()
+    assert len(scans) < 2_000, len(scans)  # 964 now: one per truth a case states
+
+
+@pytest.mark.parametrize(
+    "unit", ["1", "1,", "1.", " ", "per ", "9 ", "a1 b2, c3.4% ", "-", "I can't ", "which "]
+)
+def test_every_reader_scores_a_long_adversarial_answer_at_once(unit: str) -> None:
+    """A sentence reader that tried every start (``(?:[^.\\n]|...)*\\bword\\b``) took quadratic
+    time in a sentence's length: 1.7 s for one 8,000-character answer, so a long answer could
+    stall a run's scoring; and 20,000 digits read as an infinite figure failed it. Each kind of
+    expectation the suite has scores a 20,000-character answer of one long sentence quickly."""
+    import time
+
+    seen: dict[str, Any] = {}
+    for c in cx.cases():
+        for t in c.turns:
+            if t.expect is not None:
+                seen.setdefault(t.expect.kind, t)
+    answer = unit * (20_000 // len(unit)) + "x"
+    for kind, t in seen.items():
+        began = time.perf_counter()
+        cx.score(t.expect, answer, [], t.text, answer)
+        assert time.perf_counter() - began < 0.5, kind
