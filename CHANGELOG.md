@@ -76,6 +76,11 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- MCP elicitation: an `mcp(...)` server that asks the person in the middle of a call pauses
+  the run as `ask` does — one field of a few values a choice (a dropdown), any other form a
+  form with the server's schema (a `format: date` field a date picker), a link a choice — and
+  the answer goes back to the server when the run resumes, on both MCP protocol eras
+  (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
 - A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
   `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
   else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
