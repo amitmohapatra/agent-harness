@@ -453,14 +453,27 @@ async def test_usage_is_read_from_the_agents_log_and_the_budget_stops_the_turn(
 
 
 async def test_acps_own_usage_counts_when_the_agent_gives_it(
-    harness: Harness, tmp_path: Path
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    script = [{"prompt_usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10}}]
-    agent = harness.wrap(fake(tmp_path, [*script, {"text": "ok"}]), id="u")
-    result = await agent.run("x", user="u1")
-    assert result.status is RunStatus.SUCCESS
-    journal_spent = (await harness.runs.get(result.run_id)).checkpoint  # type: ignore[union-attr]
-    assert journal_spent is None or "spent" in journal_spent
+    """An ACP agent the harness keeps no usage log of counts the usage ACP's answer to a prompt
+    carries; Kimi's own log, read as the turn runs, is its count (the answer's is not added)."""
+    from trellis.harness import budget
+
+    counted: list[dict[str, Any]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
+    )
+    usage = {"totalTokens": 37, "inputTokens": 20, "outputTokens": 10, "cachedReadTokens": 7}
+    script = [{"prompt_usage": usage}, {"text": "ok"}]
+    agent = harness.wrap(fake(tmp_path, script, profile=None), id="u")
+    assert (await agent.run("x", user="u1")).status is RunStatus.SUCCESS
+    assert counted == [{"model": "acp", "input_tokens": 20, "output_tokens": 10, "cached": 7}]
+    counted.clear()
+    (tmp_path / "k").mkdir()
+    kimi_like = harness.wrap(fake(tmp_path / "k", script), id="k")
+    assert (await kimi_like.run("x", user="u1")).status is RunStatus.SUCCESS
+    assert counted == []  # Kimi's count is its log's
 
 
 async def test_a_usage_line_still_being_written_is_read_next_time(tmp_path: Path) -> None:

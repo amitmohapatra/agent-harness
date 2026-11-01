@@ -32,6 +32,9 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
 * :class:`RunCheckpointer` — a LangGraph checkpointer that keeps only the latest checkpoint,
   in the run's journal (``thread_id`` is the run): a resume — in any worker, after a pause or
   a crash — continues where the graph stopped, without asking the model again;
+* :class:`PromptCache` — Anthropic's prompt cache (LangChain's
+  ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model however it is given, a
+  model name the harness routes too, and the answer that ends the history marked with it;
 * :func:`narrowing` — not given by anyone: the harness runs a ``create_agent`` graph built
   without :class:`HarnessTools` as a copy whose model calls are offered only the tools the run
   offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
@@ -79,6 +82,7 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.middleware.context_editing import TokenCounter
 from langchain.agents.middleware.types import (
+    ModelCallResult,
     PrivateStateAttr,
     hook_config,
 )
@@ -122,6 +126,7 @@ from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
     budget,
+    snapshots,
 )
 from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
@@ -144,6 +149,7 @@ from trellis.harness.tools.base import (
     arguments_of,
     citations,
     data_of,
+    max_age,
     not_run,
 )
 from trellis.harness.tools.convert import langchain as converted
@@ -229,6 +235,46 @@ SCRATCH_NOTE: Final = (
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
+#: Deep Agents' file tools that read, and those that change files: on a backend outside the
+#: graph's state they are governed as any tool, with these risks (:func:`outside_state`).
+FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
+FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
+FILE_TOOLS: Final = FILE_READS | FILE_WRITES
+#: The graph state channel Deep Agents keeps its files in: a graph has it when its file tools'
+#: backend keeps files in the graph's state (``StateBackend``, alone or a route of a composite).
+FILES_CHANNEL: Final = "files"
+
+
+def outside_state(name: str) -> dict[str, Any]:
+    """The marks of a Deep Agents file tool ``name`` on a backend outside the graph's state:
+    governed (:data:`OUTSIDE_STATE`), a read or a write."""
+    return {OUTSIDE_STATE: True, "side_effects": "read" if name in FILE_READS else "write"}
+
+
+def declare_files(graph: Any) -> None:
+    """Deep Agents' file tools of ``graph`` and of its ``task`` sub-agents' graphs, marked
+    :func:`outside_state` in each graph whose files are not its state (no
+    :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
+    ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
+    is: those calls only change the state, which its checkpoint keeps."""
+    from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
+        TASK_TOOL,
+        bound_tools,
+        subagent_graphs,
+    )
+
+    pending = [graph]  # a sub-agent's graph is compiled before the graph running it: no cycle
+    while pending:
+        found = pending.pop()
+        outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
+        for tool in bound_tools(found):
+            name = getattr(tool, "name", None)
+            if outside and name in FILE_TOOLS and not (tool.metadata or {}).get(OUTSIDE_STATE):
+                tool.metadata = {**(tool.metadata or {}), **outside_state(name)}
+            elif name == TASK_TOOL:
+                pending.extend(subagent_graphs(tool))
+
+
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
 #: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
 #: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
@@ -376,6 +422,37 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
         return False
     tools = getattr(request.runtime, "tools", None) or ()
     return not any(getattr(t, "name", None) == READ_FILE for t in tools)
+
+
+def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:
+    """``messages`` (a thread the framework keeps, as the model is sent it) with each result
+    from before the latest user message of a live tool of the run (``max_age`` 0: every
+    earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
+    already stamped (a memory window's replay), or of a tool whose value stays current a while
+    (its age is not known here) or for good, is left as it is."""
+    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    called = {
+        c["id"]: c["name"]
+        for m in messages[:asked]
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
+    }
+    out = list(messages)
+    stale: set[str] = set()
+    for n, m in enumerate(messages[:asked]):
+        if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
+            continue
+        tool = called.get(m.tool_call_id) or m.name or ""
+        found = runtime.toolbox.get(tool)
+        spec = found.spec if found is not None else runtime.native.get(tool)
+        marked = m.content.startswith(snapshots.STALE.format(tool=tool))  # memory's replay
+        if spec is None or marked or max_age(spec) != 0:
+            continue
+        stale.add(tool)
+        # the request's copy is marked, never the graph's state: each call marks it anew
+        mark = snapshots.EARLIER.format(tool=tool)
+        out[n] = m.model_copy(update={"content": f"{mark}\n{m.content}"})
+    return out, stale
 
 
 async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage | None:
@@ -611,6 +688,13 @@ class HarnessTools(AgentMiddleware):
         if harness is None:
             harness = self._tools[runtime] = self._converted(runtime)
         _PAGED.add(runtime)
+        # a thread the framework keeps: an earlier turn's live value is out of date, and its
+        # tool stays offered (the memory window's replay is stamped where it is read)
+        messages, stale = _earlier(runtime, request.messages)
+        if stale:
+            request = request.override(messages=messages)
+            if runtime.offered is not None:
+                runtime.offered |= stale
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         if _saved(request.state):  # a large result kept: read in pages, or queried
@@ -792,8 +876,9 @@ async def _narrow(
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
     """A model call offered only the tools the run offers (:func:`_offered`), the memory
-    context sent with the question (:func:`with_question`)."""
-    return await handler(with_question(_offered(request, current())))
+    context sent with the question (:func:`with_question`), the end of the history marked
+    when a caching middleware marks the request (:func:`history_marked`)."""
+    return await handler(history_marked(with_question(_offered(request, current()))))
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
@@ -1012,11 +1097,8 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     one there. Only the request changes; the conversation the graph keeps does not. The
     question is the latest user message the graph's state holds (a spent budget's last word
     is not). The context is marked off (:data:`ASKED_WITH`): after a long one, a model read
-    the question as one more saved note.
-
-    A cache that keeps only what a request marks (Anthropic's: a prompt-caching middleware
-    sets the request's ``cache_control``) keeps the history too: the answer just before the
-    question is marked, the end of what the next turn repeats (:func:`_history_marked`)."""
+    the question as one more saved note. A cache that keeps only what a request marks keeps
+    the history too (:func:`history_marked`)."""
     messages = list(request.messages)
     at = next(
         (
@@ -1047,14 +1129,91 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     )
     told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
     messages[asked] = question.model_copy(update={"content": told})
-    marker = request.model_settings.get("cache_control")
-    if marker and asked > at + 1:
-        messages[asked - 1] = _history_marked(messages[asked - 1], marker)
     del messages[at]
     return request.override(messages=messages)
 
 
-def _history_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
+def history_marked(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with the answer that ends the history — just before the latest question the
+    graph's state holds (a spent budget's last word is not one), the end of what the next
+    turn repeats — given the request's cache breakpoint, for a cache that keeps only what a
+    request marks (Anthropic's: a prompt-caching middleware sets the request's
+    ``cache_control``, :class:`PromptCache`); the request as it is without one."""
+    marker = request.model_settings.get("cache_control")
+    if not marker:
+        return request
+    messages = list(request.messages)
+    kept = {m.id for m in request.state.get("messages", []) if m.id is not None}
+    asked = next(
+        (
+            n
+            for n in range(len(messages) - 1, 0, -1)
+            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+        ),
+        None,
+    )
+    if asked is None:
+        return request
+    answer = _answer_marked(messages[asked - 1], marker)
+    if answer is messages[asked - 1]:
+        return request
+    messages[asked - 1] = answer
+    return request.override(messages=messages)
+
+
+class PromptCache(AgentMiddleware):
+    """Anthropic's prompt cache for every Anthropic chat model, however it is given: a
+    ``ChatAnthropic``, or a model name the harness routes (``gateways.routed_chat_model``) whose
+    route makes one of it now (the provider's own SDK). LangChain's
+    ``AnthropicPromptCachingMiddleware`` (``native``: the one given to ``ReAct``, else its
+    defaults) decides on the chat model the call is made with and marks what it marks — the
+    tools, the instructions, the request's own breakpoint — and the answer that ends the
+    history gets the same mark (:func:`history_marked`): 4 breakpoints, Anthropic's most. Any
+    other chat model's request is sent as it was. Named as LangChain's, it stands in Deep
+    Agents' place for it (Deep Agents replaces a middleware of the same name), last of what
+    changes the request."""
+
+    def __init__(self, native: AgentMiddleware | None = None) -> None:
+        super().__init__()
+        if native is None:
+            from langchain_anthropic.middleware import (  # noqa: PLC0415 - Deep Agents' own
+                AnthropicPromptCachingMiddleware,
+            )
+
+            native = AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore")
+        self.native = native
+
+    @property
+    def name(self) -> str:
+        return CACHING
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelCallResult[Any]:
+        given = request.model
+
+        async def sent(marked: ModelRequest[Any]) -> ModelResponse[Any]:
+            return await handler(history_marked(marked).override(model=given))
+
+        made = cast(Any, given).resolved() if routed(given) else given
+        return await self.native.awrap_model_call(request.override(model=made), sent)
+
+
+#: The name of LangChain's Anthropic prompt-caching middleware, which :class:`PromptCache` has.
+CACHING: Final = "AnthropicPromptCachingMiddleware"
+
+
+def prompt_cache(given: Sequence[Any]) -> tuple[PromptCache, list[Any]]:
+    """The :class:`PromptCache` a graph is built with — around LangChain's caching middleware
+    among ``given``, its settings kept, else around its defaults — and the rest of ``given``."""
+    own = [m for m in given if m.name == CACHING]
+    rest = [m for m in given if m.name != CACHING]
+    return PromptCache(own[0] if own else None), rest
+
+
+def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
     """The answer that ends the history with a cache breakpoint (``marker``) on its last text
     part; any other message (a call, a result) as it is, and so is an answer that has one."""
     if not isinstance(answer, AIMessage) or answer.tool_calls:
