@@ -24,17 +24,17 @@ from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
-    READ_RESULT,
+    READ_FILE,
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
     StallGuard,
     _HarnessToolsState,
     model_error,
-    read_result,
     step_limit,
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
+from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 
 @tool(side_effects="read")
@@ -534,31 +534,37 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
     assert model.turns == ["never"]
 
 
-# --------------------------------------------------------------------------- read_result
-async def test_read_result_reads_a_result_of_the_conversation_in_parts(harness: Harness) -> None:
+# --------------------------------------------------------------------------- read back
+async def test_read_file_pages_a_result_of_the_conversation_by_its_calls_id(
+    harness: Harness,
+) -> None:
+    """A result the request no longer shows (cleared) is read back with ``read_file`` by Deep
+    Agents' path for its call, paged as a kept result is (``tools.results``: one paging)."""
+
     @tool(side_effects="read")
     def dump() -> str:
         """A long result."""
-        return "".join(str(n % 10) for n in range(100))
+        return "\n".join(f"row {n}" for n in range(100))
 
+    path = f"{READ_PREFIX}/call_1_0"
     model = ScriptedChatModel(
         turns=[
             ("dump", {}),
-            (READ_RESULT, {"id": "call_1_0", "offset": 10, "limit": 15}),
-            (READ_RESULT, {"id": "call_1_0", "offset": 90, "limit": 500}),
-            (READ_RESULT, {"id": "nope"}),
+            (READ_FILE, {"file_path": path, "offset": 10, "limit": 3}),
+            (READ_FILE, {"file_path": path, "offset": 98}),
+            (READ_FILE, {"file_path": f"{READ_PREFIX}/nope"}),
             "done",
         ]
     )
-    target = graph(model, HarnessTools(), tools=[read_result(30)], checkpointer=RunCheckpointer())
+    target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(target, id="reader"), [dump])
     assert (await agent.run("x", user="u")).answer == "done"
-    assert READ_RESULT in model.requests[0]["tools"]
     assert tool_messages(model, 2)[-1][1] == (
-        '012345678901234\n…[75 more characters: read_result(id="call_1_0", offset=25)]'
+        f'11  row 10\n12  row 11\n13  row 12\n…[87 more lines: read_file(file_path="{path}", '
+        "offset=13)]"
     )
-    assert tool_messages(model, 3)[-1][1] == "0123456789"  # at most what is left
-    assert tool_messages(model, 4)[-1][1] == "there is no result 'nope' to read"
+    assert tool_messages(model, 3)[-1][1] == " 99  row 98\n100  row 99"  # what is left
+    assert tool_messages(model, 4)[-1][1] == f"Error: File '{READ_PREFIX}/nope' not found"
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
