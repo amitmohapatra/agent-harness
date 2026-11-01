@@ -2676,6 +2676,20 @@ _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", r
 #: "one of them").
 _COUNTS: Final = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
                   "eleven", "twelve")  # fmt: skip
+#: A rank said as an ordinal ("third place"), read only for a question that asks where
+#: something would rank.
+_ORDINALS: Final = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+                    "ninth", "tenth", "eleventh", "twelfth")  # fmt: skip
+_RANKED: Final = re.compile(r"\b(?:rank|place|position)", re.IGNORECASE)
+
+
+def _has_rank(answer: str, question: str, value: float) -> bool:
+    """Whether a question asking for a rank is answered with ``value`` as an ordinal ("third")."""
+    if not _RANKED.search(question) or value != int(value) or not 1 <= value <= len(_ORDINALS):
+        return False
+    return re.search(rf"\b{_ORDINALS[int(value) - 1]}\b", answer, re.IGNORECASE) is not None
+
+
 #: A count said as a share of a group: "only one of our stores", "just two of them".
 _ONLY_OF: Final = re.compile(
     r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
@@ -2803,7 +2817,9 @@ def score(
             "forbidden": hit,
         }
     if k == "number":
-        if not _has_number(a, float(expect.value), expect.tol):
+        if not _has_number(a, float(expect.value), expect.tol) and not _has_rank(
+            a, question, float(expect.value)
+        ):
             missing.append(f"value {expect.value}")
     elif k == "record":
         for name, spec in expect.value.items():

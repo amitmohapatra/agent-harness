@@ -430,6 +430,18 @@ def test_more_honest_answer_shapes_of_the_gate_run() -> None:
     assert not ok("bfh-mixed-02", 2, "I made the chart. The figures: Footwear £379,446.61.")
 
 
+def test_a_rank_said_as_an_ordinal_is_that_number() -> None:
+    case = next(c for c in breakfix.cases() if c.id == "bf3-mixed-04")
+    turn = case.turns[4]
+    assert turn.expect is not None and turn.expect.kind == "number"
+    said = (
+        "If SUP-24's 2026 revenue were 20% lower, it would be about £1,028,787. That would move "
+        "it from first to **third** place, behind SUP-17 and SUP-09."
+    )
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said.replace("third", "second"), [], turn.text)["correct"]
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",
