@@ -229,7 +229,8 @@ pip install -e '.[langgraph]'    # or any extras, below
 One distribution; each framework is an extra (the core imports none of them), pinned to the
 range this release was tested with: `langgraph` (LangGraph and LangChain's `create_agent`),
 `deepagents`, `react` (`ReAct`), `openai-agents`, `claude-agent-sdk`, `agui` (`serve_chat`),
-`a2a` (`serve_a2a`, `a2a()`), `otel` (OTLP export), `all`. A Way 2 team that wants
+`a2a` (`serve_a2a`, `a2a()`), `otel` (OTLP export), `query` (DuckDB for `query_result`),
+`all`. A Way 2 team that wants
 only `trellis.memory`, `trellis.runs` or `trellis.contracts` installs that one sibling.
 
 ## Configuration
