@@ -16,7 +16,7 @@ import respx
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 
-from trellis import Harness, ReAct, tool
+from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness.automatic import JournalBackend
 
@@ -89,6 +89,7 @@ def anthropic(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     def answer(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/v1/messages"
+        assert request.headers["x-api-key"] == "test-key"
         sent.append(json.loads(request.content))
         return httpx2.Response(200, json=anthropic_reply(ANSWERS[len(sent) - 1]))
 
@@ -163,3 +164,25 @@ async def test_another_providers_request_is_sent_as_it_was(
     assert len(route.calls) == 2
     for call in route.calls:
         assert "cache_control" not in call.request.content.decode()
+
+
+@respx.mock
+async def test_anthropics_own_endpoint_given_as_openai_compatible_is_cached(
+    anthropic: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LLM_BASE_URL`` at Anthropic's OpenAI compatibility layer, which drops prompt caching:
+    its model names are called with Anthropic's own client (the endpoint's key), and cached."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY")  # the key is the endpoint's (LLM_API_KEY)
+    compatible = respx.post("https://api.anthropic.com/v1/chat/completions").mock(
+        side_effect=[httpx.Response(200, json=openai_reply(a)) for a in ANSWERS]
+    )
+    config = Settings(llm_base_url="https://api.anthropic.com/v1/", llm_api_key="test-key")
+    async with Harness(config=config) as h:
+        agent = h.wrap(graph("claude-x", deep=False), id="endpoint")
+        for text in ("How many a?", "Which sku did I ask about?"):
+            result = await agent.run(text, user="u1", thread="conv-1")
+            assert result.status is RunStatus.SUCCESS, result.error
+    assert not compatible.called
+    assert len(anthropic) == 2
+    assert all(body["cache_control"] == MARK for body in anthropic)
+    assert all(body["tools"][-1]["cache_control"] == MARK for body in anthropic)

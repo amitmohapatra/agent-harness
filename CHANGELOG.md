@@ -66,6 +66,11 @@ own model work follows the harness's configuration.
   model the call is made with, in Deep Agents' own one's place, and marks the answer that
   ends the history. Any other provider's request is unchanged. The small hosted model by name,
   18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- Anthropic's API given as an OpenAI-compatible endpoint (`LLM_BASE_URL=https://api.anthropic.com/v1/`)
+  is called with Anthropic's own client (`ChatAnthropic`, the same endpoint and key), so its
+  prompt cache is on: the OpenAI compatibility layer drops prompt caching, as Anthropic's docs
+  say. `LLM_GATEWAY=openai-compatible` keeps the OpenAI-compatible client; `trellis doctor`
+  says which client is used.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the

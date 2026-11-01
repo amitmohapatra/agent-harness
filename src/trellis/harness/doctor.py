@@ -127,6 +127,7 @@ def gateway_said(settings: Settings, environ: Mapping[str, str]) -> list[str]:
     if gateway.url is not None:
         key = ", with LLM_API_KEY" if gateway.key else ""
         lines.append(f"auth: {gateway.auth}{key}")
+        lines += gateway.notes()
         if keys:
             lines.append(
                 f"note: {', '.join(keys)} set, not used for model calls: the endpoint wins "
