@@ -13,17 +13,23 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from pydantic import Field
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.models import Script, ScriptedChat
-from tests.support.openai_model import ScriptedModel
+from tests.support.openai_model import Items, ScriptedModel
 
 Call = tuple[str, dict[str, Any]]
 FINAL = "Done. {last}"
+#: A plan step on which the model's reply reaches its output limit before it answers: no text,
+#: no call (its tokens spent on working), the provider saying so. A call offered no tool answers
+#: instead; each model gives it in its own wire form (:func:`cut_message`, :data:`CUT_REPLY`).
+CUT: Call = ("<cut at the output limit>", {})
+#: :data:`CUT` as a chat-completions endpoint returns it.
+CUT_REPLY: Final = {"role": "assistant", "content": "", "finish_reason": "length"}
 #: What a summarization middleware's request to the model holds (LangChain's, Deep Agents').
 SUMMARIZE = "Messages to summarize"
 
@@ -48,7 +54,8 @@ class PlannedChatModel(ScriptedChatModel):
     def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
         results = [_text(m.content) for m in messages if isinstance(m, ToolMessage)]
         offered = kwargs.get("tool_choice") != "none"
-        self.turns = [planned(self.plan, results, self.final, tools=offered)]
+        turn = planned(self.plan, results, self.final, tools=offered)
+        self.turns = [cut_message() if turn == CUT else turn]
         return super()._generate(messages, *args, **kwargs)
 
     def said(self) -> str:
@@ -66,7 +73,8 @@ class _Planned(Script):
         if messages and SUMMARIZE in str(messages[-1].get("content")):
             return "Summary: the work so far."  # a summarization middleware's own request
         results = [_text(m.get("content")) for m in messages if m.get("role") == "tool"]
-        return planned(self.plan, results, self.final, tools=body.get("tool_choice") != "none")
+        turn = planned(self.plan, results, self.final, tools=body.get("tool_choice") != "none")
+        return CUT_REPLY if turn == CUT else turn
 
 
 class PlannedChat(ScriptedChat):
@@ -91,11 +99,17 @@ class PlannedModel(ScriptedModel):
         results = [
             _text(_field(i, "output")) for i in items if _field(i, "type") == "function_call_output"
         ]
-        self.turns = [planned(self.plan, results, self.final, tools=not self.bare)]
+        turn = planned(self.plan, results, self.final, tools=not self.bare)
+        self.turns = [Items() if turn == CUT else turn]  # a cut reply: no output item
         return super()._next(input, system)
 
     def said(self) -> str:
         return json.dumps([self.system, self.inputs], default=str)
+
+
+def cut_message() -> AIMessage:
+    """:data:`CUT` as a LangChain chat model returns it (an OpenAI-compatible one's metadata)."""
+    return AIMessage(content="", response_metadata={"finish_reason": "length"})
 
 
 def _field(item: Any, name: str) -> Any:

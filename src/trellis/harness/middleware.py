@@ -124,7 +124,7 @@ from trellis.contracts import (
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
-    accounting,  # noqa: F401 - every model call accounted
+    accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,
     snapshots,
 )
@@ -943,7 +943,9 @@ def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
         return None
     cells = dict(zip(code.co_freevars, node.__closure__ or (), strict=True))
     given = cells[HANDLER].cell_contents
-    handler = _chain_async_model_call_handlers([*([given] if given else []), _narrow])
+    handler = _chain_async_model_call_handlers(
+        [*([given] if given else []), answered_in_full, _narrow]
+    )
     closure = tuple(
         types.CellType(handler) if name == HANDLER else cell for name, cell in cells.items()
     )
@@ -1417,8 +1419,9 @@ class StallGuard(AgentMiddleware):
     """A run that goes nowhere ends with one answer: the same call with the same arguments in
     ``max_repeats`` consecutive steps (before it runs again), or :data:`ERROR_STREAK`
     consecutive steps in which every call failed (a malformed one among them) and a failure
-    was met again (:func:`_failing`). The model is told so (``bridge.STALLED``,
-    :data:`FAILING`) and called once more, offered no tool (``tool_choice="none"``), so the
+    was met again (:func:`_failing`), or a reply cut at the model's output limit with no answer
+    (:func:`answered_in_full`). The model is told so (``bridge.STALLED``, :data:`FAILING`,
+    ``budget.CUT_OFF``) and called once more, offered no tool (``tool_choice="none"``), so the
     user is told what went wrong; no answer then stops the run (``ModelError``)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
@@ -1441,7 +1444,7 @@ class StallGuard(AgentMiddleware):
                 FAILING.format(steps=failing),
                 f"stopped: every tool call failed in {failing} consecutive steps",
             )
-        reply = await handler(request)
+        reply = await answered_in_full(request, handler)
         message = _ai(reply)
         if message is not None and message.tool_calls:
             # a stall needs only the latest steps: no more than max_repeats - 1 are looked at
@@ -1462,6 +1465,27 @@ class StallGuard(AgentMiddleware):
                         f"{streak} times in a row (a stall)",
                     )
         return reply
+
+
+#: Why a run whose model's reply reached its output limit with no answer, twice, stopped.
+CUT_STOPPED: Final = "stopped: the model's reply reached its output limit before it gave an answer"
+
+
+async def answered_in_full(
+    request: ModelRequest[Any],
+    handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+) -> ModelResponse[Any]:
+    """The model's reply — or, when it reached the model's output limit before it gave an
+    answer (``accounting.cut_off``), the model called once more, told so (``budget.CUT_OFF``)
+    and offered no tool (:func:`_answer_now`, an ``output_limit`` warning): LangChain ends its
+    loop on a reply with no tool call, so the run ended with no answer (the break-and-fix
+    gate's LangGraph turns, 4,096 tokens of rows summed by hand). ``StallGuard`` has it, and a
+    ``create_agent`` graph without the harness's middleware runs it (:func:`narrowing`)."""
+    reply = await handler(request)
+    message = _ai(reply)
+    if message is None or not accounting.cut_off(message):
+        return reply
+    return await _answer_now(request, handler, budget.CUT_OFF, CUT_STOPPED, warning="output_limit")
 
 
 async def _answer_now(

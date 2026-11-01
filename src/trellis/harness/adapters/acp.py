@@ -87,6 +87,7 @@ from trellis.harness.adapters.base import (
     Narrowing,
     Output,
     ToolFormat,
+    builtin,
     helper,
     unique,
 )
@@ -130,6 +131,9 @@ GOVERNED_MODES: Final = frozenset({"default", "plan"})
 OPTIONS: Final = ("env", "cwd", "mcp_servers", "mode", "model")
 #: The agent's answer to a turn it ended for a reason the run fails with.
 FAILED_STOPS: Final = frozenset({"refusal", "max_turn_requests"})
+#: The stop reason of a turn whose last reply reached the model's output limit (Kimi retries
+#: such a reply itself first).
+MAX_TOKENS: Final = "max_tokens"
 #: What the agent is told after a call the run rejected (ACP's answer carries no reason).
 REJECTED: Final = "Your call to {tool} was not run: {why} Carry on with the task without it."
 #: What the agent is told after a call whose arguments a reviewer (or a hook) changed (ACP's
@@ -695,12 +699,13 @@ async def _harness_server(server: Any) -> AsyncIterator[Any]:
 
 def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     """A tool the agent runs itself, as the harness records and publishes it: a built-in by its
-    risk (its profile's), an MCP server's tool (``mcp__<server>__<tool>``) by its server."""
+    risk (its profile's) and tagged ``BUILTIN``, an MCP server's tool (``mcp__<server>__<tool>``)
+    by its server."""
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
     builtins = profile.builtins if profile is not None else {}
-    spec = ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS))
+    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 
@@ -915,6 +920,8 @@ class Attempt:
                     if item.error is not None:
                         raise await self._failed(item.error)
                     self._answered_usage(item.answer)
+                    # past the agent's own retries: what a run with no answer says
+                    runtime.cut_off = getattr(item.answer, "stop_reason", None) == MAX_TOKENS
                     yield item.answer
                     return
                 if await self._seen(item):

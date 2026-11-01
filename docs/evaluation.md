@@ -484,6 +484,13 @@ cannot do; 20 new cases a round (`bf<n>-…`), categories `bf_past`, `bf_analyti
 round and are never fixed against. Each case's chats are one user's, kept to the run and the
 case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
 before a later chat the harness's writes are drained, as a chat an hour later finds them.
+A run that pauses to ask a person about a shell command that only reads (Claude Code's or Kimi's
+`Bash`: a program that reads, joined by pipes and sequences, or Python whose code writes
+nothing; `benchmark/cost/approvals.py`) is resumed approved, as a user reading it would, and the
+row says which commands (`approved`); a pause on anything else (a write, a delete, an install,
+the network, a script it cannot read) stays a pause. A `cannot` turn whose run ran such a
+command is scored on what it did: the result is its answer, and only output the user cannot
+reach (a file link, a file it says it saved) is made up; a refusal is still right.
 
 ## Load benchmark
 

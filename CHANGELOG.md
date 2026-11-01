@@ -56,6 +56,18 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A framework's built-in tools no longer count toward the tool hints' narrowing threshold
+  (`NARROW_FROM`, 30): only the run's own tools do (`Runtime.own_tools`). Claude Code's and
+  Kimi's built-ins, and Deep Agents' `task` and file tools, are tagged `builtin`. Counted with
+  them, a Claude or Kimi run of 14 tools of its own narrowed, and the tool a question needed
+  (`find_sku`) was never listed for the query: 4 missed turns in the break-and-fix gate.
+- A run never ends `SUCCESS` with no answer. A reply that reached the model's output limit
+  before it answered (no text, no tool call) ended LangChain's loop, and the run succeeded
+  with an empty answer: two LangGraph turns at 4,096 tokens in the break-and-fix gate. In
+  `ReAct`, `middleware()` and any `create_agent` or Deep Agents graph the model is now asked
+  once more, told so (`budget.CUT_OFF`) and offered no tool (an `output_limit` warning).
+  Claude Code and Kimi recover such a reply themselves. A run that still ends with no answer,
+  on any adapter but a function, ends `ERROR` `NO_ANSWER` saying why.
 - A `create_agent` or Deep Agents graph wrapped without `middleware()` computes over large
   results too: its harness tools' large results are kept, and the model is offered `read_file`
   and `query_result` once the run keeps one, as with `middleware()`. Before, it was offered

@@ -77,6 +77,7 @@ from trellis.harness.adapters.base import (
     Narrowing,
     Output,
     ToolFormat,
+    builtin,
     helper,
     unique,
 )
@@ -157,6 +158,9 @@ STEERED_SAYS: Final = "The user adds, while you work: "
 STEP: Final = "claude_agent_sdk"
 #: The result a query that reached its ``max_turns`` ends with (no answer).
 MAX_TURNS: Final = "error_max_turns"
+#: The ``stop_reason`` of a query's result whose last reply reached the model's output limit
+#: (Claude Code first continues such a reply itself).
+MAX_TOKENS: Final = "max_tokens"
 #: When the SDK hands the session store a step: as soon as the CLI mirrors it.
 SESSION_FLUSH: Final = "eager"
 #: Claude Code's tool that runs a subagent (``agents=``): ``Agent``, named ``Task`` before.
@@ -365,6 +369,9 @@ class ClaudeAdapter:
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
                         limited = message
                         continue
+                    if isinstance(message, ResultMessage):
+                        # past Claude Code's own recovery: what a run with no answer says
+                        runtime.cut_off = message.stop_reason == MAX_TOKENS
                     yield message
         except ResultError:
             # the CLI exits with an error after its error result (the SDK raises it then): at
@@ -838,12 +845,13 @@ def _unlisted(server: str, reason: str) -> None:
 
 def native_spec(name: str) -> ToolSpec:
     """A tool Claude runs itself, as the harness records and publishes it: a built-in by its
-    risk (:data:`BUILTIN_SIDE_EFFECTS`), an MCP server's tool (``mcp__<server>__<tool>``) by its
-    server."""
+    risk (:data:`BUILTIN_SIDE_EFFECTS`) and tagged ``BUILTIN``, an MCP server's tool
+    (``mcp__<server>__<tool>``) by its server."""
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    spec = ToolSpec(name=name, side_effects=BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS))
+    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    spec = builtin(ToolSpec(name=name, side_effects=risk))
     return helper(spec) if name in SUBAGENT_TOOLS else spec
 
 

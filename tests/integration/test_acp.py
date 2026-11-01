@@ -23,6 +23,7 @@ from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
     EDITED,
     KIMI,
+    KIMI_BUILTINS,
     REJECTED,
     ACPAgent,
     UsageLog,
@@ -30,6 +31,7 @@ from trellis.harness.adapters.acp import (
     native_spec,
 )
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import sandbox
@@ -355,7 +357,7 @@ async def test_each_swarm_member_is_a_child_run(harness: Harness, tmp_path: Path
         ("Review b.ts", RunStatus.ERROR),
         ("Review c.ts", RunStatus.ERROR),
     ]
-    assert native_spec("AgentSwarm", KIMI).tags == ["helper"]
+    assert "helper" in native_spec("AgentSwarm", KIMI).tags
 
 
 async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_tree(
@@ -439,6 +441,31 @@ async def test_the_session_mode_is_set_and_one_that_asks_nothing_refused(
     assert recorded(tmp_path)["modes"] == ["plan"]
     with pytest.raises(ConfigurationError, match="a mode that approves on its own"):
         kimi(mode="yolo")
+
+
+async def test_kimis_built_in_tools_do_not_count_toward_narrowing_the_runs_own(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Kimi's built-ins are the framework's, not the run's: the tools the hints narrow from
+    (``NARROW_FROM``) are the run's own. Counted with them, a run of a few tools of its own
+    narrowed, and the ``trellis`` server did not list the tool a question needed."""
+
+    def make(i: int) -> Any:
+        def look(key: str) -> str:
+            return f"t{i}"
+
+        return tool(look, name=f"t{i}", side_effects="read")
+
+    memory_service.candidates = ["t1"]
+    own = NARROW_FROM - len(KIMI_BUILTINS) + 1  # with the built-ins, past the threshold
+    script = [{"tool": "t0", "args": {"key": "a"}}, {"text": "{last}"}]
+    agent = arm(
+        memory_harness.wrap(fake(tmp_path, script), id="own"), [make(i) for i in range(own)]
+    )
+    result = await agent.run("look a up", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "t0"
+    [listed] = recorded(tmp_path)["listed"]
+    assert {f"t{i}" for i in range(own)} <= set(listed)
 
 
 # --------------------------------------------------------------------------- the context
