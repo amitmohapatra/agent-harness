@@ -172,7 +172,8 @@ over 50 MiB. A run that fails keeps none.
   journal saved with the pause; the first call that changes the sandbox after the resume
   forgets it.
 * **Deleted** when the run ends, whichever way (success, error, time out, cancel — a queued or
-  paused run cancelled included), with its snapshots. A queued run that failed with an error
+  paused run cancelled included), with its snapshots and the anonymous volumes its image
+  declares (Docker: `VOLUME`). A queued run that failed with an error
   agent-runs runs it again after keeps it: its next attempt goes on in it.
 * **Reaped**: a process deletes, in the background, a tenant's sandboxes whose runs have ended
   — what a process that died before deleting its own left — when it first makes a sandbox for
@@ -341,4 +342,6 @@ temporary directory, with no isolation) that shows the whole interface working.
 * Tests: `tests/integration/test_sandbox.py` (every adapter, calls at once, a pause, a lost
   sandbox, crashes, a timeout, governance, redaction, every ending, the reaper),
   `tests/unit/test_docker_sandbox.py` (the Engine API calls), and against the real daemon
-  `tests/live/test_live_sandbox.py`.
+  `tests/live/test_live_sandbox.py` and `tests/live/test_live_sandbox_data.py` (a data image,
+  [`tests/live/sandbox-data`](../tests/live/sandbox-data/Dockerfile): code over a kept 50k-row
+  result, an Excel workbook and a PNG chart, a missing module, two users at once).
