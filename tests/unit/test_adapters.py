@@ -49,12 +49,13 @@ from trellis.harness.adapters.openai_agents import (
     EDITED,
     OpenAIAgentsAdapter,
     _arguments,
+    _asked_with,
     _Continue,
 )
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.evals import _unfenced
 from trellis.harness.gateways import ProviderSDK
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import ASKED_WITH, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
@@ -293,6 +294,45 @@ def test_the_context_is_the_first_system_message_of_every_input_shape() -> None:
     assert adapter.prepare_input(None, {"order": 7}, None) == [
         {"role": "user", "content": '{"order": 7}'}
     ]
+
+
+async def test_the_context_moves_into_the_users_turn_after_the_runs_own_filter() -> None:
+    """``_asked_with``: the system message carrying the pushed context leaves the model's input,
+    and the latest user message after it starts with it, marked off; a message in parts keeps
+    its parts. The run's own filter runs first; no context, or no question after it, leaves the
+    input as it is."""
+    from agents import RunConfig
+    from agents.run_config import ModelInputData
+
+    marked = {"type": "input_text", "text": ASKED_WITH.format(context="ctx")}
+    seen: list[Any] = []
+
+    def theirs(data: Any) -> Any:
+        seen.append(data)
+        return data.model_data
+
+    runtime = SimpleNamespace(pushed_context="ctx")
+    options = {"run_config": RunConfig(call_model_input_filter=theirs)}
+    moved = _asked_with(runtime, options)["run_config"].call_model_input_filter  # type: ignore[arg-type]
+
+    async def given(*items: Any) -> list[Any]:
+        data = SimpleNamespace(model_data=ModelInputData(input=list(items), instructions="i"))
+        return list((await moved(data)).input)
+
+    earlier = {"role": "user", "content": "before"}
+    system = {"role": "system", "content": "ctx"}
+    assert await given(earlier, system, {"role": "user", "content": "q"}) == [
+        earlier,
+        {"role": "user", "content": [marked, {"type": "input_text", "text": "q"}]},
+    ]
+    parts = [{"type": "input_text", "text": "q"}]
+    assert await given(system, {"role": "user", "content": parts}) == [
+        {"role": "user", "content": [marked, *parts]}
+    ]
+    assert await given(earlier, system) == [earlier, system]  # no question after it
+    assert await given(earlier) == [earlier]  # no context message
+    assert len(seen) == 4
+    assert _asked_with(SimpleNamespace(pushed_context=None), {}) == {}  # type: ignore[arg-type]
 
 
 def _pending(**fields: Any) -> Pending:

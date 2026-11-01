@@ -17,9 +17,9 @@ from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, to
 from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
 from trellis.harness.events import WARNING
-from trellis.harness.history import ASKED_WITH
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.journal import content_key
 from trellis.harness.tools.bridge import SAME_CALL
 
