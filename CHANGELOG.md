@@ -59,9 +59,17 @@ own model work follows the harness's configuration.
   the instructions with this one. The model now gets it as the first part of the turn's
   question, after the history; the graph's state is unchanged. With a prompt-caching
   middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
-  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  answer ending the history is marked too (`middleware.history_marked`, audit K1). The
   context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
   long context does not read as one more saved note.
+- Anthropic's prompt cache is on for every Anthropic chat model `ReAct` is given, on
+  LangChain's loop and on Deep Agents'. A model name (routed to the provider's own SDK) is not
+  a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` skipped it, and plain
+  `ReAct` had no caching middleware at all: nothing was cached. `middleware.PromptCache` runs
+  LangChain's middleware (one given to `ReAct(middleware=)`, its settings kept) on the chat
+  model the call is made with, in Deep Agents' own one's place, and marks the answer that
+  ends the history. Any other provider's request is unchanged. The small hosted model by name,
+  18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
