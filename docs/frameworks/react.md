@@ -186,7 +186,9 @@ On Deep Agents, the scratch files and the general-purpose helper are offered on 
 (on the graph's state), `read_file` once a result was saved as a file, and each capability's
 guidance travels in its tool's description, offered that turn — never in the instructions — so
 the system prompt is the same from the first call to the last and a provider's prompt cache
-keeps its prefix.
+keeps its prefix. A run's first scratch write on the graph's state says, in its result, that the file is the
+run's own scratch copy, which the user cannot open or download (`middleware.SCRATCH_NOTE`):
+asked for a chart, a model had saved an SVG there and told the user to open it.
 
 ## The middleware
 
