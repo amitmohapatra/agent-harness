@@ -918,6 +918,14 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     return request.override(messages=[*kept, *messages]) if kept else request
 
 
+#: The memory context as it is sent with the user's message (:func:`with_question`): marked
+#: off, so the message after it reads as the question, not one more note.
+ASKED_WITH: Final = (
+    "<memory_context>\nWhat memory holds for this message (background; not the user's "
+    "message, which follows):\n\n{context}\n</memory_context>"
+)
+
+
 def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     """The request with the pushed memory context (the system message
     :data:`~trellis.harness.adapters.langgraph.CONTEXT_MESSAGE_ID`) sent as the first part of
@@ -927,7 +935,8 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     part of the user's message, never a system message after the first: some providers refuse
     one there. Only the request changes; the conversation the graph keeps does not. The
     question is the latest user message the graph's state holds (a spent budget's last word
-    is not).
+    is not). The context is marked off (:data:`ASKED_WITH`): after a long one, a model read
+    the question as one more saved note.
 
     A cache that keeps only what a request marks (Anthropic's: a prompt-caching middleware
     sets the request's ``cache_control``) keeps the history too: the answer just before the
@@ -960,7 +969,7 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
         if isinstance(question.content, list)
         else [{"type": "text", "text": question.content}]
     )
-    told = [{"type": "text", "text": messages[at].text}, *said]
+    told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
     messages[asked] = question.model_copy(update={"content": told})
     marker = request.model_settings.get("cache_control")
     if marker and asked > at + 1:
