@@ -141,6 +141,20 @@ own model work follows the harness's configuration.
   use; the harness's own `middleware.RETRYABLE_STATUS` (408, 409, 429 and every 5xx) is gone.
   425 is now retryable; 501, 505 and the other 5xx are not.
 
+### Removed (one clearing pass, one read-back tool)
+
+- `read_result`, `READ_RESULT`, `READ_LIMIT`, `FIT_CLEARED` and `FitWindow`'s clearing of older
+  results: LangChain's `ClearToolUsesEdit` is the one clearing pass, and its placeholder names
+  `read_file` with the cleared call's id as its path (`/large_tool_results/<call id>`, Deep
+  Agents' own), paged from the graph's state with the limits every kept result uses (100 lines,
+  20,000 characters). `FitWindow` cuts the longest results instead (each kept whole, its cut
+  naming the `read_file` call that reads on). Before, `FitWindow` cleared results to a
+  placeholder naming `read_result`, a tool that request did not offer.
+- `FitWindow(turns=False)` (ReAct on Deep Agents: a summarization after it) leaves tool results
+  to Deep Agents too: its overflow path offloads a result whole to its backend. Before, both cut
+  the same result, so a sandbox held it twice (the harness's whole copy, written in for code,
+  and Deep Agents' offload of the cut text).
+
 ## 0.6.0 — ReAct with Deep Agents on demand; `middleware()` (unreleased)
 
 `ReAct` is LangChain's `create_agent` with the harness's part on top, and Deep Agents'

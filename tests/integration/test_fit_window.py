@@ -21,7 +21,6 @@ from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.events import WARNING
 from trellis.harness.middleware import (
-    FIT_CLEARED,
     FITTED,
     ContextTooLarge,
     FitWindow,
@@ -108,8 +107,10 @@ async def test_older_results_are_cleared_cut_and_older_turns_left_out() -> None:
     ]
     out = await sent(FitWindow(6000), request(messages, [lc("a")]))
     results = [m.text for m in out.messages if isinstance(m, ToolMessage)]
-    assert FIT_CLEARED in results or len(results) == 1  # the older one cleared or left out
+    # one clearing pass (LangChain's ClearToolUsesEdit, before it): FitWindow only cuts
+    assert all("cleared" not in r for r in results)
     assert "characters cut to fit the window" in results[-1]
+    assert not hasattr(ours, "FIT_CLEARED") and not hasattr(ours, "read_result")
     assert _size(out) <= int(6000 * 0.95)
     kept = await sent(FitWindow(6000, turns=False), request(messages, [lc("a")]))
     assert kept.messages[1].text == "first"  # a summarization after it has the older turns
