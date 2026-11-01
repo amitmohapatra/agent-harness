@@ -73,6 +73,14 @@ own model work follows the harness's configuration.
   form with the server's schema (a `format: date` field a date picker), a link a choice — and
   the answer goes back to the server when the run resumes, on both MCP protocol eras
   (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
+- A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
+  `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
+  else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
+  `<tenant>/<user>/<conversation>/<run>/`, names it in the run's journal and announces it (the
+  `file` event); `serve_chat` serves it to the run's own user at
+  `GET {path}/runs/{run_id}/files/{name}`: a 5-minute signed link where the store signs, else
+  streamed. Stored only: never parsed or remembered. New dependency: `fsspec`.
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
