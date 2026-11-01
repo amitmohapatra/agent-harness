@@ -300,6 +300,7 @@ class Cli:
                         "resume": resumed,
                         "prompt": prompt,
                         "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
+                        "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
                         "context": context,
                         "materialised": mirrored(session) is not None,
                         "earlier": prompts(session),
