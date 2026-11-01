@@ -663,3 +663,17 @@ def test_a_store_named_as_above_the_line_is_not_listed_under_it() -> None:
     )
     assert _right("bf3-past-04", 1, figure_first)
     assert not _right("bf3-past-04", 1, "S26 and S22 were under the line.")
+
+
+def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead() -> None:
+    """bfh-mixed-02 (ReAct and create_agent, main): "I have no tool that produces image or file
+    exports. Here is the August 2026 data so you can chart it yourself" was scored as offering
+    nothing instead. A refusal that offers nothing still fails."""
+    turn = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02").turns[-1]
+    gave = (
+        "I can't create a downloadable chart. I have no tool that produces image or file "
+        "exports. Here is the August 2026 data so you can chart it yourself."
+    )
+    assert cx.score(turn.expect, gave, [], turn.text)["correct"]
+    bare = "I can't create a downloadable chart. I have no tool that produces image exports."
+    assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
