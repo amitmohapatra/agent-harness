@@ -34,8 +34,8 @@ from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import Identity, conversation_key
-from trellis.harness.middleware import ASKED_WITH
 from trellis.memory.models import ToolHints
 
 

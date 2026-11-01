@@ -57,6 +57,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.harness import budget
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -639,7 +640,49 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return _routed(runtime, target, _steering(runtime, _told_unknown_tools(options)))
+    told = _told_unknown_tools(options)
+    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, told)))
+
+
+def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the SDK's own ``max_turns`` error handler (``Runner.run``'s
+    ``error_handlers``), unless the run gives its own: a run that reaches its turn limit ends
+    with one last answer, as a ``ReAct`` run at ``max_steps`` does (``middleware.AnswerAtLimit``) —
+    the last agent called once more, told the limit is reached (``budget.LIMIT``) and given no
+    tool, through the run's own config and hooks — not a ``MaxTurnsExceeded`` error with no
+    answer. An agent that answers in a structured type, or a last call that gives no answer,
+    leaves the SDK's error."""
+    from agents import Runner
+    from agents.run_config import DEFAULT_MAX_TURNS
+
+    limit = options.get("max_turns") or DEFAULT_MAX_TURNS
+
+    async def last_answer(given: Any) -> str | None:
+        agent = given.run_data.last_agent
+        if agent.output_type not in (None, str):
+            return None
+        told: Any = {"role": "user", "content": budget.LIMIT.format(limit=limit)}
+        bare = agent.clone(tools=[], handoffs=[], mcp_servers=[])
+        try:
+            result = await Runner.run(
+                bare,
+                [*given.run_data.history, told],
+                max_turns=1,
+                hooks=_hooks(),
+                run_config=options.get("run_config"),
+                context=given.context.context,
+            )
+        except Exception as exc:
+            log.warning("run %s: no last answer at the turn limit: %s", runtime.run_id, exc)
+            return None
+        stopped = f"stopped: the turn limit ({limit}) was reached"
+        log.warning("run %s %s", runtime.run_id, stopped)
+        runtime.events.warning("step_limit", stopped)
+        return str(result.final_output)
+
+    handlers = dict(options.get("error_handlers") or {})
+    handlers.setdefault("max_turns", last_answer)
+    return {**options, "error_handlers": handlers}
 
 
 def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:

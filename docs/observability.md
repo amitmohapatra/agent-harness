@@ -159,7 +159,10 @@ memory search and recall see the real data. Masking of your own is a hook:
 `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM` (`tool_notice`, `log` from `current().log(...)`,
 `warning`, `decision` — the person's decision an attempt goes on with: `decision`, `reviewer`,
 `comment`, `remember`; or a call approved because its tool was approved for the run —),
-`INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. The decision is also on the attempt's
+`INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. Every `RUN_FINISHED` (whatever its outcome) says
+what the run spent in `data.spent`: `tokens` (input and output), `cached_tokens`, `cost` (US
+dollars, as the gateway reported them), `model_calls` and `tool_calls`, its sub-agents' runs
+and earlier attempts included — the counts its budget reads ([runs.md](runs.md#spending-a-budget-per-run)). The decision is also on the attempt's
 `invoke_agent` span (`trellis.decision.*` attributes and a `decision` span event). With
 `RUNS_URL` the events are also in agent-runs' event log, readable from any process
 (`agent.events`, [runs.md](runs.md#a-runs-events-from-anywhere)). A failed background write is a `warning`

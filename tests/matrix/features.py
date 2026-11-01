@@ -88,6 +88,10 @@ ONE_CALL_AT_A_TIME: Final = NA(
     "the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)"
 )
 NO_TEXT_OUTSIDE_STREAMS: Final = NA("nothing is streamed: no listener in this mode")
+FIXED_GRAPH: Final = NA(
+    "a graph built with its tools offers those: build it with trellis.middleware() (or use "
+    "ReAct) for a run's own tools, a front end's among them"
+)
 
 
 def only_modes(*modes: str, reason: str) -> dict[str, Note]:
@@ -945,6 +949,37 @@ async def agui_surface(w: World) -> None:
     assert decode(replay.text) == w.outcomes[-1].surface[1:]
 
 
+#: A tool the AG-UI client declares (a CopilotKit frontend action): the app runs it.
+PICK_COLOR: Final = {
+    "name": "pick_color",
+    "description": "Ask the person to pick a color in the app.",
+    "parameters": {"type": "object", "properties": {"hint": {"type": "string"}}},
+}
+
+
+async def frontend_tools(w: World) -> None:
+    from trellis.harness.frontend import FRONTEND_TOOL
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if FRONTEND_TOOL in (interrupt.payload or {}):
+            return "answer", "red"  # what the app's picker returned
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("pick_color", {"hint": "warm"})]
+    o = (await w.go([], plan, answer=answer, frontend={"tools": [PICK_COLOR]})).succeeded()
+    [asked] = o.pauses
+    assert asked.tool_call is not None and asked.tool_call.tool == "pick_color", asked
+    assert asked.tool_call.args == {"hint": "warm"}
+    assert o.answer == "Done. red", o.answer  # the model read the app's result
+    events = [e for _, e in o.surface]
+    started = [e for e in events if e["type"] == "TOOL_CALL_START"]
+    assert started and started[0]["toolCallName"] == "pick_color", started
+    paused = [e for e in events if e.get("outcome", {}).get("type") == "interrupt"]
+    [entry] = paused[0]["outcome"]["interrupts"]
+    assert entry["reason"] == FRONTEND_TOOL
+    assert entry["toolCallId"] == started[0]["toolCallId"]
+
+
 async def a2a_surface(w: World) -> None:
     await events(w)
     states = _a2a_states(w.outcomes[-1].surface)
@@ -1509,6 +1544,19 @@ FEATURES: Final[list[Feature]] = [
         way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
     ),
     Feature(
+        "F62t",
+        "AG-UI frontend tools: offered, called, run by the app, its result read",
+        "F62 (backlog: AG-UI frontend tools)",
+        "RunAgentInput.tools",
+        frontend_tools,
+        modes=only_modes("agui", reason="frontend tools come with an AG-UI request"),
+        adapters={
+            "langgraph": FIXED_GRAPH,
+            "deepagents": FIXED_GRAPH,
+        },
+        way2=NA("Way 1 only by design (README: surfaces are the harness's)"),
+    ),
+    Feature(
         "F63",
         "A2A: the task is the run, submitted to completed",
         "F63",
@@ -1652,7 +1700,8 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
+    # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
+    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
     "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
     # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
     "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
@@ -1683,7 +1732,16 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
+    if w.adapter == "openai_agents" and w.mode != "elsewhere":
+        # one last answer at the limit, its warning on the stream; elsewhere the resumed turn's
+        # planned last call is a tool, so the SDK's own error stands (test_framework_options)
+        o.succeeded()
+        warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
+        assert any(said in m for m in warned), o.custom(WARNING)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
+    if w.adapter == "openai_agents":
+        said = "Max turns (1) exceeded"
     assert said in o.record.error.message, o.record.error.message
 
 

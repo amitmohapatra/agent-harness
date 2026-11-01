@@ -181,7 +181,10 @@ async def test_react_offers_the_variant_per_model_call(run: tuple[Run, bool]) ->
         sent.extend(request.tools)
 
     request = SimpleNamespace(
-        tools=[], state={}, override=lambda **c: SimpleNamespace(**{"state": {}, **c})
+        tools=[],
+        messages=[],
+        state={},
+        override=lambda **c: SimpleNamespace(**{"state": {}, "messages": [], **c}),
     )
     await ours.HarnessTools().awrap_model_call(request, handler)  # type: ignore[arg-type]
     [found] = [t for t in sent if t.name == "query_result"]
