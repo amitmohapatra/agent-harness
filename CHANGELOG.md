@@ -56,6 +56,12 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A `create_agent` or Deep Agents graph wrapped without `middleware()` computes over large
+  results too: its harness tools' large results are kept, and the model is offered `read_file`
+  and `query_result` once the run keeps one, as with `middleware()`. Before, it was offered
+  neither, and summed rows by hand: 5 analytics turns in the break-and-fix gate, two of them
+  past the 4,096-token output limit. The harness's narrowing copy offers them as schemas, and
+  the graph's tool node answers them. A hand-built `StateGraph` still binds its own tools.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
