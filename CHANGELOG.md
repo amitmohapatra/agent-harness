@@ -44,14 +44,22 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
+  says the file is the run's own scratch copy, which the user cannot open or download
+  (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
+  graph's state and told the user to open it (break-and-fix round 1, Deep Agents).
 - A conversation is no longer lost when memory fails mid-chat. Where memory replays the
   conversation (its window) and its context call fails (an outage, the circuit open), the
   earlier turns come from the run store, as with memory off; before, the model was sent the
   question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
-- `query_result` adds money up exactly: a column of decimals as written (at most 15 digits) is
-  `DECIMAL`, whose `sum`, `total` and `avg` (a window's too) add up in Python's `decimal`, and a
-  number in an answer is written as SQLite writes a `REAL` (15 significant digits). 6,000
-  two-decimal refunds summed to `32266.149999999998` (ADV-2).
+- `query_result` adds money up exactly, on both engines: a column of decimals as written (at most
+  15 digits) is `DECIMAL` — DuckDB's own `DECIMAL(p, s)`; on SQLite a `REAL` whose `sum`,
+  `total` and `avg` (a window's too) add up in Python's `decimal` — and a number in an answer
+  is written as SQLite writes a `REAL` (15 significant digits). 6,000 two-decimal refunds
+  summed to `32266.149999999998` (ADV-2).
+- OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
+  on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
+  that ended the run with no answer (ADV-8).
 
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
@@ -85,6 +93,18 @@ own model work follows the harness's configuration.
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
   its cut naming the `read_file` call that reads on from there.
+- `query_result` runs on DuckDB when the new `query` extra is installed (in `all`), and on
+  Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
+  one contract on both (the description names the engine; the same tables, column typing,
+  `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
+  Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
+  JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
+  query builds is at most 64 MB, and a query past its time is interrupted by a watcher
+  thread on either engine.
 - `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
   of the run's saved results — each a table named by its tool, so one query joins them — with
   formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
