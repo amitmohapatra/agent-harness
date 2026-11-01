@@ -1652,7 +1652,8 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
+    # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
+    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
     "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
     # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
     "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
@@ -1683,7 +1684,16 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
+    if w.adapter == "openai_agents" and w.mode != "elsewhere":
+        # one last answer at the limit, its warning on the stream; elsewhere the resumed turn's
+        # planned last call is a tool, so the SDK's own error stands (test_framework_options)
+        o.succeeded()
+        warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
+        assert any(said in m for m in warned), o.custom(WARNING)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
+    if w.adapter == "openai_agents":
+        said = "Max turns (1) exceeded"
     assert said in o.record.error.message, o.record.error.message
 
 
