@@ -142,6 +142,13 @@ TURN_WRITE_SECONDS: Final = 5.0
 #: (``Agent.sessions``; a session's transcripts can be large): the least recently used goes,
 #: and its next turn starts a new one.
 SESSIONS_KEPT: Final = 128
+#: Why a blank message (empty, or whitespace only) opens no run: there is nothing to answer, a
+#: provider refuses a blank user message (Anthropic does), and kept in the thread it would fail
+#: every later turn of it.
+BLANK: Final = (
+    "the message is blank (empty or whitespace only): there is nothing to answer, so no run is "
+    "opened and nothing is sent to the model"
+)
 #: What the model is told when memory has nothing for the question (``evidence_status``
 #: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
 #: the user's history, instead of a confident guess the memory never held. Not when a hinted
@@ -1254,6 +1261,8 @@ class Agent:
         parent's)."""
         if not user:
             raise ConfigurationError("a run is for somebody: pass user=")
+        if isinstance(input, str) and not input.strip():
+            raise ConfigurationError(BLANK)
         run_id = run_id or new_id("run_")
         turned_off = features(without)
         if parent is not None:

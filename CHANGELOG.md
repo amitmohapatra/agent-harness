@@ -44,6 +44,11 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A blank message (empty, or whitespace only) opens no run: `run`, `stream` and `start` raise
+  `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
+  model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
+  would fail every later turn (ADV-1).
+
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
