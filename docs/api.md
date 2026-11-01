@@ -318,7 +318,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | `memory_files` | none | Deep Agents' `memory`: `AGENTS.md`-style files loaded into the instructions (named so it is not taken for the memory service) |
 | `backend` | the graph's state, kept in the run's journal | where Deep Agents' file tools work: a `StateBackend`, `StoreBackend` (the memory service when wrapped), `FilesystemBackend`, `CompositeBackend`, or the run's sandbox: [`sandbox()`](#sandbox) (`execute` runs code there). Files outside the graph's state are the agent's from the start and governed as any tool |
 | `permissions` | none | Deep Agents' `FilesystemPermission` rules for its file tools |
-| `max_steps` | 12 | model calls with tools in one invocation, then one more without (1 or more): a loop guard, counted again each invocation. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
+| `max_steps` | 12 | model calls a run makes (1 or more): LangChain's `ModelCallLimitMiddleware`, which ends the run with its own message at the limit; counted over the run (a resume included) in `ReAct`, per invocation in `middleware()`. For a spending cap over the whole run (its attempts and sub-agents included) use [`Budget(max_tool_calls=)`](#budget) |
 | `call_timeout` | none | the most one model call may take, in seconds (a tool's own `call_timeout` bounds a tool call) |
 | `effort` | none | the reasoning effort sent with every call of a model name (`reasoning_effort`) |
 
@@ -346,7 +346,7 @@ The harness's part of `ReAct` for a LangChain `create_agent` or a Deep Agents
 `create_deep_agent` graph of your own — `create_deep_agent(model, tools,
 middleware=middleware())` — the settings meaning what
 [`ReAct`](#react)'s do: the run's tools per model call (narrowed per turn; the memory and gateway
-MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` then a final answer, the
+MCP tools), the graph's own tools governed, `max_repeats`, `max_steps` (LangChain's model call limit), the
 run's budget, planning on a long task, older results cleared and read back (with a
 `context_window`), the request fitted to the window, and `ModelHooks` (the span, a failed
 call's `on_error`, `call_timeout`, a `stored(...)` `system_prompt` pinned per run). A graph
