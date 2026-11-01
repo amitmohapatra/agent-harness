@@ -15,10 +15,11 @@ from typing import Any
 
 import pytest
 
+from benchmark.cost import breakfix, judge, run
 from benchmark.cost import complex as cx
-from benchmark.cost import judge, run
 from benchmark.cost import retail as r
 from trellis import Settings
+from trellis.harness.writes import Writes
 
 
 # --------------------------------------------------------------------------- ground truth
@@ -128,7 +129,7 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    base = [c for c in cases if not c.category.startswith("adv_")]
+    base = [c for c in cases if not c.category.startswith(("adv_", "bf_"))]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
     assert {c.tier for c in cases} == set(cx.TIERS)
@@ -341,6 +342,55 @@ def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_u
     assert {c.id for c in cx.cases() if c.category == "cantdo"} == {
         "cantdo-01", "cantdo-02", "cantdo-03", "cantdo-04"
     }  # fmt: skip
+
+
+def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
+    for said in (
+        "I can't create a downloadable chart file because I have no tool for generating files.",
+        "I can't give you a downloadable file: I can only return text.",
+        "There is no tool to export a spreadsheet here.",
+    ):
+        assert cx._WHY.search(said), said
+
+
+# --------------------------------------------------------------------------- break-and-fix rounds
+def test_the_rounds_pick_by_round_and_the_held_out_set_apart() -> None:
+    every = cx.cases()
+    bf = [c for c in every if c.category.startswith("bf_")]
+    assert {c.category for c in bf} == set(breakfix.CATEGORIES) <= set(cx.CATEGORIES)
+    assert cx.picked("breakfix", every) == bf
+    held = cx.picked("heldout", every)
+    assert held and all(c.id.startswith("bfh-") for c in held)
+    for n in (1, 2, 3):
+        got = cx.picked(f"round:{n}", every)
+        assert len(got) == 20 and all(c.id.startswith(f"bf{n}-") for c in got)
+        assert {c.category for c in got} == set(breakfix.CATEGORIES)
+
+
+async def test_a_cases_chats_share_one_user_kept_to_the_run_and_the_case(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A case's chats are one user's (its past chats are theirs), kept to the case and the
+    run: no other case, nor an earlier run, leaks into its memory. Before a later chat, what
+    the earlier one recorded is delivered (the harness's writes drained)."""
+    drained: list[int] = []
+    real = Writes.drain
+
+    async def counting(self: Writes) -> None:
+        drained.append(1)
+        await real(self)
+
+    monkeypatch.setattr(Writes, "drain", counting)
+    out = tmp_path / "bf"
+    await cx.bench(_args(out, cases="bf1-past-01,bf1-past-03"), progress=lambda _: None)
+    rows = {
+        x["case"]: x for x in map(json.loads, out.with_suffix(".jsonl").read_text().splitlines())
+    }
+    users = {t["user"] for t in rows["bf1-past-01"]["turns"]}
+    assert len(users) == 1 and next(iter(users)).endswith("-bf1-past-01")
+    colleague, own = (t["user"] for t in rows["bf1-past-03"]["turns"])
+    assert colleague.startswith(breakfix.OTHER_USER) and own.startswith(run.USER)
+    assert len(drained) >= 3  # before each later chat: two in past-01, one in past-03
 
 
 # --------------------------------------------------------------------------- adversarial cases
