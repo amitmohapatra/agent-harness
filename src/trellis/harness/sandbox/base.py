@@ -25,6 +25,7 @@ The contract a provider keeps:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Final, Literal, Protocol, runtime_checkable
 
@@ -54,6 +55,51 @@ class SandboxSpec(BaseModel):
     memory: int | None = Field(default=None, gt=0)
     network: Literal["none", "open"] | tuple[str, ...] = "none"
     files: dict[str, str | bytes] = Field(default_factory=dict)
+
+
+#: A command killed by SIGKILL, as the shell reports it (128 + 9): what the kernel's
+#: out-of-memory killer does to a process past its sandbox's memory limit.
+KILLED: Final = 137
+#: Python's own words for a module it cannot import, and for memory it could not get.
+NO_MODULE: Final = re.compile(r"ModuleNotFoundError: No module named '([^'.]+)")
+OUT_OF_MEMORY: Final = "MemoryError"
+#: What a hint says to do about memory.
+IN_PARTS: Final = (
+    "Work on the data in parts (read it in chunks, keep only the columns needed) rather than "
+    "running it again as it is."
+)
+
+
+def hint(code: int, stderr: str, spec: SandboxSpec) -> str | None:
+    """What the sandbox knows about why a command failed that its own output does not say:
+    the memory limit it went past (a SIGKILL, or Python's ``MemoryError``), and whether a
+    module Python could not import can be installed there (the sandbox's network). ``None``
+    for any other outcome: the command's output says all there is."""
+    limit = f"{spec.memory} MiB" if spec.memory is not None else "the provider's"
+    if code == KILLED:
+        return (
+            f"Killed (exit {KILLED}): the command went past the sandbox's memory limit "
+            f"({limit}), or was killed. {IN_PARTS}"
+        )
+    if code == 0:
+        return None
+    if OUT_OF_MEMORY in stderr:
+        return (
+            f"Out of memory: the command went past the sandbox's memory limit ({limit}). {IN_PARTS}"
+        )
+    missing = NO_MODULE.search(stderr)
+    if missing is None:
+        return None
+    if spec.network == "none":
+        return (
+            f"The module {missing[1]} is not installed in the sandbox, and the sandbox has no "
+            "network to install it: use the standard library (csv, json, statistics, sqlite3) "
+            "or a module that is installed."
+        )
+    return (
+        f"The module {missing[1]} is not installed in the sandbox: install it (pip install), "
+        "then run the command again."
+    )
 
 
 class SandboxRef(BaseModel):

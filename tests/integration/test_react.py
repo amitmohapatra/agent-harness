@@ -100,10 +100,11 @@ async def test_a_loop_that_never_answers_ends_at_the_step_limit(harness: Harness
         harness.wrap(ReAct(system_prompt="s", model=model, max_steps=3), id="loop"), [stock]
     )
     result = await agent.run("x", user="u1")
-    # LangChain's ModelCallLimitMiddleware, counted over the run (its thread): its message
-    assert result.status is RunStatus.SUCCESS, result.error
-    assert result.answer == "Model call limits exceeded: thread limit (3/3)"
-    assert len(model.requests) == 3
+    # counted over the run (its thread); told the limit is reached and offered no tool, the
+    # model still calls one: the run says it stopped
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.message == "stopped: the step limit (3) was reached"
+    assert len(model.requests) == 4
 
 
 @respx.mock

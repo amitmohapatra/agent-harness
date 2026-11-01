@@ -61,6 +61,31 @@ async def test_kimi_is_the_pinned_version() -> None:
     compat.require_binary("kimi-code", out.decode().strip(), command=KIMI_BIN)
 
 
+def test_a_call_kimi_aborted_when_its_turn_was_stopped_did_not_run() -> None:
+    """A run that pauses on a harness call stops Kimi's turn (``session/cancel``). When the
+    cancel reaches Kimi before the call's "waiting for a person's approval", Kimi aborts the
+    call itself: its result is 'The user manually interrupted "<tool>" …' (Kimi's
+    ``abortedToolOutput``). That call did not run either: the planned model calls it again
+    after the resume, as it does after the waiting result — counting it as run made the
+    ``SEL-kimi-…`` matrix cell answer with the abort text (a timing-dependent failure)."""
+    endpoint = PlannedEndpoint([("refund", {"order": "o1"})])
+    aborted = (
+        'The user manually interrupted "mcp__trellis__refund" (and anything else running at the '
+        "same time). This was a deliberate user action, not a system error, timeout, or "
+        "capacity limit. Do not retry automatically or guess at the cause — wait for the "
+        "user's next instruction."
+    )
+    body = {
+        "messages": [
+            {"role": "user", "content": "refund o1"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": aborted},
+            {"role": "user", "content": "This task was paused at your call to refund"},
+        ]
+    }
+    assert endpoint.next(body) == ("mcp__trellis__refund", {"order": "o1"})
+
+
 async def test_kimi_calls_a_harness_tool_and_answers(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
@@ -282,3 +307,69 @@ async def test_kimi_reads_the_runs_skills(
     assert done.status is RunStatus.SUCCESS, done.error
     sent = json.dumps(endpoint.requests[0])
     assert "sql-review" in sent and "Reviews SQL queries for joins." in sent
+
+
+async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi has its own ``Read``; the harness's ``read_file`` (its MCP server, over the run's
+    journal) is kept for a large result, by measurement: the result is not written into the
+    agent's workspace (the user's working directory, which another worker resuming the run
+    does not have, and a second store beside the journal), and a page is at most
+    ``PAGE_CHARS`` where Kimi's ``Read`` returns up to 100,000 characters at once by default."""
+    from trellis.harness.journal import content_key
+    from trellis.harness.tools import results
+
+    big = "sku,units\n" + "\n".join(f"s{n},{n % 7}" for n in range(12_000))
+    assert len(big) > results.MAX_CHARS
+
+    @tool(side_effects="read")
+    def rows() -> str:
+        """Every row."""
+        return big
+
+    path = f"{results.PREFIX}/{content_key('result', big)}"
+    work = tmp_path / "kimi-work"
+    endpoint.plan = [("rows", {}), ("read_file", {"file_path": path})]
+    agent = arm(harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-big"), [rows])
+    result = await agent.run("count the rows", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    told = [text_of(m.get("content")) for m in endpoint.requests[-1]["messages"]]
+    stub, page = next(t for t in told if path in t), told[-1]
+    assert "Tool result too large" in stub  # the stub names the journal's path ...
+    assert sorted(p.name for p in work.iterdir()) == []  # ... and nothing is in the workspace
+    assert "  1  sku,units" in page and "more lines: read_file(" in page
+    assert len(page) <= results.PAGE_CHARS + 200
+    # the native path, for the record: the same rows as a workspace file, read by Kimi's Read
+    (work / "rows.csv").write_text(big)
+    endpoint.plan = [("Read", {"path": "rows.csv"})]
+    native = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-native").run(
+        "count the rows", user="u1"
+    )
+    assert native.status is RunStatus.SUCCESS, native.error
+    read = text_of(endpoint.requests[-1]["messages"][-1].get("content"))
+    assert len(read) >= 4 * results.PAGE_CHARS  # one call: over four of the harness's pages
+
+
+async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi ends a turn at its step limit (``loop_control.max_steps_per_turn``) as a finished
+    turn with no answer: ACP's ``end_turn``, the reason only in its own log
+    (``loop.max_steps_exceeded``). As a ``ReAct`` run at ``max_steps`` does, the run asks once
+    more in the same session, told the limit is reached (``budget.LIMIT``): its answer is the
+    run's, said as a ``step_limit`` warning."""
+    from trellis.harness.budget import TURN_LIMIT
+
+    lookups.clear()
+    endpoint.plan = [("lookup", {"topic": "tea"}), ("lookup", {"topic": "coffee"})]
+    target = kimi_target(endpoint, tmp_path, env={"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"})
+    agent = arm(harness.wrap(target, id="kimi-limit"), [lookup])
+    events = [e async for e in agent.stream("tea and coffee?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.endswith("Done. facts about tea") and lookups == ["tea"]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
+    assert warned == ["stopped: the step limit (1) was reached"]
+    # Kimi's session keeps it: told it holds for this turn only (a later turn calls tools again)
+    assert TURN_LIMIT.format(limit=1) in endpoint.said()

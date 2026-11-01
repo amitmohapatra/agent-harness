@@ -36,6 +36,7 @@ from trellis.contracts import (
     ConfigurationError,
     ErrorCategory,
     Interrupt,
+    InterruptDecision,
     InterruptReason,
     InterruptResolution,
     RunEvent,
@@ -44,8 +45,9 @@ from trellis.contracts import (
     RunRecord,
     RunStatus,
     ToolCall,
+    ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox
+from trellis.harness import budget, conversation, sandbox, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -71,14 +73,16 @@ from trellis.harness.conversation import (
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay
+from trellis.harness.journal import Journal, Pending, Replay, content_key
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, stored
+from trellis.harness.tools.base import SOURCES
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -312,8 +316,10 @@ async def _attempt(
         parent=parent,
         running_in=asyncio.current_task(),
         continued=continued,
+        frontend=Frontend.of(record.metadata),
     )
     events.trace_run = runtime.trace_run
+    _earlier_results(agent, runtime)
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -365,6 +371,7 @@ async def _attempt(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
     _kept_session(agent, runtime, journal, result)
+    _kept_results(agent, runtime, journal, result)
     await agent.hooks.ended(runtime, result)
     return result
 
@@ -400,6 +407,31 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 
+def _earlier_results(agent: Agent, runtime: Runtime) -> None:
+    """A conversation's turn reads the large results its earlier turns saved in this process
+    (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
+    a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
+    files in the thread's state. A run with no conversation of its own, or a child run, has
+    none."""
+    if runtime.parent is not None or runtime.conversation == runtime.run_id:
+        return
+    runtime.earlier_results, tools = agent.results.of(runtime.conversation)
+    for path, tool in tools.items():
+        runtime.kept_from.setdefault(path, tool)
+
+
+def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+    """The large results a conversation's turn saved, kept for its later turns
+    (:func:`_earlier_results`); a paused turn keeps them in its journal until it ends."""
+    if (
+        journal.results
+        and runtime.parent is None
+        and runtime.conversation != runtime.run_id
+        and result.status is not RunStatus.PAUSED
+    ):
+        agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
+
+
 async def _worked(
     agent: Agent,
     runtime: Runtime,
@@ -417,7 +449,12 @@ async def _worked(
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
     runtime.native = await agent.native_tools(runtime)
-    pushed = await agent.push(runtime)
+    if stored.looks(runtime):
+        # the memory context, and — read meanwhile — the files kept for the run's user
+        pushed, files = await asyncio.gather(agent.push(runtime), stored.note(runtime))
+        stored.told(runtime, files)
+    else:
+        pushed = await agent.push(runtime)
     if observe is not None:
         observe(pushed)
     if unresumable is not None:
@@ -455,7 +492,10 @@ async def _cancelled(
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
         settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
         identity, events = runtime.identity, runtime.events
-        if settles and await _settle_cancelled(agent, identity, events, runtime.worker_id):
+        ended = settles and await _settle_cancelled(
+            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
+        )
+        if ended:
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
@@ -537,9 +577,15 @@ async def _concluded(
         return await _paused(agent, runtime, journal, paused, extracted)
     if runtime.cancelled is not None:
         await _settle_cancelled(
-            agent, runtime.identity, runtime.events, runtime.worker_id, reason=runtime.cancelled
+            agent,
+            runtime.identity,
+            runtime.events,
+            runtime.worker_id,
+            reason=runtime.cancelled,
+            spent=budget.spent(runtime),
         )
-        await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
+        said = _transcript(runtime, extracted, RunStatus.CANCELLED)
+        await agent.recorded_run(runtime, said)  # what it said so far
         result = Result(run_id=runtime.run_id, status=RunStatus.CANCELLED)
     elif timed_out is not None:
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
@@ -552,6 +598,8 @@ async def _concluded(
         result = await _failed(agent, runtime, failure, extracted)
     else:
         assert extracted is not None
+        # what the run's code wrote for its user, kept before its sandbox goes
+        await sandbox.delivered(runtime)
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
@@ -827,7 +875,7 @@ async def _paused(
 
     def last() -> None:
         events.emit(RunEventType.INTERRUPT, data=interrupt.awaiting())
-        events.finished(RunOutcome.INTERRUPT, interrupt=interrupt)
+        events.finished(RunOutcome.INTERRUPT, interrupt=interrupt, spent=budget.spent(runtime))
 
     await events.settle(
         last,
@@ -842,7 +890,8 @@ async def _paused(
         ),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.INTERRUPT.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted))  # what it said so far
+    said = _transcript(runtime, extracted, RunStatus.PAUSED)
+    await agent.recorded_run(runtime, said)  # what it said so far
     return Result(run_id=runtime.run_id, status=RunStatus.PAUSED, interrupt=interrupt)
 
 
@@ -860,11 +909,11 @@ async def _failed(
 
     def last() -> None:
         events.emit(RunEventType.RUN_ERROR, error=error)
-        events.finished(outcome, error=error)
+        events.finished(outcome, error=error, spent=budget.spent(runtime))
 
     await events.settle(last, lambda: _ended(agent, runtime, status, error=error))
     metrics.run_finished(runtime.agent_id, outcome.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_run(runtime, _transcript(runtime, extracted, status))
     await agent.recorded_outcome(runtime, status, error.message)
     return Result(run_id=runtime.run_id, status=status, error=error)
 
@@ -876,11 +925,13 @@ async def _succeeded(
     if runtime.budget_spent is not None:
         return await _partial(agent, runtime, extracted)
     await runtime.events.settle(
-        lambda: runtime.events.finished(RunOutcome.SUCCESS, result=jsonable(answer)),
+        lambda: runtime.events.finished(
+            RunOutcome.SUCCESS, result=jsonable(answer), spent=budget.spent(runtime)
+        ),
         lambda: _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer)),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_run(runtime, _transcript(runtime, extracted, RunStatus.SUCCESS))
     await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
     await agent.grounded(runtime, answer, pushed)
     await agent.judged(runtime, answer, pushed)
@@ -901,13 +952,15 @@ async def _partial(agent: Agent, runtime: Runtime, extracted: Extracted) -> Resu
     )
     runtime.events.warning("budget", error.message)
     await runtime.events.settle(
-        lambda: runtime.events.finished(RunOutcome.PARTIAL, result=jsonable(answer)),
+        lambda: runtime.events.finished(
+            RunOutcome.PARTIAL, result=jsonable(answer), spent=budget.spent(runtime)
+        ),
         # the run record carries no error for a PARTIAL run (the contract): the warning event
         # and the recorded outcome say why
         lambda: _ended(agent, runtime, RunStatus.PARTIAL, output=jsonable(answer)),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.PARTIAL.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted))
+    await agent.recorded_run(runtime, _transcript(runtime, extracted, RunStatus.PARTIAL))
     await agent.recorded_outcome(runtime, RunStatus.PARTIAL, error.message)
     return Result(run_id=runtime.run_id, status=RunStatus.PARTIAL, answer=answer, error=error)
 
@@ -945,10 +998,10 @@ async def _recorded(
         log.info("run %s was already recorded as %s", run_id, record.status.value)
 
 
-def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[Said]:
+def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus) -> list[Said]:
     """The attempt's messages: the question, then what the agent said - its tool calls and
     their results too, where the framework reports them (its answer, when the framework
-    reports no transcript of its own)."""
+    reports no transcript of its own) - with the run's record of them (:func:`_with_facts`)."""
     said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
@@ -960,7 +1013,76 @@ def _transcript(runtime: Runtime, extracted: Extracted | None) -> list[Said]:
         for s in runtime.steers
         if question_id(runtime.conversation, s.run_id) not in reported
     ]
-    return identified([*asked, *steered, *said], runtime)
+    return _with_facts(identified([*asked, *steered, *said], runtime), runtime, status)
+
+
+#: What a person's decision on a tool call is, in the run record's words.
+DECIDED: Final = {
+    InterruptDecision.APPROVE.value: "a tool call approved",
+    InterruptDecision.EDIT.value: "a tool call approved with edits",
+    InterruptDecision.REJECT.value: "a tool call rejected",
+    InterruptDecision.CANCEL.value: "the run abandoned at a question",
+}
+
+
+def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[Said]:
+    """``said`` with what the run's journal records of it (``Said.facts``, plain values: the
+    service's custom metadata nests two levels at most): each tool result its call's status,
+    seconds and sources (the trajectory's outcome of the same call, matched by content in
+    order, as the journal matches calls), when it was fetched (``Runtime.fetched``: the one
+    place a fetch time is kept, ``snapshots``) and how long its tool says its value stays
+    current, and the last message the run's status, its seconds
+    so far and the approvals given — what the memory service's steps list of the
+    turn shows (not when it is a tool result: a run stopped at a call keeps that call's own).
+    A result no recorded call matches carries nothing."""
+    journal = runtime.replay.journal
+    outcomes: dict[str, list[ToolOutcome]] = {}
+    for call, outcome in journal.trajectory:
+        outcomes.setdefault(content_key("call", call.tool, call.args), []).append(outcome)
+    calls = {c.id: c for s in said for c in s.tool_calls}
+    out: list[Said] = []
+    for s in said:
+        called = calls.get(s.tool_call_id or "")
+        found = (
+            outcomes.get(content_key("call", called.name, dict(called.arguments)))
+            if called
+            else None
+        )
+        if s.role is not Speaker.TOOL or not found:
+            out.append(s)
+            continue
+        outcome = found.pop(0)
+        facts: dict[str, Any] = {"status": outcome.status.value}
+        if outcome.latency_ms is not None:
+            facts["seconds"] = round(outcome.latency_ms / 1000, 3)
+        sources = "; ".join(
+            ", ".join(str(c[k]) for k in ("name", "date", "link") if c.get(k))
+            for c in outcome.metadata.get(SOURCES) or ()
+        )
+        if sources:
+            facts["sources"] = sources
+        fetched = runtime.fetched.get(s.tool_call_id or "")
+        if fetched is not None:
+            facts[snapshots.FETCHED] = fetched.strftime(snapshots.TIME)
+        age = snapshots.declared_max_age(runtime, called.name) if called else None
+        if age is not None:
+            facts[snapshots.MAX_AGE] = age
+        out.append(dataclasses.replace(s, facts=facts))
+    if not out or out[-1].role is Speaker.TOOL:
+        return out
+    began = runtime.started_at
+    run: dict[str, Any] = {"status": status.value}
+    if began is not None:
+        run["seconds"] = round((datetime.now(UTC) - began).total_seconds(), 3)
+    approvals = [
+        DECIDED[a["decision"]]
+        for answers in journal.answers.values()
+        for a in answers
+        if a.get("decision") in DECIDED
+    ] + ["a tool call approved in the framework's own gate"] * len(journal.approved)
+    run["approvals"] = "; ".join(approvals) or "none"
+    out[-1] = dataclasses.replace(out[-1], facts=run)
+    return out
 
 
 async def _settle_cancelled(
@@ -969,11 +1091,13 @@ async def _settle_cancelled(
     events: RunEvents,
     worker_id: str | None,
     *,
+    spent: dict[str, float],
     reason: str | None = None,
 ) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
-    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log), and
-    say whether it was ended here (not ended, or taken over, elsewhere already)."""
+    ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
+    what it ``spent`` until then), and say whether it was ended here (not ended, or taken
+    over, elsewhere already)."""
 
     async def write() -> bool:
         try:
@@ -987,7 +1111,9 @@ async def _settle_cancelled(
 
     if reason is not None:
         log.info("run %s was cancelled: %s", identity.run_id, reason)
-    said: dict[str, Any] = {} if reason is None else {"reason": reason}
+    said: dict[str, Any] = {"spent": spent}
+    if reason is not None:
+        said["reason"] = reason
     ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
     return ended
