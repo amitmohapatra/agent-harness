@@ -53,6 +53,16 @@ own model work follows the harness's configuration.
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
   cap. It is counted now when the harness keeps no usage log of the agent.
+- The Claude Agent SDK loads the harness's tools from the first step. Claude Code defers every
+  MCP server's tools behind its `ToolSearch` unless the server's config says `alwaysLoad`, so
+  each turn's model saw only the tool names and spent a step loading them (a model that called
+  one unloaded got a validation error and called it again). The harness's `trellis` server now
+  says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
+  memory's `tool_search`). A team's own servers keep the CLI's deferral.
+- A Deep Agent of yours on a backend outside its state (a disk, a store, a sandbox) had its
+  file tools run ungoverned: a `write_file` changed a real file with no journal, record or
+  approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
+  (`middleware.declare_files`, marked when the graph is wrapped).
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
@@ -80,6 +90,10 @@ own model work follows the harness's configuration.
   its own thread (its checkpointer), so its earlier results are marked in the request it sends
   (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
   marks them as memory's window does. In both, the tool stays offered.
+- A model looping on one call is stopped on every adapter: the tool bridge does not run the
+  same call a third time in a row and tells the model to answer with what it has (a `stalled`
+  warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the

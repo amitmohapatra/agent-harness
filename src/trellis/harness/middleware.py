@@ -234,6 +234,46 @@ SCRATCH_NOTE: Final = (
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
+#: Deep Agents' file tools that read, and those that change files: on a backend outside the
+#: graph's state they are governed as any tool, with these risks (:func:`outside_state`).
+FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
+FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
+FILE_TOOLS: Final = FILE_READS | FILE_WRITES
+#: The graph state channel Deep Agents keeps its files in: a graph has it when its file tools'
+#: backend keeps files in the graph's state (``StateBackend``, alone or a route of a composite).
+FILES_CHANNEL: Final = "files"
+
+
+def outside_state(name: str) -> dict[str, Any]:
+    """The marks of a Deep Agents file tool ``name`` on a backend outside the graph's state:
+    governed (:data:`OUTSIDE_STATE`), a read or a write."""
+    return {OUTSIDE_STATE: True, "side_effects": "read" if name in FILE_READS else "write"}
+
+
+def declare_files(graph: Any) -> None:
+    """Deep Agents' file tools of ``graph`` and of its ``task`` sub-agents' graphs, marked
+    :func:`outside_state` in each graph whose files are not its state (no
+    :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
+    ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
+    is: those calls only change the state, which its checkpoint keeps."""
+    from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
+        TASK_TOOL,
+        bound_tools,
+        subagent_graphs,
+    )
+
+    pending = [graph]  # a sub-agent's graph is compiled before the graph running it: no cycle
+    while pending:
+        found = pending.pop()
+        outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
+        for tool in bound_tools(found):
+            name = getattr(tool, "name", None)
+            if outside and name in FILE_TOOLS and not (tool.metadata or {}).get(OUTSIDE_STATE):
+                tool.metadata = {**(tool.metadata or {}), **outside_state(name)}
+            elif name == TASK_TOOL:
+                pending.extend(subagent_graphs(tool))
+
+
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
 #: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
 #: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
