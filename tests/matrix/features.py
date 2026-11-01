@@ -115,8 +115,11 @@ async def events(w: World) -> None:
     if w.mode == "stream":
         assert [e.type for e in o.surface][-1] is RunEventType.RUN_FINISHED
     if w.mode == "agui":
-        numbers = [n for n, _ in o.surface]
+        # numbered one by one; an activity line shares the number of the result it follows
+        numbers = [n for n, e in o.surface if e["type"] != "ACTIVITY_SNAPSHOT"]
         assert numbers == list(range(len(numbers))), numbers
+        lines = [i for i, (_, e) in enumerate(o.surface) if e["type"] == "ACTIVITY_SNAPSHOT"]
+        assert lines and all(o.surface[i][0] == o.surface[i - 1][0] for i in lines), lines
         assert o.surface[-1][1]["type"] == "RUN_FINISHED" and o.surface[-1][1]["result"] == o.answer
     if w.mode == "a2a":
         assert _a2a_states(o.surface)[-1] == "TASK_STATE_COMPLETED"
@@ -175,6 +178,23 @@ async def ask(w: World) -> None:
     assert asked.question == "Which size of shirt?"
     assert d.ran("size") == [{"item": "shirt", "size": "L"}]
     assert o.answer == "Done. shirt in size L", o.answer
+
+
+async def ask_user_tool(w: World) -> None:
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "2026-11-05"
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("ask_user", {"question": "Which day?", "kind": "date"})]
+    o = (await w.go([ask_user()], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.props == {"kind": "date", "options": []}, asked
+    assert asked.question == "Which day? (a date, YYYY-MM-DD)"  # what plain chat reads
+    assert asked.expects == {"type": "string", "format": "date"}
+    assert o.answer == "Done. 2026-11-05", o.answer
 
 
 async def reject(w: World) -> None:
@@ -1045,6 +1065,14 @@ FEATURES: Final[list[Feature]] = [
         "explicit (current().ask in a tool)",
         ask,
         way2=way2.ask,
+    ),
+    Feature(
+        "F36u",
+        "ask_user: the model asks a structured question (a date), the answer is its result",
+        "F36 (backlog: a structured ask_user)",
+        "tools=[ask_user()]",
+        ask_user_tool,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(
         "F04",
