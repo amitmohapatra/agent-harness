@@ -19,6 +19,7 @@ from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, middleware, tool
 from trellis.contracts import RunStatus
+from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import content_key
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.tools import results
@@ -91,3 +92,14 @@ def test_the_least_recently_used_conversation_goes_past_the_bound() -> None:
     assert kept.of("b") == ({"/y": "123456", "/z": "1234"}, {"/z": "tool_z"})
     kept.add("c", {"/q": "12345678901"}, {})  # alone past the bound: kept by nobody
     assert kept.chars == 0 and kept.of("c") == ({}, {})
+
+
+def test_a_turns_transcript_is_kept_and_counted_with_the_results() -> None:
+    kept = results.Conversations(most=20)
+    first = [Said(Speaker.USER, "12345"), Said(Speaker.ASSISTANT, "123")]
+    kept.said("a", "run_1", first)
+    kept.said("a", "run_1", [*first, Said(Speaker.ASSISTANT, "12")])  # a later attempt's
+    assert kept.chars == 10 and len(kept.turns("a")["run_1"]) == 3
+    assert kept.turns("b") == {}
+    kept.add("b", {"/x": "1234567890123"}, {})  # past the bound: "a" goes, results and turns
+    assert kept.turns("a") == {} and kept.chars == 13

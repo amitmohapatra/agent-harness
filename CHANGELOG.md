@@ -36,6 +36,13 @@ own model work follows the harness's configuration.
 
 ### Changed
 
+- The context's line about earlier tool values that are out of date now asks the model to
+  call a tool again only for a value the question needs, and still never to answer with an
+  earlier one (`snapshots.NOTE`). It said "call them again; never answer from the earlier
+  ones", and on a turn that needed none of them ("Put that in a PDF for finance") ReAct
+  re-fetched every input and often dropped why it could not make the file. Haiku, three
+  repeats: that turn 1/3 -> 3/3 (4 of 10 across every ReAct run on main); the freshness
+  cases 27/27 turns before and after.
 - The tool hints narrow what the model is offered only from 30 tools in the run
   (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
@@ -49,10 +56,35 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
+  answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
+  SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
+  the limit is reached, for one turn with no tool. Kimi ended the turn with no answer, the
+  reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in the same
+  session. A `step_limit` warning says so on the stream. Both are told the limit is for this
+  turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's "This run has
+  reached its limit", a model answered the conversation's next turn "I've reached the
+  tool-call limit" without calling a tool.
+- When memory holds nothing for a question (or only part of it) and the run offers
+  `memory_search`, the note that says so now also tells the model to search the user's
+  earlier conversations first (`kinds=["message"]`) before saying a detail is missing
+  (`agent.EARLIER_CHATS`). Told only to offer to look it up, every adapter asked the user
+  again for what they had said in an earlier chat ("the cardigan in that same colour, but in
+  cotton"). Haiku, ReAct, three repeats: that turn went from 0/3 to 3/3 right, and the turns
+  the note reaches went from 15/18 to 18/18, at about half a model call more each.
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
 - A large result a conversation's turn saved stays readable in its later turns: a follow-up's
   `read_file` or `query_result` on the path its history names found "File not found", so every
   what-if needed the whole fetch again. Kept per conversation in the process that saved them
   (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
+- A worker that dies (a `BaseException` that is not an error) in a harness tool an ACP agent
+  called ends the run's attempt, as an in-process tool's does. It ended only the MCP server's
+  own task group, and the run went on as if the call had failed (the `X15-kimi-…` matrix cells,
+  "the worker did not die").
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
@@ -71,6 +103,10 @@ own model work follows the harness's configuration.
   is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
   it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
   on a small model read it as the user's message ("your message doesn't include a question").
+- A Claude Agent SDK run no longer offers Claude Code's schedules. Its CLI runs for one attempt
+  and ends with it, so a scheduled prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) never
+  fires; offered, Claude answered "set this up every Monday" with a schedule nothing kept. They
+  join the query's `disallowed_tools` (`adapters.claude.OUTLIVES_THE_QUERY`), after the team's.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
@@ -169,6 +205,10 @@ own model work follows the harness's configuration.
   it read with their fetch times, the run's tool calls); a run of a chat with files is told of
   them as it starts (one line each); `read_file` reads `/files/<run>/<name>` (CSV and Excel as
   rows, with how it was made) and `/files` lists every chat's. A deleted file is said to be gone.
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
 - A sandbox's files for the user: the command tool says that files written in `outputs/` are
   given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
   store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
