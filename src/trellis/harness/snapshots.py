@@ -29,6 +29,12 @@ FETCHED: Final = "fetched"
 MAX_AGE: Final = "max_age"
 #: The line a replayed result past its tool's max age starts with.
 STALE: Final = "[out of date: call {tool} again for the current value]"
+#: The mark of a live tool's result from an earlier turn of a thread its framework keeps (a
+#: graph's checkpointer: no fetch time is kept with it, and it is from before this turn).
+EARLIER: Final = (
+    "[{tool}'s result from an earlier turn: out of date, {tool}'s values change — call {tool} "
+    "again for the current value]"
+)
 #: What the context says of the tools whose replayed results are out of date.
 NOTE: Final = (
     "The values {tools} returned in earlier turns are out of date (older than they stay "
@@ -93,6 +99,7 @@ def _parsed(text: object) -> datetime | None:
 
 
 __all__ = [
+    "EARLIER",
     "FETCHED",
     "MAX_AGE",
     "NOTE",

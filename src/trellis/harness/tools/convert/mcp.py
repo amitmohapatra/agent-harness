@@ -51,6 +51,10 @@ class Tools(Server[Any]):
     def __init__(self, calls: set[asyncio.Task[Any]], **handlers: Any) -> None:
         super().__init__(SERVER, **handlers)
         self.calls = calls
+        #: what ended a call that was not an error (``BaseException``: the worker dying,
+        #: ``SystemExit``): the run's to raise (the attempt serving it), not this request's —
+        #: raised here it ended the server's own task group, and the run went on
+        self.fatal: BaseException | None = None
 
     async def stopped(self) -> None:
         """Every call still under way cancelled, and its end waited for."""
@@ -90,13 +94,18 @@ def convert(tools: Sequence[Tool]) -> Tools:
             call.cancel()  # this request cancelled: its call with it (nothing, once it ended)
         if call.cancelled():
             return _result(STOPPED, error=True)
+        error = call.exception()
+        if error is not None and not isinstance(error, Exception):
+            server.fatal = error  # the attempt raises it (``fatal``)
+            return _result(STOPPED, error=True)
         try:
             outcome = call.result()
         except Paused:  # the run stops here (the adapter reads the pause from the runtime)
             return _result(WAITING, error=True)
         return _result(results.readable(outcome.output, tool.name), error=not outcome.ok)
 
-    return Tools(calls, on_list_tools=list_tools, on_call_tool=call_tool)
+    server = Tools(calls, on_list_tools=list_tools, on_call_tool=call_tool)
+    return server
 
 
 def _listed(tool: Tool) -> types.Tool:

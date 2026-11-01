@@ -182,6 +182,14 @@ and tail by `FitWindow`; the cut is kept the same way and says where the rest is
 (`…[N characters cut to fit the window; the rest: read_file(file_path="…", offset=L)]…`, the
 line the cut starts on), so no row is silently out of reach.
 
+A kept result stays readable in the conversation's later turns (a run with `thread=`): its
+history names the path, and a follow-up's `read_file` or `query_result` on it finds it, as Deep
+Agents keeps its files in the thread's state. They are kept per conversation (tenant, user,
+thread) in the process that saved them, up to 64 million characters for the agent, the least
+recently used conversation forgotten first. A turn on another worker or after a restart finds
+none, and a path no longer kept reads `Error: File '…' not found: it is not a result this
+conversation keeps here … Call the tool that returned it again.`
+
 ### Counting, summing, ranking over a large result
 
 A model that pages 10,000 rows into its context to add them up gets the sum wrong, so it never

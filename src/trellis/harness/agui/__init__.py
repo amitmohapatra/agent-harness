@@ -44,7 +44,7 @@ import asyncio
 import inspect
 import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final
 
@@ -68,6 +68,7 @@ from trellis.harness.agent import Throttled
 from trellis.harness.agui.events import (
     AGUIEvent,
     AGUIEventType,
+    InputMessage,
     Outcome,
     OutcomeType,
     Resume,
@@ -77,7 +78,9 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
+from trellis.harness.conversation import Mode
 from trellis.harness.files import StoredFile, scope
+from trellis.harness.frontend import FRONTEND_TOOL, Frontend
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
 from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
@@ -216,8 +219,15 @@ class _Surface:
         tenant = await agent.harness._tenant()
         if body.resume:
             return await self._resume(body, body.resume[-1], user, tenant)
+        if (result := body.tool_result()) is not None:
+            answer = await self._tool_answer(body, result, user, tenant)
+            return await self._resume(body, answer, user, tenant)
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
+        try:
+            mode = Mode(body.forwarded.mode)
+        except ValueError as exc:
+            raise HTTPException(422, f"forwardedProps.mode: {exc}") from exc
         payload = body.latest_user_text() or body.state
         attached = await self._attached(body, user, tenant)
         try:
@@ -228,6 +238,8 @@ class _Surface:
                 tenant=tenant,
                 run_id=body.run_id,
                 document_ids=attached or None,
+                mode=mode,
+                app=_frontend(body),
             )
         except ConfigurationError as exc:  # a blank message: no run
             raise HTTPException(422, str(exc)) from exc
@@ -236,9 +248,39 @@ class _Surface:
             buffer,
             body.thread_id,
             record.run_id,
-            lambda listen: pipeline.attempt(agent, record, payload, listener=listen),
+            lambda listen: pipeline.attempt(agent, record, payload, listener=listen, mode=mode),
         )
         return buffer, -1
+
+    async def _tool_answer(
+        self, body: RunAgentInput, result: InputMessage, user: str, tenant: str
+    ) -> Resume:
+        """The resume a front end's tool result is: the answer to the interrupt of the
+        thread's paused run that waits on that call (``409`` when none does: the call was
+        answered already, or is not a front-end tool's)."""
+        agent = self.agent
+        async for summary in agent.harness.runs.iterate(
+            status=RunStatus.PAUSED,
+            agent_id=agent.id,
+            thread_id=body.thread_id,
+            tenant=tenant,
+            max_pages=1,
+        ):
+            awaiting = summary.awaiting
+            call = awaiting.tool_call if awaiting is not None else None
+            if (
+                awaiting is not None
+                and call is not None
+                and call.idempotency_key == result.tool_call_id
+                and FRONTEND_TOOL in (awaiting.payload or {})
+            ):
+                text = result.text()
+                answer = text if text is not None or result.error is None else result.error
+                return Resume(interrupt_id=awaiting.interrupt_id, payload=answer)
+        raise HTTPException(
+            409,
+            f"{BAD_RESUME}: no paused run of this thread waits on tool call {result.tool_call_id}",
+        )
 
     async def _attached(self, body: RunAgentInput, user: str, tenant: str) -> list[str]:
         """The documents the latest user message attaches (``run(document_ids=)``), each one the
@@ -291,11 +333,12 @@ class _Surface:
             raise HTTPException(409, f"{BAD_RESUME}: {exc}") from exc
         buffer = self.hub.open(record.run_id, user)
         after = buffer.published - 1
+        app = _frontend_now(record.metadata, body)
         self._launch(
             buffer,
             body.thread_id,
             record.run_id,
-            lambda listen: agent._continue(record, resolution, listen),
+            lambda listen: agent._continue(record, resolution, listen, app=app),
         )
         return buffer, after
 
@@ -563,6 +606,29 @@ def _problem(exc: HTTPException, request: Request) -> JSONResponse:
 async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
     async for number, event in buffer.read(after):
         yield encode(event, number)
+
+
+def _frontend(body: RunAgentInput) -> Frontend | None:
+    """What the request's front end gives the run: its tools, context and state."""
+    stated = "state" in body.model_fields_set and body.state is not None
+    if not (body.tools or body.context or stated):
+        return None
+    return Frontend(
+        tools=tuple(t.model_dump(exclude_none=True) for t in body.tools),
+        context=tuple(c.model_dump() for c in body.context),
+        state=body.state,
+        stated=stated,
+    )
+
+
+def _frontend_now(metadata: Mapping[str, Any], body: RunAgentInput) -> Frontend | None:
+    """What the run's front end gives a resume: what the run kept, its state the one the
+    request sends (the front end holds it: the changes the run streamed are in it); ``None``
+    to keep it all."""
+    if "state" not in body.model_fields_set or body.state is None:
+        return None
+    kept = Frontend.of(metadata) or Frontend()
+    return Frontend(tools=kept.tools, context=kept.context, state=body.state, stated=True)
 
 
 def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:

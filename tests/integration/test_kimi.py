@@ -61,6 +61,31 @@ async def test_kimi_is_the_pinned_version() -> None:
     compat.require_binary("kimi-code", out.decode().strip(), command=KIMI_BIN)
 
 
+def test_a_call_kimi_aborted_when_its_turn_was_stopped_did_not_run() -> None:
+    """A run that pauses on a harness call stops Kimi's turn (``session/cancel``). When the
+    cancel reaches Kimi before the call's "waiting for a person's approval", Kimi aborts the
+    call itself: its result is 'The user manually interrupted "<tool>" …' (Kimi's
+    ``abortedToolOutput``). That call did not run either: the planned model calls it again
+    after the resume, as it does after the waiting result — counting it as run made the
+    ``SEL-kimi-…`` matrix cell answer with the abort text (a timing-dependent failure)."""
+    endpoint = PlannedEndpoint([("refund", {"order": "o1"})])
+    aborted = (
+        'The user manually interrupted "mcp__trellis__refund" (and anything else running at the '
+        "same time). This was a deliberate user action, not a system error, timeout, or "
+        "capacity limit. Do not retry automatically or guess at the cause — wait for the "
+        "user's next instruction."
+    )
+    body = {
+        "messages": [
+            {"role": "user", "content": "refund o1"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": aborted},
+            {"role": "user", "content": "This task was paused at your call to refund"},
+        ]
+    }
+    assert endpoint.next(body) == ("mcp__trellis__refund", {"order": "o1"})
+
+
 async def test_kimi_calls_a_harness_tool_and_answers(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:

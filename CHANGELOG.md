@@ -52,15 +52,78 @@ own model work follows the harness's configuration.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
+- A large result a conversation's turn saved stays readable in its later turns: a follow-up's
+  `read_file` or `query_result` on the path its history names found "File not found", so every
+  what-if needed the whole fetch again. Kept per conversation in the process that saved them
+  (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
+- A worker that dies (a `BaseException` that is not an error) in a harness tool an ACP agent
+  called ends the run's attempt, as an in-process tool's does. It ended only the MCP server's
+  own task group, and the run went on as if the call had failed (the `X15-kimi-…` matrix cells,
+  "the worker did not die").
+- An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
+  `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
+  agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
+  cap. It is counted now when the harness keeps no usage log of the agent.
+- The Claude Agent SDK loads the harness's tools from the first step. Claude Code defers every
+  MCP server's tools behind its `ToolSearch` unless the server's config says `alwaysLoad`, so
+  each turn's model saw only the tool names and spent a step loading them (a model that called
+  one unloaded got a validation error and called it again). The harness's `trellis` server now
+  says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
+  memory's `tool_search`). A team's own servers keep the CLI's deferral.
+- A Deep Agent of yours on a backend outside its state (a disk, a store, a sandbox) had its
+  file tools run ungoverned: a `write_file` changed a real file with no journal, record or
+  approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
+  (`middleware.declare_files`, marked when the graph is wrapped).
+- An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
+  is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
+  it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
+  on a small model read it as the user's message ("your message doesn't include a question").
+- A Claude Agent SDK run no longer offers Claude Code's schedules. Its CLI runs for one attempt
+  and ends with it, so a scheduled prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) never
+  fires; offered, Claude answered "set this up every Monday" with a schedule nothing kept. They
+  join the query's `disallowed_tools` (`adapters.claude.OUTLIVES_THE_QUERY`), after the team's.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
   the instructions with this one. The model now gets it as the first part of the turn's
   question, after the history; the graph's state is unchanged. With a prompt-caching
   middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
-  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  answer ending the history is marked too (`middleware.history_marked`, audit K1). The
   context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
   long context does not read as one more saved note.
+- Anthropic's prompt cache is on for every Anthropic chat model `ReAct` is given, on
+  LangChain's loop and on Deep Agents'. A model name (routed to the provider's own SDK) is not
+  a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` skipped it, and plain
+  `ReAct` had no caching middleware at all: nothing was cached. `middleware.PromptCache` runs
+  LangChain's middleware (one given to `ReAct(middleware=)`, its settings kept) on the chat
+  model the call is made with, in Deep Agents' own one's place, and marks the answer that
+  ends the history. Any other provider's request is unchanged. The small hosted model by name,
+  18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- Anthropic's API given as an OpenAI-compatible endpoint (`LLM_BASE_URL=https://api.anthropic.com/v1/`)
+  is called with Anthropic's own client (`ChatAnthropic`, the same endpoint and key), so its
+  prompt cache is on: the OpenAI compatibility layer drops prompt caching, as Anthropic's docs
+  say. `LLM_GATEWAY=openai-compatible` keeps the OpenAI-compatible client; `trellis doctor`
+  says which client is used.
+- A live tool's value from an earlier turn reads as out of date in every adapter, not only
+  where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
+  its own thread (its checkpointer), so its earlier results are marked in the request it sends
+  (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
+  marks them as memory's window does. In both, the tool stays offered.
+- A model looping on one call is stopped on every adapter: the tool bridge does not run the
+  same call a third time in a row and tells the model to answer with what it has (a `stalled`
+  warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
@@ -109,6 +172,18 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
+  to the model beside the agent's own (one of the agent's by the same name wins, with a
+  warning); a call streams its `TOOL_CALL_*` events and pauses the run (an interrupt whose
+  reason is `frontend_tool`, its `toolCallId` the call's), and the client's result — a `tool`
+  message with that `toolCallId`, or a `resume` entry — is the call's output. `context` and the
+  `state` reach the model in the pushed context, together at most half of its token budget;
+  the run reads and sets the state (`Runtime.state`), each change streamed as `STATE_DELTA`
+  (a JSON Patch; `STATE_SNAPSHOT` where there was no object to patch), and a resume reads the
+  state the client sends. `forwardedProps.mode` (AG-UI) and the message's `metadata.mode`
+  (A2A) are the run's `mode` (queue, interrupt, steer). A call's paused `TOOL_CALL_RESULT` is
+  no longer sent on AG-UI: the call has no result until the run resumes. New dependency:
+  `jsonpatch`.
 - MCP elicitation: an `mcp(...)` server that asks the person in the middle of a call pauses
   the run as `ask` does — one field of a few values a choice (a dropdown), any other form a
   form with the server's schema (a `format: date` field a date picker), a link a choice — and
@@ -157,6 +232,10 @@ own model work follows the harness's configuration.
   names and dates, the step count, seconds within a tolerance), with the made-up claims and
   leaked template tags counted, every model request kept, and `--render` checking what a
   llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
+- What a finished run spent is on its end: every `RUN_FINISHED` carries `data.spent` (tokens,
+  cached tokens, dollars, model calls, tool calls — its sub-agents' runs and earlier attempts
+  included), which agent-runs' event log keeps (ADV-11).
+
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
