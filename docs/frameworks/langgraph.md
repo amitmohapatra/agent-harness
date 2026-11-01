@@ -72,7 +72,7 @@ thread="t-7")}})`.
 `create_agent(model, tools, middleware=trellis.middleware(...))` gives a `create_agent` graph
 everything `ReAct` adds on top of
 Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
-among them), the graph's own tools governed, `max_steps` then a final answer, the stall guard,
+among them), the graph's own tools governed, `max_steps` (LangChain's model call limit), the stall guard,
 the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
 cleared and read back with a `context_window`, the request fitted to the window, and its
 checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a

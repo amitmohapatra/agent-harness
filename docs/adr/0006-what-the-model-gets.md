@@ -2,7 +2,9 @@
 
 **Status:** Accepted as the direction (2026-10-30). The parts marked *proposed* below ship only
 after they pass the [evaluation protocol](../research/EVAL_PROTOCOL.md), each tracked in the
-[improvement backlog](../research/IMPROVEMENT_BACKLOG.md).
+[improvement backlog](../research/IMPROVEMENT_BACKLOG.md). Amended by
+[ADR 0007](0007-query-engine.md): the query engine was measured, and DuckDB is chosen, with SQLite
+as the zero-dependency fallback.
 
 ## Context
 

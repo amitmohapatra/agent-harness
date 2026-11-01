@@ -164,7 +164,7 @@ src/trellis/
     features.py        without=: the features a run or an agent turns off (Feature)
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
-    middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, StepLimit,
+    middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, step_limit,
                        StallGuard, ReadTools, read_result, FitWindow;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
@@ -462,7 +462,7 @@ flowchart TB
     pt["PatchToolCallsMiddleware · Deep Agents<br/>(before the agent) unanswered calls answered"]
     pl["TodoListMiddleware, LongTaskTools · harness<br/>planning and the scratch tools on a long task"]
     ht["HarnessTools, GovernTools · harness<br/>the run's tools per call; every call governed"]
-    sg["StallGuard, StepLimit, Budgeted · harness<br/>max_repeats, max_steps, the budget's stop"]
+    sg["StallGuard, Budgeted · harness; ModelCallLimitMiddleware · LangChain<br/>max_repeats, max_steps, the budget's stop"]
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
     rt["ReadTools · harness<br/>read_file / read_result offered once needed"]

@@ -54,6 +54,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
+from trellis.harness.agent import ABSTAIN_NOTES
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
@@ -502,6 +503,22 @@ async def push(w: World) -> None:
         assert told in w.said(), "the context never reached the model"
     else:
         assert told not in w.said()
+    assert o.answer == "Done. facts about contact"
+
+
+async def abstains(w: World) -> None:
+    """Memory with nothing for the question (``evidence_status`` INSUFFICIENT) and no tool
+    hinted with confidence: the note that says so — name what is missing, offer to look it
+    up — reaches the model with the context, in every adapter."""
+    w.memory_service.evidence_status = "INSUFFICIENT"
+    w.memory_service.top_confidence = 0.3  # under NARROW_FLOOR: no tool answers it for sure
+    d = Desk()
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
+    note = ABSTAIN_NOTES["INSUFFICIENT"]
+    if w.on:
+        assert json.dumps(note)[1:-1] in w.said() or note in w.said(), "the note never arrived"
+    else:
+        assert "## Memory" not in w.said()
     assert o.answer == "Done. facts about contact"
 
 
@@ -1253,6 +1270,16 @@ FEATURES: Final[list[Feature]] = [
         needs=frozenset({"memory"}),
         adapters={"function": NA("checked by F41f: a function target reads agent.context")},
         way2=way2.push,
+    ),
+    Feature(
+        "F41a",
+        "memory push: nothing remembered for the question, the model is told so",
+        "F41",
+        "the memory service (its evidence status)",
+        abstains,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("its code reads agent.context: no model is told anything")},
+        way2=NA("the harness's note: Way 2 reads the service's evidence status itself"),
     ),
     Feature(
         "F41f",
