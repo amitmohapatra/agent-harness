@@ -49,6 +49,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- The memory context no longer breaks a provider's prompt cache from one turn to the next.
+  A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
+  question, as a system message ahead of the history, so the next turn shared nothing past
+  the instructions with this one. The model now gets it as the first part of the turn's
+  question, after the history; the graph's state is unchanged. With a prompt-caching
+  middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
+  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
+  long context does not read as one more saved note.
 - A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
   `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
   handler) call the model once more, told the limit is reached and offered no tool, and its
@@ -80,6 +89,9 @@ own model work follows the harness's configuration.
   then a missing argument, then a made-up tool name, then the right call — goes on to its
   answer, bounded by `max_steps` (ADV-5).
 
+- A kept large result's note says its path is the run's own working copy, which the user
+  cannot open or download (`results.PRIVATE`). Asked for an Excel export, a model told the
+  user the rows were "saved as CSV at /large_tool_results/…, open it in Excel".
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
@@ -105,6 +117,11 @@ own model work follows the harness's configuration.
   form with the server's schema (a `format: date` field a date picker), a link a choice — and
   the answer goes back to the server when the run resumes, on both MCP protocol eras
   (`tools/elicit.py`; [tools.md](docs/tools.md#a-server-that-asks-mcp-elicitation)).
+- MCP resources: an `mcp(...)` server that has resources gets `<server>-read_resource`, its
+  description the map of what there is (resources and templates, at most 20, with the server's
+  `lastModified`); it reads one by its URI (a binary one described) or, given none, lists them
+  all as rows. A large resource is kept, paged and queried as any large result (`tools/resources.py`;
+  [tools.md](docs/tools.md#a-servers-resources-mcp-resources)).
 - A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
   `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
   else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under

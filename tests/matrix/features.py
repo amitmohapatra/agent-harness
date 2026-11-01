@@ -73,6 +73,8 @@ CHAIN: Final = "find_sku → sku_id → get_stock"
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
 #: A real MCP server that asks the person in the middle of a call (MCP elicitation).
 MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
+#: A real MCP server with resources (MCP resources).
+MCP_RESOURCES_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_resources_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -729,6 +731,17 @@ async def mcp_asks(w: World) -> None:
     assert [(p.question, p.options) for p in asked] == [("Which size of shirt?", ["S", "L"])]
     assert "ordered shirt in size L" in o.text, o.answer
     assert [r["status"] for r in o.results("shop-order")][-1:] == ["ok"]  # after the pause
+
+
+async def mcp_resources(w: World) -> None:
+    """An MCP server of the agent's own with resources: one read tool, its description the
+    map of what there is, a resource read by its URI as any tool's result."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_RESOURCES_SERVER)), name="docs")
+    o = await w.go([d.lookup(), server], [("docs-read_resource", {"uri": "docs://handbook"})])
+    o.succeeded()
+    assert "Ship on Tuesdays." in o.text, o.answer
+    assert [r["status"] for r in o.results("docs-read_resource")] == ["ok"]
 
 
 async def prompts(w: World) -> None:
@@ -1411,6 +1424,14 @@ FEATURES: Final[list[Feature]] = [
         "automatic for mcp(...) servers (the client says it can be asked)",
         mcp_asks,
         way2=NA("Way 2 gives the MCP SDK's client an elicitation callback of its own"),
+    ),
+    Feature(
+        "F18r",
+        "MCP resources: a server's resources read by one tool whose description maps them",
+        "N2",
+        "automatic for mcp(...) servers that have resources",
+        mcp_resources,
+        way2=NA("Way 2 reads a server's resources with the MCP SDK's client itself"),
     ),
     Feature(
         "F19",
