@@ -207,6 +207,25 @@ async def test_a_file_the_code_writes_in_outputs_is_kept_for_the_user(tmp_path: 
     assert kept.read_bytes() == b"n\r\n42\r\n" and kept.parent.name == result.run_id
 
 
+async def test_a_command_killed_past_its_memory_or_missing_a_module_says_why(
+    harness: Harness,
+) -> None:
+    async def work(input: str, agent: Runtime) -> Any:
+        hog = "python -c 'a = bytearray(512 * 1024 * 1024); print(len(a))'"
+        return [
+            await agent.tools.call("sandbox_exec", command=hog),
+            await agent.tools.call("sandbox_exec", command="python -c 'import polars'"),
+        ]
+
+    spec = SandboxSpec(memory=64)
+    agent = arm(harness.wrap(work, id="why"), [sandbox(PROVIDER, spec=spec).tools()])
+    killed, missing = (await agent.run("x", user="u")).answer
+    assert killed["exit_code"] == 137 and "memory limit (64 MiB)" in killed["hint"]
+    assert missing["exit_code"] == 1 and missing["hint"].startswith(
+        "The module polars is not installed in the sandbox, and the sandbox has no network"
+    )
+
+
 async def volumes() -> set[str]:
     return {v["Name"] for v in (await engine("GET", "/volumes")).json()["Volumes"] or []}
 

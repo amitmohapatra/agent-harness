@@ -1,6 +1,6 @@
 """A sandbox provider in process, as the harness drives one: each sandbox a dict of files, its
 commands scripted — ``echo <text>`` prints it, ``cat <path>`` a file, ``sleep <seconds>`` waits (and is killed past its
-time), ``false`` exits 1, ``crash`` kills the worker (:attr:`FakeSandboxes.crash`) — and
+time), ``false`` exits 1, ``exits <code> <stderr>`` exits so, ``crash`` kills the worker (:attr:`FakeSandboxes.crash`) — and
 everything the provider was asked to do, in order. :class:`FakeSandboxes` has the core only; :class:`PausingSandboxes` can also
 snapshot and pause."""
 
@@ -168,6 +168,9 @@ class FakeBox:
         except BaseException:
             self.provider.killed.append(command)
             raise
+        if command.startswith("exits "):
+            _, code, stderr = command.split(" ", 2)
+            return ExecResult(exit_code=int(code), stderr=stderr)
         said = command.removeprefix("echo ") if command.startswith("echo ") else ""
         if command.startswith("cat "):
             said = (await self.read(command.removeprefix("cat "))).decode()

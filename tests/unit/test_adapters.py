@@ -32,6 +32,7 @@ from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
     CLI_MESSAGE_BYTES,
+    OUTLIVES_THE_QUERY,
     ClaudeAdapter,
     ClaudeRunError,
     configured_servers,
@@ -213,7 +214,13 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    unchanged = {"hooks": None, "max_buffer_size": None, "session_store": None}
+    assert sent.disallowed_tools == list(OUTLIVES_THE_QUERY)  # nothing narrowed: only these
+    unchanged = {
+        "hooks": None,
+        "max_buffer_size": None,
+        "session_store": None,
+        "disallowed_tools": [],
+    }
     assert dataclasses.replace(sent, session_store_flush="batched", **unchanged) == options
 
 

@@ -34,6 +34,7 @@ from langchain_core.tools import BaseTool
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
+from trellis.harness.sandbox.base import hint
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
@@ -68,7 +69,8 @@ class SandboxBackend(BaseSandbox):
         await self.source.with_results(runtime, box)  # the results the run keeps, there too
         bounds = [s for s in (timeout, self.call_timeout, runtime.remaining()) if s is not None]
         result = await box.exec(command, timeout=min(bounds))
-        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        why = hint(result.exit_code, result.stderr, self.source.spec)
+        output = "\n".join(part for part in (result.stdout, result.stderr, why) if part)
         return ExecuteResponse(output=output, exit_code=result.exit_code)
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:

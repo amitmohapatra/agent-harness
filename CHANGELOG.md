@@ -49,10 +49,19 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
 - A large result a conversation's turn saved stays readable in its later turns: a follow-up's
   `read_file` or `query_result` on the path its history names found "File not found", so every
   what-if needed the whole fetch again. Kept per conversation in the process that saved them
   (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
+- A worker that dies (a `BaseException` that is not an error) in a harness tool an ACP agent
+  called ends the run's attempt, as an in-process tool's does. It ended only the MCP server's
+  own task group, and the run went on as if the call had failed (the `X15-kimi-…` matrix cells,
+  "the worker did not die").
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
@@ -71,6 +80,10 @@ own model work follows the harness's configuration.
   is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
   it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
   on a small model read it as the user's message ("your message doesn't include a question").
+- A Claude Agent SDK run no longer offers Claude Code's schedules. Its CLI runs for one attempt
+  and ends with it, so a scheduled prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) never
+  fires; offered, Claude answered "set this up every Monday" with a schedule nothing kept. They
+  join the query's `disallowed_tools` (`adapters.claude.OUTLIVES_THE_QUERY`), after the team's.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
@@ -156,6 +169,10 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
 - A sandbox's files for the user: the command tool says that files written in `outputs/` are
   given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
   store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
