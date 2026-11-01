@@ -368,6 +368,21 @@ async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
         assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"
 
 
+async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The CLI runs for one attempt and ends with it. Claude Code's scheduled prompts
+    (``CronCreate``) and wake-ups (``ScheduleWakeup``) fire only in a session that keeps
+    running, so here they never would: they are disallowed, and Claude does not promise a
+    schedule nothing keeps. The team's own ``disallowed_tools`` come first, kept."""
+    target = options(tmp_path, [{"text": "ok"}], disallowed_tools=["WebFetch"])
+    await harness.wrap(target, id="no-cron").run("run this every Monday", user="u1")
+    disallowed = started_with(tmp_path)["disallowed_tools"].split(",")
+    assert disallowed[0] == "WebFetch"
+    assert {"CronCreate", "CronDelete", "CronList", "ScheduleWakeup"} <= set(disallowed)
+    assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
+
+
 async def test_the_harness_tools_are_loaded_from_the_first_step(
     harness: Harness, tmp_path: Path
 ) -> None:
