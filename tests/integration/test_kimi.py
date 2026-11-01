@@ -324,3 +324,26 @@ async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_k
     assert native.status is RunStatus.SUCCESS, native.error
     read = text_of(endpoint.requests[-1]["messages"][-1].get("content"))
     assert len(read) >= 4 * results.PAGE_CHARS  # one call: over four of the harness's pages
+
+
+async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi ends a turn at its step limit (``loop_control.max_steps_per_turn``) as a finished
+    turn with no answer: ACP's ``end_turn``, the reason only in its own log
+    (``loop.max_steps_exceeded``). As a ``ReAct`` run at ``max_steps`` does, the run asks once
+    more in the same session, told the limit is reached (``budget.LIMIT``): its answer is the
+    run's, said as a ``step_limit`` warning."""
+    from trellis.harness.budget import LIMIT
+
+    lookups.clear()
+    endpoint.plan = [("lookup", {"topic": "tea"}), ("lookup", {"topic": "coffee"})]
+    target = kimi_target(endpoint, tmp_path, env={"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"})
+    agent = arm(harness.wrap(target, id="kimi-limit"), [lookup])
+    events = [e async for e in agent.stream("tea and coffee?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.endswith("Done. facts about tea") and lookups == ["tea"]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
+    assert warned == ["stopped: the step limit (1) was reached"]
+    assert LIMIT.format(limit=1) in endpoint.said()

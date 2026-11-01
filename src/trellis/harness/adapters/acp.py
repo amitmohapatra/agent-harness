@@ -192,6 +192,10 @@ KIMI_HOME: Final = "~/.kimi-code"
 KIMI_HEADERS: Final = "KIMI_CODE_CUSTOM_HEADERS"
 #: The line of Kimi's usage log a model request's usage is on (``agents/<id>/wire.jsonl``).
 USAGE_RECORD: Final = "usage.record"
+#: The line a turn's end is on, and the error of a turn Kimi ended at its step limit
+#: (``loop_control.max_steps_per_turn``) — over ACP a finished turn with no answer.
+TURN_ENDED: Final = "turn.ended"
+AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +267,8 @@ class UsageLog:
         self.session_id = session_id
         #: how far each file was read, in bytes
         self.read_to: dict[Path, int] = {}
+        #: the main agent's step limit, when its turn ended there (:data:`AT_STEP_LIMIT`)
+        self.limited: int | None = None
 
     def _files(self) -> list[Path]:
         return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
@@ -286,6 +292,10 @@ class UsageLog:
                 entry = _json_line(line)
                 if entry.get("type") == USAGE_RECORD and isinstance(entry.get("usage"), dict):
                     found.append(entry)
+                elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
+                    error = entry.get("error") or {}
+                    if error.get("code") == AT_STEP_LIMIT:
+                        self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
         return found
 
 
@@ -768,6 +778,7 @@ class Attempt:
         something (a rejection's reason, an edit) — the next turn's, until one ends on its own
         or the run pauses."""
         prompt = self._first(native_input)
+        asked_at_limit = False
         while prompt is not None:
             self.cancelled = False
             async with contextlib.aclosing(self._turn(prompt)) as items:
@@ -776,6 +787,14 @@ class Attempt:
             prompt, self.followup = self.followup, None
             if self.runtime.pending is not None or self.runtime.budget_spent is not None:
                 return
+            limit = self.usage.limited if self.usage is not None else None
+            if prompt is None and limit is not None and not asked_at_limit:
+                # the turn ended at the agent's step limit, with no answer: asked once more
+                asked_at_limit, self.usage.limited = True, None  # type: ignore[union-attr]
+                stopped = f"stopped: the step limit ({limit}) was reached"
+                log.warning("run %s %s", self.runtime.run_id, stopped)
+                self.runtime.events.warning("step_limit", stopped)
+                prompt = budget.LIMIT.format(limit=limit)
 
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block

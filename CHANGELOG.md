@@ -49,6 +49,12 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
+  answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
+  SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
+  the limit is reached (`budget.LIMIT`), for one turn with no tool. Kimi ended the turn with no
+  answer, the reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in
+  the same session. A `step_limit` warning says so on the stream.
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no

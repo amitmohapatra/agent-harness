@@ -61,6 +61,9 @@ WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
+#: How the harness begins the prompt that asks for one last answer at the turn limit
+#: (``budget.LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
+LIMIT_PROMPT = "This run has reached its limit"
 #: The tools ``--permission-mode acceptEdits`` lets run without asking.
 EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 #: The input and output tokens each step of a query reports.
@@ -301,6 +304,8 @@ class Cli:
                         "materialised": mirrored(session) is not None,
                         "earlier": prompts(session),
                         "disallowed_tools": argument("--disallowedTools"),
+                        "builtins": argument("--tools"),
+                        "max_turns": argument("--max-turns"),
                         "plugins": plugins(),
                     },
                     handle,
@@ -319,6 +324,11 @@ class Cli:
             mirror(session, 0, prompt=str(prompt))
         state = json.loads(kept.read_text())
         done, turn = state["done"], state.get("turn", 0)
+        if str(prompt).startswith(LIMIT_PROMPT):  # one last answer, no tool
+            said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
+            send(assistant(session, [{"type": "text", "text": said}]))
+            send(result(session, last=said, turns=1, steps=1))
+            return
         if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
             done, turn = 0, turn + 1  # the conversation's next turn, in the same session
             kept.write_text(json.dumps({"done": 0, "turn": turn}))
@@ -331,6 +341,11 @@ class Cli:
             ended = stopped(turns, steps, limit, cap)
             if ended is not None:  # what the real CLI ends with
                 send(result(session, ended[0], subtype=ended[1], steps=steps))
+                if ended[1] in (
+                    "error_max_turns",
+                    "error_max_budget_usd",
+                ):  # and exits 1, as it does
+                    sys.exit(1)
                 return
             steps += 1
             said, read, completed, interrupted, inner = self.step(
