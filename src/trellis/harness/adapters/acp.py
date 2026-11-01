@@ -269,6 +269,9 @@ class UsageLog:
         self.read_to: dict[Path, int] = {}
         #: the main agent's step limit, when its turn ended there (:data:`AT_STEP_LIMIT`)
         self.limited: int | None = None
+        #: whether the main agent's turn ended in the log (:data:`TURN_ENDED`): it is logged
+        #: a moment after the turn's last usage, the step limit's reason in it
+        self.ended = False
 
     def _files(self) -> list[Path]:
         return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
@@ -293,6 +296,7 @@ class UsageLog:
                 if entry.get("type") == USAGE_RECORD and isinstance(entry.get("usage"), dict):
                     found.append(entry)
                 elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
+                    self.ended = True
                     error = entry.get("error") or {}
                     if error.get("code") == AT_STEP_LIMIT:
                         self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
@@ -827,6 +831,8 @@ class Attempt:
 
             prompt = [text_block(prompt)]
         runtime = self.runtime
+        if self.usage is not None:
+            self.usage.ended = False  # this turn's end is still to come
         asking = asyncio.ensure_future(self.conn.prompt(session_id=self.session_id, prompt=prompt))
         asking.add_done_callback(self._ended)
         runtime.model_started(STEP)
@@ -896,13 +902,16 @@ class Attempt:
 
     async def _settled(self) -> None:
         """The turn ended: the usage the agent logs last (it writes its log as it goes, a
-        moment behind) read until a read finds nothing new — accounted, the turn being over."""
-        if self.usage is None:
+        moment behind) read until the turn's end is in it (:data:`TURN_ENDED`, with a step
+        limit's reason) and a read finds nothing new — accounted, the turn being over; at most
+        :data:`SETTLE_SECONDS`."""
+        usage = self.usage
+        if usage is None:
             return
         ends = asyncio.get_running_loop().time() + SETTLE_SECONDS  # a log that keeps growing
         self._accounted()
         await asyncio.sleep(SETTLE_STEP)
-        while self._accounted() and asyncio.get_running_loop().time() < ends:  # noqa: ASYNC110 - a file, polled
+        while (self._accounted() or not usage.ended) and asyncio.get_running_loop().time() < ends:  # noqa: ASYNC110 - a file, polled
             await asyncio.sleep(SETTLE_STEP)
 
     async def _spent(self) -> None:

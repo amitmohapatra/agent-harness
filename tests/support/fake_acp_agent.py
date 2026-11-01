@@ -118,6 +118,14 @@ def logged_usage(session_id: str, agent: str, usage: dict[str, Any]) -> None:
         file.write("not json\n" if usage.get("garbled") else json.dumps(line) + "\n")
 
 
+def logged_end(session_id: str) -> None:
+    """The turn's end, as Kimi logs it after the turn's usage (``turn.ended``)."""
+    path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as file:
+        file.write(json.dumps({"type": "turn.ended", "agentId": "main"}) + "\n")
+
+
 class Stopped(Exception):
     """The turn stops here: the step did not run (a pause, a rejection, an edit)."""
 
@@ -213,6 +221,12 @@ class FakeAgent:
         self.cancelled.setdefault(session_id, asyncio.Event()).set()
 
     async def prompt(self, prompt: list[Any], session_id: str, **kw: Any) -> Any:
+        try:
+            return await self._prompt(prompt, session_id)
+        finally:
+            logged_end(session_id)
+
+    async def _prompt(self, prompt: list[Any], session_id: str) -> Any:
         text = "\n".join(getattr(b, "text", "") for b in prompt)
         record("prompts", text)
         self.cancelled[session_id] = asyncio.Event()
