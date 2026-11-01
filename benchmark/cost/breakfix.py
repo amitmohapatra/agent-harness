@@ -817,13 +817,16 @@ def cases() -> list[Any]:
     ))  # fmt: skip
     south_sep = r.truth_top(w, "store", "revenue", 10, region="south", **SEP)
     under = [s for s, v in south_sep if v < 45_000]
+    # an honest answer may name the store just above the line as just above it
+    nearest_above = min(((v, s) for s, v in south_sep if v >= 45_000), default=(0, None))[1]
     out.append(Case(
         "bf3-past-04", "bf_past", 3,
         (
             Turn("Flag any store whose monthly revenue is below £45,000: that's my alert line.",
                  reply="Noted."),
             Turn("Which south stores were under my alert line in September 2026?",
-                 expect=cx.idset(under, forbidden=[s for s, _ in south_sep if s not in under])
+                 expect=cx.idset(under, forbidden=[s for s, _ in south_sep
+                                                   if s not in under and s != nearest_above])
                  if under else cx.abstain("none under the line"), thread="b"),
         ),
         ("a user-set threshold applied in a later chat",),
@@ -983,6 +986,10 @@ def cases() -> list[Any]:
                 and reorder(k.sku, "north", review=14) != reorder(k.sku, "north", review=10)
                 and reorder(k.sku, "north", review=10) > 0, 6)  # fmt: skip
     q14, q10 = reorder(m14.sku, "north", review=14), reorder(m14.sku, "north", review=10)
+    lead14 = w.suppliers[m14.supplier].lead_time_days
+    # the colleague's result, unless the right working shows the same number (its cover
+    # days, lead time + 14): then the colleague's cover days, lead time + 10
+    wrong14 = str(q10) if q10 != lead14 + 14 else str(lead14 + 10)
     out.append(Case(
         "bf3-mixed-03", "bf_mixed", 3,
         (
@@ -992,7 +999,7 @@ def cases() -> list[Any]:
             Turn(f"Reorder qty of the {m14.name} for the north using my review period: average "
                  "daily units sold over 2026-09-03..2026-09-30 (28 days) x (supplier lead time + "
                  "review period) - units on hand, rounded up, never below 0 (north only).",
-                 expect=cx.Expect("number", q14, forbidden=(f"{q10}",), reference=f"{q14}"),
+                 expect=cx.Expect("number", q14, forbidden=(wrong14,), reference=f"{q14}"),
                  thread="c"),
         ),
         ("this user's own parameter, not a colleague's",),

@@ -499,3 +499,31 @@ async def test_the_adversarial_cases_fail_only_where_a_known_finding_says(
     )
     na = {row["case"] for row in rows if row.get("not_applicable")}
     assert na == (set() if adapter == "deepagents" else {"advflow-02", "advflow-03", "advflow-04"})
+
+
+def test_a_right_answer_that_names_a_nearby_value_is_not_marked_forbidden() -> None:
+    """Two right answers of the past-chats measurement (memory #76) were scored wrong: the
+    south store just above the alert line, named as just above it (bf3-past-04), and a
+    worked answer whose cover days, lead time + 14, equal the colleague's 10-day result
+    (bf3-mixed-03: 38 + 14 = 52 days, and 52 units with a 10-day review). A wrong answer
+    still fails."""
+    w = r.world()
+    cases = {c.id: c for c in breakfix.cases()}
+    alert = cases["bf3-past-04"].turns[1]
+    rows = r.truth_top(w, "store", "revenue", 10, region="south", **breakfix.SEP)
+    under = [s for s, v in rows if v < 45_000]
+    nearest = min((v, s) for s, v in rows if v >= 45_000)[1]
+    honest = f"Only {', '.join(under)}. The nearest store above the line was {nearest}."
+    assert cx.score(alert.expect, honest, [], alert.text)["correct"], (honest, alert.expect)
+    other = next(s for s, v in rows if v >= 45_000 and s != nearest)
+    assert not cx.score(alert.expect, f"{under[0]} and {other}.", [], alert.text)["correct"]
+
+    turn = cases["bf3-mixed-03"].turns[2]
+    sku = next(k for k in w.skus.values() if k.name in turn.text)
+    cover = w.suppliers[sku.supplier].lead_time_days + 14
+    worked = f"{cover} days of cover, so the reorder quantity is {turn.expect.value} units."
+    assert cx.score(turn.expect, worked, [], turn.text)["correct"], (worked, turn.expect)
+    wrong = cover - 4  # the colleague's 10-day review: lead time + 10 days of cover
+    assert not cx.score(turn.expect, f"{wrong} days of cover, so 52 units.", [], turn.text)[
+        "correct"
+    ]
