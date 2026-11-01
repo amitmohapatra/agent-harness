@@ -396,6 +396,11 @@ def test_a_cannot_do_why_reads_what_the_tools_have_no_way_to_do() -> None:
         "monthly revenue history and make a transparent trend estimate, which is not ARIMA."
     )
     assert cx.score(expect, answer, [])["correct"]
+    statistical = (  # OpenAI Agents, the second run
+        "This is a simple time-series method, not a fitted ARIMA model. I don't have a "
+        "statistical modelling tool, so I couldn't estimate ARIMA parameters; here is a trend."
+    )
+    assert cx.score(expect, statistical, [])["correct"]
     assert not cx.score(expect, "I can't fit an ARIMA model. Here is a trend estimate.", [])[
         "correct"
     ]  # no why

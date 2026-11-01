@@ -2617,7 +2617,8 @@ _WHY: Final = re.compile(
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
     r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with (?:the|these|my) tools|"
     r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|"
-    r"tools? (?:have|has) no (?:[\w-]+ ){0,3}(?:model\w*|code|scripting|way)\b|make (?:an? |the )?(?:image|chart|pdf|"
+    r"tools? (?:have|has) no (?:[\w-]+ ){0,3}(?:model\w*|code|scripting|way)\b|"
+    r"(?:don't|do not) have an? (?:[\w-]+ ){0,3}(?:model\w*|statistic\w*|forecasting) tool|make (?:an? |the )?(?:image|chart|pdf|"
     r"csv|excel) ?files?|none of (?:my|the) tools (?:can |will )?(?:run|make|create|produce|fit)|"
     r"no way to (?:create|make|produce|attach|export|run)|"
     # where an answer it can make would be: out of the user's reach, or text only
