@@ -37,7 +37,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call
-from trellis.harness.adapters.acp import KIMI_BUILTINS, ACPAgent, kimi
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
 from trellis.harness.tools.bridge import TURN_STALLED
 
 #: The ``kimi`` program, when it is installed.
@@ -87,7 +87,8 @@ def result_text(content: Any) -> str:
 
 def kimi_name(tool: str) -> str:
     """A tool as Kimi names it: its own by name, the harness's through the ``trellis`` server."""
-    return tool if tool in KIMI_BUILTINS or tool.startswith("mcp__") else f"mcp__trellis__{tool}"
+    own = tool in KIMI_BUILTINS or tool in KIMI_OUTLIVES_THE_TURN or tool.startswith("mcp__")
+    return tool if own else f"mcp__trellis__{tool}"
 
 
 class PlannedEndpoint:
