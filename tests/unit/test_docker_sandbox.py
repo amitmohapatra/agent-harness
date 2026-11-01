@@ -208,6 +208,17 @@ async def test_a_snapshot_makes_the_sandbox_again_and_delete_removes_both() -> N
             await provider.create(kept, SandboxSpec())
 
 
+async def test_delete_removes_the_anonymous_volumes_the_image_declares() -> None:
+    docker = FakeDocker()
+    docker.image_volumes[DEFAULT_IMAGE] = ["/data", "/cache"]
+    with docker.running():
+        await made(docker)
+        assert sorted(docker.volumes) == [f"{NAME}/cache", f"{NAME}/data"]
+        await DockerSandbox().delete(REF)
+    assert NAME not in docker.containers
+    assert docker.volumes == {}  # none left behind, run after run
+
+
 async def test_a_delete_the_daemon_refuses_is_an_error_and_a_vanished_image_is_not() -> None:
     docker = FakeDocker()
     provider = DockerSandbox()
