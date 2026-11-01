@@ -112,17 +112,17 @@ _ALLOWED: Final = frozenset(
 )
 _NAME: Final = re.compile(r"[^0-9A-Za-z_]+")
 #: The typing rules (see the module), one text for Python's ``re`` and DuckDB's RE2: a whole
-#: number as SQL writes one, a number, a leading zero before a digit (``00123``, ``-007``: a
-#: code, not a number), and the spaces a number may have around it.
-WHOLE: Final = r"[-+]?[0-9]+"
-NUMBER: Final = r"[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?"
-LEADING_ZERO: Final = r"^[-+]?0[0-9]"
-SPACES: Final = " \t\n\r\x0b\x0c"
+#: number as SQL writes one, and a number — never with a leading zero before a digit
+#: (``00123``, ``-007``: a code, not a number); spaces around one are left out.
+WHOLE: Final = r"[-+]?(0|[1-9][0-9]*)"
+NUMBER: Final = r"[-+]?((0|[1-9][0-9]*)(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?"
 _WHOLE: Final = re.compile(WHOLE)
 _NUMBER: Final = re.compile(NUMBER)
-_LEADING_ZERO: Final = re.compile(LEADING_ZERO)
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
+#: The rows DuckDB first types a table's columns by: a column with a value no number there
+#: is text, not looked at again over every row (:meth:`DuckDB._typed`).
+SAMPLE_ROWS: Final = 2_048
 
 
 def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
@@ -139,11 +139,11 @@ def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
     return ["line"], [[line] for line in found]
 
 
-def _shape(text: str) -> tuple[str, Any]:
+def _shape(text: str, *, values: bool = True) -> tuple[str, Any]:
     """What a kept result is, as a table (see the module): ``("json", (rows, key))`` (the key
-    of the object that holds them, ``None`` for an array), ``("csv", delimiter)`` or
-    ``("lines", lines)``."""
-    found = _json_rows(text)
+    of the object that holds them, ``None`` for an array; without ``values``, each row only
+    its keys: :func:`_json_rows`), ``("csv", delimiter)`` or ``("lines", lines)``."""
+    found = _json_rows(text, values=values)
     if found is not None:
         return "json", found
     lines = text.splitlines()
@@ -459,35 +459,34 @@ class DuckDB:
         """``text`` as the table ``raw``, every column ``VARCHAR`` (an empty cell ``NULL``),
         read by DuckDB's own reader from ``path`` (written here: the text, or its lines as
         CSV); its columns (:func:`column_names`). Its shape is :func:`_shape`'s."""
-        kind, found = _shape(text)
+        kind, found = _shape(text, values=False)  # DuckDB reads the values
         file = _quoted(path)
         with open(path, "w", encoding="utf-8", errors="replace", newline="") as out:
             if kind == "lines":
                 csv.writer(out).writerows([["line"], *([line] for line in found)])
             else:
                 out.write(text)
-        if kind == "json":
+        if kind == "json":  # a string as its text, a number as written, a nested value as JSON
             rows, key = found
             keys = _keys(rows)
             names = column_names(keys)
+            largest = f"maximum_object_size = {len(text) + 1}"
             if key is None:  # an array of objects: one record each
-                spec = ", ".join(f"{_quoted(k)}: 'JSON'" for k in keys)
+                spec = ", ".join(f"{_quoted(k)}: 'VARCHAR'" for k in keys)
                 source = (
-                    f"read_json({file}, format = 'array', records = true, columns = {{{spec}}}, "
-                    f"maximum_object_size = {len(text) + 1})"
+                    f"read_json({file}, format = 'array', records = true, "
+                    f"columns = {{{spec}}}, {largest})"
                 )
                 cells = [_name(k) for k in keys]
             else:  # an object holding the array: its rows unnested
+                fields = _quoted(f"STRUCT({', '.join(f'{_name(k)} VARCHAR' for k in keys)})[]")
                 source = (
-                    f"(SELECT unnest(CAST({_name(key)} AS JSON[])) AS r FROM read_json({file}, "
-                    f"records = true, columns = {{{_quoted(key)}: 'JSON'}}, "
-                    f"maximum_object_size = {len(text) + 1}))"
+                    f"(SELECT unnest({_name(key)}) AS r FROM read_json({file}, records = true, "
+                    f"columns = {{{_quoted(key)}: {fields}}}, {largest}))"
                 )
-                cells = [f"json_extract(r, {_quoted('/' + _pointer(k))})" for k in keys]
-            # a string as its text, a number as written, a nested value as its JSON text
+                cells = [f"struct_extract(r, {_quoted(k)})" for k in keys]
             listed = ", ".join(
-                f"NULLIF(json_extract_string({c}, '$'), '') AS {_name(n)}"
-                for c, n in zip(cells, names, strict=True)
+                f"NULLIF({c}, '') AS {_name(n)}" for c, n in zip(cells, names, strict=True)
             )
             db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
             return names
@@ -513,35 +512,25 @@ class DuckDB:
 
     def _typed(self, db: Any, name: str, columns: Sequence[str]) -> None:
         """The table ``name`` from ``raw`` (dropped after), each column typed by the module's
-        rules (see :func:`_kind`): counted in one pass, then cast."""
-        tests = []
-        for column in columns:
-            text = f"trim({_name(column)}, {_quoted(SPACES)})"
-            plain = (
-                f"length({text}) <= {NUMBER_CHARS} "
-                f"AND NOT regexp_matches({text}, {_quoted(LEADING_ZERO)})"
-            )
-            whole = f"regexp_full_match({text}, {_quoted(WHOLE)})"
-            fits = f"TRY_CAST({text} AS BIGINT) IS NOT NULL"
-            number = (
-                f"regexp_full_match({text}, {_quoted(NUMBER)}) "
-                f"AND isfinite(TRY_CAST({text} AS DOUBLE))"
-            )
-            tests += [
-                f"count({_name(column)})",
-                f"count(*) FILTER ({plain} AND {whole} AND {fits})",
-                f"count(*) FILTER ({plain} AND (CASE WHEN {whole} THEN {fits} ELSE {number} END))",
-            ]
-        counts = db.execute(f"SELECT {', '.join(tests)} FROM raw").fetchone()
-        cast = []
-        for n, column in enumerate(columns):
-            present, whole, number = counts[3 * n : 3 * n + 3]
-            kind = "BIGINT" if present and whole == present else None
-            kind = kind or ("DOUBLE" if present and number == present else None)
-            cell = _name(column)
-            if kind is not None:
-                cell = f"CAST(trim({cell}, {_quoted(SPACES)}) AS {kind})"
-            cast.append(f"{cell} AS {_name(column)}")
+        rules (:func:`_number`), counted in one pass over every row — only the columns still
+        numbers in its first :data:`SAMPLE_ROWS` — then cast."""
+        kinds: dict[str, str | None] = dict.fromkeys(columns, "")
+        for rows in (f"(SELECT * FROM raw LIMIT {SAMPLE_ROWS})", "raw"):
+            asked = [c for c in columns if kinds[c] is not None]
+            if not asked:
+                break
+            counts = db.execute(f"SELECT {', '.join(map(_counted, asked))} FROM {rows}").fetchone()
+            for n, column in enumerate(asked):
+                present, whole, number = counts[3 * n : 3 * n + 3]
+                kinds[column] = (
+                    None
+                    if number < present or (rows == "raw" and not present)
+                    else ("BIGINT" if whole == present else "DOUBLE")
+                )
+        cast = [
+            f"CAST({_name(c)} AS {kinds[c]}) AS {_name(c)}" if kinds[c] else _name(c)
+            for c in columns
+        ]
         db.execute(f"CREATE TABLE {_name(name)} AS SELECT {', '.join(cast)} FROM raw")
         db.execute("DROP TABLE raw")
 
@@ -556,6 +545,22 @@ class DuckDB:
         return str(exc).split("\n\nLINE ")[0]  # its pointer under the SQL left out
 
 
+def _counted(column: str) -> str:
+    """In SQL, over a text column: how many values it has, how many are whole numbers, how
+    many are numbers (:func:`_number`'s rules; DuckDB's casts allow the spaces around one)."""
+    text = f"trim({_name(column)})"
+    whole = f"regexp_full_match({text}, {_quoted(WHOLE)})"
+    fits = f"TRY_CAST({text} AS BIGINT) IS NOT NULL"
+    number = (
+        f"regexp_full_match({text}, {_quoted(NUMBER)}) AND isfinite(TRY_CAST({text} AS DOUBLE))"
+    )
+    short = f"length({text}) <= {NUMBER_CHARS}"
+    return (
+        f"count({_name(column)}), count(*) FILTER ({short} AND {whole} AND {fits}), "
+        f"count(*) FILTER ({short} AND (CASE WHEN {whole} THEN {fits} ELSE {number} END))"
+    )
+
+
 def _quoted(text: str) -> str:
     """``text`` as a SQL string."""
     return "'" + text.replace("'", "''") + "'"
@@ -564,11 +569,6 @@ def _quoted(text: str) -> str:
 def _name(text: str) -> str:
     """``text`` as a SQL name."""
     return '"' + text.replace('"', '""') + '"'
-
-
-def _pointer(key: str) -> str:
-    """A JSON object's key as a step of a JSON Pointer (RFC 6901)."""
-    return key.replace("~", "~0").replace("/", "~1")
 
 
 def chosen() -> Engine:
@@ -711,22 +711,39 @@ def _table(db: sqlite3.Connection, name: str, text: str) -> None:
     db.executemany(f'INSERT INTO "{name}" VALUES ({marks})', [_typed(r, kinds) for r in rows])
 
 
-def _json_rows(text: str) -> tuple[list[Mapping[str, Any]], str | None] | None:
+def _json_rows(
+    text: str, *, values: bool = True
+) -> tuple[Sequence[Mapping[str, Any]] | Sequence[tuple[str, ...]], str | None] | None:
     """The rows of a JSON result: an array of objects, or the first such array an object
     holds (``{"items": [...]}``), with that key (``None`` for an array); ``None`` when it is
-    no such JSON."""
+    no such JSON. Without ``values``, each row is only its keys (one tuple for rows alike), for
+    a reader that reads the values itself: a fraction of the memory of the rows as dicts."""
+    last: list[Any] = [None]  # the pairs of the object read last: the outermost one at the end
+    alike: dict[tuple[str, ...], _Keys] = {}
+
+    def keys(pairs: list[tuple[str, Any]]) -> _Keys:
+        last[0] = pairs
+        found = _Keys(k for k, _ in pairs)
+        return alike.setdefault(found, found)
+
     try:
-        found = json.loads(text)
+        found = json.loads(text) if values else json.loads(text, object_pairs_hook=keys)
     except ValueError:
         return None
-    if isinstance(found, dict):
-        key = next((k for k, v in found.items() if _objects(v)), None)
-        return None if key is None else (found[key], key)
-    return (found, None) if _objects(found) else None
+    kind = dict if values else _Keys
+    if isinstance(found, kind):
+        pairs = found.items() if values else last[0]
+        key = next((k for k, v in pairs if _objects(v, kind)), None)
+        return None if key is None else (dict(pairs)[key], key)
+    return (found, None) if _objects(found, kind) else None
 
 
-def _objects(value: Any) -> bool:
-    return isinstance(value, list) and bool(value) and all(isinstance(v, dict) for v in value)
+class _Keys(tuple[str, ...]):
+    """A JSON object read for its keys only (:func:`_json_rows` without values)."""
+
+
+def _objects(value: Any, kind: type = dict) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(v, kind) for v in value)
 
 
 def _cell(value: Any) -> Any:
@@ -775,8 +792,8 @@ def _number(value: Any, *, whole: bool) -> bool:
         return -(2**63) <= value < 2**63
     if isinstance(value, float):
         return not whole and math.isfinite(value)
-    text = str(value).strip(SPACES)
-    if _LEADING_ZERO.match(text) or len(text) > NUMBER_CHARS:
+    text = str(value).strip(" ")
+    if len(text) > NUMBER_CHARS:
         return False
     # a whole number first: one past 64 bits stays its text, never a rounded REAL
     if _WHOLE.fullmatch(text):
@@ -791,9 +808,9 @@ def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:
         if value in (None, ""):
             out.append(None)
         elif kind == "INTEGER":
-            out.append(int(str(value).strip(SPACES)))
+            out.append(int(str(value).strip(" ")))
         elif kind == "REAL":
-            out.append(float(str(value).strip(SPACES)))
+            out.append(float(str(value).strip(" ")))
         else:
             out.append(value)
     return out
