@@ -142,7 +142,7 @@ from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
 from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
-from trellis.harness.tools import bridge, query, results
+from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     SideEffects,
     Sourced,
@@ -465,13 +465,15 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
-    kept = path in query.saved(runtime)
+    # a result the run can read (its own, its conversation's earlier turns'), or a file kept
+    # for its user (``tools.stored``): the harness's
+    kept = path in query.saved(runtime) or stored.is_stored(path)
     said: str | None = None
     cleared = None if kept else _cleared_result(request.state, path)
     if call["name"] == READ_FILE and cleared is not None:
         said = results.read(args, text=cleared)
     elif call["name"] == READ_FILE and (request.tool is None or kept):
-        said = results.read(args)
+        said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:
@@ -521,9 +523,11 @@ def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) ->
     )
 
 
-#: The harness's ``read_file`` and ``query_result`` as LangChain tools.
+#: The harness's ``read_file`` and ``query_result`` as LangChain tools; and as a run that saves a
+#: query's result as a file is offered them (``results.SAVING``), made once each.
 READERS: Final = {r[0]: _reader(*r) for r in results.READERS}
 READ_FILE_TOOL: Final = READERS[READ_FILE]
+SAVING: Final = {**READERS, query.QUERY_RESULT: _reader(*results.SAVING[1])}
 #: The runs a :class:`HarnessTools` offers the harness's tools to (:func:`_paged`).
 _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
@@ -700,7 +704,8 @@ class HarnessTools(AgentMiddleware):
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         if _saved(request.state):  # a large result kept: read in pages, or queried
             names = {_named(t) for t in own}
-            offered.extend(t for name, t in READERS.items() if name not in names)
+            readers = SAVING if query.saving(runtime) else READERS
+            offered.extend(t for name, t in readers.items() if name not in names)
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:

@@ -39,7 +39,7 @@ WAITING: Final = "Waiting for a person's approval."
 
 
 def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
-    readers = [_reader(*r) for r in results.READERS]
+    readers = [_reader(*r) for r in results.readers()]
     server = create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 
@@ -62,8 +62,9 @@ def _reader(
     schema: dict[str, Any],
     answer: Callable[[dict[str, Any]], Awaitable[str]],
 ) -> Any:
-    """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
-    its pages, ``query_result`` SQL over its rows)."""
+    """A tool reading a large result the run keeps (``tools.results.readers``: ``read_file``
+    its pages, ``query_result`` SQL over its rows — saving them as a file in a run with no tool
+    that runs code)."""
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": await answer(dict(args))}]}
