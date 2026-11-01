@@ -1,6 +1,6 @@
 """A sandbox provider in process, as the harness drives one: each sandbox a dict of files, its
 commands scripted — ``echo <text>`` prints it, ``cat <path>`` a file, ``sleep <seconds>`` waits (and is killed past its
-time), ``false`` exits 1, ``crash`` kills the worker (:attr:`FakeSandboxes.crash`) — and
+time), ``false`` exits 1, ``exits <code> <stderr>`` exits so, ``crash`` kills the worker (:attr:`FakeSandboxes.crash`) — and
 everything the provider was asked to do, in order. :class:`FakeSandboxes` has the core only; :class:`PausingSandboxes` can also
 snapshot and pause."""
 
@@ -11,7 +11,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from trellis.contracts import ToolError
-from trellis.harness.sandbox import ExecResult, SandboxLost, SandboxRef, SandboxSpec
+from trellis.harness.sandbox import (
+    LIST_OUTPUTS,
+    OUTPUTS,
+    PROBE,
+    PROBE_LABEL,
+    ExecResult,
+    SandboxLost,
+    SandboxRef,
+    SandboxSpec,
+)
 
 
 @dataclass
@@ -36,8 +45,18 @@ class FakeSandboxes:
         #: made its sandbox when ``crash_after_create``
         self.crash: BaseException = SystemExit("the worker died")
         self.crash_after_create = False
+        #: the sandboxes made only to read the environment card (``PROBE``), apart from the
+        #: runs': ("create" | "delete", id); and what the probe prints there
+        self.probes: list[tuple[str, str]] = []
+        self.environment = "3.12.7\nnumpy==2.1.0 openpyxl==3.1.5"
+        #: how often a run's outputs were listed (``LIST_OUTPUTS``), apart from ``commands``
+        self.listed = 0
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec) -> FakeBox:
+        if PROBE_LABEL in ref.labels:
+            self.probes.append(("create", ref.id))
+            self.boxes[ref.id] = Box(dict(ref.labels))
+            return FakeBox(self, ref)
         if ref.id in self.boxes:
             self.calls.append(("adopt", ref.id))
         else:
@@ -57,7 +76,10 @@ class FakeSandboxes:
         return FakeBox(self, ref)
 
     async def delete(self, ref: SandboxRef) -> None:
-        self.calls.append(("delete", ref.id))
+        if PROBE_LABEL in ref.labels:
+            self.probes.append(("delete", ref.id))
+        else:
+            self.calls.append(("delete", ref.id))
         self.boxes.pop(ref.id, None)
 
     async def labelled(self, labels: Mapping[str, str]) -> list[SandboxRef]:
@@ -123,6 +145,19 @@ class FakeBox:
     ) -> ExecResult:
         box = self.provider.live(self.ref)
         assert not box.paused, "a command in a paused sandbox"
+        if command == PROBE:
+            return ExecResult(exit_code=0, stdout=self.provider.environment)
+        if command == LIST_OUTPUTS:  # each file directly in outputs/: its size and name
+            self.provider.listed += 1
+            prefix = f"{OUTPUTS}/"
+            found = {
+                p.removeprefix(prefix): c
+                for p, c in box.files.items()
+                if p.startswith(prefix) and "/" not in p.removeprefix(prefix)
+            }
+            return ExecResult(
+                exit_code=0, stdout="".join(f"{len(c)} {n}\n" for n, c in found.items())
+            )
         self.provider.commands.append(command)
         if command == "crash":
             raise self.provider.crash
@@ -133,6 +168,9 @@ class FakeBox:
         except BaseException:
             self.provider.killed.append(command)
             raise
+        if command.startswith("exits "):
+            _, code, stderr = command.split(" ", 2)
+            return ExecResult(exit_code=int(code), stderr=stderr)
         said = command.removeprefix("echo ") if command.startswith("echo ") else ""
         if command.startswith("cat "):
             said = (await self.read(command.removeprefix("cat "))).decode()

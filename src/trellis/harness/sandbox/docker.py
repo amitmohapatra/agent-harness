@@ -6,7 +6,8 @@ spec opens it, every capability dropped, no new privileges, at most :data:`PIDS_
 processes, the spec's CPU and memory as its limits, and an init process that reaps what a
 killed command leaves. A command runs with ``sh -c`` in :data:`WORKDIR` and writes its process
 id first, so a command out of time is killed with everything it started (its process group).
-A snapshot is the container committed to an image (``trellis-snapshot:<id>``); a pause is
+Deleting a sandbox removes its container with the anonymous volumes its image declares. A
+snapshot is the container committed to an image (``trellis-snapshot:<id>``); a pause is
 Docker's (its processes frozen until the run continues).
 
 The daemon is this machine's (or the one whose socket is given): a run paused here and resumed
@@ -46,7 +47,7 @@ from trellis.harness.sandbox.base import (
 #: Engine API version spoken (Docker 24 and later).
 DOCKER_SOCKET: Final = "/var/run/docker.sock"
 API_VERSION: Final = "v1.43"
-#: The image of a sandbox whose spec and provider name none (``SANDBOX_IMAGE`` names another).
+#: The image of a sandbox whose spec and provider name none (``sandbox(image=)`` names another).
 DEFAULT_IMAGE: Final = "python:3.12-slim"
 #: The label of a snapshot's image: the sandbox it was taken of (what ``delete`` removes by).
 SNAPSHOT: Final = "trellis.snapshot_of"
@@ -139,7 +140,10 @@ class DockerSandbox:
 
     async def delete(self, ref: SandboxRef) -> None:
         async with self._client() as client:
-            gone = await client.delete(f"/containers/{ref.id}", params={"force": "true"})
+            # v: the anonymous volumes its image declares (``VOLUME``) go with it, not left
+            # behind run after run
+            removed = {"force": "true", "v": "true"}
+            gone = await client.delete(f"/containers/{ref.id}", params=removed)
             if gone.status_code != 404:
                 _checked(gone, ref)
             snapshots = {"filters": _filter({SNAPSHOT: ref.id})}  # its own images, none other

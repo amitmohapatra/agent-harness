@@ -20,6 +20,8 @@ from trellis.harness.agui.events import (
     Outcome,
     OutcomeType,
 )
+from trellis.harness.frontend import FRONTEND_TOOL
+from trellis.harness.tools.bridge import PAUSED
 
 #: Outcomes an AG-UI client hears as ``RUN_ERROR`` rather than ``RUN_FINISHED``.
 FAILURE_OUTCOMES: Final = frozenset({RunOutcome.ERROR, RunOutcome.REJECTED, RunOutcome.TIMEOUT})
@@ -54,7 +56,7 @@ def translate(event: RunEvent) -> AGUIEvent | None:
         "run_id": event.run_id,
     }
     kind = event.type
-    if kind in FOLDED:
+    if kind in FOLDED or _paused_result(event):
         return None
     if kind is RunEventType.RUN_FINISHED:
         return _finished(event, base)
@@ -66,6 +68,12 @@ def translate(event: RunEvent) -> AGUIEvent | None:
         return None
     fields: dict[str, Any] = {"type": AGUIEventType(kind.value), **base, **_members(event)}
     return AGUIEvent(**fields)
+
+
+def _paused_result(event: RunEvent) -> bool:
+    """A call that paused the run has no result yet (a front end runs it now, or a person is
+    asked): its ``TOOL_CALL_RESULT`` comes when the run resumes."""
+    return event.type is RunEventType.TOOL_CALL_RESULT and event.data.get("status") == PAUSED
 
 
 def _members(event: RunEvent) -> dict[str, Any]:
@@ -171,14 +179,15 @@ SHOWN: Final = (
 
 def interrupt_entry(raw: dict[str, Any]) -> InterruptEntry:
     """A contracts ``Interrupt`` (as ``awaiting()`` spells it) as the protocol's entry: the
-    reason lower-cased, the question as the message, ``expects`` as the response schema,
-    the tool call's id, and the rest under ``metadata`` — what a client renders, as it is
-    (:data:`SHOWN`)."""
+    reason lower-cased (``frontend_tool`` for a call the front end runs), the question as the
+    message, ``expects`` as the response schema, the tool call's id, and the rest under
+    ``metadata`` — what a client renders, as it is (:data:`SHOWN`)."""
     call = raw.get("tool_call") or {}
     metadata = {k: raw[k] for k in SHOWN if raw.get(k) not in (None, [], False)}
+    frontend = FRONTEND_TOOL in (raw.get("payload") or {})
     return InterruptEntry(
         id=str(raw.get("interrupt_id")),
-        reason=str(raw.get("reason", "QUESTION")).lower(),
+        reason=FRONTEND_TOOL if frontend else str(raw.get("reason", "QUESTION")).lower(),
         message=raw.get("question"),
         tool_call_id=call.get("idempotency_key") if isinstance(call, dict) else None,
         response_schema=raw.get("expects"),

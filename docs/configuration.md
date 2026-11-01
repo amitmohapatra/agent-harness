@@ -16,7 +16,7 @@ One place for each thing, decided by who owns it and how often it changes — ne
 
 | Place | Owner | What goes there | Example |
 |---|---|---|---|
-| the environment | the deployment | where the models and each service are, their keys, the spool: the nine [settings](#settings-and-the-environment) | `LLM_BASE_URL=http://localhost:8091/v1` |
+| the environment | the deployment | where the models and each service are, their keys, the spool, the file store: the ten [settings](#settings-and-the-environment) | `LLM_BASE_URL=http://localhost:8091/v1` |
 | the tools' own variables | their SDKs | `OTEL_*`, `LANGFUSE_*`, `DOCKER_HOST`, the providers' keys and credentials (without `LLM_BASE_URL`; Google's and AWS's for `LLM_AUTH=google`, `aws`) | `OPENAI_API_KEY=sk-...` |
 | Bifrost | the gateway's administrator | model routing, fallbacks, model retries, rate limits, key and team budgets, caching, the MCP allow-list of a key, stored prompts, the judge's model alias | a virtual key allowed the `erp` MCP server |
 | the memory service | its administrator, or a deploy script | the tool catalog: each tool's `risk` and `approve_when` rules; learned approvals | `refund`: `approve_when amount > 100` |
@@ -84,7 +84,7 @@ runs' models over the environment's, whenever the agent was built:
 
 | Set | Route (`LLM_GATEWAY`) | Model calls go | What else it can do |
 |---|---|---|---|
-| `LLM_BASE_URL` | `openai-compatible` (unset) | to that OpenAI-compatible endpoint — OpenAI, OpenRouter, a LiteLLM proxy, Ollama, vLLM, llama.cpp, Anthropic's and Gemini's OpenAI-compatible endpoints —, the name as given, authenticated by `LLM_AUTH` (`LLM_API_KEY` as the bearer key) | models only: the client's own retries; a judge by name on the same endpoint |
+| `LLM_BASE_URL` | `openai-compatible` (unset) | to that OpenAI-compatible endpoint — OpenAI, OpenRouter, a LiteLLM proxy, Ollama, vLLM, llama.cpp, Anthropic's and Gemini's OpenAI-compatible endpoints —, the name as given, authenticated by `LLM_AUTH` (`LLM_API_KEY` as the bearer key). Anthropic's API (`https://api.anthropic.com/v1/`) is called with Anthropic's own client, on the same endpoint and key: its OpenAI compatibility layer drops prompt caching. `LLM_GATEWAY=openai-compatible` set keeps the OpenAI-compatible client | models only: the client's own retries; a judge by name on the same endpoint |
 | `LLM_BASE_URL` | `bifrost` | through Bifrost, with `LLM_API_KEY` as the virtual key, the name as Bifrost's `provider/model` | everything: the MCP tools, Code Mode, the cost of each call (dollar budgets), fallbacks and retries, stored prompts, skills, the judge alias, each call's run as its dimensions, the Claude CLI on its Anthropic route |
 | no `LLM_BASE_URL` | `provider-sdk` | to the model's provider, through the provider's own SDK and key — LangChain's `init_chat_model` (`OPENAI_API_KEY` and `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, Google's and AWS's own credentials for Vertex and Bedrock...) | models only: the client's own retries; a judge by name is an OpenAI model (`llm_judge(model="openai:...")`); MCP servers are `mcp(...)` entries of your own ([tools.md](tools.md)) |
 
@@ -135,6 +135,7 @@ route:
 | `MEMORY_URL` | `memory_url` | memory off: no context, no memory tools, no records, no catalog (the tools' own risks decide) | `http://localhost:8080` | memory push, pull and records; the tool catalog; grounding; documents; feedback in memory |
 | `RUNS_URL` | `runs_url` | runs, the queue and schedules kept in process (`LocalRuns`: the last 1,000 finished runs, an hour each), lost on restart | `http://localhost:8090` | durable runs, workers across processes, the ticker's schedules and deadlines, artifacts, the event log (needs `MEMORY_URL`) |
 | `TRELLIS_SPOOL_DIR` | `spool_dir` | the XDG state folder (`$XDG_STATE_HOME/trellis`, else `~/.local/state/trellis`) when it can be written and the process is not in a container or a serverless runtime (`K_SERVICE`, `KUBERNETES_SERVICE_HOST`, `AWS_LAMBDA_FUNCTION_NAME`, `/.dockerenv`); there, none: a write the service could not take is lost at a restart (said once) | `/var/spool/trellis` | undelivered writes kept in `<dir>/trellis-writes.jsonl`, replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
+| `TRELLIS_FILES_URL` | `files_url` | the XDG data folder (`$XDG_DATA_HOME/trellis/files`, else `~/.local/share/trellis/files`) | `gs://acme-trellis/files` | the files runs make for their users (exports, sandbox outputs), stored only, under `<tenant>/<user>/<conversation>/<run>/`, on fsspec: `gs://`, `s3://`, `az://` need `gcsfs`, `s3fs`, `adlfs` (each reads its cloud's own credentials); served over AG-UI to the run's user, as a link signed for 5 minutes where the store signs, else streamed ([surfaces.md](surfaces.md)) |
 
 The tools' own variables, read by their own SDKs (not `Settings` fields): `LANGFUSE_PUBLIC_KEY`
 and `LANGFUSE_SECRET_KEY` (and `LANGFUSE_BASE_URL`, unset: Langfuse Cloud) — its scores and

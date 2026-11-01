@@ -12,7 +12,9 @@ loop is the harness's. What it is built with:
 
 * **LangChain's loop** — ``create_agent``, dangling tool calls answered (Deep Agents'
   ``PatchToolCallsMiddleware``), ``response_format``, parallel tool calls: the base measured
-  best on a small model (``docs/frameworks/react.md#the-base``);
+  best on a small model (``docs/frameworks/react.md#the-base``); Anthropic's prompt cache
+  (LangChain's ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model, a model name
+  too (``middleware.PromptCache``, in Deep Agents' graph in its own one's place);
 * **Deep Agents, on demand** — given ``backend=`` (its file tools on the graph's state, a disk, a
   store, a composite, or the run's sandbox: ``sandbox()``), a sub-agent of its own
   (``subagents=``: the ``task`` tool), ``skills=``, ``memory_files=`` (its ``AGENTS.md``-style
@@ -29,7 +31,8 @@ loop is the harness's. What it is built with:
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
   ``ModelHooks``; one named as the harness's is refused (naming the parameter that sets it;
   ``middleware()`` itself, saying ReAct already has it), one named as Deep Agents' replaces
-  it, as Deep Agents does.
+  it, as Deep Agents does (an ``AnthropicPromptCachingMiddleware``, its settings kept, is the
+  prompt cache's).
 
 ``middleware(...)`` is the harness's part on its own: ``create_agent(...,
 middleware=middleware(...))`` or ``create_deep_agent(..., middleware=middleware(...))``.
@@ -56,6 +59,7 @@ from pydantic import BaseModel
 from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import (
     MODEL_METADATA,
+    PROMPT_METADATA,
     TOOLS_ATTRIBUTE,
     WINDOW_METADATA,
     context_window,
@@ -76,12 +80,9 @@ KEEP_RESULTS: Final = 3
 MIN_FREED: Final = 0.1
 #: What a cleared result reads as (the tool message keeps its call's id).
 CLEARED: Final = (
-    "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
+    "[result cleared to keep the context small: "
+    'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
 )
-#: Deep Agents' file tools that read, and those that change files: on a backend outside the
-#: graph's state they are governed as any tool, with these risks.
-FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
-FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
 #: What ``ReAct`` and :func:`middleware` say of a switch they no longer take (``removed``).
 _NO_GUIDANCE: Final = (
     "the tool guidance was removed, measured as no better and slower: say how to choose among "
@@ -143,9 +144,10 @@ def middleware(
     ``max_steps`` model calls (LangChain's ``ModelCallLimitMiddleware``,
     :func:`~.middleware.step_limit`: counted per invocation here, per run in ``ReAct``); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
-    cleared past half of it and ``read_result`` to read them back; the request made to fit
-    the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
-    narrowed and compacted, older results cleared, older turns left out — only as far as
+    cleared past half of it (LangChain's ``ClearToolUsesEdit``) and ``read_file`` to read them
+    back; the request made to fit the window, never failing for its size
+    (:class:`~.middleware.FitWindow`: the tools narrowed and compacted, the longest results
+    cut, older turns left out — only as far as
     needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
@@ -169,6 +171,7 @@ def _middleware(
     held: frozenset[str] = frozenset(),
     files: bool = True,
     summarization: Any = None,
+    card: Any = None,
     scoped: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
@@ -185,7 +188,7 @@ def _middleware(
         context_window=context_window,
         system_prompt=system_prompt,
     )
-    from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
+    from langchain.agents.middleware import ContextEditingMiddleware
 
     from trellis.harness import automatic
     from trellis.harness import middleware as ours
@@ -195,11 +198,11 @@ def _middleware(
         [
             ContextEditingMiddleware(
                 edits=[
-                    ClearToolUsesEdit(
+                    ours.ThisTurnsResults(
                         trigger=int(CLEAR_AT * window),
                         clear_at_least=int(MIN_FREED * window),
                         keep=KEEP_RESULTS,
-                        exclude_tools=(ours.READ_RESULT, ours.READ_FILE),
+                        exclude_tools=(ours.READ_FILE,),
                         placeholder=CLEARED,
                     )
                 ]
@@ -218,13 +221,14 @@ def _middleware(
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         ours.HarnessTools(),
-        *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps, scoped=scoped),
         automatic.Budgeted(),
         *clearing,
         *reads,
+        # the sandbox's environment card in execute's description (``sandbox.backend``)
+        *([card] if card is not None else []),
         # the request made to fit the window, after everything that adds to it; a
         # summarization after it summarizes the older turns, else it leaves them out
         ours.FitWindow(window, turns=summarization is None),
@@ -333,6 +337,7 @@ def ReAct(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
     profiled = _profiled(chat, window)
+    cache, middleware = ours.prompt_cache(middleware)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
     instructions = system_prompt if not isinstance(system_prompt, Stored) else None
     if not _deep(
@@ -361,6 +366,7 @@ def ReAct(
                     ),
                     middleware,
                 ),
+                cache,  # last of what changes the request, where Deep Agents puts its own
             ],
             response_format=cast(Any, response_format),  # a JSON schema too, at run time
             state_schema=state_schema,
@@ -369,7 +375,7 @@ def ReAct(
             cache=cache,
             name="react",
         )
-        return _described(graph, named, window, [*run, *helpers])
+        return _described(graph, named, window, instructions, [*run, *helpers])
     files_backend = backend if backend is not None else automatic.JournalBackend()
     graph_backend = files_backend
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
@@ -391,14 +397,16 @@ def ReAct(
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        card=_card(files_backend),
         scoped=True,
     )
     graph = create_deep_agent(
         profiled,
         tools=own,
         system_prompt=instructions,
-        # Deep Agents' summarization stands after the harness's narrowing, which it counts
-        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware)],
+        # Deep Agents' summarization stands after the harness's narrowing, which it counts;
+        # the prompt cache in its own caching middleware's place
+        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cache],
         subagents=cast(Any, native),  # Deep Agents' own dicts, as given
         skills=skills,
         memory=memory_files,
@@ -412,7 +420,7 @@ def ReAct(
         name="react",
     )
     _declared(graph, backend=graph_backend, outside=outside, helper_only=not native)
-    return _described(graph, named, window, [*run, *helpers])
+    return _described(graph, named, window, instructions, [*run, *helpers])
 
 
 def _deep(
@@ -428,6 +436,14 @@ def _deep(
     return backend is not None or bool(native or skills or memory_files or permissions)
 
 
+def _card(backend: Any) -> Any:
+    """The middleware that describes ``execute`` with the run's sandbox's environment card,
+    for a backend that is one (``sandbox.backend.SandboxCard``)."""
+    from trellis.harness.sandbox.backend import SandboxBackend, SandboxCard
+
+    return SandboxCard(backend.source) if isinstance(backend, SandboxBackend) else None
+
+
 def _backend(given: Any) -> Any:
     """``backend=`` as Deep Agents takes it: ``sandbox()`` is the run's sandbox as its backend
     (``sandbox().deep_agent()``'s), any other as it is."""
@@ -436,10 +452,15 @@ def _backend(given: Any) -> Any:
     return given.deep_agent()["backend"] if isinstance(given, SandboxSource) else given
 
 
-def _described(graph: Any, named: str | None, window: int | None, run: list[Any]) -> Any:
+def _described(
+    graph: Any, named: str | None, window: int | None, instructions: str | None, run: list[Any]
+) -> Any:
     """What the harness reads of the graph: the model's name, the window when known (the
-    pushed memory context's budget is a share of it), and the tools it runs for the agent."""
-    graph = graph.with_config(metadata={MODEL_METADATA: named, WINDOW_METADATA: window})
+    pushed memory context's budget is a share of it, and the replayed conversation's is what
+    is left of it), its instructions' text, and the tools it runs for the agent."""
+    graph = graph.with_config(
+        metadata={MODEL_METADATA: named, WINDOW_METADATA: window, PROMPT_METADATA: instructions}
+    )
     setattr(graph, TOOLS_ATTRIBUTE, run)
     return graph
 
@@ -512,23 +533,24 @@ def _native(
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
     the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
-    middleware of those names kept) and its ``interrupt_on`` turned into its tools' declared
-    risk — a tool it
-    names asks a person (``irreversible``), as the catalog says; a name that is none of its
-    tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the harness asks
-    once."""
+    middleware of those names kept), the prompt cache (``middleware.PromptCache``, around its
+    own ``AnthropicPromptCachingMiddleware``) and its ``interrupt_on`` turned into its tools'
+    declared risk — a tool it names asks a person (``irreversible``), as the catalog says; a
+    name that is none of its tools (a Deep Agents tool of its own) stays Deep Agents'
+    approval, which the harness asks once."""
     if "runnable" in spec or "graph_id" in spec:
         return spec
     from trellis.harness import middleware as ours
 
     if isinstance(spec.get("model"), str):
         spec["model"] = routed_chat_model(spec["model"])
-    given = list(spec.get("middleware") or [])
+    cache, given = ours.prompt_cache(spec.get("middleware") or [])
     names = {m.name for m in given}
     guards = [
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),
+        cache,
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
     gates = spec.pop("interrupt_on", None) or {}
@@ -568,14 +590,13 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
-    from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE
+    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, outside_state
 
     runs = supports_execution(backend)
     for tool in graph_tools(graph):
         marks: dict[str, Any] = {}
-        if outside and tool.name in FILE_READS | FILE_WRITES:
-            risk = "read" if tool.name in FILE_READS else "write"
-            marks = {OUTSIDE_STATE: True, "side_effects": risk}
+        if outside and tool.name in FILE_TOOLS:
+            marks = outside_state(tool.name)
         elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
             marks = {MACHINERY: True}
         if marks:
@@ -597,21 +618,8 @@ SET_BY: Final = {
 HARNESS_TOOLS: Final = "HarnessTools"
 
 
-#: The default middleware a measurement turns off (:func:`defaults_off`), by name, and the
-#: middleware it turns on that a default leaves out (:func:`defaults_on`).
+#: The default middleware a measurement turns off (:func:`defaults_off`), by name.
 _OFF: ContextVar[frozenset[str]] = ContextVar("trellis_react_off", default=frozenset())
-_ON: ContextVar[frozenset[str]] = ContextVar("trellis_react_on", default=frozenset())
-
-
-@contextlib.contextmanager
-def defaults_on(*names: str) -> Iterator[None]:
-    """``ReAct`` graphs built inside add the middleware ``names`` the defaults leave out
-    (``ToolSelection``): a measurement of what it is worth, as :func:`defaults_off`."""
-    token = _ON.set(frozenset(names))
-    try:
-        yield
-    finally:
-        _ON.reset(token)
 
 
 @contextlib.contextmanager

@@ -8,12 +8,18 @@ A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the mode
 preview naming where; the server's ``read_file`` pages it. The CLI lists a server's tools once,
 when its session starts (the SDK carries no ``list_changed``), so ``read_file`` is listed from
 the start: before a result was kept it finds nothing to read.
+
+The server's config says ``alwaysLoad``: Claude Code otherwise defers every MCP server's tools
+behind its ``ToolSearch`` (the model is told their names only, and spends a step loading them
+before it can call one). Which tools a run offers is the harness's choice (the tool hints'
+narrowing, memory's ``tool_search``), made before the query: they are the tools to load. A
+team's own servers keep the CLI's deferral.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server
 from claude_agent_sdk import tool as sdk_tool
@@ -24,14 +30,18 @@ from trellis.harness.tools.base import Tool
 
 #: The in-process server's name, and so the prefix Claude sees.
 SERVER: Final = "trellis"
+#: The server config's key (the CLI's ``--mcp-config``, which the SDK passes on with all but the
+#: server's instance) that loads its tools from the first step instead of deferring them.
+ALWAYS_LOAD: Final = "alwaysLoad"
 #: What the CLI is told about a call that paused the run (a harness tool's, or a built-in's
 #: the permission check asked a person about).
 WAITING: Final = "Waiting for a person's approval."
 
 
 def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
-    readers = [_reader(*r) for r in results.READERS]
-    return create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
+    readers = [_reader(*r) for r in results.readers()]
+    server = create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
+    return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 
 
 def _one(tool: Tool) -> Any:
@@ -52,8 +62,9 @@ def _reader(
     schema: dict[str, Any],
     answer: Callable[[dict[str, Any]], Awaitable[str]],
 ) -> Any:
-    """A tool reading a large result the run keeps (``tools.results.READERS``: ``read_file``
-    its pages, ``query_result`` SQL over its rows)."""
+    """A tool reading a large result the run keeps (``tools.results.readers``: ``read_file``
+    its pages, ``query_result`` SQL over its rows — saving them as a file in a run with no tool
+    that runs code)."""
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": await answer(dict(args))}]}

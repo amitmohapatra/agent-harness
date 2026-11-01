@@ -124,6 +124,12 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "SlashCommand": "write",
     "Bash": "irreversible",
 }
+#: Claude Code's built-in tools whose work needs the CLI to go on running after the query: a
+#: scheduled prompt (``CronCreate``, durable or not, fires only in a session that is running
+#: then) and a wake-up (``ScheduleWakeup``). The CLI here runs for one attempt and ends with it,
+#: so they are disallowed (with the tools that list and delete the schedules): offered, Claude
+#: promised a schedule that nothing keeps.
+OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 #: The most MCP tools a Claude agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
 #: The most one message from the CLI may be (the SDK's ``max_buffer_size``: 1 MiB unless the
@@ -141,6 +147,8 @@ FAILED_EVENT: Final = "PostToolUseFailure"
 STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
+#: The result a query that reached its ``max_turns`` ends with (no answer).
+MAX_TURNS: Final = "error_max_turns"
 #: When the SDK hands the session store a step: as soon as the CLI mirrors it.
 SESSION_FLUSH: Final = "eager"
 #: Claude Code's tool that runs a subagent (``agents=``): ``Agent``, named ``Task`` before.
@@ -333,6 +341,51 @@ class ClaudeAdapter:
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
+        """The query's messages (:meth:`_attempted`) — and, when it reached its turn limit
+        (``error_max_turns``: no answer), one last answer instead of that error: its session
+        resumed (Claude's own ``resume``), told the limit is reached for this turn
+        (``budget.TURN_LIMIT``: the session keeps it, and the next turn has its tools again),
+        for one turn with no tool, as a ``ReAct`` run at ``max_steps`` answers. A last query
+        that gives no answer leaves the error."""
+        from claude_agent_sdk import ResultError, ResultMessage
+
+        runtime = run.runtime
+        limited: Any = None
+        try:
+            async with aclosing(self._attempted(target, native_input, run)) as messages:
+                async for message in messages:
+                    if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
+                        limited = message
+                        continue
+                    yield message
+        except ResultError:
+            # the CLI exits with an error after its error result (the SDK raises it then): at
+            # the turn limit that is the end the result already said
+            if limited is None:
+                raise
+        if limited is None:
+            return
+        # the result names the session it ran in (the journal's): resumed for the last answer
+        session = runtime.replay.journal.session
+        limit = int(runtime.framework_options.get("max_turns") or target.max_turns or 0)
+        told = dataclasses.replace(native_input, prompt=budget.TURN_LIMIT.format(limit=limit))
+        last: list[Any] = []
+        async with aclosing(self._query(target, told, run, session, last=True)) as messages:
+            async for message in messages:
+                last.append(message)
+        answered = [m for m in last if isinstance(m, ResultMessage) and not m.is_error]
+        if not answered or not (answered[-1].result or "").strip():
+            yield limited
+            return
+        stopped = f"stopped: the turn limit ({limit}) was reached"
+        log.warning("run %s %s", runtime.run_id, stopped)
+        runtime.events.warning("step_limit", stopped)
+        for message in last:
+            yield message
+
+    async def _attempted(
+        self, target: Any, native_input: Any, run: Invocation
+    ) -> AsyncGenerator[Any, None]:
         """The query's messages — the session an earlier attempt kept resumed, when there is
         one the CLI still holds; else from the prompt."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
@@ -365,10 +418,17 @@ class ClaudeAdapter:
                 yield message
 
     async def _query(
-        self, target: Any, native_input: Any, run: Invocation, session: str | None
+        self,
+        target: Any,
+        native_input: Any,
+        run: Invocation,
+        session: str | None,
+        *,
+        last: bool = False,
     ) -> AsyncGenerator[Any, None]:
         """One query (``session``: the one it resumes); the session it runs in kept in the
-        journal as it goes."""
+        journal as it goes. ``last``: the one last answer at the turn limit — its prompt as
+        given, one turn, no tool (no built-in, no MCP server), no context added again."""
         from claude_agent_sdk import ResultMessage
 
         runtime = run.runtime
@@ -379,10 +439,12 @@ class ClaudeAdapter:
         if written:
             target = dataclasses.replace(target, plugins=plugins)
         steps = Steps(runtime, self)
-        options = _options(target, native_input.context, run, session, steps)
+        options = _options(target, None if last else native_input.context, run, session, steps)
+        if last:
+            options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
-        first = session is None or runtime.attempt == 1
+        first = last or session is None or runtime.attempt == 1
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         try:
@@ -552,9 +614,7 @@ def _options(
     if run.native_tools is not None:
         servers = configured_servers(options.mcp_servers)
         changes["mcp_servers"] = {**servers, convert.SERVER: run.native_tools}
-    narrowed = _narrowed(runtime, options.disallowed_tools)
-    if narrowed is not None:
-        changes["disallowed_tools"] = narrowed
+    changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
     env = routed_env(options.env, runtime)
@@ -589,15 +649,16 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
     return given
 
 
-def _narrowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str] | None:
-    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer
-    (the tool hints' narrowing: Claude's built-ins and MCP tools too, for the whole query);
-    ``None`` when nothing is narrowed."""
-    if runtime.offered is None:
-        return None
+def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
+    """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
+    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), and those the tool hints
+    narrow away (Claude's built-ins and MCP tools too, for the whole query)."""
     given = list(denied or ())
-    hidden = [n for n in runtime.native if not runtime.offers(n) and n not in given]
-    return [*given, *hidden] if hidden else None
+    narrowed = (
+        [n for n in runtime.native if not runtime.offers(n)] if runtime.offered is not None else []
+    )
+    hidden = [n for n in (*OUTLIVES_THE_QUERY, *narrowed) if n not in given]
+    return [*given, *dict.fromkeys(hidden)]
 
 
 def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:

@@ -15,6 +15,9 @@
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
   agent-runs.
+* ``GET {path}/runs/{run_id}/files/{name}`` — a file the run kept for its user (its ``file``
+  event names it): a redirect to a link the store signs for :data:`~trellis.harness.files.
+  LINK_SECONDS` (GCS, S3, Azure), else its bytes streamed. Only the run's own user.
 
 Identity is the deployment's, read as ``serve_a2a`` reads it: the trusted header the platform's
 authenticating edge sets, ``X-Trellis-Identity: {"tenant_id": ..., "user_id": ...}`` (its
@@ -41,12 +44,12 @@ import asyncio
 import inspect
 import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from trellis.contracts import (
@@ -57,6 +60,7 @@ from trellis.contracts import (
     RunEvent,
     RunEventType,
     RunStatus,
+    ToolError,
     safe_id,
 )
 from trellis.harness import pipeline
@@ -64,6 +68,7 @@ from trellis.harness.agent import Throttled
 from trellis.harness.agui.events import (
     AGUIEvent,
     AGUIEventType,
+    InputMessage,
     Outcome,
     OutcomeType,
     Resume,
@@ -73,7 +78,11 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
+from trellis.harness.conversation import Mode
+from trellis.harness.files import StoredFile, scope
+from trellis.harness.frontend import FRONTEND_TOOL, Frontend
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
+from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
@@ -210,26 +219,68 @@ class _Surface:
         tenant = await agent.harness._tenant()
         if body.resume:
             return await self._resume(body, body.resume[-1], user, tenant)
+        if (result := body.tool_result()) is not None:
+            answer = await self._tool_answer(body, result, user, tenant)
+            return await self._resume(body, answer, user, tenant)
         if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
+        try:
+            mode = Mode(body.forwarded.mode)
+        except ValueError as exc:
+            raise HTTPException(422, f"forwardedProps.mode: {exc}") from exc
         payload = body.latest_user_text() or body.state
         attached = await self._attached(body, user, tenant)
-        record = await agent._opened(
-            payload,
-            user=user,
-            thread=body.thread_id,
-            tenant=tenant,
-            run_id=body.run_id,
-            document_ids=attached or None,
-        )
+        try:
+            record = await agent._opened(
+                payload,
+                user=user,
+                thread=body.thread_id,
+                tenant=tenant,
+                run_id=body.run_id,
+                document_ids=attached or None,
+                mode=mode,
+                app=_frontend(body),
+            )
+        except ConfigurationError as exc:  # a blank message: no run
+            raise HTTPException(422, str(exc)) from exc
         buffer = self.hub.open(record.run_id, user)
         self._launch(
             buffer,
             body.thread_id,
             record.run_id,
-            lambda listen: pipeline.attempt(agent, record, payload, listener=listen),
+            lambda listen: pipeline.attempt(agent, record, payload, listener=listen, mode=mode),
         )
         return buffer, -1
+
+    async def _tool_answer(
+        self, body: RunAgentInput, result: InputMessage, user: str, tenant: str
+    ) -> Resume:
+        """The resume a front end's tool result is: the answer to the interrupt of the
+        thread's paused run that waits on that call (``409`` when none does: the call was
+        answered already, or is not a front-end tool's)."""
+        agent = self.agent
+        async for summary in agent.harness.runs.iterate(
+            status=RunStatus.PAUSED,
+            agent_id=agent.id,
+            thread_id=body.thread_id,
+            tenant=tenant,
+            max_pages=1,
+        ):
+            awaiting = summary.awaiting
+            call = awaiting.tool_call if awaiting is not None else None
+            if (
+                awaiting is not None
+                and call is not None
+                and call.idempotency_key == result.tool_call_id
+                and FRONTEND_TOOL in (awaiting.payload or {})
+            ):
+                text = result.text()
+                answer = text if text is not None or result.error is None else result.error
+                return Resume(interrupt_id=awaiting.interrupt_id, payload=answer)
+        raise HTTPException(
+            409,
+            f"{BAD_RESUME}: no paused run of this thread waits on tool call {result.tool_call_id}",
+        )
 
     async def _attached(self, body: RunAgentInput, user: str, tenant: str) -> list[str]:
         """The documents the latest user message attaches (``run(document_ids=)``), each one the
@@ -282,11 +333,12 @@ class _Surface:
             raise HTTPException(409, f"{BAD_RESUME}: {exc}") from exc
         buffer = self.hub.open(record.run_id, user)
         after = buffer.published - 1
+        app = _frontend_now(record.metadata, body)
         self._launch(
             buffer,
             body.thread_id,
             record.run_id,
-            lambda listen: agent._continue(record, resolution, listen),
+            lambda listen: agent._continue(record, resolution, listen, app=app),
         )
         return buffer, after
 
@@ -322,6 +374,34 @@ class _Surface:
         if data is None:
             raise HTTPException(404, f"no artifact {artifact_id}")
         return Response(data, media_type=ref.mime_type or "application/octet-stream")
+
+    async def file(self, request: Request, run_id: str, name: str) -> Response:
+        """A file the run kept (``Runtime.save_file``), for the run's own user only: its path is
+        rebuilt from the run's record (``files.scope``), so no other user's is reachable."""
+        user = await self.user(request)
+        agent = self.agent
+        tenant = await agent.harness._tenant()
+        record = await agent.harness.runs.get(run_id, tenant=tenant)
+        if record is None or record.agent_id != agent.id or record.user_id != user:
+            raise HTTPException(404, f"no run {run_id}")
+        who = RunIdentity.of(record)
+        folder = scope(who.tenant, who.user, who.conversation, run_id)
+        store = agent.harness.files
+        try:
+            size = await store.size(folder, name)
+        except ToolError:  # not a file name
+            size = None
+        if size is None:
+            raise HTTPException(404, f"no file {name}")
+        link = await store.link(folder, name)
+        if link is not None:
+            return RedirectResponse(link, status_code=307)
+        kind = StoredFile.kind_of(name)
+        headers = {
+            "Content-Length": str(size),
+            "Content-Disposition": f'attachment; filename="{name}"',
+        }
+        return StreamingResponse(store.chunks(folder, name), media_type=kind, headers=headers)
 
     async def logged(self, run_id: str, user: str, after: int) -> AsyncIterator[str]:
         """A run this process did not serve, from agent-runs' event log: its events past
@@ -480,6 +560,27 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         except HTTPException as exc:
             return _problem(exc, request)
 
+    @router.get(
+        "/runs/{run_id}/files/{name}",
+        summary="A file the run kept for its user",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "the file's bytes (a store that signs no links)",
+                "content": {"application/octet-stream": {}},
+            },
+            307: {"description": "a link the store signed, valid five minutes"},
+            **_refusals(401, 404),
+        },
+    )
+    async def file(request: Request, run_id: str, name: str) -> Response:
+        """A file the run kept for its user, which its `file` event names: a redirect to a
+        short-lived signed link (GCS, S3, Azure), else its bytes. Only the run's own user."""
+        try:
+            return await surface.file(request, run_id, name)
+        except HTTPException as exc:
+            return _problem(exc, request)
+
     return router
 
 
@@ -505,6 +606,29 @@ def _problem(exc: HTTPException, request: Request) -> JSONResponse:
 async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
     async for number, event in buffer.read(after):
         yield encode(event, number)
+
+
+def _frontend(body: RunAgentInput) -> Frontend | None:
+    """What the request's front end gives the run: its tools, context and state."""
+    stated = "state" in body.model_fields_set and body.state is not None
+    if not (body.tools or body.context or stated):
+        return None
+    return Frontend(
+        tools=tuple(t.model_dump(exclude_none=True) for t in body.tools),
+        context=tuple(c.model_dump() for c in body.context),
+        state=body.state,
+        stated=stated,
+    )
+
+
+def _frontend_now(metadata: Mapping[str, Any], body: RunAgentInput) -> Frontend | None:
+    """What the run's front end gives a resume: what the run kept, its state the one the
+    request sends (the front end holds it: the changes the run streamed are in it); ``None``
+    to keep it all."""
+    if "state" not in body.model_fields_set or body.state is None:
+        return None
+    kept = Frontend.of(metadata) or Frontend()
+    return Frontend(tools=kept.tools, context=kept.context, state=body.state, stated=True)
 
 
 def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:
