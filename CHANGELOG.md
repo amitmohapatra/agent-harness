@@ -49,6 +49,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
+  answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
+  SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
+  the limit is reached, for one turn with no tool. Kimi ended the turn with no answer, the
+  reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in the same
+  session. A `step_limit` warning says so on the stream. Both are told the limit is for this
+  turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's "This run has
+  reached its limit", a model answered the conversation's next turn "I've reached the
+  tool-call limit" without calling a tool.
 - `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
   their results, not only its question and answer — so a follow-up has the figures behind an
   earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
@@ -168,6 +177,11 @@ own model work follows the harness's configuration.
   ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
 
 ### Added
+
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
 
 - AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
   to the model beside the agent's own (one of the agent's by the same name wins, with a

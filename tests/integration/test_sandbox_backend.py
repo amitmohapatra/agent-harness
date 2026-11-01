@@ -16,7 +16,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.sandbox import FakeSandboxes, PausingSandboxes
 from trellis import Harness, ReAct, Runtime, sandbox, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolError
-from trellis.harness.sandbox import SandboxSource
+from trellis.harness.sandbox import SandboxSource, SandboxSpec
 from trellis.harness.sandbox.backend import ASYNC_ONLY, SandboxBackend, _error_of
 
 
@@ -205,3 +205,22 @@ async def test_a_result_the_run_keeps_is_a_file_in_its_sandbox_for_code(harness:
 
     assert (await harness.wrap(work, id="kept-in-box").run("go", user="u")).answer == "done"
     assert seen == ["sku,stock\nSKU-1,4"] * 2
+
+
+async def test_executes_output_ends_with_what_the_sandbox_knows_about_why(
+    harness: Harness,
+) -> None:
+    backend = backend_of(FakeSandboxes(), spec=SandboxSpec(memory=64))
+    seen: dict[str, Any] = {}
+
+    async def work(input: str, agent: Runtime) -> str:
+        seen["oom"] = await backend.aexecute("exits 137 ")
+        seen["ok"] = await backend.aexecute("echo hi")
+        return "done"
+
+    assert (await harness.wrap(work, id="hinted").run("go", user="u")).answer == "done"
+    assert seen["oom"].exit_code == 137
+    assert seen["oom"].output.startswith(
+        "Killed (exit 137): the command went past the sandbox's memory limit (64 MiB)"
+    )
+    assert seen["ok"].output == "hi"

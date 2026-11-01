@@ -636,3 +636,54 @@ async def test_way_2_a_provider_and_governed_without_a_harness() -> None:
     assert await run(command="echo hi") == {"exit_code": 0, "stdout": "hi TOKEN=t", "stderr": ""}
     await provider.delete(box.ref)
     assert provider.boxes == {}
+
+
+MISSING: Final = "exits 1 ModuleNotFoundError: No module named 'polars'"
+
+
+@pytest.mark.parametrize(
+    ("spec", "command", "hint"),
+    [
+        (
+            SandboxSpec(memory=256),
+            "exits 137 ",
+            "Killed (exit 137): the command went past the sandbox's memory limit (256 MiB), or "
+            "was killed. Work on the data in parts (read it in chunks, keep only the columns "
+            "needed) rather than running it again as it is.",
+        ),
+        (
+            SandboxSpec(),
+            "exits 1 MemoryError",
+            "Out of memory: the command went past the sandbox's memory limit (the provider's). "
+            "Work on the data in parts (read it in chunks, keep only the columns needed) rather "
+            "than running it again as it is.",
+        ),
+        (
+            SandboxSpec(),
+            MISSING,
+            "The module polars is not installed in the sandbox, and the sandbox has no network "
+            "to install it: use the standard library (csv, json, statistics, sqlite3) or a "
+            "module that is installed.",
+        ),
+        (
+            SandboxSpec(network="open"),
+            MISSING,
+            "The module polars is not installed in the sandbox: install it (pip install), then "
+            "run the command again.",
+        ),
+        (SandboxSpec(), "exits 2 usage: no such option", None),
+        (SandboxSpec(), "echo fine", None),
+    ],
+)
+async def test_a_failed_command_says_what_the_sandbox_knows_about_why(
+    harness: Harness, spec: SandboxSpec, command: str, hint: str | None
+) -> None:
+    """Facts the command's own output lacks: the memory limit it went past, whether a missing
+    module can be installed there."""
+
+    async def work(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("sandbox_exec", command=command)
+
+    agent = arm(harness.wrap(work, id="hints"), [sandbox(FakeSandboxes(), spec=spec).tools()])
+    result = await agent.run("x", user="u")
+    assert result.answer.get("hint") == hint, result.error

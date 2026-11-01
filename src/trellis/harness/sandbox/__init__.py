@@ -9,7 +9,9 @@ As a backend (``ReAct``, Deep Agents: ``trellis.harness.sandbox.backend``) Deep 
 tools and its ``execute`` work in the run's sandbox. As tools (:meth:`SandboxSource.tools`) the
 model gets three harness tools: :data:`EXEC` (a shell command: its exit code, stdout and
 stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes through the
-bridge like any tool's: governed (``sandbox_exec`` and ``sandbox_write`` write,
+bridge like any tool's — a failed command's result adds a ``hint`` when the sandbox knows why
+(:func:`~trellis.harness.sandbox.base.hint`: the memory limit it went past, a module it cannot
+install) — governed (``sandbox_exec`` and ``sandbox_write`` write,
 ``sandbox_read`` reads; the catalog may say more), journaled (a resumed run reads the same
 output and runs nothing again), recorded and redacted, and bounded by its ``call_timeout`` — a
 command out of time is killed, and its effect is unknown to the model, as any write's.
@@ -60,6 +62,7 @@ from trellis.harness.sandbox.base import (
     SandboxSpec,
     SupportsPause,
     SupportsSnapshot,
+    hint,
 )
 from trellis.harness.sandbox.docker import DockerSandbox
 from trellis.harness.tools import query
@@ -226,7 +229,9 @@ class SandboxSource:
         runtime = _running()
         box = await self.opened(runtime, changes=True)
         await self.with_results(runtime, box)
-        return (await box.exec(str(args["command"]), timeout=runtime.remaining())).model_dump()
+        result = await box.exec(str(args["command"]), timeout=runtime.remaining())
+        why = hint(result.exit_code, result.stderr, self.spec)
+        return result.model_dump() if why is None else {**result.model_dump(), "hint": why}
 
     async def _read(self, args: dict[str, Any]) -> str:
         runtime = _running()
