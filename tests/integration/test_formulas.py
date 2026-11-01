@@ -1,7 +1,8 @@
 """Formulas and statistics over 50,000 SKUs with no sandbox, asked with read-only SQL
 (``query_result``: ``tools.query``) — margins, a weighted score, growth, percentiles, standard
 deviation, correlation, regression, date math, a what-if, a moving average — each answer equal
-to Python's own over every row (floating results to 12 significant digits)."""
+to Python's own over every row (floating results to 12 significant digits), on DuckDB and on
+the SQLite fallback alike, with the same SQL."""
 
 from __future__ import annotations
 
@@ -152,7 +153,7 @@ def same(got: list[list[Any]], want: list[list[Any]]) -> bool:
 
 @pytest.mark.parametrize("question", list(SUITE))
 async def test_a_formula_or_a_statistic_over_50000_rows_equals_pythons(
-    harness: Harness, question: str
+    harness: Harness, engine: str, question: str
 ) -> None:
     want, sql = SUITE[question]
     args = {"file_path": PATH, "sql": sql}

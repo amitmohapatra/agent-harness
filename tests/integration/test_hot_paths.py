@@ -118,7 +118,8 @@ def test_a_model_node_of_another_shape_is_said_once(caplog: pytest.LogCaptureFix
 def test_the_stall_look_back_reads_only_the_latest_turn() -> None:
     messages = conversation(500)
     ahead = Ahead(messages, start=len(messages) - 3)
-    assert mw._failing(ahead) == 1
+    assert mw._failing(ahead) == 0  # one failing step, its failure not met again (Ahead: no
+    # message before the latest turn is read)
     assert [len(s) for s in mw._steps(ahead)] == [1]
 
 
@@ -133,10 +134,16 @@ def test_a_call_is_found_from_the_end() -> None:
     assert mw._calling(again, "new") == (len(again) - 1, again[-1])
 
 
-async def test_read_result_reads_the_latest_result_of_an_id() -> None:
-    read = mw.read_result()
+def test_a_cleared_result_is_the_latest_result_of_its_id() -> None:
     messages = [ToolMessage("first", tool_call_id="c"), ToolMessage("again", tool_call_id="c")]
-    assert await read.coroutine(id="c", state={"messages": messages}) == "again"  # type: ignore[attr-defined]
+    state = {"messages": messages}
+    assert mw._cleared_result(state, "/large_tool_results/c") == "again"
+    assert mw._cleared_result(state, "/large_tool_results/x") is None
+    assert mw._cleared_result(state, "/elsewhere/c") is None
+    assert mw._cleared_result(None, "/large_tool_results/c") is None
+    # evicted by Deep Agents to its backend: its own read_file reads that file
+    evicted = {"messages": [ToolMessage("Tool result too large, ...", tool_call_id="c")]}
+    assert mw._cleared_result(evicted, "/large_tool_results/c") is None
 
 
 # --------------------------------------------------------------------------- A5
@@ -205,5 +212,7 @@ def test_a_text_reply_or_a_note_in_the_turn_changes_nothing(monkeypatch: Any) ->
         LLMResult(generations=[[Generation(text="x")]]), run_id=uuid.uuid4()
     )
     assert accounted == []  # a completion model's text reply carries no chat usage
-    noted = [*conversation(1), SystemMessage(content="a note")]
-    assert mw._failing(noted) == 1
+    again = {"name": "t", "args": {"n": 9}, "id": "again"}
+    failed = ToolMessage("bad", tool_call_id="again", status="error")  # the same failure
+    noted = [*conversation(1), AIMessage(content="", tool_calls=[again]), failed]
+    assert mw._failing([*noted, SystemMessage(content="a note")]) == 2

@@ -873,9 +873,11 @@ def assortment_sql(scenario: str, price: float | None = None) -> str:
 
 
 def replenishment_sql(review: int, order_cost: float = 40) -> str:
+    need = f"ceil(avg_daily_units*(lead_time_days+{review}) - on_hand)"
     return (
         "WITH top AS (SELECT * FROM result ORDER BY units_q3 DESC, sku LIMIT 50), "
-        f"q AS (SELECT *, max(0, ceil(avg_daily_units*(lead_time_days+{review}) - on_hand)) AS qty FROM top) "
+        # never below 0: a CASE, as both engines write it (DuckDB has no two-argument max)
+        f"q AS (SELECT *, CASE WHEN {need} > 0 THEN {need} ELSE 0 END AS qty FROM top) "
         f"SELECT sum(qty) AS units, round({order_cost}*sum(qty > 0)*92.0/{review}, 2) AS ordering, "
         "round(sum((on_hand + qty/2.0)*unit_cost)*0.25*92.0/365, 2) AS holding FROM q"
     )
@@ -1092,8 +1094,9 @@ def cases() -> tuple[Any, ...]:
         Case(
             "advconv-07", "adv_conversation", 1,
             (
-                Turn("", reply=ask, ends=("SUCCESS", "FAILED"), sent=(nonblank,)),
-                Turn("   \n\t  ", reply=ask, ends=("SUCCESS", "FAILED"), sent=(nonblank,)),
+                # a blank message opens no run: refused before any model call (ADV-1, fixed)
+                Turn("", ends=("RAISED",), sent=(nonblank,)),
+                Turn("   \n\t  ", ends=("RAISED",), sent=(nonblank,)),
                 Turn("🤔📦❓", reply=ask,
                      sent=(nonblank, Probe("has", "🤔📦❓", "emoji reach the model intact", role="user"))),
                 Turn("How many stores do we have in the west?", ((("store_list", {"region": "west"}),),),
@@ -2663,11 +2666,6 @@ SCRIPTED: Final = ("langgraph", "react", "deepagents")
 #: fix makes its turns pass, and ``test_bench_complex`` fails until its entry is removed; any
 #: other failure is a regression.
 KNOWN: Final[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {
-    "ADV-1": (("advconv-07/0", "advconv-07/1", "advconv-07/2", "advconv-07/3"), SCRIPTED),
-    "ADV-2": (("advdata-11/0",), SCRIPTED),
-    "ADV-3": (("advdata-12/0",), SCRIPTED),
-    "ADV-4": (("advres-02/0",), SCRIPTED),
-    "ADV-5": (("advres-01/0",), SCRIPTED),
     "ADV-6": (("advscen-01/7", "advscen-02/6", "advscen-03/6"), ("langgraph", "react")),
     "ADV-7": (
         (

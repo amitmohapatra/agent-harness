@@ -132,7 +132,7 @@ flowchart LR
 | the model endpoint (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_AUTH`): any OpenAI-compatible one, or Bifrost (`LLM_GATEWAY=bifrost`) | every model call of a model name; with Bifrost also the MCP tools the virtual key allows, their execution, Code Mode, `ReAct`'s and the judge's model calls, the MCP log of Code Mode scripts, stored prompts, skills, the MCP clients' Agent Mode lists | `POST /mcp[/<slug>]` (`tools/list`, `tools/call`), `POST /v1/mcp/tool/execute`, `POST /v1/chat/completions`, `GET /api/mcp-logs`, `GET /api/prompt-repo/prompts`, `GET /api/skills[/...]`, `GET /api/mcp/clients` (`clients/bifrost.py`, through `bifrost-sdk`) |
 | Memory service (`MEMORY_URL`, `TRELLIS_API_KEY`) | who the key is, the pushed context, the pull tools, transcripts and tool records, the tool catalog, outcomes and feedback, the grounding check, documents, the agent's model endpoint | `/v1/keys/self`, `/v1/context`, `/v1/agent-tools`, `/v1/messages`, `/v1/tools/invocations`, `/v1/tools`, `/v1/tools/catalog`, `/v1/feedback`, `/v1/verify`, `/v1/documents`, `/v1/agents/model-key` (`clients/memory.py`, the catalog in `governance/catalog.py`, `/v1/verify` in `evals.grounding_score`, through `trellis-memory`) |
 | agent-runs (`RUNS_URL`, `TRELLIS_API_KEY`) | run records, the worker queue and leases, pauses with their checkpoint, the inbox, schedules, `ask` artifacts, the event log | `/v1/runs`, `/v1/runs/claim`, `/v1/runs/{id}/heartbeat`, `/pause`, `/resume`, `/finish`, `/release`, `/artifacts`, `/events`, `/v1/artifacts/{id}`, `/v1/schedules` (`runs.py`, `runlog.py`, through `trellis.runs.RunsClient`) |
-| Chat UI | runs and their events, resumes, reconnects, cancels, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `POST {path}/runs/{id}/cancel`, `GET {path}/runs/{id}/artifacts/{artifact_id}` (`agui`) |
+| Chat UI | runs and their events, resumes, reconnects, cancels, large interrupt payloads | `serve_chat`: `POST {path}/run`, `GET {path}/runs/{id}/events`, `POST {path}/runs/{id}/cancel`, `GET {path}/runs/{id}/artifacts/{artifact_id}`, `GET {path}/runs/{id}/files/{name}` (`agui`) |
 | Remote A2A agents | callers of this agent, and agents this agent calls | `serve_a2a`: the card and JSON-RPC at `url`; `a2a(url)` (`RemoteAgent`): `SendStreamingMessage`, `CancelTask` (`a2a`) |
 | Langfuse (`LANGFUSE_*`) / an OTel collector (`OTEL_EXPORTER_OTLP_*`) | traces; grounding, feedback and evaluation scores; evaluation datasets and dataset runs | OTLP/HTTP `<endpoint>/v1/traces`, `POST /api/public/scores`, `GET /api/public/v2/datasets/{name}`, `GET /api/public/dataset-items`, `POST /api/public/dataset-run-items` (`telemetry.Langfuse`) |
 
@@ -165,7 +165,7 @@ src/trellis/
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, step_limit,
-                       StallGuard, ReadTools, read_result, FitWindow;
+                       StallGuard, ReadTools, FitWindow;
                        RunCheckpointer (the latest checkpoint, delta channels' history beside it)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
@@ -434,8 +434,8 @@ flowchart LR
 
 | Target | Stream | Pause / resume | Harness tools | Tools narrowed | Memory push |
 |---|---|---|---|---|---|
-| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread |
-| `ReAct` (a `create_agent` graph — `create_deep_agent` on demand — with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | a system message after `system` |
+| LangGraph graph, Deep Agents | text deltas and tool events | native `interrupt` / `Command(resume=)` with a checkpointer; re-run against the journal without; `HumanInTheLoopMiddleware` / `interrupt_on` pauses are approvals answered with the harness's decisions | the graph's own, governed as it runs them; the harness's with `HarnessTools()` | per model call for a `create_agent` / Deep Agents graph (one more `awrap_model_call` handler in the copy the harness runs, or `HarnessTools`); a hand-built `StateGraph`: no (its code binds the tools) | leading system message, one per checkpointed thread; a `create_agent` / Deep Agents graph sends it with the question, after the history |
+| `ReAct` (a `create_agent` graph — `create_deep_agent` on demand — with `middleware()`) | text deltas and tool events | the graph's checkpoint kept in the run: the resume continues it (no repeated model call) | per model call (`HarnessTools`) | per model call | with the turn's question, after the history a prompt cache keeps |
 | OpenAI Agents `Agent` | text deltas and tool events | `ask` → re-run against the journal; the SDK's own `needs_approval` → its `RunState` approved or rejected and continued | added to a copy per run | per turn (`FunctionTool.is_enabled`) | leading `system` message |
 | Claude Agent SDK `ClaudeAgentOptions` | assistant text blocks and tool events | `ask` → the CLI is stopped; the resume continues its session (built-ins not run again), the journal answering | in-process MCP server `trellis` (`mcp__trellis__*`); built-ins governed through a `PreToolUse` hook | per run | a `UserPromptSubmit` hook |
 | async function `(input, agent)` | tool events | re-run against the journal | `agent.tools.call(...)` | n/a | `agent.context` (and a leading system message for a message list) |
@@ -465,7 +465,7 @@ flowchart TB
     sg["StallGuard, Budgeted · harness; ModelCallLimitMiddleware · LangChain<br/>max_repeats, max_steps, the budget's stop"]
     ce["ContextEditingMiddleware · LangChain<br/>older results cleared past half the window"]
     su["summarization · Deep Agents<br/>older turns summarized near the window's end"]
-    rt["ReadTools · harness<br/>read_file / read_result offered once needed"]
+    rt["ReadTools · harness<br/>read_file offered once needed"]
     yours["yours: middleware=[...]<br/>(HumanInTheLoopMiddleware, PII, a tool selector...)"]
     mh["ModelHooks · harness<br/>chat span, call_timeout, on_error,<br/>pinned prompt, unparsable calls answered"]
     tail["Deep Agents' tail<br/>prompt caching, memory files, unsupported content"]
