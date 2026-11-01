@@ -188,6 +188,8 @@ async def test_the_environment_card_is_read_from_the_image_and_its_sandbox_delet
     assert (
         await engine("GET", "/containers/json", params={"all": "true", "filters": filters})
     ).json() == []
+
+
 async def volumes() -> set[str]:
     return {v["Name"] for v in (await engine("GET", "/volumes")).json()["Volumes"] or []}
 
