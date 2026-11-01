@@ -44,6 +44,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
+  says the file is the run's own scratch copy, which the user cannot open or download
+  (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
+  graph's state and told the user to open it (break-and-fix round 1, Deep Agents).
 - A conversation is no longer lost when memory fails mid-chat. Where memory replays the
   conversation (its window) and its context call fails (an outage, the circuit open), the
   earlier turns come from the run store, as with memory off; before, the model was sent the

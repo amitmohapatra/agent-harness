@@ -121,7 +121,7 @@ from trellis.harness import (
     accounting,  # noqa: F401 - every model call accounted
 )
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
-from trellis.harness.bounded import LRU, SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
@@ -199,6 +199,16 @@ STATE_TOOLS: Final = frozenset(
         "grep",
     }
 )
+#: The state tools that write a file, and what their result then says of it: the run's own
+#: scratch copy, which the user cannot reach (asked for a chart, a model saved an SVG in the
+#: graph's state and told the user to open it).
+SCRATCH_WRITES: Final = frozenset({"write_file", "edit_file"})
+#: The runs whose model was told :data:`SCRATCH_NOTE` (once a run, however many it writes).
+_SCRATCH_SAID: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
+SCRATCH_NOTE: Final = (
+    "This file is in this run's own scratch space: the user cannot open or download it, so "
+    "never offer it to them as a file; give them its content instead."
+)
 #: The metadata key marking a file tool whose backend is outside the graph's state (a disk, a
 #: store, a sandbox: ``ReAct(backend=)``): governed as any other tool, its risk as declared.
 OUTSIDE_STATE: Final = "trellis_outside_state"
@@ -230,6 +240,42 @@ class GovernTools(AgentMiddleware):
 _GOVERNING: ContextVar[tuple[str, str] | None] = ContextVar("trellis_governing", default=None)
 
 
+def _scratch_said(
+    runtime: Runtime, tool: str, done: ToolMessage | Command[Any]
+) -> ToolMessage | Command[Any]:
+    """A state tool's result: the run's first scratch write that worked says
+    :data:`SCRATCH_NOTE` (once a run: its history keeps saying it)."""
+    if tool not in SCRATCH_WRITES or runtime.run_id in _SCRATCH_SAID:
+        return done
+    noted = _scratch_noted(done)
+    if noted is not done:
+        _SCRATCH_SAID.add(runtime.run_id)
+    return noted
+
+
+def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[Any]:
+    """A scratch write's result with :data:`SCRATCH_NOTE` after it: on its message, or on the
+    message of the ``Command`` that also updates the graph's files (Deep Agents' state
+    backend). A failed write is left as it is."""
+
+    def noted(m: Any) -> Any:
+        if not isinstance(m, ToolMessage) or m.status == "error" or not isinstance(m.content, str):
+            return m
+        return m.model_copy(update={"content": f"{m.content}\n{SCRATCH_NOTE}"})
+
+    if isinstance(done, ToolMessage):
+        return noted(done)
+    update = done.update
+    if not isinstance(update, dict) or not isinstance(update.get("messages"), list):
+        return done
+    said = [noted(m) for m in update["messages"]]
+    if all(a is b for a, b in zip(said, update["messages"], strict=True)):
+        return done
+    return Command(
+        graph=done.graph, update={**update, "messages": said}, resume=done.resume, goto=done.goto
+    )
+
+
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
@@ -249,13 +295,10 @@ async def governed_call(
     runtime = current()
     call = request.tool_call
     own = request.tool
-    if (
-        runtime is None
-        or own is None
-        or (call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE))
-        or _GOVERNING.get() == (call["name"], str(call["id"]))
-    ):
+    if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
+    if call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE):
+        return _scratch_said(runtime, call["name"], await handler(request))
     _, step = _step_of(request)
     first = _repeats(step).get(str(call["id"]))
     if first is not None:
