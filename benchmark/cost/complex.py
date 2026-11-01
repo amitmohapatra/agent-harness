@@ -2604,7 +2604,7 @@ _WHY: Final = re.compile(
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
-    r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with the tools I have|"
+    r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with (?:the|these|my) tools|"
     r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|make (?:an? |the )?(?:image|chart|pdf|"
     r"csv|excel) ?files?|none of (?:my|the) tools (?:can |will )?(?:run|make|create|produce|fit)|"
     r"no way to (?:create|make|produce|attach|export|run)",

@@ -599,6 +599,7 @@ def test_a_cannot_do_why_reads_more_ways_a_model_says_it() -> None:
         "I can't make image files, but here are the weekly figures for the chart.",
         "I can't fit an ARIMA model: none of my tools runs time-series models.",
         "I can't give you a downloadable file. I have no way to create one.",
+        "I can't produce a PDF with these tools.",
     ):
         assert cx._WHY.search(said), said
     assert not cx._WHY.search("I can't do that right now.")
