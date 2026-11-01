@@ -49,6 +49,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
+- A large result a conversation's turn saved stays readable in its later turns: a follow-up's
+  `read_file` or `query_result` on the path its history names found "File not found", so every
+  what-if needed the whole fetch again. Kept per conversation in the process that saved them
+  (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
@@ -58,10 +67,6 @@ own model work follows the harness's configuration.
   for this turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's
   "This run has reached its limit", a model answered the conversation's next turn "I've reached
   the tool-call limit" without calling a tool.
-- A large result a conversation's turn saved stays readable in its later turns: a follow-up's
-  `read_file` or `query_result` on the path its history names found "File not found", so every
-  what-if needed the whole fetch again. Kept per conversation in the process that saved them
-  (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
@@ -89,6 +94,12 @@ own model work follows the harness's configuration.
   answer ending the history is marked too (`middleware.history_marked`, audit K1). The
   context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
   long context does not read as one more saved note.
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
 - Anthropic's prompt cache is on for every Anthropic chat model `ReAct` is given, on
   LangChain's loop and on Deep Agents'. A model name (routed to the provider's own SDK) is not
   a `ChatAnthropic`, so Deep Agents' `AnthropicPromptCachingMiddleware` skipped it, and plain
