@@ -53,7 +53,11 @@ catalog says otherwise. The harness's tools — the MCP tools the Bifrost virtua
 memory on, the memory tools — reach Claude as one more in-process MCP server named `trellis`
 (tool names `mcp__trellis__<tool>`), added beside your own `mcp_servers` (a dict, a config file
 path or its JSON text); the harness's permission callback lets them through: the bridge is
-their check.
+their check. That server is loaded from the first step (its config says `alwaysLoad`): Claude
+Code otherwise defers every MCP server's tools behind its `ToolSearch`, so the model sees their
+names only and spends a step loading them. Which tools a run offers is already the harness's
+choice (the tool hints' narrowing, memory's `tool_search`); your own servers keep the CLI's
+deferral.
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 

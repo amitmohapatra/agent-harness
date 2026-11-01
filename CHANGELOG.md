@@ -53,6 +53,12 @@ own model work follows the harness's configuration.
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
   cap. It is counted now when the harness keeps no usage log of the agent.
+- The Claude Agent SDK loads the harness's tools from the first step. Claude Code defers every
+  MCP server's tools behind its `ToolSearch` unless the server's config says `alwaysLoad`, so
+  each turn's model saw only the tool names and spent a step loading them (a model that called
+  one unloaded got a validation error and called it again). The harness's `trellis` server now
+  says `alwaysLoad`: which tools a run offers is already the harness's choice (the tool hints,
+  memory's `tool_search`). A team's own servers keep the CLI's deferral.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
