@@ -23,6 +23,7 @@ from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
     EDITED,
     KIMI,
+    KIMI_ENV,
     REJECTED,
     ACPAgent,
     UsageLog,
@@ -385,6 +386,18 @@ async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_
     own = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={SWARM_LIMIT: "7"}), id="own")
     await own.run("x", user="u1")
     assert recorded(tmp_path)["started"][-1]["env"][SWARM_LIMIT] == "7"
+
+
+async def test_kimis_scheduling_is_turned_off_whatever_its_own_environment_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A schedule fires only while Kimi runs, and Kimi ends with each attempt: Kimi's own switch
+    (``KIMI_DISABLE_CRON``) is set for it, an agent's own value included, as Claude's cron tools
+    are disallowed whatever its options say."""
+    agent = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={"KIMI_DISABLE_CRON": "0"}), id="c")
+    await agent.run("every Monday", user="u1")
+    assert recorded(tmp_path)["started"][0]["env"]["KIMI_DISABLE_CRON"] == "1"
+    assert KIMI.env == KIMI_ENV
 
 
 # --------------------------------------------------------------------------- sessions

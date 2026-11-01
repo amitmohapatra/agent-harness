@@ -171,7 +171,6 @@ KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
     "EnterPlanMode": "read",
     "ExitPlanMode": "read",
     "GetGoal": "read",
-    "CronList": "read",
     "AskUserQuestion": "read",
     "Agent": "read",
     "AgentSwarm": "read",
@@ -181,10 +180,20 @@ KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
     "CreateGoal": "write",
     "UpdateGoal": "write",
     "SetGoalBudget": "write",
-    "CronCreate": "write",
-    "CronDelete": "write",
     "Bash": "irreversible",
 }
+#: Kimi Code's built-in tools whose work needs Kimi to go on running after the turn: a scheduled
+#: prompt (``CronCreate``) fires only in a session that is running then, and its list and delete
+#: go with it. The harness runs ``kimi acp`` for one attempt and ends it, so a schedule would
+#: never fire: Kimi's own switch turns scheduling off (:data:`KIMI_ENV`: a call answers "Cron
+#: scheduling is disabled", and the model can say so), as Claude's are disallowed
+#: (``claude.OUTLIVES_THE_QUERY``), and they are not of the run's tool set (no hint offers them).
+#: Kimi still lists them: ACP has no way to take a built-in off (``kimi acp`` takes no agent file).
+KIMI_OUTLIVES_THE_TURN: Final = ("CronCreate", "CronDelete", "CronList")
+#: What the harness sets in Kimi's environment, whatever the agent's own says: scheduling off
+#: (:data:`KIMI_OUTLIVES_THE_TURN`; before, Kimi scheduled a prompt nothing would fire, and
+#: answered as if it would: the break-and-fix gate).
+KIMI_ENV: Final = {"KIMI_DISABLE_CRON": "1"}
 #: Where Kimi Code keeps its sessions, its config and its usage log, unless ``KIMI_CODE_HOME``
 #: says.
 KIMI_HOME: Final = "~/.kimi-code"
@@ -224,6 +233,9 @@ class Profile:
     #: harness's adaptive limit of child runs (``admission.py``) unless the agent's own ``env``
     #: names it
     swarm_limit: str | None = None
+    #: what is set in the agent's environment whatever its own says: what a run of it, which
+    #: ends with each attempt, cannot keep, turned off (Kimi's scheduling)
+    env: Mapping[str, str] = field(default_factory=dict)
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
@@ -346,6 +358,7 @@ KIMI: Final = Profile(
     usage=_kimi_usage,
     home="KIMI_CODE_HOME",
     swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
+    env=KIMI_ENV,
 )
 
 
@@ -584,6 +597,8 @@ class ACPAdapter:
             profile.routed(env, runtime, target.model)
         if profile is not None and profile.swarm_limit is not None:
             env.setdefault(profile.swarm_limit, str(admission.ADMISSION.limit))
+        if profile is not None:
+            env.update(profile.env)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
         capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
@@ -1506,6 +1521,8 @@ def _output(update: Any) -> str:
 __all__ = [
     "KIMI",
     "KIMI_BUILTINS",
+    "KIMI_ENV",
+    "KIMI_OUTLIVES_THE_TURN",
     "READS_NOT_ISOLATED",
     "ACPAdapter",
     "ACPAgent",

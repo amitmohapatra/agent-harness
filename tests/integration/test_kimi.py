@@ -28,7 +28,7 @@ from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import compat
-from trellis.harness.adapters.acp import KIMI_BUILTINS
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
 from trellis.harness.adapters.claude import RESUMED_CALL
 from trellis.harness.budget import Budget
 from trellis.harness.sandbox import sandbox
@@ -100,8 +100,28 @@ async def test_kimi_calls_a_harness_tool_and_answers(
     # the harness's tools through its MCP server, beside Kimi's own — its swarm included
     assert "mcp__trellis__lookup" in offered and "mcp__trellis__read_file" in offered
     assert {"Bash", "Agent", "AgentSwarm", "Skill"} <= set(offered)
-    assert set(offered) - {t for t in offered if t.startswith("mcp__")} <= set(KIMI_BUILTINS)
+    own = set(KIMI_BUILTINS) | set(KIMI_OUTLIVES_THE_TURN)  # listed by Kimi, turned off
+    assert set(offered) - {t for t in offered if t.startswith("mcp__")} <= own
     assert "what about tea?" in endpoint.said()
+
+
+async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's scheduled prompt (``CronCreate``) fires only while Kimi runs, and the harness ends
+    Kimi with each attempt: nothing would ever fire it. Kimi's own switch turns scheduling off
+    (``KIMI_DISABLE_CRON``): the call says so and the model can tell the user, where Kimi
+    scheduled it and answered as if it would run (the break-and-fix gate: bf2-cantdo-02). The
+    cron tools are not of the run's tool set (no hint offers them)."""
+    schedule = {"cron": "0 9 * * 1", "prompt": "send the top 5 SKUs", "recurring": True}
+    endpoint.plan = [("CronCreate", schedule)]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron")
+    result = await agent.run("every Monday, send me the top 5 SKUs", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert "Cron scheduling is disabled" in str(result.answer)
+    assert "nextFireAt" not in str(result.answer)  # nothing was scheduled
+    own = {t.name for t in await agent.adapter.native(agent.target)}
+    assert not own & set(KIMI_OUTLIVES_THE_TURN)
 
 
 async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(

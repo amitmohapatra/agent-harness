@@ -56,6 +56,13 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- Kimi no longer schedules prompts that never fire. `kimi acp` runs for one attempt and ends
+  with it, so a `CronCreate` schedule could not run, yet Kimi scheduled it and answered as if
+  it would (found by #121; the break-and-fix gate paused on one). Kimi's own switch,
+  `KIMI_DISABLE_CRON=1`, is now set in its environment (`acp.KIMI_ENV`, whatever the agent's
+  own `env` says), as Claude's cron tools are disallowed: the call says scheduling is off. The
+  cron tools left the run's tool set (`KIMI_OUTLIVES_THE_TURN`). ACP cannot take a built-in off
+  Kimi's list, so Kimi still lists them.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
