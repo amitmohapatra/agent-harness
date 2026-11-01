@@ -76,8 +76,10 @@ own model work follows the harness's configuration.
   Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
   one contract on both (the description names the engine; the same tables, column typing,
   `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
-  file, network, extension or setting; a 512 MB `memory_limit`). A call over 50,000 rows
-  loads and answers about 2x faster, 8 calls at once about 6x (`benchmark/query_engines`).
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
   Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
   JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
   query builds is at most 64 MB, and a query past its time is interrupted by a watcher
