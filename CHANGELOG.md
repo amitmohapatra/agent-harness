@@ -58,6 +58,13 @@ own model work follows the harness's configuration.
   turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's "This run has
   reached its limit", a model answered the conversation's next turn "I've reached the
   tool-call limit" without calling a tool.
+- When memory holds nothing for a question (or only part of it) and the run offers
+  `memory_search`, the note that says so now also tells the model to search the user's
+  earlier conversations first (`kinds=["message"]`) before saying a detail is missing
+  (`agent.EARLIER_CHATS`). Told only to offer to look it up, every adapter asked the user
+  again for what they had said in an earlier chat ("the cardigan in that same colour, but in
+  cotton"). Haiku, ReAct, three repeats: that turn went from 0/3 to 3/3 right, and the turns
+  the note reaches went from 15/18 to 18/18, at about half a model call more each.
 - `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
   their results, not only its question and answer — so a follow-up has the figures behind an
   earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
