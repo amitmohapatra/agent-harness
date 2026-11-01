@@ -22,7 +22,6 @@ table's columns; a run with a sandbox is also told the result is a file there to
 from __future__ import annotations
 
 import re
-
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
@@ -169,10 +168,9 @@ _KEPT_PATH: Final = re.compile(re.escape(PREFIX) + r"/[\w-]+")
 
 def still_kept(before: Any, after: Any) -> Any:
     """``after``, a tool result item a framework's trimmer cut from ``before`` (a
-    ``function_call_output``), with the paths ``before`` named where the run keeps it and the
-    cut lost: the model can still read it whole. Any other item as it is."""
-    if not (isinstance(before, dict) and isinstance(after, dict)):
-        return after
+    ``function_call_output``: the SDK's trimmer replaces only those, with a copy), with the
+    paths ``before`` named where the run keeps it and the cut lost: the model can still read
+    it whole."""
     was, now = str(before.get("output", "")), str(after.get("output", ""))
     lost = [p for p in dict.fromkeys(_KEPT_PATH.findall(was)) if p not in now]
     if not lost:
