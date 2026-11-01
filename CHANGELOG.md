@@ -41,9 +41,23 @@ own model work follows the harness's configuration.
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
   looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
   every adapter.
+- A stall no longer ends the run with no answer. A stall is the same call with the same
+  arguments in `max_repeats` steps, or every call failing in 3 steps in a row. The model is
+  now told so and called once more with no tool, as `StepLimit`'s last step is. The user
+  gets an answer that says what went wrong, for example that the tool timed out. The run
+  still stops (`ModelError`) when that call gives no answer.
 
 ### Fixed
 
+- The memory context no longer breaks a provider's prompt cache from one turn to the next.
+  A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
+  question, as a system message ahead of the history, so the next turn shared nothing past
+  the instructions with this one. The model now gets it as the first part of the turn's
+  question, after the history; the graph's state is unchanged. With a prompt-caching
+  middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
+  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
+  long context does not read as one more saved note.
 - A model looping on one call is stopped on every adapter: the tool bridge does not run the
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
