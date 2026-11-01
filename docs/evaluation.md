@@ -474,6 +474,17 @@ for any of them. `python -m benchmark.cost.judge` writes each scored turn's judg
 exact model input, the answer, the ground truth) and reports the judge's verdicts as harness
 gaps (the input lacked what the answer needs) and model gaps (it did not).
 
+**Break-and-fix rounds** (`benchmark/cost/breakfix.py`, `--cases breakfix`, `round:<n>`,
+`heldout`): long conversations that mix past chats (two or more earlier chats of the same
+user, a decision or a correction made there, a colleague's statement that must not count as
+the user's), analytics over two or three tools, explanations of a turn just done or of an
+earlier chat, what-ifs, topic switches, corrections, ambiguity and requests this deployment
+cannot do; 20 new cases a round (`bf<n>-…`), categories `bf_past`, `bf_analytics`,
+`bf_explain`, `bf_mixed`, `bf_cantdo`, `bf_clarify`. The held-out cases (`bfh-…`) run every
+round and are never fixed against. Each case's chats are one user's, kept to the run and the
+case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
+before a later chat the harness's writes are drained, as a chat an hour later finds them.
+
 ## Load benchmark
 
 `make bench-load` (`python -m benchmark.load`) runs many `ReAct` runs at once — a tool call and

@@ -66,7 +66,7 @@ from benchmark.cost import prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
-from trellis.contracts import ToolCall, ToolOutcome
+from trellis.contracts import RunStatus, ToolCall, ToolOutcome
 
 Call = tuple[str, dict[str, Any]]
 
@@ -95,6 +95,13 @@ CATEGORIES: Final = (
     "adv_files",
     "adv_pipeline",
     "adv_domain",
+    # the break-and-fix rounds (``benchmark.cost.breakfix``): ``--cases breakfix``
+    "bf_past",
+    "bf_analytics",
+    "bf_explain",
+    "bf_mixed",
+    "bf_cantdo",
+    "bf_clarify",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -162,6 +169,8 @@ class Probe:
 #: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
 #: busy-conversation modes (``trellis.harness.conversation.Mode``).
 BUSY: Final = ("queue", "interrupt", "steer")
+#: Who approves a turn's paused call (``Turn.approve``).
+REVIEWER: Final = "trellis-bench-reviewer"
 
 
 @dataclass(frozen=True)
@@ -181,6 +190,10 @@ class Turn:
     #: sent while the turn before it works (once that one's first tool call started), with
     #: this busy-conversation mode (:data:`BUSY`); ``None``: after it ended
     mode: str | None = None
+    #: its run pauses for a person's approval (a call that asks one: forgetting what the user
+    #: said, ``harness._forgotten``) and is resumed approved; the turn is the resumed run, and
+    #: its ``asks`` check says it paused (with memory on: the memory tools are memory's)
+    approve: bool = False
 
 
 @dataclass(frozen=True)
@@ -2574,6 +2587,9 @@ def cases() -> tuple[Case, ...]:
     from benchmark.cost import adversarial
 
     out.extend(adversarial.cases())
+    from benchmark.cost import breakfix
+
+    out.extend(breakfix.cases())
     return tuple(out)
 
 
@@ -2589,10 +2605,12 @@ _WHY: Final = re.compile(
     r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
-    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tool that (?:writes|creates|makes|draws|"
-    r"renders|runs)|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
-    r"(?:real )?(?:files?|images?|charts?|excel|spreadsheets?|plots?|graphs?|\.?xlsx)|"
-    r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)",
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tools? (?:that|for|to) (?:writ|creat|mak|"
+    r"draw|render|run|generat|export)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
+    r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
+    r"plots?|graphs?|\.?xlsx)|"
+    r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
+    r"reply with) (?:you )?text|only have (?:[\w-]+ ){0,3}tools|with the tools I have",
     re.IGNORECASE,
 )
 #: Output made up for a request that could not be met: a file or image link, a file it says it
@@ -3164,19 +3182,33 @@ async def run_case(
     requests: list[dict[str, Any]] = []
     stopped = None
 
+    def user_of(t: Turn) -> str:
+        """The turn's user, kept to this run and this case: a case's chats share what it
+        remembers, and no other case's (nor an earlier run's) leak into it."""
+        return f"{t.user or runner.USER}-{tag}-{case.id}"
+
+    paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+
     async def asked(t: Turn) -> Any:
-        return await agent.run(
+        result = await agent.run(
             t.text,
-            user=t.user or runner.USER,
+            user=user_of(t),
             thread=f"cx-{tag}-{case.id}-{t.thread}",
             mode=t.mode or "queue",
         )
+        if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
+            paused.add(id(t))
+            result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+        return result
 
     i = 0
     while i < len(case.turns):
         t = case.turns[i]
         beside = case.turns[i + 1] if i + 1 < len(case.turns) else None
         together = [t] if beside is None or beside.mode is None else [t, beside]
+        if i and t.thread != case.turns[i - 1].thread:
+            # another conversation, later: what the earlier one recorded has reached memory
+            await h.writes.drain()
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
@@ -3235,7 +3267,7 @@ async def run_case(
             row: dict[str, Any] = {
                 "turn": i + n,
                 "thread": turn.thread,
-                "user": turn.user or runner.USER,
+                "user": user_of(turn),
                 "mode": turn.mode,
                 "text": turn.text,
                 "ticks": turn.ticks,
@@ -3249,6 +3281,18 @@ async def run_case(
                 "seconds": seconds,
                 "checks": checked(
                     turn, status, captured.requests, captured.calls, calls=calls, history=history
+                )
+                + (
+                    [
+                        {
+                            "check": "asks",
+                            "ok": id(turn) in paused,
+                            "why": "the run asks a person, then goes on approved",
+                            "found": "paused" if id(turn) in paused else "no pause",
+                        }
+                    ]
+                    if turn.approve and history == "memory"
+                    else []
                 ),
             }
             if turn.expect is not None:
@@ -3372,8 +3416,12 @@ def _write(path: Path, rows: Sequence[dict[str, Any]], mode: str = "a") -> None:
 def _names(c: Case) -> set[str]:
     """What ``--cases`` picks a case by: its id, its category, its tier, and ``adversarial``
     for every ``adv_*`` category."""
-    return {c.id, c.category, f"tier:{c.tier}"} | (
-        {ADVERSARIAL} if c.category.startswith("adv_") else set()
+    from benchmark.cost import breakfix
+
+    return (
+        {c.id, c.category, f"tier:{c.tier}"}
+        | ({ADVERSARIAL} if c.category.startswith("adv_") else set())
+        | breakfix.names(c)
     )
 
 

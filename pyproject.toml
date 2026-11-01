@@ -155,6 +155,8 @@ known-first-party = ["trellis", "benchmark"]
 "benchmark/cost/retail.py" = ["E501", "PLR0917"]
 # the adversarial cases' table (a turn a line), some in other scripts on purpose
 "benchmark/cost/adversarial.py" = ["E501", "PLR0915", "RUF001"]
+# the break-and-fix rounds' case table (a turn a line)
+"benchmark/cost/breakfix.py" = ["E501", "PLR0915"]
 # the tool-chain cases' table, one case a line
 "benchmark/tool_chains/cases.py" = ["E501"]
 # Adapters import their framework on first use, never at module import.
