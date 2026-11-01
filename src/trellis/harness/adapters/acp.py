@@ -130,6 +130,9 @@ GOVERNED_MODES: Final = frozenset({"default", "plan"})
 OPTIONS: Final = ("env", "cwd", "mcp_servers", "mode", "model")
 #: The agent's answer to a turn it ended for a reason the run fails with.
 FAILED_STOPS: Final = frozenset({"refusal", "max_turn_requests"})
+#: The stop reason of a turn whose last reply reached the model's output limit (Kimi retries
+#: such a reply itself first).
+MAX_TOKENS: Final = "max_tokens"
 #: What the agent is told after a call the run rejected (ACP's answer carries no reason).
 REJECTED: Final = "Your call to {tool} was not run: {why} Carry on with the task without it."
 #: What the agent is told after a call whose arguments a reviewer (or a hook) changed (ACP's
@@ -893,6 +896,8 @@ class Attempt:
                     if item.error is not None:
                         raise await self._failed(item.error)
                     self._answered_usage(item.answer)
+                    # past the agent's own retries: what a run with no answer says
+                    runtime.cut_off = getattr(item.answer, "stop_reason", None) == MAX_TOKENS
                     yield item.answer
                     return
                 if await self._seen(item):

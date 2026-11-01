@@ -185,6 +185,9 @@ class Runtime:
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
+    #: the model's latest reply was cut at its output limit (its ``max_tokens``) before it gave
+    #: an answer — what a run that ends with no answer says it ended for (``pipeline``)
+    cut_off: bool = False
     #: the latest harness tool call (its key) and how many times in a row it was made
     #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
     #: not run again)

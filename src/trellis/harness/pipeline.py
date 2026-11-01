@@ -92,6 +92,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.run")
 
+#: The adapters whose target has no model of its own: what it returns is its answer, none
+#: included (a function).
+NO_MODEL: Final = frozenset({"function"})
+#: What a run that ended with no answer says its model's last reply did (:func:`_unanswered`).
+UNANSWERED_CUT: Final = (
+    "the model's last reply reached its output limit (its max_tokens) before it gave an answer"
+)
+UNANSWERED: Final = "the model's last reply had no text"
+
 
 @dataclass(frozen=True, slots=True)
 class Budget:
@@ -596,6 +605,9 @@ async def _concluded(
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
         await agent.hooks.failed("run", error)
         result = await _failed(agent, runtime, failure, extracted)
+    elif (unanswered := _unanswered(agent, runtime, extracted)) is not None:
+        log.warning("run %s failed: %s", runtime.run_id, unanswered.message)
+        result = await _failed(agent, runtime, unanswered, extracted)
     else:
         assert extracted is not None
         # what the run's code wrote for its user, kept before its sandbox goes
@@ -604,6 +616,30 @@ async def _concluded(
     if not _again(runtime, result):
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
+
+
+def _unanswered(agent: Agent, runtime: Runtime, extracted: Extracted | None) -> AgentError | None:
+    """Why a model's run that would end ``SUCCESS`` with no answer (none, or blank text) ends
+    ``ERROR`` instead (``budget.NO_ANSWER``), and what its last reply did: reached its output
+    limit (``Runtime.cut_off``), or said nothing. Reported as a success, an empty answer hid the
+    failure (the break-and-fix gate's two LangGraph turns). ``None``: it answered, its budget
+    was spent (``PARTIAL`` says so), no model replied in it (a graph of nodes with no model
+    answers with its state), or the target is a function (it returns what it returns)."""
+    assert extracted is not None
+    answer = extracted.answer
+    if agent.adapter.name in NO_MODEL or runtime.budget_spent is not None:
+        return None
+    if answer is not None and not (isinstance(answer, str) and not answer.strip()):
+        return None
+    if not budget.spent(runtime)["model_calls"]:
+        return None
+    why = UNANSWERED_CUT if runtime.cut_off else UNANSWERED
+    return AgentError(
+        code=budget.NO_ANSWER,
+        category=ErrorCategory.MODEL,
+        message=f"the run ended with no answer: {why}",
+        source=agent.adapter.name,
+    )
 
 
 def _again(runtime: Runtime, result: Result) -> bool:
