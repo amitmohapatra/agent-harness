@@ -98,6 +98,7 @@ from langchain_core.messages import (
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     BaseCheckpointSaver,
@@ -366,7 +367,8 @@ async def governed_call(
         )
         return _message(repeat, str(call["id"]), call["name"], kept=_paged(runtime, request))
     if converted.made(own) or call["name"] in runtime.toolbox:
-        return await handler(request)  # the harness's own: its call goes through the bridge
+        # the harness's own: its call goes through the bridge
+        return _kept_own(runtime, request, await handler(request))
     produced: list[ToolMessage | Command[Any]] = []
 
     async def run(args: dict[str, Any]) -> Any:
@@ -506,6 +508,30 @@ def _saved(state: Any) -> bool:
     return results.kept() or any(str(p).startswith(results.PREFIX) for p in files)
 
 
+def _kept_own(
+    runtime: Runtime, request: ToolCallRequest, done: ToolMessage | Command[Any]
+) -> ToolMessage | Command[Any]:
+    """A harness tool's result in a graph that was built with it and is offered the harness's
+    readers (:func:`_narrow`): a large one kept and previewed, a table read whole kept too, as
+    ``HarnessTools`` keeps them (:func:`_message`); elsewhere as it is."""
+    if runtime not in _PAGED or not isinstance(done, ToolMessage) or done.status == "error":
+        return done
+    name, said = request.tool_call["name"], text_of(done.content)
+    kept = results.readable(said, name) if _paged(runtime, request) else results.tabled(said, name)
+    return done.model_copy(update={"content": kept})
+
+
+def _readers(runtime: Runtime, state: Any, present: set[str]) -> list[BaseTool]:
+    """The harness's readers of a kept result (``read_file``; ``query_result`` too, saving its
+    result as a file where the run runs no code: :data:`SAVING`) the model is offered beside
+    ``present``, once the run keeps a result or the graph's state holds one Deep Agents saved
+    (:func:`_saved`): its calls are answered by the harness (:func:`_kept_read`)."""
+    if not _saved(state):
+        return []
+    readers = SAVING if query.saving(runtime) else READERS
+    return [t for name, t in readers.items() if name not in present]
+
+
 def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) -> BaseTool:
     """A tool reading a kept result (``tools.results.READERS``) as a LangChain tool, offered
     once there is one, its calls answered by :class:`HarnessTools` (no tool node runs it)."""
@@ -575,7 +601,10 @@ def _told(done: Any) -> Any:
 def govern_tool_nodes() -> None:
     """Every LangGraph tool node, inside a harness run, governed (:func:`governed_call`): a
     ``create_agent`` or Deep Agents graph's (its ``task`` sub-agents' graphs too), a hand-built
-    graph's ``ToolNode`` — whoever built them, with no middleware of the harness's. Installed
+    graph's ``ToolNode`` — whoever built them, with no middleware of the harness's. A call
+    reading a result the run keeps is answered first (:func:`_kept_read`), the harness's
+    readers among them where the graph was not built with them: ``ToolNode`` defers checking
+    a call's tool to this execution so that a wrapper may answer a tool it lacks. Installed
     once per process, on the tool node's one execution of a call (after its own wrappers);
     outside a harness run it changes nothing."""
     execute = ToolNode._execute_tool_async
@@ -585,8 +614,14 @@ def govern_tool_nodes() -> None:
     async def governed(
         self: ToolNode, request: ToolCallRequest, input_type: Any, config: RunnableConfig
     ) -> Any:
-        if current() is None:
+        runtime = current()
+        if runtime is None:
             return await execute(self, request, input_type, config)
+        # a reader of a kept result the graph was not built with (:func:`_narrow` offers it):
+        # the tool node validates a call only here, so a tool it lacks can be answered
+        page = await _kept_read(runtime, request) if runtime in _PAGED else None
+        if page is not None:
+            return page
 
         async def handler(given: ToolCallRequest) -> Any:
             return await execute(self, given, input_type, config)
@@ -625,8 +660,6 @@ def spec_of(tool: BaseTool) -> ToolSpec:
 
 
 def _schema_of(tool: Any) -> dict[str, Any]:
-    from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: PLC0415
-
     return dict(convert_to_openai_tool(tool)["function"].get("parameters") or {})
 
 
@@ -697,10 +730,7 @@ class HarnessTools(AgentMiddleware):
                 runtime.offered |= stale
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
-        if _saved(request.state):  # a large result kept: read in pages, or queried
-            names = {_named(t) for t in own}
-            readers = SAVING if query.saving(runtime) else READERS
-            offered.extend(t for name, t in readers.items() if name not in names)
+        offered.extend(_readers(runtime, request.state, {_named(t) for t in own}))
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
@@ -876,10 +906,24 @@ async def _narrow(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
-    """A model call offered only the tools the run offers (:func:`_offered`), the memory
-    context sent with the question (:func:`with_question`), the end of the history marked
-    when a caching middleware marks the request (:func:`history_marked`)."""
-    return await handler(history_marked(with_question(_offered(request, current()))))
+    """A model call offered only the tools the run offers (:func:`_offered`) — and, once the
+    run keeps a large result, the harness's ``read_file`` and ``query_result`` the graph was not
+    built with (:func:`_readers`; their calls answered in its tool node, :func:`govern_tool_nodes`),
+    its tools' large results kept and previewed as ``HarnessTools`` keeps them (:data:`_PAGED`):
+    without them a ``create_agent`` graph built without ``middleware()`` summed rows by hand
+    (the break-and-fix gate, 5 analytics turns) —, the memory context sent with the question
+    (:func:`with_question`), the end of the history marked when a caching middleware marks the
+    request (:func:`history_marked`)."""
+    runtime = current()
+    if runtime is not None:
+        _PAGED.add(runtime)
+        present = {_named(t) for t in request.tools}
+        # as schemas: ``create_agent`` refuses a tool object its tool node lacks, and leaves a
+        # schema to the provider (the tool node answers the call: :func:`govern_tool_nodes`)
+        readers = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
+        if readers:
+            request = request.override(tools=[*request.tools, *readers])
+    return await handler(history_marked(with_question(_offered(request, runtime))))
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
@@ -1865,8 +1909,6 @@ def _described(tool: BaseTool | dict[str, Any]) -> str:
 def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
     """A tool as its definition with the description cut to its first sentence (at most
     :data:`FIT_DESCRIPTION` characters) and no parameter descriptions."""
-    from langchain_core.utils.function_calling import convert_to_openai_tool  # noqa: PLC0415
-
     found = copy.deepcopy(convert_to_openai_tool(tool))
     function = found.get("function", found)
     first = re.split(r"(?<=[.!?])\s", str(function.get("description") or ""), maxsplit=1)[0]
