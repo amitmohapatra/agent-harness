@@ -13,7 +13,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from tests.support.chat_model import ScriptedChatModel
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID
 from trellis.harness.budget import SPENT
-from trellis.harness.middleware import ASKED_WITH, history_marked, with_question
+from trellis.harness.history import ASKED_WITH
+from trellis.harness.middleware import history_marked, with_question
 
 MARK = {"type": "ephemeral", "ttl": "5m"}
 CONTEXT = SystemMessage("## Facts\n- prefers email", id=CONTEXT_MESSAGE_ID)
