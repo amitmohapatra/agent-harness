@@ -49,6 +49,11 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
 - A large result a conversation's turn saved stays readable in its later turns: a follow-up's
   `read_file` or `query_result` on the path its history names found "File not found", so every
   what-if needed the whole fetch again. Kept per conversation in the process that saved them
