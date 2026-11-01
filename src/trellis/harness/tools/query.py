@@ -6,7 +6,8 @@ No sandbox and no Code Mode needed, and no dependency: Python's own SQLite (``sq
 memory. The kept text becomes the table ``result``: a JSON array of objects (or the first such
 array a JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one
 row per line (``line``). A column whose every value is a whole number is ``INTEGER``, a number
-``REAL``, else ``TEXT``; a nested value is its JSON text (``json_extract`` reads it).
+``REAL``, else ``TEXT`` (a code with a leading zero, or an id past 64 bits, keeps its exact
+text); a nested value is its JSON text (``json_extract`` reads it).
 
 Only reading is allowed: an authorizer admits ``SELECT`` (``WITH`` included), reading the table
 and calling functions — never a write, ``ATTACH`` (no other file, no network), a ``PRAGMA`` or
@@ -415,7 +416,10 @@ def _objects(value: Any) -> bool:
 
 
 def _cell(value: Any) -> Any:
-    """A JSON value as a cell: a number or text as it is, anything else its JSON text."""
+    """A JSON value as a cell: a number or text as it is (a whole number past SQLite's 64 bits
+    as its digits), anything else its JSON text."""
+    if isinstance(value, int) and not isinstance(value, bool) and not _number(value, whole=True):
+        return str(value)
     if value is None or (isinstance(value, str | int | float) and not isinstance(value, bool)):
         return value
     return json.dumps(value)
@@ -449,7 +453,8 @@ def _kind(values: Sequence[Any]) -> str:
 def _number(value: Any, *, whole: bool) -> bool:
     """Whether a cell (text, or a JSON number: a JSON true is its text) is a number SQLite
     keeps exactly: a whole one within 64 bits, a finite one — never text a number would change
-    (a code with a leading zero, ``00123``; a run of digits too long for one)."""
+    (a code with a leading zero, ``00123``; a run of digits too long for one; an id past 64
+    bits, which a ``REAL`` would round)."""
     if isinstance(value, int):
         return -(2**63) <= value < 2**63
     if isinstance(value, float):
@@ -457,11 +462,11 @@ def _number(value: Any, *, whole: bool) -> bool:
     text = str(value).strip()
     if _LEADING_ZERO.match(text) or len(text) > NUMBER_CHARS:
         return False
-    try:
-        found = (int if whole else float)(text)
-    except ValueError:
-        return False
-    return _number(found, whole=whole)
+    # read as a whole number first: one past 64 bits stays its text, never a rounded REAL
+    for read in (int,) if whole else (int, float):
+        with contextlib.suppress(ValueError):
+            return _number(read(text), whole=whole)
+    return False
 
 
 def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:

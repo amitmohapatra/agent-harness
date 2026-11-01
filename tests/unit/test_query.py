@@ -127,6 +127,8 @@ def test_outside_a_run_nothing_is_read() -> None:
         (["1", "2.5"], "REAL"),
         (["007", "8"], "TEXT"),  # a code with a leading zero stays as written
         (["9" * 40], "TEXT"),  # a run of digits too long for a number
+        (["12345678901234567890"], "TEXT"),  # a whole number past 64 bits: never rounded
+        (["12345678901234567890", "1.5"], "TEXT"),
         ([2**64], "TEXT"),
         ([float("inf")], "TEXT"),
         (["1e999"], "TEXT"),
@@ -136,6 +138,28 @@ def test_outside_a_run_nothing_is_read() -> None:
 )
 def test_a_column_is_a_number_only_when_sqlite_keeps_it_exactly(cells: list, kind: str) -> None:
     assert query._kind(cells) == kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "id,v\n12345678901234567890,1\n12345678901234567891,2\n7,3",
+        json.dumps(
+            [
+                {"id": 12345678901234567890, "v": 1},
+                {"id": 12345678901234567891, "v": 2},
+                {"id": 7, "v": 3},
+            ]
+        ),
+    ],
+    ids=["csv", "json"],
+)
+def test_an_id_past_64_bits_keeps_every_digit(journal: Journal, text: str) -> None:
+    """SQLite's integers stop at 64 bits: a longer id is its exact text, never a rounded REAL
+    (two ids made one) nor a failed load."""
+    said = ask(text, "SELECT id, typeof(id) FROM result WHERE v < 3 ORDER BY v")
+    assert said == "id,typeof(id)\n12345678901234567890,text\n12345678901234567891,text"
+    assert ask(text, "SELECT count(DISTINCT id) FROM result") == "count(DISTINCT id)\n3"
 
 
 def aggregate(name: str, *rows: tuple[Any, ...]) -> Any:

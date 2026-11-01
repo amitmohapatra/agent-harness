@@ -73,7 +73,9 @@ def triage(state: Ticket) -> dict[str, str]:
   `without={"tool_search"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
-it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
+it. Where memory replays the conversation (its window), the conversation's earlier turns then
+come from the run store, each one's question and answer, as with memory off: an outage mid-chat
+does not lose the chat. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
 
 ## Pull
 
@@ -103,8 +105,10 @@ said:
   tool calls (on the assistant message, `tool_calls`) and their results (`TOOL` messages naming
   their call) with its answers, where the framework reports them (LangGraph, the OpenAI Agents
   SDK) — each message named by the harness (`source_system: trellis-harness`,
-  `source_message_id`: the run for the question, which every attempt asks, the attempt and
-  position for what the agent said), so the service stores a message it has already seen once;
+  `source_message_id`: its harness id, the same on every attempt, so a resumed attempt that
+  sends the first one's messages again has each stored once; a message with no harness id, a
+  helper's, is named by its run and position), so the service stores a message it has already
+  seen once;
   each message's `custom_metadata` carries its harness id (`message_id`: the conversation's
   digest of `<run>:input`, `<run>:answer`, `result:<call>` or `call:<call>` — the same id the
   AG-UI stream says, across a resume), its `run_id` and the `tool_call_id` it answers or makes

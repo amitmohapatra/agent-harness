@@ -120,6 +120,11 @@ POLL_SECONDS: Final = 0.5
 #: (the window fits them) with ``tool_search``. A match scores about 0.6 at its best (the
 #: service scores relative to the best match); nothing matching scores 0 to 0.1.
 NARROW_FLOOR: Final = 0.5
+#: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
+#: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
+#: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
+#: narrowed away in 22-26% of turns, and those turns were wrong 2-3 times as often.
+NARROW_FROM: Final = 30
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
 UNREACHED_FIX: Final = {
@@ -138,18 +143,22 @@ TURN_WRITE_SECONDS: Final = 5.0
 #: and its next turn starts a new one.
 SESSIONS_KEPT: Final = 128
 #: What the model is told when memory has nothing for the question (``evidence_status``
-#: INSUFFICIENT) or only part of it (INCOMPLETE): answer "I don't know" for what depends on
-#: the user's history, instead of a confident guess the memory never held. Not when a hinted
-#: tool answers the question (its confidence at least :data:`NARROW_FLOOR`): told "do not
-#: guess", a weak model searched memory in loops instead of calling it.
+#: INSUFFICIENT) or only part of it (INCOMPLETE): for what depends on the user's history, an
+#: honest "I don't know" instead of a confident guess the memory never held — one that names
+#: the detail it does not have and offers to look it up or to be told it, so the user knows
+#: what is missing and what to do next. Not when a hinted tool answers the question (its
+#: confidence at least :data:`NARROW_FLOOR`): told "do not guess", a weak model searched
+#: memory in loops instead of calling it.
 ABSTAIN_NOTES: Final = {
     "INSUFFICIENT": (
         "## Memory\nMemory holds nothing about this question. If the answer depends on "
-        "something the user told you before, say you do not know it; do not guess."
+        "something the user told you before, do not guess: say which detail you do not "
+        "have, and offer to look it up or ask the user for it."
     ),
     "INCOMPLETE": (
-        "## Memory\nMemory covers only part of this question, or someone else. Say what "
-        "you do not know rather than fill the gap."
+        "## Memory\nMemory covers only part of this question, or someone else. Answer the "
+        "part it covers; for the rest, do not fill the gap: say which detail you do not "
+        "have, and offer to look it up or ask the user for it."
     ),
 }
 
@@ -848,7 +857,8 @@ class Agent:
         return await self.remembered(runtime)
 
     async def recalled(self, runtime: Runtime) -> None:
-        """With memory off, the conversation's earlier turns from the run store
+        """With memory off (or unreachable where it replays the conversation), the
+        conversation's earlier turns from the run store
         (``conversation.earlier``: each one's question and answer) — only where nothing else
         keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
         a session of the run's, a conversation on OpenAI's servers) or continues the session
@@ -905,6 +915,9 @@ class Agent:
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
+                if window is not Window.NONE:
+                    # memory replays the conversation: without it, the run store's turns do
+                    await self.recalled(runtime)
                 return None
             output(span, pushed.rendered)
         stale: list[str] = []
@@ -918,7 +931,13 @@ class Agent:
         # enough, narrows nothing
         candidates = [n for n in pushed.tool_names if n in runtime.toolbox or n in runtime.native]
         best = max((t.confidence for t in pushed.tools or ()), default=0.0)
-        if hints and candidates and best >= NARROW_FLOOR and self.adapter.narrows != "none":
+        if (
+            hints
+            and candidates
+            and best >= NARROW_FLOOR
+            and len(own) >= NARROW_FROM
+            and self.adapter.narrows != "none"
+        ):
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
             # a candidate's chain stays whole: the tools its output feeds, and those giving
             # what it needs (``tools.links``, from the tools' schemas)

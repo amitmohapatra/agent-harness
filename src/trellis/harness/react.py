@@ -76,7 +76,8 @@ KEEP_RESULTS: Final = 3
 MIN_FREED: Final = 0.1
 #: What a cleared result reads as (the tool message keeps its call's id).
 CLEARED: Final = (
-    "[result cleared to keep the context small: read_result(id=<this call's id>) reads it again]"
+    "[result cleared to keep the context small: "
+    'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
 )
 #: Deep Agents' file tools that read, and those that change files: on a backend outside the
 #: graph's state they are governed as any tool, with these risks.
@@ -140,11 +141,13 @@ def middleware(
     model call, narrowed per turn, the memory and gateway MCP tools among them
     (:class:`~.middleware.HarnessTools`); the graph's own tools governed with full parity
     (:class:`~.middleware.GovernTools`); ``max_repeats`` (:class:`~.middleware.StallGuard`);
-    ``max_steps`` then one answer without tools (:class:`~.middleware.StepLimit`); the run's
+    ``max_steps`` model calls (LangChain's ``ModelCallLimitMiddleware``,
+    :func:`~.middleware.step_limit`: counted per invocation here, per run in ``ReAct``); the run's
     budget (:class:`~.automatic.Budgeted`); on a known ``context_window``, older tool results
-    cleared past half of it and ``read_result`` to read them back; the request made to fit
-    the window, never failing for its size (:class:`~.middleware.FitWindow`: the tools
-    narrowed and compacted, older results cleared, older turns left out — only as far as
+    cleared past half of it (LangChain's ``ClearToolUsesEdit``) and ``read_file`` to read them
+    back; the request made to fit the window, never failing for its size
+    (:class:`~.middleware.FitWindow`: the tools narrowed and compacted, the longest results
+    cut, older turns left out — only as far as
     needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
@@ -168,13 +171,15 @@ def _middleware(
     held: frozenset[str] = frozenset(),
     files: bool = True,
     summarization: Any = None,
+    scoped: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent."""
+    sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
+    resume included — :func:`~.middleware.step_limit`)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -196,7 +201,7 @@ def _middleware(
                         trigger=int(CLEAR_AT * window),
                         clear_at_least=int(MIN_FREED * window),
                         keep=KEEP_RESULTS,
-                        exclude_tools=(ours.READ_RESULT, ours.READ_FILE),
+                        exclude_tools=(ours.READ_FILE,),
                         placeholder=CLEARED,
                     )
                 ]
@@ -215,10 +220,9 @@ def _middleware(
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         ours.HarnessTools(),
-        *([automatic.ToolSelection()] if "ToolSelection" in _ON.get() else []),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        ours.step_limit(max_steps, scoped=scoped),
         automatic.Budgeted(),
         *clearing,
         *reads,
@@ -354,6 +358,7 @@ def ReAct(
                         call_timeout=call_timeout,
                         context_window=window,
                         system_prompt=stored_prompt,
+                        scoped=True,
                     ),
                     middleware,
                 ),
@@ -387,6 +392,7 @@ def ReAct(
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        scoped=True,
     )
     graph = create_deep_agent(
         profiled,
@@ -506,8 +512,9 @@ def _native(
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
-    the loop's guards (``StallGuard``, ``StepLimit``, ``ModelHooks``: its own middleware of
-    those names kept) and its ``interrupt_on`` turned into its tools' declared risk — a tool it
+    the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
+    middleware of those names kept) and its ``interrupt_on`` turned into its tools' declared
+    risk — a tool it
     names asks a person (``irreversible``), as the catalog says; a name that is none of its
     tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the harness asks
     once."""
@@ -521,7 +528,7 @@ def _native(
     names = {m.name for m in given}
     guards = [
         ours.StallGuard(max_repeats),
-        ours.StepLimit(max_steps),
+        ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
@@ -579,7 +586,7 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
 #: What a default middleware of ``ReAct`` is set by, where a parameter sets it: a given one of
 #: the same name is refused, naming it (it would have replaced the default silently).
 SET_BY: Final = {
-    "StepLimit": "max_steps=",
+    "ModelCallLimitMiddleware": "max_steps=",
     "StallGuard": "max_repeats=",
     "ModelHooks": "call_timeout= and system_prompt=stored(...) (and h.wrap(hooks=) for the hooks)",
     "ContextEditingMiddleware": "context_window=",
@@ -591,21 +598,8 @@ SET_BY: Final = {
 HARNESS_TOOLS: Final = "HarnessTools"
 
 
-#: The default middleware a measurement turns off (:func:`defaults_off`), by name, and the
-#: middleware it turns on that a default leaves out (:func:`defaults_on`).
+#: The default middleware a measurement turns off (:func:`defaults_off`), by name.
 _OFF: ContextVar[frozenset[str]] = ContextVar("trellis_react_off", default=frozenset())
-_ON: ContextVar[frozenset[str]] = ContextVar("trellis_react_on", default=frozenset())
-
-
-@contextlib.contextmanager
-def defaults_on(*names: str) -> Iterator[None]:
-    """``ReAct`` graphs built inside add the middleware ``names`` the defaults leave out
-    (``ToolSelection``): a measurement of what it is worth, as :func:`defaults_off`."""
-    token = _ON.set(frozenset(names))
-    try:
-        yield
-    finally:
-        _ON.reset(token)
 
 
 @contextlib.contextmanager

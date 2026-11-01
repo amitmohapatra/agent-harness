@@ -87,7 +87,7 @@ format. What helps it choose, whatever the source:
 |---|---|
 | **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
 | **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
-| **Fewer tools per call** — the memory service's tool hints (from 5 tools, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
+| **Fewer tools per call** — the memory service's tool hints (they narrow from 30 tools in the run, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
 | **Tool chains** — which tool's output is another's argument (`find_sku → sku_id → get_stock`), read from the schemas the tools publish ([below](#tool-chains)) | automatic: a function's return annotation, an MCP tool's `outputSchema` |
 | **What it can do** — capabilities beyond the tools, said plainly | the instructions: `ReAct("... You cannot accept an image upload.", ...)` |
 | **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
@@ -161,6 +161,15 @@ On OpenAI Agents `read_file` is offered once the run keeps a result (`FunctionTo
 on Claude it is on the `trellis` server from the start (the CLI lists a server's tools once).
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
+
+Claude and Kimi have file readers of their own (Claude's `Read`, Kimi's `Read`); the harness's
+`read_file` on its server is still the one that reads a kept result, by measurement
+(`test_kimi.py::test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read`):
+writing the result into the agent's workspace instead would put a second copy in the user's
+working directory, which a resume on another worker does not have (the journal is what
+survives it), and Kimi's `Read` returns 100,000 characters at once by default — the whole
+96,899-character result, about 25,000 tokens, in one call — where a `read_file` page is 100
+lines (1,219 characters in that test) and `query_result` computes without reading rows.
 
 A result under 80,000 characters that still does not fit a small window is cut to its head
 and tail by `FitWindow`; the cut is kept the same way and says where the rest is
@@ -247,8 +256,11 @@ The memory context is asked for with the run's tool set (not the memory tools): 
 with the skills the agent learned for the task ("Learned skills for this task", any number of
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
-(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With five or
-more tools, the model is then offered:
+(`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With 30 or
+more tools in the run (`NARROW_FROM`: its own, its framework's and memory's), the model is then
+offered the following; with fewer, every tool, and the tools section still says which fit
+(narrowing a set of 20 hid a tool the question needed in about a quarter of the turns, and
+those turns went wrong two to three times as often: the holistic small-model run):
 
 * the memory tools,
 * the tools the service named (at most 8),
