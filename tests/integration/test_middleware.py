@@ -24,6 +24,7 @@ from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
+    FAILING,
     READ_FILE,
     HarnessTools,
     ModelHooks,
@@ -34,6 +35,7 @@ from trellis.harness.middleware import (
     step_limit,
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
+from trellis.harness.tools.bridge import STALLED
 from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 
@@ -497,19 +499,48 @@ def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
 
 
 # --------------------------------------------------------------------------- StallGuard
-async def test_the_same_call_repeated_stops_the_run(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=[("look", {"item": "a"})] * 3)
+async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: Harness) -> None:
+    """A stall is not run again: the model is told so and answers with what it has, offered
+    no tool (``tool_choice="none"``) — the user gets an answer saying what went wrong."""
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, "the lookup keeps failing: no answer"])
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="stall"), [look]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == (
-        "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
-    )
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "the lookup keeps failing: no answer"
+    told = model.seen[-1]
+    assert told[-1].content == STALLED.format(tool="look", times=3)
+    # the stalled call itself is not replayed: the step before it is the last one run
+    assert [type(m).__name__ for m in told[-3:]] == ["AIMessage", "ToolMessage", "HumanMessage"]
+    assert model.requests[-1]["tool_choice"] == "none"
     with pytest.raises(ConfigurationError):
         StallGuard(1)
 
 
-async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
+async def test_a_stall_outside_a_run_ends_with_one_answer_too() -> None:
+    def step(n: int) -> list[Any]:
+        call = {"name": "nothing", "args": {}, "id": f"c{n}", "type": "tool_call"}
+        return [AIMessage(content="", tool_calls=[call]), ToolMessage("no", tool_call_id=f"c{n}")]
+
+    model = ScriptedChatModel(turns=[("nothing", {}), "gave up"])
+    state = await graph(model, StallGuard(3)).ainvoke(
+        {"messages": [HumanMessage("x"), *step(1), *step(2)]}
+    )
+    assert state["messages"][-1].content == "gave up"
+
+
+async def test_a_stall_with_no_answer_then_stops_the_run(harness: Harness) -> None:
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, look_a])
+    target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="stall-none"), [look]).run("x", user="u")
+    assert result.error is not None
+    assert result.error.message == (
+        "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
+    )
+
+
+async def test_steps_in_which_every_call_failed_end_with_one_answer(harness: Harness) -> None:
     @tool(side_effects="read")
     def flaky(n: int) -> str:
         """Fails for odd numbers."""
@@ -524,13 +555,16 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
             [("flaky", {"n": 3}), ("nope", {})],
             ("flaky", {"n": 5}),
             ("flaky", {"x": "bad"}),
+            "every call failed",
             "never",
         ]
     )
     target = graph(model, HarnessTools(), StallGuard(), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="flaky"), [flaky]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "every call failed"
+    assert model.seen[-1][-1].content == FAILING.format(steps=3)
+    assert model.requests[-1]["tool_choice"] == "none"
     assert model.turns == ["never"]
 
 
