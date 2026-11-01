@@ -97,6 +97,12 @@ own model work follows the harness's configuration.
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
 
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the

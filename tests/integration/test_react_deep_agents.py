@@ -90,9 +90,10 @@ def test_middleware_settings_mean_what_reacts_do() -> None:
         m.name: m
         for m in middleware(max_steps=4, max_repeats=5, call_timeout=2.0, context_window=64_000)
     }
-    # LangChain's model call limit, per invocation here (the graph's thread may outlive a run)
+    # LangChain's model call limit, per invocation here (the graph's thread may outlive a run):
+    # max_steps calls, then one that answers (LangChain's own limit, one later, the backstop)
     limit = stack["ModelCallLimitMiddleware"]
-    assert (limit.run_limit, limit.thread_limit, limit.exit_behavior) == (4, None, "end")
+    assert (limit.max_steps, limit.run_limit, limit.thread_limit) == (4, 5, None)
     assert stack["StallGuard"].max_repeats == 5
     assert stack["ModelHooks"].timeout == 2.0
     pinned = {m.name: m for m in middleware(system_prompt=stored("triage"))}
