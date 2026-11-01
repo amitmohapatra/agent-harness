@@ -2640,6 +2640,19 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     return any(abs(n - value) <= tol + 1e-9 for n in numbers(answer))
 
 
+#: A figure written as a percentage ("73%", "73.0 %").
+_PERCENT = re.compile(r"(-?\d+(?:\.\d+)?)\s*%")
+
+
+def _has_rate(answer: str, value: float, tol: float) -> bool:
+    """A rate kept as a fraction (0 to 1), as the answer states it: the fraction itself, or
+    the percentage it is ("73%" for 0.73)."""
+    if _has_number(answer, value, tol):
+        return True
+    shown = (float(m) / 100 for m in _PERCENT.findall(answer.replace(",", "")))
+    return 0 < abs(value) <= 1 and any(abs(n - value) <= tol + 1e-9 for n in shown)
+
+
 def _has_text(answer: str, value: Any) -> bool:
     options = value if isinstance(value, (list, tuple)) else (value,)
     return any(str(o).lower() in answer.lower() for o in options)
@@ -2715,7 +2728,7 @@ def score(
     elif k == "record":
         for name, spec in expect.value.items():
             v = spec["value"]
-            ok = _has_number(a, float(v), spec["tol"]) if _num(v) else _has_text(a, v)
+            ok = _has_rate(a, float(v), spec["tol"]) if _num(v) else _has_text(a, v)
             if not ok:
                 missing.append(name)
     elif k == "set":

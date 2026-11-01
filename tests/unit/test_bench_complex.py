@@ -298,6 +298,17 @@ async def test_judge_packets_and_the_gap_report(tmp_path: Path, offline: None) -
     assert "Harness gaps" in judge.markdown(found)
 
 
+def test_a_rate_given_as_a_percentage_matches_its_fraction() -> None:
+    """A rate the world keeps as a fraction (an on-time rate of 0.73) is right when the answer
+    gives it as a percentage ("73%"), as a person and a model write it; a bare 73 is not."""
+    expect = cx.record({"supplier": "SUP-06", "on_time": 0.73}, tol={"on_time": 0.005})
+    right = "Bursa Textiles (SUP-06). Its on-time delivery rate is **73%**."
+    assert cx.score(expect, right, [], "")["correct"] is True
+    assert cx.score(expect, "SUP-06, on time 0.73.", [], "")["correct"] is True
+    assert cx.score(expect, "SUP-06, on time 81%.", [], "")["correct"] is False
+    assert cx.score(expect, "SUP-06 shipped 73 orders.", [], "")["correct"] is False
+
+
 def test_a_negative_written_with_the_minus_sign_is_read_as_negative() -> None:
     assert cx.numbers("r \u2248 \u22120.23, and -1.5") == [-0.23, -1.5]
 
