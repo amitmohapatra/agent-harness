@@ -75,6 +75,10 @@ own model work follows the harness's configuration.
   its own thread (its checkpointer), so its earlier results are marked in the request it sends
   (`snapshots.EARLIER`; the graph's state is unchanged). The OpenAI Agents memory session
   marks them as memory's window does. In both, the tool stays offered.
+- A model looping on one call is stopped on every adapter: the tool bridge does not run the
+  same call a third time in a row and tells the model to answer with what it has (a `stalled`
+  warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
