@@ -49,6 +49,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
+  `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
+  agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
+  cap. It is counted now when the harness keeps no usage log of the agent.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
