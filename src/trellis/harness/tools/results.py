@@ -78,7 +78,13 @@ QUERY: Final = (
     'filter, a ranking or a group over them, call query_result(file_path="{path}", '
     'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
     "this run saved is a table of the same query, named by its tool, so one query can JOIN "
-    "them. Do not add up or rank rows yourself."
+    "them. Do not add up or rank rows yourself. {private}"
+)
+#: What a kept result's note says of its path: the run's own working copy, which the user
+#: cannot reach (a model offered one as an export to open in Excel).
+PRIVATE: Final = (
+    "The path is this run's own working copy, for read_file and query_result: the user cannot "
+    "open or download it, so never offer it to them as a file."
 )
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
@@ -123,7 +129,7 @@ def readable(output: Any, tool: str | None = None) -> str:
         return text
     columns = ", ".join(query.columns_of(text))
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=columns, path=path)
+    table = QUERY.format(table=name, columns=columns, path=path, private=PRIVATE)
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
 
 
@@ -142,7 +148,9 @@ def tabled(text: str, tool: str | None = None) -> str:
     path = keep(text, tool=tool)
     assert path is not None  # in a run
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=", ".join(query.column_names(columns)), path=path)
+    table = QUERY.format(
+        table=name, columns=", ".join(query.column_names(columns)), path=path, private=PRIVATE
+    )
     return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
 
 

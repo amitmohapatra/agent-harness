@@ -69,6 +69,9 @@ own model work follows the harness's configuration.
   then a missing argument, then a made-up tool name, then the right call — goes on to its
   answer, bounded by `max_steps` (ADV-5).
 
+- A kept large result's note says its path is the run's own working copy, which the user
+  cannot open or download (`results.PRIVATE`). Asked for an Excel export, a model told the
+  user the rows were "saved as CSV at /large_tool_results/…, open it in Excel".
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
   result over 80,000 characters was kept, so a small model added up hundreds of rows by hand
