@@ -88,6 +88,18 @@ own model work follows the harness's configuration.
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
   its cut naming the `read_file` call that reads on from there.
+- `query_result` runs on DuckDB when the new `query` extra is installed (in `all`), and on
+  Python's own SQLite otherwise, chosen by what is installed ([ADR 0007](docs/adr/0007-query-engine.md)):
+  one contract on both (the description names the engine; the same tables, column typing,
+  `percentile_cont(x, p)` and `julianday(d)`, and limits), DuckDB locked after loading (no
+  file, network, extension or setting; a 512 MB `memory_limit`). Loading a run's 4 results
+  of 50,000 rows takes 0.37 s (was 1.01 s), of 500,000 rows 2.5 s (was 9.5 s); 8 calls at
+  once over 50,000 rows take 1.8 s (was 7.2 s), over 500,000 rows 12 s (was 89 s)
+  (`benchmark/query_engines/results/harness.md`).
+  Both engines: a number is only what SQL writes as one (`1_000`, `0x10` stay text), a nested
+  JSON value is its compact JSON text, a boolean answers `true`/`false`, a value a SQLite
+  query builds is at most 64 MB, and a query past its time is interrupted by a watcher
+  thread on either engine.
 - `query_result`: read-only SQL (Python's own SQLite, in memory, no dependency) over every row
   of the run's saved results — each a table named by its tool, so one query joins them — with
   formulas, window functions and statistics (`stddev`, `median`, `percentile_cont`, `corr`,
