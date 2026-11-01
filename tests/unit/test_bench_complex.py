@@ -774,3 +774,18 @@ def test_more_honest_shapes_of_the_langgraph_graph_are_read() -> None:
     assert _right("bf3-clarify-01", 0, asked)
     picked = "The Insulated Parka Navy costs £120 and the Insulated Parka Black £118."
     assert not _right("bf3-clarify-01", 0, picked)
+
+
+def test_two_more_honest_shapes_of_openai_agents_are_read() -> None:
+    """OpenAI Agents (the context-placement run): "I can only return data as text in this chat"
+    gives the reason, and a store named with a figure four times the others' is not listed
+    under the line. A reasonless refusal, or S22 listed under the line, still fails."""
+    assert cx._WHY.search(
+        "I can't give you a downloadable file. I can only return data as text in this chat."
+    )
+    named = (
+        "Only one South store was under your £45,000 alert line in September 2026: S26 Truro, "
+        "£39,481.85. S22 Bath recorded £205,983.47, roughly four times any other South store."
+    )
+    assert _right("bf3-past-04", 1, named)
+    assert not _right("bf3-past-04", 1, "S26 and S22 were under your alert line.")

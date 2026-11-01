@@ -2610,7 +2610,7 @@ _WHY: Final = re.compile(
     r"no way to (?:create|make|produce|attach|export|run)|"
     # where an answer it can make would be: out of the user's reach, or text only
     r"(?:isn't|is not|aren't|are not) accessible to you|you can(?:'t|not) (?:access|open|reach)|"
-    r"only (?:return|give|send) (?:you )?data in (?:this|the) (?:conversation|chat)|"
+    r"only (?:return|give|send) (?:you )?data (?:as text )?in (?:this|the) (?:conversation|chat)|"
     r"only (?:file )?tool (?:I have )?(?:writes|makes|saves) (?:plain )?text",
     re.IGNORECASE,
 )
@@ -2643,7 +2643,8 @@ _ASKS: Final = re.compile(
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
 #: above the line").
 _NOT_IN: Final = re.compile(
-    r"(?:[^.\n]|\.(?=\S))*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below))\b"
+    r"(?:[^.\n]|\.(?=\S))*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
+    r"(?:times|more than) (?:any|every|all) other)\b"
     r"(?:[^.\n]|\.(?=\S))*",
     re.IGNORECASE,
 )
