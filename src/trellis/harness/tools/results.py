@@ -26,6 +26,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from trellis.harness import snapshots
 from trellis.harness.history import Said
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import current
@@ -177,6 +178,8 @@ def keep(text: str, *, tool: str | None = None) -> str | None:
     runtime.replay.journal.results[path] = text
     if tool is not None and getattr(runtime, "kept_from", None) is not None:
         runtime.kept_from.setdefault(path, tool)
+    if getattr(runtime, "kept_at", None) is not None:
+        runtime.kept_at.setdefault(path, snapshots.now())  # when it was fetched
     return path
 
 
@@ -204,9 +207,12 @@ def coding_tool() -> str | None:
 
 
 def kept() -> bool:
-    """Whether the current run keeps a result to read (``read_file`` is offered then)."""
+    """Whether the current run keeps a result to read, or was told of files kept for its user
+    (``tools.stored``): ``read_file`` and ``query_result`` are offered then."""
     runtime = current()
-    return runtime is not None and bool(query.saved(runtime))
+    if runtime is None:
+        return False
+    return bool(query.saved(runtime)) or getattr(runtime, "files_note", None) is not None
 
 
 class Conversations:
@@ -303,6 +309,12 @@ def read_file(
         text = query.saved(runtime).get(path)
     if text is None:
         return query.not_found(path)
+    return page(text, path, offset, limit)
+
+
+def page(text: str, path: str, offset: int = 0, limit: int = READ_LINES) -> str:
+    """Lines ``offset`` on (at most ``limit``, and :data:`PAGE_CHARS`) of ``text``, read at
+    ``path``, numbered, then where the next page starts."""
     lines = _lines(text)
     start = max(0, offset)
     if start >= len(lines):
@@ -361,8 +373,14 @@ def _numbered(lines: list[str], first: int) -> str:
 #: its rows: ``tools.query``) — as each adapter offers them: name, description, JSON schema, and
 #: what answers a call (its arguments, as the model wrote them).
 async def aread(args: dict[str, Any]) -> str:
-    """:func:`read`, as a reader answers (``READERS``: each awaited)."""
-    return read(args)
+    """:func:`read`, as a reader answers (``READERS``: each awaited) — and a file kept for the
+    user (``tools.stored``: ``/files/...``) read from the file store."""
+    from trellis.harness.tools import stored  # noqa: PLC0415 - it reads its pages here
+
+    path = "/" + str(args.get("file_path", "")).lstrip("/")
+    if not stored.is_stored(path) or arguments_problem(READ_FILE_SCHEMA, args) is not None:
+        return read(args)
+    return await stored.read(path, int(args.get("offset", 0)), int(args.get("limit", READ_LINES)))
 
 
 #: A reader: its name, description, JSON schema, and what answers a call.

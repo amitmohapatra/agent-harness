@@ -209,7 +209,7 @@ def root(tmp_path: Path, engine: str) -> Iterator[Path]:
     found = tmp_path / "files"
     store = FileStore(found.as_uri())
 
-    async def save_file(name: str, data: bytes, *, source: str) -> Any:
+    async def save_file(name: str, data: bytes, *, source: str, **made: Any) -> Any:
         return await store.put("f", name, data, source=source)
 
     given = Run()
@@ -220,6 +220,7 @@ def root(tmp_path: Path, engine: str) -> Iterator[Path]:
 
 
 def ask(**args: Any) -> str:
+    results.keep("other\n1", tool="other")  # a result the query does not read
     path = results.keep("n,name,blob\n1,a,\n2,b,x\n3,c,y")
     assert path is not None
     return asyncio.run(query.query({"file_path": path, **args}))

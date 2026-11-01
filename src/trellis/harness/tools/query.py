@@ -298,11 +298,33 @@ async def _save(runtime: Any, args: dict[str, Any], sql: str, text: str | None) 
     if isinstance(found, str):
         return found
     data, count, shown = found
-    stored = await runtime.save_file(name, data, source=QUERY_RESULT)
+    made = {"sql": sql, "from": _sources(runtime, str(args["file_path"]), sql)}
+    stored = await runtime.save_file(name, data, source=QUERY_RESULT, made=made)
     return (
         f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
         f"its download link. Its first rows:\n{shown}"
     )
+
+
+def _sources(runtime: Any, file_path: str, sql: str) -> list[dict[str, Any]]:
+    """The results a query read — the file asked about, and each other result the run keeps
+    whose table the query names — each as its table, the tool it came from and when it was
+    fetched (``results.keep``), for how a file it made was made (``FileStore.record``)."""
+    path = "/" + file_path.lstrip("/")
+    named = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql)
+    tools, times = getattr(runtime, "kept_from", {}), getattr(runtime, "kept_at", {})
+    found = []
+    for kept, table in tables(runtime).items():
+        if kept == path or table in named:
+            fetched = times.get(kept)
+            found.append(
+                {
+                    "table": TABLE if kept == path else table,
+                    "tool": tools.get(kept),
+                    "fetched_at": fetched.isoformat() if fetched is not None else None,
+                }
+            )
+    return found
 
 
 def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], str] | str:
