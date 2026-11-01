@@ -578,6 +578,29 @@ async def pull(w: World) -> None:
     assert searched.path["name"] == "memory_search" and searched.body["args"] == search
 
 
+async def forget_said(w: World) -> None:
+    """Forget by chat: what the user said, which the service refuses an agent, is asked about
+    through the approval path and, approved, forgotten as the user — in every adapter."""
+    if not w.on:
+        return  # no memory tools: F42 checks none is offered
+    w.memory_service.memories["mem_said"] = {
+        "content": "I live at 12 Baker Street.",
+        "memory_type": "SEMANTIC",
+        "visibility": "PRIVATE",
+        "user": USER,
+        "current": True,
+        "created_at": "2026-10-01T09:00:00Z",
+        "supersedes": None,
+        "superseded_by": None,
+    }
+    o = (await w.go([Desk().lookup()], [("memory_forget", {"id": "mem_said"})])).succeeded()
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert asked == ["memory_forget"] and "mem_said" in o.pauses[0].question, o.pauses
+    [forgot] = w.memory_service.named("forget")
+    assert forgot.path["memory_id"] == "mem_said" and not forgot.scope.get("agent_id")
+    assert not w.memory_service.memories["mem_said"]["current"]
+
+
 async def records(w: World) -> None:
     d = Desk()
     plan: list[Call] = [("lookup", {"topic": "a"}), ("note", {"text": "b"})]
@@ -1326,6 +1349,16 @@ FEATURES: Final[list[Feature]] = [
         way2=NA(
             "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
         ),
+    ),
+    Feature(
+        "F42d",
+        "memory pull: forgetting what the user said asks, then forgets it as them",
+        "F42",
+        "the memory service (its refusal names the user's statement)",
+        forget_said,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("a function target calls memory_forget itself, as any tool")},
+        way2=NA("the harness's approval path: Way 2 calls the service, which refuses the agent"),
     ),
     Feature(
         "F43",

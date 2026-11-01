@@ -52,9 +52,22 @@ own model work follows the harness's configuration.
   conversation (its window) and its context call fails (an outage, the circuit open), the
   earlier turns come from the run store, as with memory off; before, the model was sent the
   question alone and answered "this conversation has no earlier list" (break-and-fix round 1).
+- `query_result` adds money up exactly, on both engines: a column of decimals as written (at most
+  15 digits) is `DECIMAL` — DuckDB's own `DECIMAL(p, s)`; on SQLite a `REAL` whose `sum`,
+  `total` and `avg` (a window's too) add up in Python's `decimal` — and a number in an answer
+  is written as SQLite writes a `REAL` (15 significant digits). 6,000 two-decimal refunds
+  summed to `32266.149999999998` (ADV-2).
 - OpenAI Agents: a call to a tool the model made up is an error the model reads and the run goes
   on (the SDK's `tool_not_found_behavior="return_error_to_model"`), not a `ModelBehaviorError`
   that ended the run with no answer (ADV-8).
+- A blank message (empty, or whitespace only) opens no run: `run`, `stream` and `start` raise
+  `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
+  model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
+  would fail every later turn (ADV-1).
+- `StallGuard`: three steps in a row in which every call failed stop the run only when a failure
+  among them repeats (the same tool, the same error). A model correcting itself — a wrong type,
+  then a missing argument, then a made-up tool name, then the right call — goes on to its
+  answer, bounded by `max_steps` (ADV-5).
 
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
@@ -94,6 +107,36 @@ own model work follows the harness's configuration.
   `GET {path}/runs/{run_id}/files/{name}`: a 5-minute signed link where the store signs, else
   streamed. Stored only: never parsed or remembered. New dependency: `fsspec`.
 
+- Forget by chat: `memory_forget` of what the user said ("forget my address"), which the memory
+  service refuses an agent, asks a person through the approval path (the run pauses as any
+  call that asks does) and, approved, forgets it as the user; rejected, the model reads why.
+  A memory the agent wrote is forgotten at once, as before. Needs the memory service to name
+  the memory it refuses (`details.memory_id`); an older one's refusal stays the error it was.
+- Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
+  returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
+  (also a LangChain tool's own artifact); the model reads the content alone and the call's
+  outcome keeps the citations in `metadata["sources"]`, so the run's trajectory has them.
+- The turn written to memory carries its run record (`Said.facts`, under
+  `custom_metadata["run_record"]`, plain values): each tool result its call's status, seconds,
+  sources (the trajectory's outcome of the same call), when it was fetched (`fetched`, UTC)
+  and its tool's `max_age`; the turn's last message the run's status, seconds and approvals —
+  what the memory service's steps list of the turn shows, with its evidence line for "why" and
+  "how sure" (trellis-memory 0.6.2). The fetch time is said there only: a tool result written
+  to memory is no longer stamped `[snapshot of <tool> from <UTC time>]`, and a replayed result
+  past its tool's age is marked out of date from its run record.
+- A `ReAct` agent with a known window sizes the conversation the memory service replays
+  (`conversation_token_budget`, trellis-memory 0.6): what one request may hold (95% of the
+  window, as `FitWindow` fits it) less its instructions, offered tools and question
+  (LangChain's `count_tokens_approximately`), the memory context's budget and 1,024 tokens for
+  the reply (`Agent.conversation_budget`). Tool-result clearing (`ThisTurnsResults`, LangChain's
+  `ClearToolUsesEdit`) clears only the turn under way's older results, never the replayed
+  turns' that memory already sized.
+- The cost benchmark's `--suite explain`: two-turn conversations, memory on, whose second turn
+  asks about the first answer (its steps, sources, tools, time, approvals...) or is an ordinary
+  follow-up, scored strictly against turn 1's own journal record (exact tool names, source
+  names and dates, the step count, seconds within a tolerance), with the made-up claims and
+  leaked template tags counted, every model request kept, and `--render` checking what a
+  llama.cpp chat template shows the model (`benchmark/cost/explain.py`).
 - Large results in `ReAct` without a backend and in a `create_agent` graph with
   `middleware()`: kept in the run and previewed, paged with `read_file`, as on OpenAI Agents
   and Claude (`tools.results`); a result `FitWindow` cuts to fit a small window is kept too,
@@ -118,8 +161,8 @@ own model work follows the harness's configuration.
   (`tools.pages`). A run with a sandbox finds every kept result as a file there too.
 - Freshness: a tool's data is live by default; `tool(max_age=)`, `tool(freshness="static")`
   (or `"live"`), a LangChain tool's `metadata`, an MCP tool's `_meta` say otherwise
-  (`tools.base.data_of`). Tool results written to memory's thread start with
-  `[snapshot of <tool> from <UTC time>]`; replayed past the tool's age they are marked out of
+  (`tools.base.data_of`). Tool results replayed from memory's thread past the tool's age
+  (their fetch time is in their run record) are marked out of
   date, the context says so, and the tool stays offered (`trellis.harness.snapshots`).
 - `benchmark/cost`: the `aggregate` and `freshness` classes over 10,000 SKUs.
 - Tool chains (`trellis.harness.tools.links`): which tool's output is another's argument, read
