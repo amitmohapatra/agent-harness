@@ -83,6 +83,18 @@ class Budget:
         return None
 
 
+#: What a run's end says it spent (``spent``), each counted from 0.
+SPENT_KEYS: Final = ("tokens", "cached_tokens", "cost", "model_calls", "tool_calls")
+
+
+def spent(runtime: Runtime) -> dict[str, float]:
+    """What the run has spent, its sub-agents' runs and its earlier attempts included: its
+    tokens (input and output), cached tokens, dollars (as the gateway said them), model calls
+    and harness tool calls — what its ``RUN_FINISHED`` event carries (``spent``)."""
+    kept = runtime.replay.journal.spent
+    return {name: kept.get(name, 0.0 if name == "cost" else 0) for name in SPENT_KEYS}
+
+
 def _runs(runtime: Runtime) -> Iterator[Runtime]:
     """The run and the runs it works inside (a sub-agent's parent, theirs)."""
     at: Runtime | None = runtime
@@ -184,11 +196,13 @@ __all__ = [
     "BUDGET",
     "BUDGET_EXCEEDED",
     "SPENT",
+    "SPENT_KEYS",
     "Budget",
     "account",
     "account_reply",
     "count_tool_call",
     "gateway_cost",
     "reached",
+    "spent",
     "stopped",
 ]
