@@ -732,9 +732,9 @@ def _json_rows(
         return None
     kind = dict if values else _Keys
     if isinstance(found, kind):
-        pairs = found.items() if values else last[0]
-        key = next((k for k, v in pairs if _objects(v, kind)), None)
-        return None if key is None else (dict(pairs)[key], key)
+        pairs = dict(found if isinstance(found, dict) else last[0])
+        key = next((k for k, v in pairs.items() if _objects(v, kind)), None)
+        return None if key is None else (pairs[key], key)
     return (found, None) if _objects(found, kind) else None
 
 
