@@ -44,6 +44,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- The memory context no longer breaks a provider's prompt cache from one turn to the next.
+  A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
+  question, as a system message ahead of the history, so the next turn shared nothing past
+  the instructions with this one. The model now gets it as the first part of the turn's
+  question, after the history; the graph's state is unchanged. With a prompt-caching
+  middleware that marks the request (LangChain's `AnthropicPromptCachingMiddleware`), the
+  answer ending the history is marked too (`middleware.with_question`, audit K1). The
+  context is marked off from the question (`middleware.ASKED_WITH`), so a question after a
+  long context does not read as one more saved note.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
