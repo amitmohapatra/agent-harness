@@ -49,6 +49,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A worker that dies (a `BaseException` that is not an error) in a harness tool an ACP agent
+  called ends the run's attempt, as an in-process tool's does. It ended only the MCP server's
+  own task group, and the run went on as if the call had failed (the `X15-kimi-…` matrix cells,
+  "the worker did not die").
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
