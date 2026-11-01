@@ -2599,7 +2599,7 @@ _WHY: Final = re.compile(
     r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
-    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tools? (?:that|for|to) (?:writ|creat|mak|"
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
     r"draw|render|run|generat|export|fit)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
@@ -2636,7 +2636,8 @@ _ABSTAIN: Final = re.compile(
 _ASKS: Final = re.compile(
     r"\b(?:confirm|tell me|let me know|say|specify|choose|pick)\b[^.?!\n]{0,30}\bwhich\b|"
     r"\bwhich (?:one|product|item|sku|of these)\b[^.?!\n]{0,30}\byou (?:mean|meant|want)|"
-    r"\b(?:need you to|please) (?:pick|choose) one\b",
+    r"\b(?:need you to|please) (?:pick|choose) one\b|"
+    r"\bneed to know which\b[^.?!\n]{0,30}\byou (?:mean|meant|want)",
     re.IGNORECASE,
 )
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
