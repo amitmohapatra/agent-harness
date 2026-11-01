@@ -197,6 +197,8 @@ async def test_a_command_killed_past_its_memory_or_missing_a_module_says_why(
     assert missing["exit_code"] == 1 and missing["hint"].startswith(
         "The module polars is not installed in the sandbox, and the sandbox has no network"
     )
+
+
 async def volumes() -> set[str]:
     return {v["Name"] for v in (await engine("GET", "/volumes")).json()["Volumes"] or []}
 
