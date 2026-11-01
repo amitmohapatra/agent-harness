@@ -59,6 +59,10 @@ own model work follows the harness's configuration.
   `ConfigurationError`, AG-UI answers `422`, an A2A task ends `rejected`. It was sent to the
   model and kept in the thread, where a provider that refuses a blank user message (Anthropic)
   would fail every later turn (ADV-1).
+- `StallGuard`: three steps in a row in which every call failed stop the run only when a failure
+  among them repeats (the same tool, the same error). A model correcting itself — a wrong type,
+  then a missing argument, then a made-up tool name, then the right call — goes on to its
+  answer, bounded by `max_steps` (ADV-5).
 
 - A table of 30 rows or more that fits the context is read whole and also kept, so `query_result`
   counts, sums, ranks and joins over it exactly (`tools.results.tabled`). Before, only a
