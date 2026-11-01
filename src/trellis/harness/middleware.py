@@ -463,7 +463,7 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
-    kept = path in runtime.replay.journal.results
+    kept = path in query.saved(runtime)
     said: str | None = None
     cleared = None if kept else _cleared_result(request.state, path)
     if call["name"] == READ_FILE and cleared is not None:
