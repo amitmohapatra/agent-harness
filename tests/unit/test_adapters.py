@@ -334,6 +334,15 @@ async def test_the_context_moves_into_the_users_turn_after_the_runs_own_filter()
     assert len(seen) == 4
     assert _asked_with(SimpleNamespace(pushed_context=None), {}) == {}  # type: ignore[arg-type]
 
+    async def awaited(data: Any) -> Any:  # a run's own filter may be async
+        return data.model_data
+
+    later = {"run_config": RunConfig(call_model_input_filter=awaited)}
+    moved = _asked_with(runtime, later)["run_config"].call_model_input_filter  # type: ignore[arg-type]
+    assert await given(system, {"role": "user", "content": "q"}) == [
+        {"role": "user", "content": [marked, {"type": "input_text", "text": "q"}]}
+    ]
+
 
 def _pending(**fields: Any) -> Pending:
     interrupt = Interrupt(interrupt_id="run_1.1.1", tenant_id="t", run_id="run_1", question="?")
