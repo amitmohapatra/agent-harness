@@ -97,15 +97,17 @@ CUT: Final = {
 }
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
-#: The times in a row one call (the same tool, the same arguments) is made before it is not run
-#: again (:func:`_repeated`): a model looping on one call, whatever its framework.
-MAX_REPEATS: Final = 3
-#: What the model reads for that call instead of its result.
+#: What a model that stalled — the same call with the same arguments over and over — is told,
+#: for its one answer without tools (``middleware.StallGuard``; every adapter's loop).
 STALLED: Final = (
-    "{tool} was not run: you called it with the same arguments {times} times in a row and it "
-    "did not give you what you need. Do not call it again: answer now with what you have, and "
+    "You called {tool} with the same arguments {times} times in a row and it did not give you "
+    "what you need: do not call it again. Do not call tools: answer now with what you have, and "
     "say what went wrong."
 )
+#: The times in a row one call (the same tool, the same arguments) is made before it is not run
+#: again (:func:`_repeated`, the model reading :data:`STALLED` instead of its result): a model
+#: looping on one call, whatever its framework.
+MAX_REPEATS: Final = 3
 #: The ``error_class`` of that call, and the warning on the run's stream (once).
 REPEATED: Final = "Repeated"
 

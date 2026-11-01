@@ -656,3 +656,12 @@ async def test_an_unreadable_decision_asks_again(wire: tuple[Client, Harness]) -
     assert "Which region?" in status_texts(again)
     done = await send(client, "eu", task_id=task_id)
     assert states(done)[-1] == TaskState.TASK_STATE_COMPLETED
+
+
+async def test_a_task_is_rejected_once(executor: tuple[RunExecutor, Agent]) -> None:
+    run, _ = executor
+    queue = Queue()
+    await run._rejected(queue, "t1", "c1", "the message is blank")  # type: ignore[arg-type]
+    await run._rejected(queue, "t1", "c1", "again")  # type: ignore[arg-type]  # settled: nothing
+    assert queue.states() == [TaskState.TASK_STATE_REJECTED]
+    assert queue.texts() == ["the message is blank"]

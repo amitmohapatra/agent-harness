@@ -2,30 +2,50 @@
 (``tools.results``) — a count, a sum, a filter, a top-N or a group computed in process, exactly,
 instead of the model paging thousands of rows into its context and adding them up itself.
 
-No sandbox and no Code Mode needed, and no dependency: Python's own SQLite (``sqlite3``), in
-memory. The kept text becomes the table ``result``: a JSON array of objects (or the first such
-array a JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one
-row per line (``line``). A column whose every value is a whole number is ``INTEGER``, a number
-``REAL``, else ``TEXT`` (a code with a leading zero, or an id past 64 bits, keeps its exact
-text); a nested value is its JSON text (``json_extract`` reads it).
+No sandbox and no Code Mode needed. The engine is chosen by what is installed
+(:data:`ENGINE`, `ADR 0007 <docs/adr/0007-query-engine.md>`_): DuckDB (:class:`DuckDB`, the
+``query`` extra) when it can be imported, else Python's own SQLite (:class:`SQLite`, no
+dependency), each in memory, made for one query and closed after it. Both give the model one
+contract: the tool's description names the engine (the model writes its dialect), the tables,
+their typing and the limits are the same.
 
-Only reading is allowed: an authorizer admits ``SELECT`` (``WITH`` included), reading the table
-and calling functions — never a write, ``ATTACH`` (no other file, no network), a ``PRAGMA`` or
-loading an extension (off, as Python leaves it). A query runs for at most :data:`SECONDS`, its
-text is at most :data:`SQL_CHARS`, what it loads at most :data:`LOAD_CHARS` (its tables'
-pages at most :data:`DB_BYTES`), its sorts and joins hold at most :data:`TEMP_CACHE_BYTES` in
-memory (more goes to SQLite's temporary files, gone when it closes), and at most :data:`ROWS`
-rows and :data:`OUTPUT_CHARS` characters come back (said when there were more).
+The kept text becomes the table ``result``: a JSON array of objects (or the first such array a
+JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one row per
+line (``line``). A column whose every value is a whole number is ``INTEGER`` (DuckDB:
+``BIGINT``), a decimal as written of at most :data:`DECIMAL_DIGITS` digits (``12.50``, money)
+``DECIMAL``, another number ``REAL`` (``DOUBLE``), else ``TEXT`` (``VARCHAR``): a code with a
+leading zero, or an id past 64 bits, keeps its exact text; a nested value is its JSON text
+(``json_extract`` reads it). A ``DECIMAL`` column adds up exactly, as written: DuckDB's own
+``DECIMAL(p, s)``; SQLite has none, so it stores the column ``REAL`` and adds it up with
+``sum``, ``total`` and ``avg`` (a window's too) in Python's ``decimal`` (:data:`EXACT`). Every
+number with a fraction an answer holds is written as SQLite writes a ``REAL`` (15 significant
+digits, :func:`_shown`), on both engines: ``32266.15``, never ``32266.149999999998``. A
+number is written as SQL writes one (:data:`WHOLE`, :data:`DECIMAL`, :data:`NUMBER`): never
+``1_000``, ``0x10`` or ``٣``.
 
-Formulas: SQLite's arithmetic, ``CASE``, math (``sqrt``, ``power``, ``ln``, ``exp``…), dates
-(``julianday``, ``strftime``, ``date(…, '+7 days')``) and window functions (``avg(x) OVER
-(ORDER BY d ROWS 6 PRECEDING)`` a moving average, ``lag`` a growth rate, ``rank``); and the
-statistics it lacks, as aggregates of this module (:data:`AGGREGATES`, Python's
-``statistics``): ``stddev``/``stddev_samp``, ``stddev_pop``, ``variance``/``var_samp``,
-``var_pop``, ``median``, ``percentile_cont(x, p)`` (``p`` from 0 to 1, interpolated as
-DuckDB's ``quantile_cont``), ``corr(y, x)``, ``covar_samp(y, x)``, ``covar_pop(y, x)``,
-``regr_slope(y, x)``, ``regr_intercept(y, x)``, ``regr_r2(y, x)`` — named as PostgreSQL and
-DuckDB name them, ``NULL`` where there are too few values.
+Only reading is allowed, and only the run's own results are ever loaded. SQLite: an authorizer
+admits ``SELECT`` (``WITH`` included), reading the tables and calling functions — never a write,
+``ATTACH`` (no other file, no network), a ``PRAGMA`` or loading an extension (off, as Python
+leaves it). DuckDB: one ``SELECT`` statement only, and once its tables are loaded no file or
+network access (``enable_external_access``), no extension loaded or installed, and its settings
+locked. A query runs for at most :data:`SECONDS` (then it is interrupted, as a cancelled call
+is), its text is at most :data:`SQL_CHARS`, what it loads at most :data:`LOAD_CHARS`, its
+memory at most :data:`DB_BYTES` (SQLite: its tables' pages, a value :data:`VALUE_CHARS`, its
+sorts and joins :data:`TEMP_CACHE_BYTES` in memory, more in SQLite's temporary files, gone
+when it closes; DuckDB: ``memory_limit``, never spilled to disk), and at most :data:`ROWS` rows
+and :data:`OUTPUT_CHARS` characters come back (said when there were more).
+
+Formulas: arithmetic, ``CASE``, math (``sqrt``, ``power``, ``ln``, ``exp``…), dates
+(``julianday``; SQLite's ``strftime``, ``date(…, '+7 days')``) and window functions
+(``avg(x) OVER (ORDER BY d ROWS 6 PRECEDING)`` a moving average, ``lag`` a growth rate,
+``rank``); and the statistics, named as PostgreSQL and DuckDB name them: ``stddev``/
+``stddev_samp``, ``stddev_pop``, ``variance``/``var_samp``, ``var_pop``, ``median``,
+``percentile_cont(x, p)`` (``p`` from 0 to 1, interpolated as DuckDB's ``quantile_cont``),
+``corr(y, x)``, ``covar_samp(y, x)``, ``covar_pop(y, x)``, ``regr_slope(y, x)``,
+``regr_intercept(y, x)``, ``regr_r2(y, x)`` — DuckDB's own, and on SQLite aggregates of this
+module (:data:`AGGREGATES`, Python's ``statistics``), ``NULL`` where there are too few values.
+On DuckDB, ``percentile_cont(x, p)`` and ``julianday(d)`` are macros (:data:`MACROS`), so the
+spelling above works on both engines.
 """
 
 from __future__ import annotations
@@ -33,16 +53,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import importlib
+import importlib.util
 import io
 import json
 import math
+import os
 import re
 import sqlite3
 import statistics
+import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Final
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from decimal import Decimal
+from functools import cached_property
+from typing import Any, Final, Protocol
 
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import arguments_problem, not_run
@@ -50,13 +76,6 @@ from trellis.harness.tools.base import arguments_problem, not_run
 #: The tool, and what it is told and given.
 QUERY_RESULT: Final = "query_result"
 TABLE: Final = "result"
-QUERY_RESULT_DESCRIPTION: Final = (
-    "Runs a read-only SQL query (SQLite) over every row of a large tool result that was saved to "
-    f"a file: the rows are the table {TABLE} (the tool message names its path; SELECT * FROM "
-    f"{TABLE} LIMIT 3 shows its columns). "
-    "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
-    "instead of reading them page by page: the answer is computed over all of them, exactly."
-)
 QUERY_RESULT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
@@ -75,11 +94,14 @@ QUERY_RESULT_SCHEMA: Final[dict[str, Any]] = {
 ROWS: Final = 200
 SQL_CHARS: Final = 5_000
 SECONDS: Final = 5.0
-#: What a query may load (the run's saved results, in characters), the pages its tables may
-#: take, the memory its sorts and joins may hold, the most characters it answers with, how many
-#: queries run at once in a process (each in a worker thread) and how long one waits its turn.
+#: What a query may load (the run's saved results, in characters), the memory its database may
+#: take (SQLite: its tables' pages; DuckDB: all of it), the longest value a SQLite query may
+#: build, the memory SQLite's sorts and joins may hold, the most characters it answers with,
+#: how many queries run at once in a process (each in a worker thread) and how long one waits
+#: its turn.
 LOAD_CHARS: Final = 64 * 1024 * 1024
 DB_BYTES: Final = 512 * 1024 * 1024
+VALUE_CHARS: Final = LOAD_CHARS
 TEMP_CACHE_BYTES: Final = 8 * 1024 * 1024
 OUTPUT_CHARS: Final = 20_000
 CONCURRENT: Final = 4
@@ -87,6 +109,8 @@ WAIT_SECONDS: Final = 60.0
 #: The most a query's tables may take to load (the run's saved results parsed), beside its
 #: own :data:`SECONDS`.
 LOAD_SECONDS: Final = 60.0
+#: How often a query's time is looked at: one past it is interrupted, again until it stops.
+INTERRUPT_SECONDS: Final = 0.05
 _RUNNING: Final = threading.BoundedSemaphore(CONCURRENT)
 DELIMITERS: Final = ",\t;|"
 #: What the authorizer admits: a SELECT, reading, a function, a recursive WITH.
@@ -94,26 +118,57 @@ _ALLOWED: Final = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
 _NAME: Final = re.compile(r"[^0-9A-Za-z_]+")
-#: Text that is a code, not a number: a leading zero before a digit (``00123``, ``-007``).
-_LEADING_ZERO: Final = re.compile(r"^[-+]?0\d")
+#: The typing rules (see the module), one text for Python's ``re`` and DuckDB's RE2: a whole
+#: number as SQL writes one, and a number — never with a leading zero before a digit
+#: (``00123``, ``-007``: a code, not a number); spaces around one are left out.
+WHOLE: Final = r"[-+]?(0|[1-9][0-9]*)"
+#: A decimal as written (digits and a point, no exponent: money), and any number.
+DECIMAL: Final = r"[-+]?((0|[1-9][0-9]*)(\.[0-9]*)?|\.[0-9]+)"
+NUMBER: Final = DECIMAL + r"([eE][-+]?[0-9]+)?"
+_WHOLE: Final = re.compile(WHOLE)
+_DECIMAL: Final = re.compile(DECIMAL)
+_NUMBER: Final = re.compile(NUMBER)
+#: The most digits a ``DECIMAL`` value has: a float keeps 15 exactly (its text read back is the
+#: same), so SQLite, which has no decimal type, can store the column ``REAL``.
+DECIMAL_DIGITS: Final = 15
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
+#: The rows DuckDB first types a table's columns by: a column with a value no number there
+#: is text, not looked at again over every row (:meth:`DuckDB._typed`).
+SAMPLE_ROWS: Final = 2_048
 
 
 def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
     """A kept result as a table: its columns and rows (see the module)."""
-    found = _json_rows(text)
+    kind, found = _shape(text)
+    if kind == "json":
+        rows = found[0]
+        columns = _keys(rows)
+        return columns, [[_cell(row.get(c)) for c in columns] for row in rows]
+    if kind == "csv":
+        read = list(csv.reader(io.StringIO(text), delimiter=found))
+        width = len(read[0])
+        return list(read[0]), [_padded(r, width) for r in read[1:] if r]
+    return ["line"], [[line] for line in found]
+
+
+def _shape(text: str, *, values: bool = True) -> tuple[str, Any]:
+    """What a kept result is, as a table (see the module): ``("json", (rows, key))`` (the key
+    of the object that holds them, ``None`` for an array; without ``values``, each row only
+    its keys: :func:`_json_rows`), ``("csv", delimiter)`` or ``("lines", lines)``."""
+    found = _json_rows(text, values=values)
     if found is not None:
-        columns = list(dict.fromkeys(k for row in found for k in row))
-        return columns, [[_cell(row.get(c)) for c in columns] for row in found]
+        return "json", found
     lines = text.splitlines()
     head = lines[0] if lines else ""
     delimiter = max(DELIMITERS, key=head.count)
     if head.count(delimiter) > 0 and len(lines) > 1:
-        read = list(csv.reader(io.StringIO(text), delimiter=delimiter))
-        width = len(read[0])
-        return list(read[0]), [_padded(r, width) for r in read[1:] if r]
-    return ["line"], [[line] for line in lines]
+        return "csv", delimiter
+    return "lines", lines
+
+
+def _keys(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    return list(dict.fromkeys(k for row in rows for k in row))
 
 
 def columns_of(text: str) -> list[str]:
@@ -142,10 +197,10 @@ def tables(runtime: Any) -> dict[str, str]:
 
 async def query(args: dict[str, Any], text: str | None = None) -> str:
     """``query_result``: the query's rows as CSV (a header line first), at most :data:`ROWS`
-    and :data:`OUTPUT_CHARS`; or what is wrong — the arguments, the path, the SQL (SQLite's own
-    words, and the tables there are). The file asked about is the table :data:`TABLE`; every
-    other result the run keeps is a table too (:func:`tables`), so one query joins and groups
-    across them — only the run's own: nothing else is ever loaded.
+    and :data:`OUTPUT_CHARS`; or what is wrong — the arguments, the path, the SQL (the engine's
+    own words, and the tables there are). The file asked about is the table :data:`TABLE`;
+    every other result the run keeps is a table too (:func:`tables`), so one query joins and
+    groups across them — only the run's own: nothing else is ever loaded.
 
     The query runs in a worker thread (the event loop never waits on it), at most
     :data:`CONCURRENT` at once in the process, on a database made for it and closed after it
@@ -199,19 +254,46 @@ async def run(file_path: str, sql: str, params: Sequence[Any] = (), text: str | 
 
 
 class _Call:
-    """One query's database while it is open, and whether its call was cancelled: a cancel
-    interrupts the database (never one closed, nor one being closed: ``lock``)."""
+    """One query's database while it is open, the time it may run until, and whether its call
+    was cancelled: a cancel, or its time running out, interrupts the database (never one
+    closed, nor one being closed: ``lock``)."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.db: sqlite3.Connection | None = None
+        self.db: Any = None
         self.cancelled = False
+        self.ends = time.monotonic() + LOAD_SECONDS
 
     def cancel(self) -> None:
         with self.lock:
             self.cancelled = True
             if self.db is not None:
                 self.db.interrupt()
+
+    def overdue(self) -> None:
+        """Interrupt the database when it is past :attr:`ends`."""
+        with self.lock:
+            if self.db is not None and time.monotonic() > self.ends:
+                self.db.interrupt()
+
+    @contextlib.contextmanager
+    def watched(self) -> Iterator[None]:
+        """While in it, a thread looks every :data:`INTERRUPT_SECONDS` whether the database is
+        past its time, and interrupts it until it stops (an interrupt may come between two
+        statements, before the next one starts)."""
+        stop = threading.Event()
+
+        def watch() -> None:
+            while not stop.wait(INTERRUPT_SECONDS):
+                self.overdue()
+
+        watcher = threading.Thread(target=watch, name="query-time", daemon=True)
+        watcher.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            watcher.join()
 
 
 def _answer(
@@ -222,27 +304,30 @@ def _answer(
     *,
     call: _Call,
 ) -> str:
-    """The query over ``texts`` (:func:`query`), in this worker thread, once its turn comes
-    (and its call was not cancelled meanwhile); ``call`` holds its database while it is open."""
+    """The query over ``texts`` (:func:`query`) on :data:`ENGINE`, in this worker thread, once
+    its turn comes (and its call was not cancelled meanwhile); ``call`` holds its database
+    while it is open."""
     if not _RUNNING.acquire(timeout=WAIT_SECONDS):
         return f"Error: the query waited {WAIT_SECONDS:g} s for others to finish: ask it again"
-    deadline = time.monotonic() + LOAD_SECONDS
-    ends = [deadline]  # what the progress handler stops at: loading's, then the query's
+    engine = ENGINE
     try:
-        with contextlib.closing(sqlite3.connect(":memory:", check_same_thread=False)) as db:
+        with engine.opened() as db:
             with call.lock:
                 if call.cancelled:
                     return "Error: cancelled"
                 call.db = db
+                call.ends = time.monotonic() + LOAD_SECONDS
             try:
-                db.set_progress_handler(lambda: int(time.monotonic() > ends[0]), 10_000)
-                _loaded(db, texts, own, deadline)
-                deadline = ends[0] = time.monotonic() + SECONDS  # the query's own, from here
-                cursor = db.execute(sql, tuple(params))
-                rows = cursor.fetchmany(ROWS + 1)
-                names = [d[0] for d in cursor.description or ()]
-            except sqlite3.Error as exc:
-                said = "took too long" if time.monotonic() > deadline else str(exc)
+                with call.watched():
+                    engine.load(db, texts, own)
+                    if time.monotonic() > call.ends:
+                        raise TimeoutError("loading the saved results took too long")
+                    call.ends = time.monotonic() + SECONDS  # the query's own, from here
+                    cursor = engine.execute(db, sql, params)
+                    rows = cursor.fetchmany(ROWS + 1)
+                    names = [d[0] for d in cursor.description or ()]
+            except (*engine.errors, TimeoutError) as exc:
+                said = "took too long" if time.monotonic() > call.ends else engine.said(exc)
                 there = "; ".join(f"{t} ({', '.join(columns_of(x))})" for t, x in texts.items())
                 return (
                     f"Error: the query failed: {said}. Only a SELECT runs, over the table "
@@ -256,7 +341,7 @@ def _answer(
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(names)
-    writer.writerows(rows[:ROWS])
+    writer.writerows([_shown(v) for v in row] for row in rows[:ROWS])
     shown = out.getvalue().rstrip("\n")
     if len(shown) > OUTPUT_CHARS:
         shown = shown[:OUTPUT_CHARS] + f"\n…[cut at {OUTPUT_CHARS} characters: aggregate more]"
@@ -265,23 +350,290 @@ def _answer(
     return shown
 
 
-def _loaded(db: sqlite3.Connection, texts: Mapping[str, str], own: str, deadline: float) -> None:
-    """``db`` (in memory) holding each of ``texts`` as a table (by its name), the view
-    :data:`TABLE` on ``own``, read-only from then on (the authorizer); its tables' pages at most
-    :data:`DB_BYTES`, its sorts' and joins' memory :data:`TEMP_CACHE_BYTES`; its
-    loading within ``deadline`` (``time.monotonic``)."""
-    for name, arguments, aggregate in AGGREGATES:
-        db.create_aggregate(name, arguments, aggregate)
-    size = int(db.execute("PRAGMA page_size").fetchone()[0])
-    db.execute(f"PRAGMA main.max_page_count = {DB_BYTES // size}")
-    db.execute(f"PRAGMA temp.cache_size = -{TEMP_CACHE_BYTES // 1024}")
-    for name, text in texts.items():
-        _table(db, name, text)
-    db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
-    db.commit()
-    if time.monotonic() > deadline:
-        raise sqlite3.OperationalError("loading the saved results took too long")
-    db.set_authorizer(lambda action, *_: 0 if action in _ALLOWED else 1)  # 1: SQLITE_DENY
+def _shown(value: Any) -> Any:
+    """A cell of an answer as it is written: a boolean as SQL and JSON write it (DuckDB has
+    them; SQLite's are 0 and 1); a number with a fraction — a float, or DuckDB's decimal — as
+    SQLite writes a ``REAL`` (``%!.15g``: 15 significant digits, a whole one with ``.0``), so
+    the binary tail of a sum, a product or a ratio (``59.970000000000006``) is not read as a
+    figure, and both engines write a figure alike."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Decimal):
+        value = float(value)
+    if not isinstance(value, float):
+        return value
+    shown = format(value, ".15g")
+    return f"{shown}.0" if shown.lstrip("-").isdigit() else shown
+
+
+class Engine(Protocol):
+    """What runs a query (:data:`ENGINE`): a database made for one call, its tables loaded from
+    the run's saved results and read-only from then on, one ``SELECT`` over them."""
+
+    #: As the tool's description names it, so the model writes its dialect.
+    name: str
+
+    @property
+    def errors(self) -> tuple[type[Exception], ...]:
+        """What a refused or failed query raises (an interrupted one too)."""
+        ...
+
+    def opened(self) -> contextlib.AbstractContextManager[Any]:
+        """A database for one call, closed at the end; its ``interrupt()`` stops what it runs."""
+        ...
+
+    def load(self, db: Any, texts: Mapping[str, str], own: str) -> None:
+        """Each of ``texts`` as a table (by its name), the view :data:`TABLE` on ``own``, then
+        nothing but reading."""
+        ...
+
+    def execute(self, db: Any, sql: str, params: Sequence[Any]) -> Any:
+        """``sql`` run: a cursor (``fetchmany``, ``description``); only one ``SELECT``."""
+        ...
+
+    def said(self, exc: Exception) -> str:
+        """What a failed query says to the model."""
+        ...
+
+
+class SQLite:
+    """The fallback, with no dependency: Python's own ``sqlite3``, the cells typed and loaded
+    in Python, the statistics it lacks as Python aggregates (:data:`AGGREGATES`), an
+    authorizer admitting only reading."""
+
+    name = "SQLite"
+    errors: tuple[type[Exception], ...] = (sqlite3.Error,)
+
+    @contextlib.contextmanager
+    def opened(self) -> Iterator[sqlite3.Connection]:
+        with contextlib.closing(sqlite3.connect(":memory:", check_same_thread=False)) as db:
+            yield db
+
+    def load(self, db: sqlite3.Connection, texts: Mapping[str, str], own: str) -> None:
+        """Its tables' pages at most :data:`DB_BYTES`, a value :data:`VALUE_CHARS`, its sorts'
+        and joins' memory :data:`TEMP_CACHE_BYTES`."""
+        for name, arguments, aggregate in AGGREGATES:
+            db.create_aggregate(name, arguments, aggregate)
+        size = int(db.execute("PRAGMA page_size").fetchone()[0])
+        db.execute(f"PRAGMA main.max_page_count = {DB_BYTES // size}")
+        db.execute(f"PRAGMA temp.cache_size = -{TEMP_CACHE_BYTES // 1024}")
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, VALUE_CHARS)
+        decimal = False
+        for name, text in texts.items():
+            decimal = _table(db, name, text) or decimal
+        if decimal:  # its sums exact, as written (a window's too): SQLite has no decimal type
+            for name, made in EXACT:
+                db.create_window_function(name, 1, made)
+        db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
+        db.commit()
+        db.set_authorizer(lambda action, *_: 0 if action in _ALLOWED else 1)  # 1: SQLITE_DENY
+
+    def execute(self, db: sqlite3.Connection, sql: str, params: Sequence[Any]) -> sqlite3.Cursor:
+        return db.execute(sql, tuple(params))
+
+    def said(self, exc: Exception) -> str:
+        return str(exc)
+
+
+#: DuckDB's names for the documented functions it spells otherwise (see the module).
+MACROS: Final = (
+    "CREATE MACRO percentile_cont(x, p) AS quantile_cont(x, p)",
+    # SQLite's: days since noon UTC on 24 November 4714 BC, from an ISO date or time
+    "CREATE MACRO julianday(d) AS epoch(CAST(d AS TIMESTAMP)) / 86400 + 2440587.5",
+)
+
+
+class DuckDB:
+    """The engine when the ``query`` extra is installed: each saved result written to a private
+    temporary file and read by DuckDB's own CSV and JSON readers, every column as text, then
+    typed by the module's rules in one SQL pass (:meth:`_typed`); then locked (see the
+    module). DuckDB itself is imported at the first query."""
+
+    name = "DuckDB"
+
+    @cached_property
+    def duckdb(self) -> Any:
+        return importlib.import_module("duckdb")
+
+    @property
+    def errors(self) -> tuple[type[Exception], ...]:
+        return (self.duckdb.Error,)
+
+    @contextlib.contextmanager
+    def opened(self) -> Iterator[Any]:
+        config = {
+            "memory_limit": f"{DB_BYTES // 2**20}MiB",
+            "temp_directory": "",  # never spilled to disk: the memory limit holds
+            "autoinstall_known_extensions": False,
+            "autoload_known_extensions": False,
+        }
+        with contextlib.closing(self.duckdb.connect(":memory:", config=config)) as db:
+            yield db
+
+    def load(self, db: Any, texts: Mapping[str, str], own: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
+            for n, (name, text) in enumerate(texts.items()):
+                self._typed(db, name, self._read(db, os.path.join(folder, str(n)), text))
+        for macro in MACROS:
+            db.execute(macro)
+        db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
+        db.execute("SET enable_external_access = false")
+        db.execute("SET lock_configuration = true")
+
+    def _read(self, db: Any, path: str, text: str) -> list[str]:
+        """``text`` as the table ``raw``, every column ``VARCHAR`` (an empty cell ``NULL``),
+        read by DuckDB's own reader from ``path`` (written here: the text, or its lines as
+        CSV); its columns (:func:`column_names`). Its shape is :func:`_shape`'s."""
+        kind, found = _shape(text, values=False)  # DuckDB reads the values
+        file = _quoted(path)
+        with open(path, "w", encoding="utf-8", errors="replace", newline="") as out:
+            if kind == "lines":
+                csv.writer(out).writerows([["line"], *([line] for line in found)])
+            else:
+                out.write(text)
+        if kind == "json":  # a string as its text, a number as written, a nested value as JSON
+            rows, key = found
+            keys = _keys(rows)
+            names = column_names(keys)
+            largest = f"maximum_object_size = {len(text) + 1}"
+            if key is None:  # an array of objects: one record each
+                spec = ", ".join(f"{_quoted(k)}: 'VARCHAR'" for k in keys)
+                source = (
+                    f"read_json({file}, format = 'array', records = true, "
+                    f"columns = {{{spec}}}, {largest})"
+                )
+                cells = [_name(k) for k in keys]
+            else:  # an object holding the array: its rows unnested
+                fields = _quoted(f"STRUCT({', '.join(f'{_name(k)} VARCHAR' for k in keys)})[]")
+                source = (
+                    f"(SELECT unnest({_name(key)}) AS r FROM read_json({file}, records = true, "
+                    f"columns = {{{_quoted(key)}: {fields}}}, {largest}))"
+                )
+                cells = [f"struct_extract(r, {_quoted(k)})" for k in keys]
+            listed = ", ".join(
+                f"NULLIF({c}, '') AS {_name(n)}" for c, n in zip(cells, names, strict=True)
+            )
+            db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
+            return names
+        if kind == "csv":
+            names = column_names(next(csv.reader(io.StringIO(text), delimiter=found)))
+            spec = ", ".join(f"{_quoted(n)}: 'VARCHAR'" for n in names)
+            # as Python's csv reads it: short rows padded, long ones cut, blank lines skipped
+            source = (
+                f"read_csv({file}, delim = {_quoted(found)}, header = true, quote = '\"', "
+                f"escape = '\"', columns = {{{spec}}}, auto_detect = false, "
+                f"null_padding = true, strict_mode = false, parallel = false, "
+                f"max_line_size = {max(len(text), 2**21)})"
+            )
+        else:  # one row per line
+            names = ["line"]
+            source = (
+                f"read_csv({file}, header = true, columns = {{'line': 'VARCHAR'}}, "
+                f"auto_detect = false, max_line_size = {max(len(text), 2**21)})"
+            )
+        listed = ", ".join(f"NULLIF({_name(n)}, '') AS {_name(n)}" for n in names)
+        db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
+        return names
+
+    def _typed(self, db: Any, name: str, columns: Sequence[str]) -> None:
+        """The table ``name`` from ``raw`` (dropped after), each column typed by the module's
+        rules (:func:`_number`), counted in one pass over every row — only the columns still
+        numbers in its first :data:`SAMPLE_ROWS` — then cast."""
+        kinds: dict[str, str | None] = dict.fromkeys(columns, "")
+        for rows in (f"(SELECT * FROM raw LIMIT {SAMPLE_ROWS})", "raw"):
+            asked = [c for c in columns if kinds[c] is not None]
+            if not asked:
+                break
+            counts = db.execute(f"SELECT {', '.join(map(_counted, asked))} FROM {rows}").fetchone()
+            for n, column in enumerate(asked):
+                present, whole, decimal, number, digits, scale = counts[6 * n : 6 * n + 6]
+                if number < present or (rows == "raw" and not present):
+                    kinds[column] = None
+                elif whole == present:
+                    kinds[column] = "BIGINT"
+                elif decimal == present:  # exact, as written: money adds up
+                    kinds[column] = f"DECIMAL({max(digits + scale, 1)}, {scale})"
+                else:
+                    kinds[column] = "DOUBLE"
+        cast = [
+            f"CAST({_name(c)} AS {kinds[c]}) AS {_name(c)}" if kinds[c] else _name(c)
+            for c in columns
+        ]
+        db.execute(f"CREATE TABLE {_name(name)} AS SELECT {', '.join(cast)} FROM raw")
+        db.execute("DROP TABLE raw")
+
+    def execute(self, db: Any, sql: str, params: Sequence[Any]) -> Any:
+        duckdb = self.duckdb
+        statements = duckdb.extract_statements(sql)
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise duckdb.PermissionException("not authorized: only one SELECT runs")
+        return db.execute(sql, list(params))
+
+    def said(self, exc: Exception) -> str:
+        return str(exc).split("\n\nLINE ")[0]  # its pointer under the SQL left out
+
+
+def _counted(column: str) -> str:
+    """In SQL, over a text column: how many values it has, how many are whole numbers, how
+    many decimals (:func:`_decimal`), how many numbers (:func:`_number`'s rules; DuckDB's
+    casts allow the spaces around one), and the decimals' most digits before the point and
+    after it."""
+    text = f"trim({_name(column)})"
+    whole = f"regexp_full_match({text}, {_quoted(WHOLE)})"
+    fits = f"TRY_CAST({text} AS BIGINT) IS NOT NULL"
+    number = (
+        f"regexp_full_match({text}, {_quoted(NUMBER)}) AND isfinite(TRY_CAST({text} AS DOUBLE))"
+    )
+    short = f"length({text}) <= {NUMBER_CHARS}"
+    digits = f"length(ltrim(regexp_replace({text}, '[^0-9]', '', 'g'), '0'))"
+    decimal = (
+        f"{short} AND regexp_full_match({text}, {_quoted(DECIMAL)}) "
+        f"AND {digits} <= {DECIMAL_DIGITS}"
+    )
+    before = f"length(ltrim(split_part(ltrim({text}, '+-'), '.', 1), '0'))"
+    after = f"length(split_part({text}, '.', 2))"
+    return (
+        f"count({_name(column)}), count(*) FILTER ({short} AND {whole} AND {fits}), "
+        f"count(*) FILTER ({decimal}), "
+        f"count(*) FILTER ({short} AND (CASE WHEN {whole} THEN {fits} ELSE {number} END)), "
+        f"coalesce(max({before}) FILTER ({decimal}), 0), "
+        f"coalesce(max({after}) FILTER ({decimal}), 0)"
+    )
+
+
+def _quoted(text: str) -> str:
+    """``text`` as a SQL string."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _name(text: str) -> str:
+    """``text`` as a SQL name."""
+    return '"' + text.replace('"', '""') + '"'
+
+
+def chosen() -> Engine:
+    """The engine this process has: DuckDB when it can be imported (the ``query`` extra),
+    else SQLite."""
+    return DuckDB() if importlib.util.find_spec("duckdb") is not None else SQLite()
+
+
+#: What every query runs on (:func:`chosen`).
+ENGINE: Engine = chosen()
+
+
+def description(engine: Engine) -> str:
+    """``query_result``'s description on ``engine``: it names the engine, whose SQL the model
+    writes."""
+    return (
+        f"Runs a read-only SQL query ({engine.name}) over every row of a large tool result that "
+        f"was saved to a file: the rows are the table {TABLE} (the tool message names its path; "
+        f"SELECT * FROM {TABLE} LIMIT 3 shows its columns). "
+        "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
+        "instead of reading them page by page: the answer is computed over all of them, exactly."
+    )
+
+
+QUERY_RESULT_DESCRIPTION: Final = description(ENGINE)
 
 
 class _Values:
@@ -388,41 +740,129 @@ AGGREGATES: Final[tuple[tuple[str, int, type], ...]] = (
 )
 
 
-def _table(db: sqlite3.Connection, name: str, text: str) -> None:
-    """``text`` as the table ``name``: typed columns (see the module), its rows."""
+class _ExactSum:
+    """``sum``, ``total`` and ``avg`` as SQLite means them — over the numbers of a group or a
+    window frame — added up in Python's ``decimal``, each ``REAL`` by its shortest text: a
+    ``DECIMAL`` column's values as written, so two-decimal money adds up to its decimal figure
+    (SQLite's own compensated sum still ends ``…149999999998`` or ``…99999992``). A text that
+    is no number counts as 0, as in SQLite."""
+
+    def __init__(self) -> None:
+        self.added = Decimal(0)
+        self.count = 0
+        self.fractional = 0  # the values added that were not whole numbers
+
+    @staticmethod
+    def _of(value: Any) -> Decimal | None:
+        if value is None or isinstance(value, int):
+            return None if value is None else Decimal(value)
+        if isinstance(value, float):
+            return Decimal(repr(value))
+        with contextlib.suppress(ArithmeticError):
+            return Decimal(str(value).strip())
+        return Decimal(0)
+
+    def step(self, value: Any) -> None:
+        found = self._of(value)
+        if found is not None:
+            self.added += found
+            self.count += 1
+            self.fractional += not isinstance(value, int)
+
+    def inverse(self, value: Any) -> None:
+        found = self._of(value)
+        if found is not None:
+            self.added -= found
+            self.count -= 1
+            self.fractional -= not isinstance(value, int)
+
+    def finalize(self) -> Any:
+        return self.value()
+
+    def value(self) -> Any:
+        if not self.count:
+            return None
+        return float(self.added) if self.fractional else int(self.added)
+
+
+class _ExactTotal(_ExactSum):
+    def value(self) -> Any:
+        return float(self.added)
+
+
+class _ExactAvg(_ExactSum):
+    def value(self) -> Any:
+        return float(self.added / self.count) if self.count else None
+
+
+#: The sums a query over a ``DECIMAL`` column computes exactly, in place of SQLite's own.
+EXACT: Final[tuple[tuple[str, type], ...]] = (
+    ("sum", _ExactSum),
+    ("total", _ExactTotal),
+    ("avg", _ExactAvg),
+)
+
+
+#: How a kind is stored in SQLite: it has no decimal type (:data:`EXACT` adds its values up).
+_STORED: Final = {"DECIMAL": "REAL"}
+
+
+def _table(db: sqlite3.Connection, name: str, text: str) -> bool:
+    """``text`` as the table ``name`` in SQLite: typed columns (see the module; a ``DECIMAL``
+    one stored ``REAL``), its rows; whether one of its columns is ``DECIMAL``."""
     columns, rows = rows_of(text)
     names = column_names(columns)
     kinds = [_kind([r[n] for r in rows]) for n in range(len(names))]
-    typed = ", ".join(f'"{n}" {k}' for n, k in zip(names, kinds, strict=True))
+    typed = ", ".join(f'"{n}" {_STORED.get(k, k)}' for n, k in zip(names, kinds, strict=True))
     db.execute(f'CREATE TABLE "{name}" ({typed})')
     marks = ", ".join("?" for _ in names)
     db.executemany(f'INSERT INTO "{name}" VALUES ({marks})', [_typed(r, kinds) for r in rows])
+    return "DECIMAL" in kinds
 
 
-def _json_rows(text: str) -> list[Mapping[str, Any]] | None:
+def _json_rows(
+    text: str, *, values: bool = True
+) -> tuple[Sequence[Mapping[str, Any]] | Sequence[tuple[str, ...]], str | None] | None:
     """The rows of a JSON result: an array of objects, or the first such array an object
-    holds (``{"items": [...]}``); ``None`` when it is no such JSON."""
+    holds (``{"items": [...]}``), with that key (``None`` for an array); ``None`` when it is
+    no such JSON. Without ``values``, each row is only its keys (one tuple for rows alike), for
+    a reader that reads the values itself: a fraction of the memory of the rows as dicts."""
+    last: list[Any] = [None]  # the pairs of the object read last: the outermost one at the end
+    alike: dict[tuple[str, ...], _Keys] = {}
+
+    def keys(pairs: list[tuple[str, Any]]) -> _Keys:
+        last[0] = pairs
+        found = _Keys(k for k, _ in pairs)
+        return alike.setdefault(found, found)
+
     try:
-        found = json.loads(text)
+        found = json.loads(text) if values else json.loads(text, object_pairs_hook=keys)
     except ValueError:
         return None
-    if isinstance(found, dict):
-        found = next((v for v in found.values() if _objects(v)), None)
-    return found if _objects(found) else None
+    kind = dict if values else _Keys
+    if isinstance(found, kind):
+        pairs = dict(found if isinstance(found, dict) else last[0])
+        key = next((k for k, v in pairs.items() if _objects(v, kind)), None)
+        return None if key is None else (pairs[key], key)
+    return (found, None) if _objects(found, kind) else None
 
 
-def _objects(value: Any) -> bool:
-    return isinstance(value, list) and bool(value) and all(isinstance(v, dict) for v in value)
+class _Keys(tuple[str, ...]):
+    """A JSON object read for its keys only (:func:`_json_rows` without values)."""
+
+
+def _objects(value: Any, kind: type = dict) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(v, kind) for v in value)
 
 
 def _cell(value: Any) -> Any:
     """A JSON value as a cell: a number or text as it is (a whole number past SQLite's 64 bits
-    as its digits), anything else its JSON text."""
+    as its digits), anything else its JSON text, compact (as DuckDB writes it)."""
     if isinstance(value, int) and not isinstance(value, bool) and not _number(value, whole=True):
         return str(value)
     if value is None or (isinstance(value, str | int | float) and not isinstance(value, bool)):
         return value
-    return json.dumps(value)
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
 def _padded(row: Sequence[str], width: int) -> list[str | None]:
@@ -441,32 +881,47 @@ def column_names(columns: Sequence[str]) -> list[str]:
 
 
 def _kind(values: Sequence[Any]) -> str:
-    """``INTEGER`` when every value is a whole number, ``REAL`` a number, else ``TEXT``."""
+    """``INTEGER`` when every value is a whole number, ``DECIMAL`` a decimal as written
+    (:func:`_decimal`), ``REAL`` a number, else ``TEXT``."""
     present = [v for v in values if v not in (None, "")]
     if present and all(_number(v, whole=True) for v in present):
         return "INTEGER"
+    if present and all(_decimal(v) for v in present):
+        return "DECIMAL"
     if present and all(_number(v, whole=False) for v in present):
         return "REAL"
     return "TEXT"
 
 
+def _decimal(value: Any) -> bool:
+    """Whether a cell is a decimal as written (:data:`DECIMAL`: digits and a point, no
+    exponent, a JSON number by its shortest text) of at most :data:`DECIMAL_DIGITS` digits,
+    so a float keeps it exactly and its text reads back the same. DuckDB applies the same rule
+    in SQL (:func:`_counted`)."""
+    text = repr(value) if isinstance(value, float) else str(value).strip(" ")
+    if len(text) > NUMBER_CHARS or not _DECIMAL.fullmatch(text):
+        return False
+    return len(text.lstrip("+-").replace(".", "").lstrip("0")) <= DECIMAL_DIGITS
+
+
 def _number(value: Any, *, whole: bool) -> bool:
-    """Whether a cell (text, or a JSON number: a JSON true is its text) is a number SQLite
-    keeps exactly: a whole one within 64 bits, a finite one — never text a number would change
-    (a code with a leading zero, ``00123``; a run of digits too long for one; an id past 64
-    bits, which a ``REAL`` would round)."""
+    """Whether a cell (text, or a JSON number: a JSON true is its text) is a number the
+    engine keeps exactly: a whole one within 64 bits, a finite one — never text a number would
+    change (a code with a leading zero, ``00123``; a run of digits too long for one; an id
+    past 64 bits, which a ``REAL`` would round), nor one SQL would not read as a number
+    (:data:`WHOLE`, :data:`NUMBER`). DuckDB applies the same rules in SQL
+    (``DuckDB._typed``)."""
     if isinstance(value, int):
         return -(2**63) <= value < 2**63
     if isinstance(value, float):
         return not whole and math.isfinite(value)
-    text = str(value).strip()
-    if _LEADING_ZERO.match(text) or len(text) > NUMBER_CHARS:
+    text = str(value).strip(" ")
+    if len(text) > NUMBER_CHARS:
         return False
-    # read as a whole number first: one past 64 bits stays its text, never a rounded REAL
-    for read in (int,) if whole else (int, float):
-        with contextlib.suppress(ValueError):
-            return _number(read(text), whole=whole)
-    return False
+    # a whole number first: one past 64 bits stays its text, never a rounded REAL
+    if _WHOLE.fullmatch(text):
+        return _number(int(text), whole=whole)
+    return not whole and bool(_NUMBER.fullmatch(text)) and math.isfinite(float(text))
 
 
 def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:
@@ -476,9 +931,9 @@ def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:
         if value in (None, ""):
             out.append(None)
         elif kind == "INTEGER":
-            out.append(int(str(value).strip()))
-        elif kind == "REAL":
-            out.append(float(str(value).strip()))
+            out.append(int(str(value).strip(" ")))
+        elif kind in ("REAL", "DECIMAL"):
+            out.append(float(str(value).strip(" ")))
         else:
             out.append(value)
     return out

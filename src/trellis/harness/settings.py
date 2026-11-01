@@ -2,10 +2,10 @@
 is in ``.env.example``): where the models are and how they are reached (``LLM_BASE_URL``,
 ``LLM_API_KEY``, ``LLM_GATEWAY``, ``LLM_AUTH``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), where the
 services are and the key they are reached with (``MEMORY_URL``, ``TRELLIS_API_KEY``,
-``RUNS_URL``) and where undelivered writes are kept (``TRELLIS_SPOOL_DIR``). Each setting
-lives in exactly one layer:
+``RUNS_URL``), where undelivered writes are kept (``TRELLIS_SPOOL_DIR``) and where the files
+runs make for their users are (``TRELLIS_FILES_URL``). Each setting lives in exactly one layer:
 
-* **the environment** — what differs per deployment: the nine above. The tools' own variables
+* **the environment** — what differs per deployment: the ten above. The tools' own variables
   are read by their own SDKs, or under their own names, never mirrored here: ``OTEL_*`` (the
   OpenTelemetry SDK; ``service.version`` in ``OTEL_RESOURCE_ATTRIBUTES`` is the agents'
   version), ``LANGFUSE_*`` (its scores, datasets and — with no OpenTelemetry exporter variable
@@ -67,6 +67,7 @@ VARIABLES: Final = {
     "runs_url": "RUNS_URL",
     "judge_virtual_key": "TRELLIS_JUDGE_VIRTUAL_KEY",
     "spool_dir": "TRELLIS_SPOOL_DIR",
+    "files_url": "TRELLIS_FILES_URL",
 }
 
 
@@ -101,6 +102,10 @@ class Settings(BaseModel):
     #: The virtual key the judge's calls go through — its own budget, rate limits and models
     #: in Bifrost, so evaluation spend never exhausts the agents'; unset: ``LLM_API_KEY``.
     judge_virtual_key: str | None = None
+    #: Where the files runs make for their users are kept (``files.FileStore``): an fsspec URL
+    #: — ``gs://bucket/prefix``, ``s3://...``, ``az://...``, ``file:///path``; unset, the XDG
+    #: data folder (:func:`default_files_url`).
+    files_url: str | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -129,6 +134,15 @@ def service_version(environ: Mapping[str, str]) -> str | None:
     format for it (``k=v,k2=v2``, values URL-encoded) — what ``Resource.create()`` reads."""
     attributes = parse_headers(environ.get("OTEL_RESOURCE_ATTRIBUTES", ""))
     return attributes.get("service.version") or None
+
+
+def default_files_url(environ: Mapping[str, str] | None = None) -> str:
+    """Where files are kept when ``TRELLIS_FILES_URL`` is unset: the XDG data folder,
+    ``$XDG_DATA_HOME/trellis/files``, else ``~/.local/share/trellis/files`` (a ``file://``
+    URL). Nothing is made until a file is kept."""
+    env = os.environ if environ is None else environ
+    base = env.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return (Path(base) / "trellis" / "files").as_uri()
 
 
 def default_spool(environ: Mapping[str, str]) -> str | None:
