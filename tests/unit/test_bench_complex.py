@@ -350,6 +350,27 @@ def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_u
     }  # fmt: skip
 
 
+def test_an_export_the_run_saved_for_the_user_is_no_made_up_file() -> None:
+    """``query_result`` saves a result as a file for the user (#97): an answer naming the file
+    the run's tool said it saved did what was asked; a file the run never saved is still made up."""
+    case = next(c for c in breakfix.cases() if c.id == "bf2-mixed-04")
+    expect = case.turns[0].expect
+    assert expect is not None
+    saved = (
+        "Saved store_S14_sales_2026.csv for the user: 1077 rows, 36470 bytes; the chat shows "
+        "its download link. Its first rows:\ndate,store,sku,units,revenue"
+    )
+    answer = (
+        "The CSV of every 2026 sales line for store S14 is ready: **store_S14_sales_2026.csv**, "
+        "with 1,077 rows. The download link is in the chat."
+    )
+    question = case.turns[0].text
+    assert cx.score(expect, answer, [], question, saved)["correct"]
+    assert not cx.score(expect, answer, [], question, "")["correct"]  # nothing was saved
+    other = answer.replace("store_S14_sales_2026.csv", "s14.csv")
+    assert not cx.score(expect, other, [], question, saved)["correct"]  # not that file
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",

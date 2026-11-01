@@ -2595,6 +2595,9 @@ def cases() -> tuple[Case, ...]:
 
 # --------------------------------------------------------------------------- scoring
 _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
+#: A file the run saved for its user, as ``query_result``'s tool message says it (#97): an export
+#: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
+_SAVED: Final = re.compile(r"\bSaved (\S+) for the user\b")
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
 _CANNOT: Final = re.compile(
     r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
@@ -2829,6 +2832,8 @@ def score(
             int(n) for n in numbers(a) if n == int(n)
         ]:
             missing.append(f"count {len(held.get('calls', []))}")
+    elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
+        pass  # done after all: the file the run saved for the user (``query_result``, #97)
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
