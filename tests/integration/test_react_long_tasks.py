@@ -13,12 +13,15 @@ from typing import Any
 import pytest
 from deepagents import create_deep_agent
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
+from trellis.harness import middleware
 from trellis.harness.automatic import LONG_AFTER, MIN_WINDOW, SCRATCH, TASK, JournalBackend
+from trellis.harness.middleware import SCRATCH_NOTE
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
 
@@ -167,6 +170,59 @@ async def test_scratch_files_are_written_edited_listed_and_read(harness: Harness
     assert "a-1: 7" in read and "café ☃" in read
     assert "not found" in result_of(model.seen[5])
     assert "traversal" in result_of(model.seen[6]).lower()
+
+
+async def test_a_scratch_file_written_says_the_user_cannot_open_it(harness: Harness) -> None:
+    """A file a write puts in the graph's own state is the run's scratch copy: the model is
+    told so where its path is, not to hand it over (break-and-fix round 1: asked for a chart, a
+    model saved an SVG at /tmp/... and told the user to open it)."""
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "/chart.svg", "content": "<svg/>"}),
+            ("edit_file", {"file_path": "/chart.svg", "old_string": "/", "new_string": " /"}),
+            ("read_file", {"file_path": "/chart.svg"}),
+            "done",
+        ]
+    )
+    agent = arm(
+        harness.wrap(ReAct("s", model, backend=JournalBackend(), context_window=ROOM), id="svg"),
+        [stock],
+    )
+    assert (await agent.run(STEPS + "chart it", user="u")).answer == "done"
+    assert SCRATCH_NOTE in result_of(model.seen[1])  # the run's first write says it
+    assert SCRATCH_NOTE not in result_of(model.seen[2])  # once a run: the history keeps it
+    assert SCRATCH_NOTE not in result_of(model.seen[3])  # a read says nothing of the kind
+
+
+async def test_a_deep_agents_state_write_says_it_and_a_failed_one_does_not(
+    harness: Harness,
+) -> None:
+    """Deep Agents' own state backend answers a write with a Command (the files and the
+    message): its message says it; a write that failed says nothing, and the next one does."""
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "../escape.md", "content": "x"}),
+            ("write_file", {"file_path": "/chart.svg", "content": "<svg/>"}),
+            "done",
+        ]
+    )
+    agent = harness.wrap(create_deep_agent(model=model, tools=[]), id="da-svg")
+    assert (await agent.run("chart it", user="u")).answer == "done"
+    assert SCRATCH_NOTE not in result_of(model.seen[1])  # refused: nothing written
+    assert SCRATCH_NOTE in result_of(model.seen[2])
+
+
+def test_a_writes_command_says_it_on_its_message_and_a_failed_one_is_left() -> None:
+    """Deep Agents' state backend answers a write with a Command (the files and the message)."""
+    said = ToolMessage("Updated file /a.md", tool_call_id="c1")
+    noted = middleware._scratch_noted(Command(update={"files": {}, "messages": [said]}))
+    assert isinstance(noted, Command) and isinstance(noted.update, dict)
+    assert noted.update["files"] == {}
+    assert noted.update["messages"][0].content.endswith(SCRATCH_NOTE)
+    failed = Command(update={"messages": [ToolMessage("no", tool_call_id="c2", status="error")]})
+    assert middleware._scratch_noted(failed) is failed
+    files = Command(update={"files": {"/a.md": "x"}})
+    assert middleware._scratch_noted(files) is files
 
 
 async def test_files_are_kept_across_a_pause(harness: Harness) -> None:

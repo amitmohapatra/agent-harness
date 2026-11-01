@@ -118,7 +118,8 @@ def test_a_model_node_of_another_shape_is_said_once(caplog: pytest.LogCaptureFix
 def test_the_stall_look_back_reads_only_the_latest_turn() -> None:
     messages = conversation(500)
     ahead = Ahead(messages, start=len(messages) - 3)
-    assert mw._failing(ahead) == 1
+    assert mw._failing(ahead) == 0  # one failing step, its failure not met again (Ahead: no
+    # message before the latest turn is read)
     assert [len(s) for s in mw._steps(ahead)] == [1]
 
 
@@ -211,5 +212,7 @@ def test_a_text_reply_or_a_note_in_the_turn_changes_nothing(monkeypatch: Any) ->
         LLMResult(generations=[[Generation(text="x")]]), run_id=uuid.uuid4()
     )
     assert accounted == []  # a completion model's text reply carries no chat usage
-    noted = [*conversation(1), SystemMessage(content="a note")]
-    assert mw._failing(noted) == 1
+    again = {"name": "t", "args": {"n": 9}, "id": "again"}
+    failed = ToolMessage("bad", tool_call_id="again", status="error")  # the same failure
+    noted = [*conversation(1), AIMessage(content="", tool_calls=[again]), failed]
+    assert mw._failing([*noted, SystemMessage(content="a note")]) == 2
