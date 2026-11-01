@@ -97,6 +97,19 @@ async def test_a_10000_row_result_is_kept_and_read_to_its_last_row(harness: Harn
     assert "SKU-10000,0,90000" in page and "SKU-09995" in page, page[:300]
 
 
+async def test_a_kept_result_says_it_is_the_runs_own_copy_not_a_file_for_the_user(
+    harness: Harness,
+) -> None:
+    """The stub names a path in the run's own store: the model is told the user cannot open
+    it (break-and-fix round 1: asked for an Excel export, a model told the user the rows were
+    "saved as CSV at /large_tool_results/..., open it in Excel")."""
+    model = ScriptedChat([("inventory", {}), "done"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="own"), [inventory])
+    await agent.run("export every SKU to a file I can download", user="u")
+    preview = last(model.requests[1])
+    assert results.PRIVATE in preview, preview[-600:]
+
+
 async def test_every_row_of_a_kept_result_is_reachable_page_by_page(harness: Harness) -> None:
     script = Reader(("inventory", {}))
     model = ScriptedChat(script=script)
@@ -243,7 +256,9 @@ async def test_the_stub_names_the_table_and_its_columns_before_the_preview(
     assert (await agent.run("x", user="u")).status is RunStatus.SUCCESS
     stub = last(model.requests[1])
     # its table named by its tool: one query joins it with the run's other saved results
-    said = results.QUERY.format(table="inventory", columns="sku, stock, revenue", path=KEPT)
+    said = results.QUERY.format(
+        table="inventory", columns="sku, stock, revenue", path=KEPT, private=results.PRIVATE
+    )
     assert said in stub and stub.index(said) < stub.index("Here is a preview")
     assert {"read_file", "query_result"} <= set(names(model.requests[1]))
     assert "query_result" not in names(model.requests[0])
@@ -486,7 +501,9 @@ async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand
     assert result.status is RunStatus.SUCCESS, result.error
     told = last(model.requests[1])
     assert told.startswith(LINES)  # every row, as it came
-    said = results.QUERY.format(table="sales_lines", columns="date, sku, units", path=LINES_KEPT)
+    said = results.QUERY.format(
+        table="sales_lines", columns="date, sku, units", path=LINES_KEPT, private=results.PRIVATE
+    )
     assert said in told and "300 rows" in told
     assert "query_result" in names(model.requests[1])
     assert last(model.requests[2]).splitlines()[1] == "41"

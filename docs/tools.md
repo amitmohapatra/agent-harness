@@ -105,7 +105,10 @@ should check, the journal keeps that, and the call is never run again blind.
 A result longer than 80,000 characters (20,000 tokens) is not what the model reads: it is
 saved as a file, and the model reads where (`/large_tool_results/<id>`) with a head-and-tail
 preview, then pages the rest with `read_file` (`file_path`, `offset` the line to start from,
-`limit` the most lines). One convention everywhere, automatic, nothing to configure:
+`limit` the most lines). The note with it says the path is the run's own working copy, for
+`read_file` and `query_result`: the user cannot open or download it, so the model does not
+offer it as an export (`results.PRIVATE`). One convention everywhere, automatic, nothing to
+configure:
 
 | Target | Who cuts | Where the whole result is kept |
 |---|---|---|
