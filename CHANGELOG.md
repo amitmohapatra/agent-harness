@@ -196,6 +196,17 @@ own model work follows the harness's configuration.
   killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
   says whether the sandbox can install it (no network: use the standard library). In
   `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
+- A sandbox's files for the user: the command tool says that files written in `outputs/` are
+  given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
+  store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
+  sandbox is deleted.
+
+- The sandbox's environment card: `sandbox_exec`, and Deep Agents' `execute` under
+  `ReAct(backend=sandbox())`, are described with the image's Python version and installed
+  distributions, and with no network, that nothing else can be installed
+  (`SandboxSource.card`). The card is read once per process in a sandbox made for it alone.
+  [sandbox.md](docs/sandbox.md) has an image recipe that installs from your index
+  (`PIP_INDEX_URL`, `UV_INDEX_URL`, a build secret for credentials).
 
 - AG-UI parity with CopilotKit-style clients (`frontend.py`): the request's `tools` are offered
   to the model beside the agent's own (one of the agent's by the same name wins, with a
