@@ -345,7 +345,9 @@ one step: the reads at once, the writes one at a time in the model's order —
   again. Do not call tools: answer now with what you have, and say what went wrong.` — the text
   `StallGuard` tells the model on a stall (`bridge.STALLED`) — (a
   `stalled` warning on the run's stream, once). `ReAct` and a graph with `middleware()` stop
-  the loop a step earlier, in `StallGuard`.
+  the loop a step earlier, in `StallGuard`. OpenAI Agents, which offers its tools per turn,
+  offers none on the turn after (`bridge.stalled`), so the model's reply is the run's answer,
+  as `StallGuard`'s last call.
 * Identical calls made at once that are not one step's repeats (a function's
   `asyncio.gather`, a framework's step the harness does not read) take their turn: one
   runs, then the next, in the order they were made, so each has its own occurrence in the
