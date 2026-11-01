@@ -258,6 +258,13 @@ seconds; a `Result`). Cancel the run with `agent.cancel(handle.id)`.
 `run_id`, `status` (`SUCCESS`, `PAUSED`, `ERROR`, `TIMEOUT`, `QUEUED`, `CANCELLED`), `answer`,
 `interrupt` (a contracts `Interrupt` when paused), `error` (a contracts `AgentError`).
 
+## Citation
+
+`Citation(name, date=None, link=None)` — where a tool's result came from: what the source is
+called, when what it said was true or published (as the source gives it), and where to find it
+(a URL, or a reference). A `content_and_artifact` tool's artifact ([tool](#tool)); the call's
+outcome keeps it in its `metadata["sources"]`, never in what the model reads.
+
 ## Runtime
 
 `Runtime` — `trellis.current()` inside a tool or a node (`None` outside a run), and the second argument of
@@ -382,14 +389,16 @@ the gateway's (Bifrost's virtual-key budgets).
 
 ```text
 tool(fn, *, name=None, description=None, side_effects="write", idempotent=False,
-     call_timeout=None)
+     call_timeout=None, response_format="content")
 @tool  /  @tool(...)
 ```
 
 A Python function (sync or async) as a tool: the schema from its signature (each parameter
 described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
 repeated call with its idempotency key has its effect once; `call_timeout` seconds per call
-([tools.md](tools.md)).
+([tools.md](tools.md)). `response_format="content_and_artifact"` (LangChain's): the function
+returns `(content, artifact)` — what the model reads, and where it came from, a
+[`Citation`](#citation) or a list of them, kept with the call's outcome.
 
 ### mcp, stdio
 
