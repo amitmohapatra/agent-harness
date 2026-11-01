@@ -52,6 +52,12 @@ READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
 #: ``Tools.hints``, which passes the run's toolbox.
 TOOL_SEARCH: Final = "tool_search"
+#: The pull tool that forgets a memory. The service lets an agent forget only what it wrote:
+#: what the user said, it refuses for :data:`USERS_OWN` (the harness asks a person, then
+#: forgets it as the user: ``harness._forgotten``).
+FORGET: Final = "memory_forget"
+#: The service's reason for refusing an agent the user's own statement.
+USERS_OWN: Final = "users_own_statement"
 #: What the harness calls the transcript it writes, so a re-recorded message is stored once.
 SOURCE_SYSTEM: Final = "trellis-harness"
 #: The largest recorded tool output the memory service takes (its ``POST /v1/tools/invocations``
