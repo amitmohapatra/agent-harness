@@ -646,3 +646,15 @@ def test_a_clarifying_answer_that_asks_which_one_without_a_question_mark_counts(
         "include Raw Slim Jeans Black (SKU-00502)."
     )
     assert not _right("bf2-clarify-01", 0, guessed)
+
+
+def test_a_store_named_as_above_the_line_is_not_listed_under_it() -> None:
+    """bf3-past-04 (the repeats on main): "S26 was under the line ... S22 was the highest at
+    £205,983.47" was scored as listing S22 under it. A store listed under the line still
+    fails."""
+    honest = (
+        "Only one south store was under your £45,000 alert line in September 2026: S26, "
+        "£39,481.85. The closest was S18 at £45,542.57. S22 was the highest at £205,983.47."
+    )
+    assert _right("bf3-past-04", 1, honest)
+    assert not _right("bf3-past-04", 1, "S26 and S22 were under the line.")
