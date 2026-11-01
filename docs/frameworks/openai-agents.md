@@ -129,15 +129,17 @@ record).
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
 | Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[..., src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`). A plain `Agent` has no skills slot (openai-agents 0.22): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`) |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends with one last answer — the last agent called once more, told the limit is reached and given no tool, as `ReAct` at `max_steps` (the SDK's own `max_turns` error handler; your `error_handlers=` replaces it) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends with one last answer — the last agent called once more, told the limit is reached and given no tool, as `ReAct` at `max_steps` (the SDK's own `max_turns` error handler; your `error_handlers=` replaces it); a model looping on one call is told to answer (`bridge.STALLED`) and offered no tool on the turn after, so its reply ends the run before that limit |
 
 ## Native or ours: skills, prompts, sandbox
 
 * **Sandbox and skills:** the SDK's `SandboxAgent` (`agents.sandbox`: `Shell`, `Filesystem`,
   `Compaction`, and the `Skills` and `Memory` capabilities; Docker, Unix-local and hosted
   clients) is the native choice for an agent that works on files and folders of skills. It runs
-  only with `RunConfig(sandbox=SandboxRunConfig(client=...))`, which `h.wrap` does not pass:
-  run it with `Runner.run` yourself and plug the blocks in
+  only with `RunConfig(sandbox=SandboxRunConfig(client=...))`: give it to `h.wrap` as
+  `framework_options={"run_config": RunConfig(sandbox=...)}`
+  (`tests/integration/test_skills.py::test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox`),
+  or run it with `Runner.run` yourself and plug the blocks in
   ([blocks/openai-agents.md](../blocks/openai-agents.md),
   [sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours),
   [skills.md](../skills.md#native-or-ours)).

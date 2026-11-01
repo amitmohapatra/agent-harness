@@ -28,9 +28,12 @@ FINAL = "Done. {last}"
 SUMMARIZE = "Messages to summarize"
 
 
-def planned(plan: Sequence[Call], results: Sequence[str], final: str) -> str | Call:
-    """The next turn of ``plan`` after ``results`` (the tool results so far)."""
-    if len(results) < len(plan):
+def planned(
+    plan: Sequence[Call], results: Sequence[str], final: str, *, tools: bool = True
+) -> str | Call:
+    """The next turn of ``plan`` after ``results`` (the tool results so far) — the answer when
+    the call offers no tool (``tool_choice="none"``: a provider's model then answers in text)."""
+    if tools and len(results) < len(plan):
         return plan[len(results)]
     return final.replace("{last}", results[-1] if results else "")
 
@@ -76,7 +79,7 @@ class PlannedChat(ScriptedChat):
 
 
 class PlannedModel(ScriptedModel):
-    """An OpenAI Agents SDK ``Model``."""
+    """An OpenAI Agents SDK ``Model``: a call offered no tool and no handoff answers."""
 
     def __init__(self, plan: Sequence[Call], final: str = FINAL, *, stall: float = 0.0) -> None:
         super().__init__([], stall=stall)
@@ -87,7 +90,7 @@ class PlannedModel(ScriptedModel):
         results = [
             _text(_field(i, "output")) for i in items if _field(i, "type") == "function_call_output"
         ]
-        self.turns = [planned(self.plan, results, self.final)]
+        self.turns = [planned(self.plan, results, self.final, tools=not self.bare)]
         return super()._next(input, system)
 
     def said(self) -> str:
