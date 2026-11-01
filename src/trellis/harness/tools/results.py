@@ -52,7 +52,7 @@ PREVIEW_LINE: Final = 1_000
 HEAD: Final = 5
 TAIL: Final = 5
 #: The tool that pages a kept result, the lines it reads by default, and the most characters
-#: one page holds (as ``read_result`` reads).
+#: one page holds — a kept result's and a cleared one's alike.
 READ_FILE: Final = "read_file"
 READ_LINES: Final = 100
 PAGE_CHARS: Final = 20_000
@@ -73,6 +73,8 @@ READ_FILE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: How a result Deep Agents (or :func:`readable`) saved to a file reads in its place: its stub.
+EVICTED: Final = "Tool result too large"
 #: What a stub says first: the kept rows are a table that ``query_result`` computes over
 #: (``tools.query``) — a count, a sum, a filter, a top-N or a group, exact, with no sandbox.
 QUERY: Final = (
@@ -80,7 +82,13 @@ QUERY: Final = (
     'filter, a ranking or a group over them, call query_result(file_path="{path}", '
     'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
     "this run saved is a table of the same query, named by its tool, so one query can JOIN "
-    "them. Do not add up or rank rows yourself."
+    "them. Do not add up or rank rows yourself. {private}"
+)
+#: What a kept result's note says of its path: the run's own working copy, which the user
+#: cannot reach (a model offered one as an export to open in Excel).
+PRIVATE: Final = (
+    "The path is this run's own working copy, for read_file and query_result: the user cannot "
+    "open or download it, so never offer it to them as a file."
 )
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
@@ -125,7 +133,7 @@ def readable(output: Any, tool: str | None = None) -> str:
         return text
     columns = ", ".join(query.columns_of(text))
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=columns, path=path)
+    table = QUERY.format(table=name, columns=columns, path=path, private=PRIVATE)
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
 
 
@@ -144,7 +152,9 @@ def tabled(text: str, tool: str | None = None) -> str:
     path = keep(text, tool=tool)
     assert path is not None  # in a run
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=", ".join(query.column_names(columns)), path=path)
+    table = QUERY.format(
+        table=name, columns=", ".join(query.column_names(columns)), path=path, private=PRIVATE
+    )
     return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
 
 
@@ -232,20 +242,26 @@ class Conversations:
             self.chars -= sum(map(len, gone.values()))
 
 
-def read(args: dict[str, Any]) -> str:
-    """``read_file``: a page of a kept result, as the model asked for it (``args``)."""
+def read(args: dict[str, Any], *, text: str | None = None) -> str:
+    """``read_file``: a page of a kept result, as the model asked for it (``args``) — or of
+    ``text``, a cleared result the graph's state keeps (:func:`read_file`)."""
     problem = arguments_problem(READ_FILE_SCHEMA, args)
     if problem is not None:
         return not_run(READ_FILE, problem)
-    return read_file(**args)
+    return read_file(**args, text=text)
 
 
-def read_file(file_path: str, offset: int = 0, limit: int = READ_LINES) -> str:
+def read_file(
+    file_path: str, offset: int = 0, limit: int = READ_LINES, *, text: str | None = None
+) -> str:
     """Lines ``offset`` on (at most ``limit``, and :data:`PAGE_CHARS`) of the result kept at
-    ``file_path``, numbered, then where the next page starts."""
+    ``file_path`` — or of ``text`` given for it (a result cleared from the request, which the
+    graph's state keeps: ``middleware.HarnessTools``) — numbered, then where the next page
+    starts. The one paging every read-back uses."""
     runtime = current()
     path = "/" + file_path.lstrip("/")
-    text = None if runtime is None else query.saved(runtime).get(path)
+    if text is None and runtime is not None:
+        text = query.saved(runtime).get(path)
     if text is None:
         return query.not_found(path)
     lines = _lines(text)

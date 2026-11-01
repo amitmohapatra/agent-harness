@@ -11,6 +11,7 @@ from typing import Any, cast
 import httpx2
 import openai
 import pytest
+from bifrost_sdk import RETRYABLE
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -23,17 +24,19 @@ from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness import middleware as ours
 from trellis.harness.adapters.langgraph import HARNESS_TOOLS, LangGraphAdapter
 from trellis.harness.middleware import (
-    READ_RESULT,
+    FAILING,
+    READ_FILE,
     HarnessTools,
     ModelHooks,
     RunCheckpointer,
     StallGuard,
     _HarnessToolsState,
     model_error,
-    read_result,
     step_limit,
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
+from trellis.harness.tools.bridge import STALLED
+from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 
 @tool(side_effects="read")
@@ -362,6 +365,20 @@ def test_the_model_clients_errors_say_whether_a_retry_may_pass() -> None:
     assert model_error(other) is other
 
 
+def test_a_model_status_is_retryable_exactly_where_the_gateway_client_says() -> None:
+    """One set of retryable statuses for every model call: bifrost-sdk's ``RETRYABLE``, the one
+    the gateway client and the memory service retry on (duplication audit C1)."""
+    request = httpx2.Request("POST", "http://gateway/v1/chat/completions")
+    differ = []
+    for code in range(400, 600):
+        response = httpx2.Response(code, request=request, json={"error": {"message": "no"}})
+        error = model_error(openai.APIStatusError("no", response=response, body=None))
+        assert isinstance(error, ModelError)
+        if error.retryable != (code in RETRYABLE):
+            differ.append(code)
+    assert differ == []
+
+
 async def test_a_model_client_error_reaches_the_run_as_a_model_error(harness: Harness) -> None:
     class Limited(ScriptedChatModel):
         async def _agenerate(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
@@ -482,19 +499,48 @@ def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
 
 
 # --------------------------------------------------------------------------- StallGuard
-async def test_the_same_call_repeated_stops_the_run(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=[("look", {"item": "a"})] * 3)
+async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: Harness) -> None:
+    """A stall is not run again: the model is told so and answers with what it has, offered
+    no tool (``tool_choice="none"``) — the user gets an answer saying what went wrong."""
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, "the lookup keeps failing: no answer"])
     target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="stall"), [look]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == (
-        "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
-    )
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "the lookup keeps failing: no answer"
+    told = model.seen[-1]
+    assert told[-1].content == STALLED.format(tool="look", times=3)
+    # the stalled call itself is not replayed: the step before it is the last one run
+    assert [type(m).__name__ for m in told[-3:]] == ["AIMessage", "ToolMessage", "HumanMessage"]
+    assert model.requests[-1]["tool_choice"] == "none"
     with pytest.raises(ConfigurationError):
         StallGuard(1)
 
 
-async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
+async def test_a_stall_outside_a_run_ends_with_one_answer_too() -> None:
+    def step(n: int) -> list[Any]:
+        call = {"name": "nothing", "args": {}, "id": f"c{n}", "type": "tool_call"}
+        return [AIMessage(content="", tool_calls=[call]), ToolMessage("no", tool_call_id=f"c{n}")]
+
+    model = ScriptedChatModel(turns=[("nothing", {}), "gave up"])
+    state = await graph(model, StallGuard(3)).ainvoke(
+        {"messages": [HumanMessage("x"), *step(1), *step(2)]}
+    )
+    assert state["messages"][-1].content == "gave up"
+
+
+async def test_a_stall_with_no_answer_then_stops_the_run(harness: Harness) -> None:
+    look_a: Any = ("look", {"item": "a"})
+    model = ScriptedChatModel(turns=[look_a, look_a, look_a, look_a])
+    target = graph(model, HarnessTools(), StallGuard(3), checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="stall-none"), [look]).run("x", user="u")
+    assert result.error is not None
+    assert result.error.message == (
+        "stopped: the model called 'look' with the same arguments 3 times in a row (a stall)"
+    )
+
+
+async def test_steps_in_which_every_call_failed_end_with_one_answer(harness: Harness) -> None:
     @tool(side_effects="read")
     def flaky(n: int) -> str:
         """Fails for odd numbers."""
@@ -509,41 +555,50 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
             [("flaky", {"n": 3}), ("nope", {})],
             ("flaky", {"n": 5}),
             ("flaky", {"x": "bad"}),
+            "every call failed",
             "never",
         ]
     )
     target = graph(model, HarnessTools(), StallGuard(), checkpointer=RunCheckpointer())
     result = await arm(harness.wrap(target, id="flaky"), [flaky]).run("x", user="u")
-    assert result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "every call failed"
+    assert model.seen[-1][-1].content == FAILING.format(steps=3)
+    assert model.requests[-1]["tool_choice"] == "none"
     assert model.turns == ["never"]
 
 
-# --------------------------------------------------------------------------- read_result
-async def test_read_result_reads_a_result_of_the_conversation_in_parts(harness: Harness) -> None:
+# --------------------------------------------------------------------------- read back
+async def test_read_file_pages_a_result_of_the_conversation_by_its_calls_id(
+    harness: Harness,
+) -> None:
+    """A result the request no longer shows (cleared) is read back with ``read_file`` by Deep
+    Agents' path for its call, paged as a kept result is (``tools.results``: one paging)."""
+
     @tool(side_effects="read")
     def dump() -> str:
         """A long result."""
-        return "".join(str(n % 10) for n in range(100))
+        return "\n".join(f"row {n}" for n in range(100))
 
+    path = f"{READ_PREFIX}/call_1_0"
     model = ScriptedChatModel(
         turns=[
             ("dump", {}),
-            (READ_RESULT, {"id": "call_1_0", "offset": 10, "limit": 15}),
-            (READ_RESULT, {"id": "call_1_0", "offset": 90, "limit": 500}),
-            (READ_RESULT, {"id": "nope"}),
+            (READ_FILE, {"file_path": path, "offset": 10, "limit": 3}),
+            (READ_FILE, {"file_path": path, "offset": 98}),
+            (READ_FILE, {"file_path": f"{READ_PREFIX}/nope"}),
             "done",
         ]
     )
-    target = graph(model, HarnessTools(), tools=[read_result(30)], checkpointer=RunCheckpointer())
+    target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(target, id="reader"), [dump])
     assert (await agent.run("x", user="u")).answer == "done"
-    assert READ_RESULT in model.requests[0]["tools"]
     assert tool_messages(model, 2)[-1][1] == (
-        '012345678901234\n…[75 more characters: read_result(id="call_1_0", offset=25)]'
+        f'11  row 10\n12  row 11\n13  row 12\n…[87 more lines: read_file(file_path="{path}", '
+        "offset=13)]"
     )
-    assert tool_messages(model, 3)[-1][1] == "0123456789"  # at most what is left
-    assert tool_messages(model, 4)[-1][1] == "there is no result 'nope' to read"
+    assert tool_messages(model, 3)[-1][1] == " 99  row 98\n100  row 99"  # what is left
+    assert tool_messages(model, 4)[-1][1] == f"Error: File '{READ_PREFIX}/nope' not found"
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
