@@ -80,7 +80,7 @@ class PlannedChat(ScriptedChat):
 
 
 class PlannedModel(ScriptedModel):
-    """An OpenAI Agents SDK ``Model``."""
+    """An OpenAI Agents SDK ``Model``: a call offered no tool and no handoff answers."""
 
     def __init__(self, plan: Sequence[Call], final: str = FINAL, *, stall: float = 0.0) -> None:
         super().__init__([], stall=stall)
@@ -91,7 +91,7 @@ class PlannedModel(ScriptedModel):
         results = [
             _text(_field(i, "output")) for i in items if _field(i, "type") == "function_call_output"
         ]
-        self.turns = [planned(self.plan, results, self.final)]
+        self.turns = [planned(self.plan, results, self.final, tools=not self.bare)]
         return super()._next(input, system)
 
     def said(self) -> str:

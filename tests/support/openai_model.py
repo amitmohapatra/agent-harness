@@ -50,6 +50,8 @@ class ScriptedModel(Model):
         self.system: list[str | None] = []
         #: the tool names each call was offered
         self.tools: list[list[str]] = []
+        #: whether the latest call was offered nothing to call (no tool, no handoff)
+        self.bare = False
 
     def _next(self, input: Any, system: str | None) -> list[Any]:
         self.inputs.append(input)
@@ -80,6 +82,14 @@ class ScriptedModel(Model):
             for n, (name, args) in enumerate(calls)
         ]
 
+    def _offered(
+        self, tools: Any, _schema: Any = None, handoffs: Any = (), *_: Any, **k: Any
+    ) -> None:
+        """What the call was offered (the SDK's arguments after the settings: tools, output
+        schema, handoffs)."""
+        self.tools.append([t.name for t in tools])
+        self.bare = not tools and not k.get("handoffs", handoffs)
+
     async def get_response(
         self,
         system_instructions: str | None,
@@ -89,7 +99,7 @@ class ScriptedModel(Model):
         *args: Any,
         **kwargs: Any,
     ) -> ModelResponse:
-        self.tools.append([t.name for t in tools])
+        self._offered(tools, *args, **kwargs)
         if self.stall:
             await asyncio.sleep(self.stall)
         return ModelResponse(
@@ -97,8 +107,15 @@ class ScriptedModel(Model):
         )
 
     async def stream_response(  # type: ignore[override]
-        self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any
+        self,
+        system_instructions: str | None,
+        input: Any,
+        model_settings: Any = None,
+        tools: Any = (),
+        *args: Any,
+        **kwargs: Any,
     ) -> AsyncIterator[Any]:
+        self._offered(tools, *args, **kwargs)
         if self.stall:
             await asyncio.sleep(self.stall)
         output = self._next(input, system_instructions)
