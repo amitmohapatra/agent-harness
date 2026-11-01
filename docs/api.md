@@ -501,10 +501,10 @@ defining `before_model` or `after_model` is refused.
 ## Settings
 
 `Settings(llm_base_url=, llm_api_key=, llm_gateway=, llm_auth=, api_key=, memory_url=,
-runs_url=, spool_dir=, judge_virtual_key=)` — every field optional; `Settings.from_env()` is
+runs_url=, spool_dir=, judge_virtual_key=, files_url=)` — every field optional; `Settings.from_env()` is
 what `Harness()` reads: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_GATEWAY`, `LLM_AUTH`,
 `TRELLIS_API_KEY`, `MEMORY_URL`, `RUNS_URL`,
-`TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`. The tools' own variables (`OTEL_*`,
+`TRELLIS_SPOOL_DIR`, `TRELLIS_JUDGE_VIRTUAL_KEY`, `TRELLIS_FILES_URL`. The tools' own variables (`OTEL_*`,
 `LANGFUSE_*`, the providers' keys, `DOCKER_HOST`) are read by their own SDKs. Each field, its
 variable, default and an example: [configuration.md](configuration.md#settings-and-the-environment).
 

@@ -15,6 +15,9 @@
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
   agent-runs.
+* ``GET {path}/runs/{run_id}/files/{name}`` — a file the run kept for its user (its ``file``
+  event names it): a redirect to a link the store signs for :data:`~trellis.harness.files.
+  LINK_SECONDS` (GCS, S3, Azure), else its bytes streamed. Only the run's own user.
 
 Identity is the deployment's, read as ``serve_a2a`` reads it: the trusted header the platform's
 authenticating edge sets, ``X-Trellis-Identity: {"tenant_id": ..., "user_id": ...}`` (its
@@ -46,7 +49,7 @@ from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from trellis.contracts import (
@@ -57,6 +60,7 @@ from trellis.contracts import (
     RunEvent,
     RunEventType,
     RunStatus,
+    ToolError,
     safe_id,
 )
 from trellis.harness import pipeline
@@ -73,7 +77,9 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
+from trellis.harness.files import StoredFile, scope
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
+from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
@@ -326,6 +332,34 @@ class _Surface:
             raise HTTPException(404, f"no artifact {artifact_id}")
         return Response(data, media_type=ref.mime_type or "application/octet-stream")
 
+    async def file(self, request: Request, run_id: str, name: str) -> Response:
+        """A file the run kept (``Runtime.save_file``), for the run's own user only: its path is
+        rebuilt from the run's record (``files.scope``), so no other user's is reachable."""
+        user = await self.user(request)
+        agent = self.agent
+        tenant = await agent.harness._tenant()
+        record = await agent.harness.runs.get(run_id, tenant=tenant)
+        if record is None or record.agent_id != agent.id or record.user_id != user:
+            raise HTTPException(404, f"no run {run_id}")
+        who = RunIdentity.of(record)
+        folder = scope(who.tenant, who.user, who.conversation, run_id)
+        store = agent.harness.files
+        try:
+            size = await store.size(folder, name)
+        except ToolError:  # not a file name
+            size = None
+        if size is None:
+            raise HTTPException(404, f"no file {name}")
+        link = await store.link(folder, name)
+        if link is not None:
+            return RedirectResponse(link, status_code=307)
+        kind = StoredFile.kind_of(name)
+        headers = {
+            "Content-Length": str(size),
+            "Content-Disposition": f'attachment; filename="{name}"',
+        }
+        return StreamingResponse(store.chunks(folder, name), media_type=kind, headers=headers)
+
     async def logged(self, run_id: str, user: str, after: int) -> AsyncIterator[str]:
         """A run this process did not serve, from agent-runs' event log: its events past
         position ``after`` as AG-UI events numbered by position, live until it ends. Only the
@@ -480,6 +514,27 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         table or diff), from agent-runs — so any replica serves them."""
         try:
             return await surface.artifact(request, run_id, artifact_id)
+        except HTTPException as exc:
+            return _problem(exc, request)
+
+    @router.get(
+        "/runs/{run_id}/files/{name}",
+        summary="A file the run kept for its user",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "the file's bytes (a store that signs no links)",
+                "content": {"application/octet-stream": {}},
+            },
+            307: {"description": "a link the store signed, valid five minutes"},
+            **_refusals(401, 404),
+        },
+    )
+    async def file(request: Request, run_id: str, name: str) -> Response:
+        """A file the run kept for its user, which its `file` event names: a redirect to a
+        short-lived signed link (GCS, S3, Azure), else its bytes. Only the run's own user."""
+        try:
+            return await surface.file(request, run_id, name)
         except HTTPException as exc:
             return _problem(exc, request)
 

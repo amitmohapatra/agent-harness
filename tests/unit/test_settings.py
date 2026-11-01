@@ -26,6 +26,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "RUNS_URL": "http://runs",
         "TRELLIS_SPOOL_DIR": "/var/spool/trellis",
         "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-vk",
+        "TRELLIS_FILES_URL": "gs://acme/files",
     }
     settings = Settings.from_env(env)
     assert settings.model_dump() == {
@@ -38,6 +39,7 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "runs_url": "http://runs",
         "spool_dir": "/var/spool/trellis",
         "judge_virtual_key": "eval-vk",
+        "files_url": "gs://acme/files",
     }
     assert set(env) == set(settings_module.VARIABLES.values())  # the nine, and only them
     assert sourced(env)["api_key"] == ("tk", "TRELLIS_API_KEY")
@@ -113,5 +115,10 @@ def test_env_example_documents_exactly_what_is_read() -> None:
     documented = set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]+)=", text, re.M))
     source = (ROOT / "src/trellis/harness/settings.py").read_text()
     read = set(re.findall(r'"([A-Z][A-Z0-9_]+)"', source)) - set(settings_module.OTEL_EXPORTER_ENV)
-    read -= {*settings_module.EPHEMERAL_MARKERS, "XDG_STATE_HOME", "OTEL_RESOURCE_ATTRIBUTES"}
+    read -= {
+        *settings_module.EPHEMERAL_MARKERS,
+        "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
+        "OTEL_RESOURCE_ATTRIBUTES",
+    }
     assert read == documented
