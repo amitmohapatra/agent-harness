@@ -12,7 +12,9 @@ loop is the harness's. What it is built with:
 
 * **LangChain's loop** — ``create_agent``, dangling tool calls answered (Deep Agents'
   ``PatchToolCallsMiddleware``), ``response_format``, parallel tool calls: the base measured
-  best on a small model (``docs/frameworks/react.md#the-base``);
+  best on a small model (``docs/frameworks/react.md#the-base``); Anthropic's prompt cache
+  (LangChain's ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model, a model name
+  too (``middleware.PromptCache``, in Deep Agents' graph in its own one's place);
 * **Deep Agents, on demand** — given ``backend=`` (its file tools on the graph's state, a disk, a
   store, a composite, or the run's sandbox: ``sandbox()``), a sub-agent of its own
   (``subagents=``: the ``task`` tool), ``skills=``, ``memory_files=`` (its ``AGENTS.md``-style
@@ -29,7 +31,8 @@ loop is the harness's. What it is built with:
 * **yours** — ``middleware=[...]``: any LangChain or Deep Agents middleware, added before
   ``ModelHooks``; one named as the harness's is refused (naming the parameter that sets it;
   ``middleware()`` itself, saying ReAct already has it), one named as Deep Agents' replaces
-  it, as Deep Agents does.
+  it, as Deep Agents does (an ``AnthropicPromptCachingMiddleware``, its settings kept, is the
+  prompt cache's).
 
 ``middleware(...)`` is the harness's part on its own: ``create_agent(...,
 middleware=middleware(...))`` or ``create_deep_agent(..., middleware=middleware(...))``.
@@ -80,10 +83,6 @@ CLEARED: Final = (
     "[result cleared to keep the context small: "
     'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
 )
-#: Deep Agents' file tools that read, and those that change files: on a backend outside the
-#: graph's state they are governed as any tool, with these risks.
-FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
-FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
 #: What ``ReAct`` and :func:`middleware` say of a switch they no longer take (``removed``).
 _NO_GUIDANCE: Final = (
     "the tool guidance was removed, measured as no better and slower: say how to choose among "
@@ -338,6 +337,7 @@ def ReAct(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
     profiled = _profiled(chat, window)
+    cache, middleware = ours.prompt_cache(middleware)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
     instructions = system_prompt if not isinstance(system_prompt, Stored) else None
     if not _deep(
@@ -366,6 +366,7 @@ def ReAct(
                     ),
                     middleware,
                 ),
+                cache,  # last of what changes the request, where Deep Agents puts its own
             ],
             response_format=cast(Any, response_format),  # a JSON schema too, at run time
             state_schema=state_schema,
@@ -403,8 +404,9 @@ def ReAct(
         profiled,
         tools=own,
         system_prompt=instructions,
-        # Deep Agents' summarization stands after the harness's narrowing, which it counts
-        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware)],
+        # Deep Agents' summarization stands after the harness's narrowing, which it counts;
+        # the prompt cache in its own caching middleware's place
+        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cache],
         subagents=cast(Any, native),  # Deep Agents' own dicts, as given
         skills=skills,
         memory=memory_files,
@@ -531,23 +533,24 @@ def _native(
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
     the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
-    middleware of those names kept) and its ``interrupt_on`` turned into its tools' declared
-    risk — a tool it
-    names asks a person (``irreversible``), as the catalog says; a name that is none of its
-    tools (a Deep Agents tool of its own) stays Deep Agents' approval, which the harness asks
-    once."""
+    middleware of those names kept), the prompt cache (``middleware.PromptCache``, around its
+    own ``AnthropicPromptCachingMiddleware``) and its ``interrupt_on`` turned into its tools'
+    declared risk — a tool it names asks a person (``irreversible``), as the catalog says; a
+    name that is none of its tools (a Deep Agents tool of its own) stays Deep Agents'
+    approval, which the harness asks once."""
     if "runnable" in spec or "graph_id" in spec:
         return spec
     from trellis.harness import middleware as ours
 
     if isinstance(spec.get("model"), str):
         spec["model"] = routed_chat_model(spec["model"])
-    given = list(spec.get("middleware") or [])
+    cache, given = ours.prompt_cache(spec.get("middleware") or [])
     names = {m.name for m in given}
     guards = [
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),
+        cache,
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
     gates = spec.pop("interrupt_on", None) or {}
@@ -587,14 +590,13 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
-    from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE
+    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, outside_state
 
     runs = supports_execution(backend)
     for tool in graph_tools(graph):
         marks: dict[str, Any] = {}
-        if outside and tool.name in FILE_READS | FILE_WRITES:
-            risk = "read" if tool.name in FILE_READS else "write"
-            marks = {OUTSIDE_STATE: True, "side_effects": risk}
+        if outside and tool.name in FILE_TOOLS:
+            marks = outside_state(tool.name)
         elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
             marks = {MACHINERY: True}
         if marks:

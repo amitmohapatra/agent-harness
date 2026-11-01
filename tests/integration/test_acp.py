@@ -31,6 +31,7 @@ from trellis.harness.adapters.acp import (
 )
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import sandbox
 
 #: What Kimi reads its swarm's concurrency from.
@@ -410,15 +411,19 @@ async def test_the_session_mode_is_set_and_one_that_asks_nothing_refused(
 
 
 # --------------------------------------------------------------------------- the context
-async def test_the_context_goes_before_the_prompt(
+async def test_the_context_goes_before_the_prompt_marked_off_from_it(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
+    """ACP's prompt has no place for background but its blocks: the context goes first, marked
+    off as every adapter's is where it shares the user's message (``history.ASKED_WITH``).
+    Unmarked, a model read the context as the user's message and the question as a note."""
     await memory_harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="ctx").run(
         "reach me?", user="u1"
     )
     [prompt] = recorded(tmp_path)["prompts"]
-    context, asked = prompt.split("\n", 1)[0], prompt.rsplit("\n", 1)[-1]
-    assert memory_service.context_text.split("\n", 1)[0] == context and asked == "reach me?"
+    opened, closed = ASKED_WITH.split("{context}")
+    assert prompt.startswith(opened + memory_service.context_text)
+    assert prompt.endswith(f"{closed}\nreach me?")
     [request] = memory_service.named("context")
     available = request.body["tools"]["available"]
     assert {"Bash", "Read", "AgentSwarm"} <= set(available)  # Kimi's own tools: its tool set
@@ -453,14 +458,27 @@ async def test_usage_is_read_from_the_agents_log_and_the_budget_stops_the_turn(
 
 
 async def test_acps_own_usage_counts_when_the_agent_gives_it(
-    harness: Harness, tmp_path: Path
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    script = [{"prompt_usage": {"totalTokens": 30, "inputTokens": 20, "outputTokens": 10}}]
-    agent = harness.wrap(fake(tmp_path, [*script, {"text": "ok"}]), id="u")
-    result = await agent.run("x", user="u1")
-    assert result.status is RunStatus.SUCCESS
-    journal_spent = (await harness.runs.get(result.run_id)).checkpoint  # type: ignore[union-attr]
-    assert journal_spent is None or "spent" in journal_spent
+    """An ACP agent the harness keeps no usage log of counts the usage ACP's answer to a prompt
+    carries; Kimi's own log, read as the turn runs, is its count (the answer's is not added)."""
+    from trellis.harness import budget
+
+    counted: list[dict[str, Any]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
+    )
+    usage = {"totalTokens": 37, "inputTokens": 20, "outputTokens": 10, "cachedReadTokens": 7}
+    script = [{"prompt_usage": usage}, {"text": "ok"}]
+    agent = harness.wrap(fake(tmp_path, script, profile=None), id="u")
+    assert (await agent.run("x", user="u1")).status is RunStatus.SUCCESS
+    assert counted == [{"model": "acp", "input_tokens": 20, "output_tokens": 10, "cached": 7}]
+    counted.clear()
+    (tmp_path / "k").mkdir()
+    kimi_like = harness.wrap(fake(tmp_path / "k", script), id="k")
+    assert (await kimi_like.run("x", user="u1")).status is RunStatus.SUCCESS
+    assert counted == []  # Kimi's count is its log's
 
 
 async def test_a_usage_line_still_being_written_is_read_next_time(tmp_path: Path) -> None:
