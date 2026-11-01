@@ -79,7 +79,7 @@ def save_plan(**save: Any) -> list[Call]:
 # --------------------------------------------------------------------------- every adapter
 @pytest.mark.parametrize("framework", ["react", "middleware", "openai_agents"])
 async def test_every_framework_saves_a_querys_whole_result_as_excel(
-    harness: Harness, stored: Path, framework: str, tmp_path: Path
+    harness: Harness, engine: str, stored: Path, framework: str, tmp_path: Path
 ) -> None:
     plan = save_plan(save_as="xlsx", file_name="low-stock")
     target, own = await BUILDERS[framework](harness, [inventory], tmp_path, plan)
@@ -201,8 +201,8 @@ def test_saving_adds_a_few_dozen_tokens_to_query_result_only() -> None:
 
 # --------------------------------------------------------------------------- the file
 @pytest.fixture
-def root(tmp_path: Path) -> Iterator[Path]:
-    """A run saving files (no code tool) in a store at the folder yielded."""
+def root(tmp_path: Path, engine: str) -> Iterator[Path]:
+    """A run saving files (no code tool) in a store at the folder yielded, on each engine."""
     found = tmp_path / "files"
     store = FileStore(found.as_uri())
 
@@ -236,6 +236,24 @@ def test_an_excel_cell_that_is_no_number_or_text_is_its_text(root: Path) -> None
     assert rows == [("n", "z", "b"), (1, None, "b'a'"), (2, None, "b'b'"), (3, None, "b'c'")]
 
 
+def test_a_saved_file_keeps_the_engines_values(root: Path, engine: str) -> None:
+    """What DuckDB answers with that SQLite never does — a decimal, a boolean — is a number and
+    a boolean in Excel, and exact text, ``true``/``false`` in CSV, as the answer shows it."""
+    sql = "SELECT n, n * 1.5 AS d, n > 1 AS b FROM result ORDER BY n"
+    said = ask(sql=sql, save_as="xlsx", file_name="v")
+    flags = {"duckdb": (False, True, True), "sqlite": (0, 1, 1)}[engine]
+    rows = sheet_rows(kept(root, "v.xlsx"))
+    assert rows == [("n", "d", "b"), *zip((1, 2, 3), (1.5, 3.0, 4.5), flags, strict=True)]
+    shown = {"duckdb": ("false", "true"), "sqlite": ("0", "1")}[engine]
+    assert said.endswith(f"n,d,b\n1,1.5,{shown[0]}\n2,3.0,{shown[1]}\n3,4.5,{shown[1]}"), said
+    ask(sql=sql, save_as="csv", file_name="v")
+    text = kept(root, "v.csv").read_text().splitlines()
+    exact = {"duckdb": ["1.5", "3.0", "4.5"], "sqlite": ["1.5", "3.0", "4.5"]}[engine]
+    assert [r.split(",")[1:] for r in text[1:]] == [
+        [d, f] for d, f in zip(exact, (shown[0], shown[1], shown[1]), strict=True)
+    ]
+
+
 @pytest.mark.parametrize(
     ("args", "said"),
     [
@@ -265,7 +283,7 @@ def test_more_rows_than_a_file_holds_are_refused(
 
 def test_a_failed_query_saves_nothing(root: Path) -> None:
     told = ask(sql="SELECT nope FROM result", save_as="csv")
-    assert told.startswith("Error: the query failed: no such column: nope"), told
+    assert told.startswith("Error: the query failed:") and "nope" in told, told
     assert not root.exists()
 
 
