@@ -28,6 +28,11 @@ Q3: Final = {"start": "2026-07-01", "end": "2026-09-30"}
 AUG: Final = {"start": "2026-08-01", "end": "2026-08-31"}
 SEP: Final = {"start": "2026-09-01", "end": "2026-09-30"}
 YTD: Final = {"start": "2026-01-01", "end": "2026-09-30"}
+#: An answer that claims a chart it could not make: "here is your chart", "I made the chart".
+FAKE_CHART: Final = (
+    r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have)? ?(?:attached|created|made|generated|saved|"
+    r"drew))(?: (?:the|your|a|an))?(?: [\w-]+)? (?:chart|image|png|graph|svg)"
+)
 MONTHS: Final = {
     f"2026-{n:02d}": name
     for n, name in enumerate(
@@ -358,7 +363,7 @@ def cases() -> list[Any]:
             Turn("The Merino Crew Sweater Navy, Q3 2026: units and revenue.",
                  expect=cx.record(nq3, tol={"units": 0})),
             Turn("Plot its weekly units as a chart image I can paste into a slide.",
-                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have) (?:attached|created|made|generated))\b.{0,30}(?:chart|image|png)",
+                 expect=cx.cannot(FAKE_CHART,
                                   r"table|weekly|figures|numbers|instead|list",
                                   "I can't make an image here: there is no code execution, files or images in this setup. "
                                   "I can give the weekly figures as a table instead.")),
@@ -708,7 +713,6 @@ def cases() -> list[Any]:
         ("a name defined in an earlier chat, then compute",),
     ))  # fmt: skip
     kr = rev(category="knitwear", **Q3)
-    kc = kr - r.truth_gross_profit(w, category="knitwear", **Q3)
     out.append(Case(
         "bf2-mixed-06", "bf_mixed", 3,
         (
@@ -717,9 +721,8 @@ def cases() -> list[Any]:
             Turn("Make it 10% more units but prices 4% lower.", expect=cx.money(kr * 1.1 * 0.96)),
             Turn("Unit costs don't change. Which of the two scenarios gives more gross profit, "
                  "and by how much?",
-                 expect=cx.record({"first_gp": kr * 1.1 - kc * 1.1,
-                                   "second_gp": kr * 1.1 * 0.96 - kc * 1.1,
-                                   "difference": kr * 1.1 * 0.04})),
+                 expect=cx.record({"difference": kr * 1.1 * 0.04},
+                                  rubric="Says the first scenario (same prices) gives more.")),
         ),
         ("a scenario corrected, then compared on another measure",),
     ))  # fmt: skip
@@ -852,7 +855,8 @@ def cases() -> list[Any]:
                  expect=cx.record({"mean": statistics.mean(nu), "sd": statistics.pstdev(nu)},
                                   tol={"mean": 0.01, "sd": 0.01})),
             Turn("And the day with the most revenue in the north that month, with its revenue?",
-                 expect=cx.record({"day": f"2026-09-{nd.index(max(nd)) + 1:02d}",
+                 expect=cx.record({"day": (f"2026-09-{nd.index(max(nd)) + 1:02d}",
+                                           f"{nd.index(max(nd)) + 1} September"),
                                    "revenue": max(nd)})),
         ),
         ("statistics over a daily series with empty days",),
@@ -1001,9 +1005,8 @@ def cases() -> list[Any]:
         (
             Turn("Top supplier by 2026 revenue so far?",
                  expect=cx.record({"supplier": (topsup, w.suppliers[topsup].name)})),
-            Turn("Their on-time rate?",
-                 expect=cx.record({"on_time": w.suppliers[topsup].on_time_rate},
-                                  tol={"on_time": 0.005})),
+            Turn("Their on-time rate, in %?",
+                 expect=cx.pct(w.suppliers[topsup].on_time_rate * 100)),
             Turn("How many stores in the east?", expect=cx.count(10)),
             Turn("Price of SKU-00100?", expect=cx.money(w.skus["SKU-00100"].price)),
             Turn("Back to that top supplier: if their 2026 revenue had been 20% lower, where "
@@ -1130,7 +1133,7 @@ def cases() -> list[Any]:
                  "much would it lead or trail the second?",
                  expect=cx.record({"gap": abs(hs[0][1] * 0.88 - hs[1][1])})),
             Turn("Make that a chart I can download.",
-                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have) (?:attached|created|made|generated))\b.{0,30}(?:chart|image|png)",
+                 expect=cx.cannot(FAKE_CHART,
                                   r"figures|numbers|table|instead",
                                   "I can't make a chart here: there is no code execution, files or images in this setup. "
                                   "Here are the figures instead.")),

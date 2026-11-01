@@ -2601,9 +2601,10 @@ _WHY: Final = re.compile(
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
     r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tools? (?:that|for|to) (?:writ|creat|mak|"
     r"draw|render|run|generat|export)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
-    r"(?:real )?(?:files?|images?|charts?|excel|spreadsheets?|plots?|graphs?|\.?xlsx)|"
+    r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
+    r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
-    r"reply with) (?:you )?text",
+    r"reply with) (?:you )?text|only have (?:[\w-]+ ){0,3}tools|with the tools I have",
     re.IGNORECASE,
 )
 #: Output made up for a request that could not be met: a file or image link, a file it says it

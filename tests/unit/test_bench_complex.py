@@ -349,6 +349,8 @@ def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
         "I can't create a downloadable chart file because I have no tool for generating files.",
         "I can't give you a downloadable file: I can only return text.",
         "There is no tool to export a spreadsheet here.",
+        "I can't create PDF files with the tools I have.",
+        "I can't create a downloadable chart; I only have data-query tools.",
     ):
         assert cx._WHY.search(said), said
 
