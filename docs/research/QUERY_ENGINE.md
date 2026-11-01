@@ -7,6 +7,11 @@ gets the same questions over the same data, and each answer is checked against P
 The decision is in [ADR 0007](../adr/0007-query-engine.md).
 
 **Run it:** `QUERY_ENGINES_SITE=<folder> python -m benchmark.query_engines` (`benchmark/query_engines/`).
+Its `sqlite` and `duckdb` engines are now the harness's own (`tools.query.SQLite`,
+`tools.query.DuckDB`), so it measures the code `query_result` runs: the switch's before and
+after are in [ADR 0007](../adr/0007-query-engine.md#implemented) and
+[results/harness.md](../../benchmark/query_engines/results/harness.md). The tables below are the
+measurement that chose the engine, with DuckDB as a prototype loader.
 DuckDB 2.0.0, Polars 2.1.0 and pandasql 0.7.3 were installed with `uv pip install --target` into
 a scratch folder, not into the harness's environment. Each measurement runs in its own process.
 Raw numbers are in [results/local.json](../../benchmark/query_engines/results/local.json), the

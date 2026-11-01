@@ -71,6 +71,8 @@ from trellis.harness.tools.results import MAX_LINE
 CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
+#: A real MCP server that asks the person in the middle of a call (MCP elicitation).
+MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -708,6 +710,26 @@ async def mcp_servers(w: World) -> None:
     o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
     assert "note at a.md" in o.text, o.answer
     assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
+
+
+async def mcp_asks(w: World) -> None:
+    """An MCP server of the agent's own asks the person in the middle of a call (MCP
+    elicitation): the run pauses as an ``ask`` does (a pick from the server's values is a
+    choice), and the answer goes back to the server, whose call then ends."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_ASKING_SERVER)), name="shop")
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.reason is InterruptReason.CHOICE:
+            return "answer", "L"
+        return approve_all(interrupt)
+
+    o = await w.go([d.lookup(), server], [("shop-order", {"item": "shirt"})], answer=answer)
+    o.succeeded()
+    asked = [p for p in o.pauses if p.reason is InterruptReason.CHOICE]
+    assert [(p.question, p.options) for p in asked] == [("Which size of shirt?", ["S", "L"])]
+    assert "ordered shirt in size L" in o.text, o.answer
+    assert [r["status"] for r in o.results("shop-order")][-1:] == ["ok"]  # after the pause
 
 
 async def prompts(w: World) -> None:
@@ -1411,6 +1433,14 @@ FEATURES: Final[list[Feature]] = [
         "ReAct(tools=[mcp(stdio(...))]) or mcp('https://...')",
         mcp_servers,
         way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
+    ),
+    Feature(
+        "F18e",
+        "MCP elicitation: a server's question in a call pauses the run, the answer goes back",
+        "N2",
+        "automatic for mcp(...) servers (the client says it can be asked)",
+        mcp_asks,
+        way2=NA("Way 2 gives the MCP SDK's client an elicitation callback of its own"),
     ),
     Feature(
         "F19",

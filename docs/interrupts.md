@@ -11,7 +11,8 @@ approval needs no `ask` (governance, an approval rule in a hook, below).
 
 **Where.** Any tool or node of any adapter (`ReAct`, a function, LangGraph — `interrupt()`
 in place with a checkpointer —, Deep Agents, OpenAI Agents, Claude); Way 2 builds the same
-question (`Question`, below).
+question (`Question`, below). An `mcp(...)` server that asks in the middle of a
+call (MCP elicitation) asks the same way, automatically ([tools.md](tools.md#a-server-that-asks-mcp-elicitation)).
 
 **How.**
 
