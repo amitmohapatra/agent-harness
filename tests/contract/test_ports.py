@@ -44,6 +44,7 @@ def test_the_public_api_is_the_documented_one() -> None:
         "Agent",
         "Ask",
         "Budget",
+        "Citation",
         "Deny",
         "Harness",
         "Hooks",

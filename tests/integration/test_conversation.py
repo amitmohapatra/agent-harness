@@ -22,7 +22,7 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import conversation
 from trellis.harness.bounded import LRU
 from trellis.harness.conversation import (
@@ -106,6 +106,30 @@ async def test_a_follow_up_has_the_conversation(
     other = await agent.run("What is the locker code?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS, other.error
     assert "4242" not in told(seen)  # another user's thread named alike is not this one
+
+
+@pytest.mark.parametrize("framework", MODELLED)
+async def test_a_blank_message_is_no_run_and_never_reaches_the_thread(
+    memory_harness: Harness, tmp_path: Path, framework: str
+) -> None:
+    """An empty or whitespace-only message is refused before a run opens (ADV-1): a provider
+    refuses a blank user message (Anthropic does), and kept in the thread it would fail every
+    later turn. Nothing is sent to the model, nothing recorded; the next message goes on."""
+    seen: list[Any] = []
+    target, tools = await BUILDERS[framework](memory_harness, [], tmp_path, [], seen=seen)
+    agent = arm(memory_harness.wrap(target, id=f"blank-{framework}", without={"memory"}), tools)
+    for blank in ("", "  \n\t "):
+        with pytest.raises(ConfigurationError, match="blank"):
+            await agent.run(blank, user="ada", thread=THREAD)
+        with pytest.raises(ConfigurationError, match="blank"):
+            [e async for e in agent.stream(blank, user="ada", thread=THREAD)]
+        with pytest.raises(ConfigurationError, match="blank"):
+            await agent.start(blank, user="ada", thread=THREAD)
+    assert runs_in_order(memory_harness) == []  # no run opened
+    forget(seen)
+    after = await agent.run("What is the locker code?", user="ada", thread=THREAD)
+    assert after.status is RunStatus.SUCCESS, after.error
+    assert "What is the locker code?" in told(seen)
 
 
 async def test_a_function_reads_the_earlier_turns_as_its_history(harness: Harness) -> None:

@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any, Final
 from trellis.contracts import ErrorCategory, HarnessError
 from trellis.harness import snapshots
 from trellis.harness.history import Said, Speaker, answered, said_of
-from trellis.harness.tools.base import max_age
 from trellis.memory.errors import NotFoundError
 
 if TYPE_CHECKING:
@@ -76,17 +75,13 @@ class MemorySession:
         ]
         # an earlier value of a live tool is out of date, as the memory window's replay says,
         # and its tool stays offered: the model fetches it again
-        said, stale = snapshots.out_of_date(said, self._max_age)
+        said, stale = snapshots.out_of_date(
+            said, lambda name: snapshots.declared_max_age(self.runtime, name)
+        )
         if stale and self.runtime.offered is not None:
             self.runtime.offered |= set(stale)
         items = [item for s in answered(said) for item in input_items(s)]
         return items if limit is None else items[-limit:] if limit > 0 else []
-
-    def _max_age(self, name: str) -> float | None:
-        """How long a value of the run's tool ``name`` stays current (``None``: not said)."""
-        found = self.runtime.toolbox.get(name)
-        spec = found.spec if found is not None else self.runtime.native.get(name)
-        return None if spec is None else max_age(spec)
 
     async def add_items(self, items: list[Any]) -> None:
         """Nothing: the harness records the run's turns in the thread itself."""

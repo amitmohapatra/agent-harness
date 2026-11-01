@@ -54,6 +54,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
+from trellis.harness.agent import ABSTAIN_NOTES
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
@@ -70,6 +71,10 @@ from trellis.harness.tools.results import MAX_LINE
 CHAIN: Final = "find_sku → sku_id → get_stock"
 #: A real MCP server on the official SDK (stdio; ``tests/support/mcp_server.py``).
 MCP_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_server.py"
+#: A real MCP server that asks the person in the middle of a call (MCP elicitation).
+MCP_ASKING_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
+#: A real MCP server with resources (MCP resources).
+MCP_RESOURCES_SERVER: Final = Path(__file__).parents[1] / "support" / "mcp_resources_server.py"
 
 # --------------------------------------------------------------------------- not applicable
 NO_MODEL: Final = NA("a function target has no model: your code calls the tools itself")
@@ -505,6 +510,22 @@ async def push(w: World) -> None:
     assert o.answer == "Done. facts about contact"
 
 
+async def abstains(w: World) -> None:
+    """Memory with nothing for the question (``evidence_status`` INSUFFICIENT) and no tool
+    hinted with confidence: the note that says so — name what is missing, offer to look it
+    up — reaches the model with the context, in every adapter."""
+    w.memory_service.evidence_status = "INSUFFICIENT"
+    w.memory_service.top_confidence = 0.3  # under NARROW_FLOOR: no tool answers it for sure
+    d = Desk()
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
+    note = ABSTAIN_NOTES["INSUFFICIENT"]
+    if w.on:
+        assert json.dumps(note)[1:-1] in w.said() or note in w.said(), "the note never arrived"
+    else:
+        assert "## Memory" not in w.said()
+    assert o.answer == "Done. facts about contact"
+
+
 async def push_function(w: World) -> None:
     async def target(h: Harness, tools: list[Any], plan: list[Call]) -> tuple[Any, list[Any]]:
         async def reads(input: str, agent: Runtime) -> str:
@@ -555,6 +576,29 @@ async def pull(w: World) -> None:
     assert "the user prefers email" in o.text, o.answer
     [searched] = w.memory_service.named("call_agent_tool")
     assert searched.path["name"] == "memory_search" and searched.body["args"] == search
+
+
+async def forget_said(w: World) -> None:
+    """Forget by chat: what the user said, which the service refuses an agent, is asked about
+    through the approval path and, approved, forgotten as the user — in every adapter."""
+    if not w.on:
+        return  # no memory tools: F42 checks none is offered
+    w.memory_service.memories["mem_said"] = {
+        "content": "I live at 12 Baker Street.",
+        "memory_type": "SEMANTIC",
+        "visibility": "PRIVATE",
+        "user": USER,
+        "current": True,
+        "created_at": "2026-10-01T09:00:00Z",
+        "supersedes": None,
+        "superseded_by": None,
+    }
+    o = (await w.go([Desk().lookup()], [("memory_forget", {"id": "mem_said"})])).succeeded()
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert asked == ["memory_forget"] and "mem_said" in o.pauses[0].question, o.pauses
+    [forgot] = w.memory_service.named("forget")
+    assert forgot.path["memory_id"] == "mem_said" and not forgot.scope.get("agent_id")
+    assert not w.memory_service.memories["mem_said"]["current"]
 
 
 async def records(w: World) -> None:
@@ -667,6 +711,37 @@ async def mcp_servers(w: World) -> None:
     o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
     assert "note at a.md" in o.text, o.answer
     assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
+
+
+async def mcp_asks(w: World) -> None:
+    """An MCP server of the agent's own asks the person in the middle of a call (MCP
+    elicitation): the run pauses as an ``ask`` does (a pick from the server's values is a
+    choice), and the answer goes back to the server, whose call then ends."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_ASKING_SERVER)), name="shop")
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.reason is InterruptReason.CHOICE:
+            return "answer", "L"
+        return approve_all(interrupt)
+
+    o = await w.go([d.lookup(), server], [("shop-order", {"item": "shirt"})], answer=answer)
+    o.succeeded()
+    asked = [p for p in o.pauses if p.reason is InterruptReason.CHOICE]
+    assert [(p.question, p.options) for p in asked] == [("Which size of shirt?", ["S", "L"])]
+    assert "ordered shirt in size L" in o.text, o.answer
+    assert [r["status"] for r in o.results("shop-order")][-1:] == ["ok"]  # after the pause
+
+
+async def mcp_resources(w: World) -> None:
+    """An MCP server of the agent's own with resources: one read tool, its description the
+    map of what there is, a resource read by its URI as any tool's result."""
+    d = Desk()
+    server = mcp(stdio(sys.executable, str(MCP_RESOURCES_SERVER)), name="docs")
+    o = await w.go([d.lookup(), server], [("docs-read_resource", {"uri": "docs://handbook"})])
+    o.succeeded()
+    assert "Ship on Tuesdays." in o.text, o.answer
+    assert [r["status"] for r in o.results("docs-read_resource")] == ["ok"]
 
 
 async def prompts(w: World) -> None:
@@ -1232,6 +1307,16 @@ FEATURES: Final[list[Feature]] = [
         way2=way2.push,
     ),
     Feature(
+        "F41a",
+        "memory push: nothing remembered for the question, the model is told so",
+        "F41",
+        "the memory service (its evidence status)",
+        abstains,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("its code reads agent.context: no model is told anything")},
+        way2=NA("the harness's note: Way 2 reads the service's evidence status itself"),
+    ),
+    Feature(
         "F41f",
         "memory push: a function target reads agent.context",
         "F41",
@@ -1264,6 +1349,16 @@ FEATURES: Final[list[Feature]] = [
         way2=NA(
             "by design: agent_tools() returns JSON-schema tool specs every framework takes as they are, and call_agent_tool() runs them"
         ),
+    ),
+    Feature(
+        "F42d",
+        "memory pull: forgetting what the user said asks, then forgets it as them",
+        "F42",
+        "the memory service (its refusal names the user's statement)",
+        forget_said,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("a function target calls memory_forget itself, as any tool")},
+        way2=NA("the harness's approval path: Way 2 calls the service, which refuses the agent"),
     ),
     Feature(
         "F43",
@@ -1321,6 +1416,22 @@ FEATURES: Final[list[Feature]] = [
         "ReAct(tools=[mcp(stdio(...))]) or mcp('https://...')",
         mcp_servers,
         way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
+    ),
+    Feature(
+        "F18e",
+        "MCP elicitation: a server's question in a call pauses the run, the answer goes back",
+        "N2",
+        "automatic for mcp(...) servers (the client says it can be asked)",
+        mcp_asks,
+        way2=NA("Way 2 gives the MCP SDK's client an elicitation callback of its own"),
+    ),
+    Feature(
+        "F18r",
+        "MCP resources: a server's resources read by one tool whose description maps them",
+        "N2",
+        "automatic for mcp(...) servers that have resources",
+        mcp_resources,
+        way2=NA("Way 2 reads a server's resources with the MCP SDK's client itself"),
     ),
     Feature(
         "F19",

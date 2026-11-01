@@ -143,10 +143,10 @@ async def test_the_run_does_not_read_back_its_own_turns_and_the_thread_only_grow
 async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The thread's tool results are stamped when they are written; read back as the SDK's
-    session, a live tool's earlier value is marked out of date (as the memory window's replay
-    is) and its tool stays offered."""
-    stamped = "[snapshot of stock from 2026-10-30T09:00:00Z]\n40"
+    """A thread's tool result carries when it was fetched in its run record (its text is not
+    stamped); read back as the SDK's session, a live tool's earlier value is marked out of date
+    (as the memory window's replay is) and its tool stays offered."""
+    fetched = {"run_record": {"status": "ok", "fetched": "2026-10-30T09:00:00Z", "max_age": 0}}
     thread = [
         MessageInfo.model_validate(m)
         for m in (
@@ -156,7 +156,8 @@ async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
              "content": "", "agent_run_id": "run_0",
              "tool_calls": [{"id": "c1", "name": "stock", "arguments": {}}]},
             {"message_id": "3", "role": "TOOL", "kind": "INTERNAL", "sequence": 3,
-             "content": stamped, "agent_run_id": "run_0", "tool_call_id": "c1"},
+             "content": "40", "agent_run_id": "run_0", "tool_call_id": "c1",
+             "custom_metadata": fetched},
         )
     ]  # fmt: skip
 
@@ -172,8 +173,7 @@ async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
     )  # fmt: skip
     items = await MemorySession(runtime).get_items()  # type: ignore[arg-type]
     told = next(i["output"] for i in items if i.get("type") == "function_call_output")
-    stale = snapshots.STALE.format(tool="stock", at="2026-10-30T09:00:00Z")
-    assert told == f"{stale}\n40"
+    assert told == f"{snapshots.STALE.format(tool='stock')}\n40"
     assert runtime.offered == {"other", "stock"}
 
 
