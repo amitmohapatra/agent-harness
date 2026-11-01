@@ -141,7 +141,10 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   (`helper_started`, `helper_finished`).
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
-  `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer.
+  `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer
+  (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run asks it
+  once more in the same session, told the limit is reached, as `ReAct` does at `max_steps` (a
+  `step_limit` warning).
 
 ## Streaming
 
