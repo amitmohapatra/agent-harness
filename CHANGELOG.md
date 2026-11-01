@@ -44,6 +44,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
+  is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
+  it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
+  on a small model read it as the user's message ("your message doesn't include a question").
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
