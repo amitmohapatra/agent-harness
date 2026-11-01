@@ -29,6 +29,7 @@ this: `a2a(url)(message, tenant=, user=)` works from any code ([blocks/a2a.md](b
 | `GET {path}/runs/{run_id}/events` | Reconnect: the run's events after `Last-Event-ID` (or `?after=`), then live until it finishes. Only the run's own user sees it. A run another replica served is read from agent-runs' event log (with `RUNS_URL`), its events numbered by their position there. |
 | `POST {path}/runs/{run_id}/cancel` | Stop the run, whatever it is doing (`agent.cancel`): `200 {"runId", "status": "CANCELLED"}`, and its stream ends with `RUN_FINISHED` and a `cancelled` outcome. Only the run's own user (`404` for anyone else's); `409` once the run ended. |
 | `GET {path}/runs/{run_id}/artifacts/{artifact_id}` | Data the interrupt the run waits on carries by reference (`payload_ref`: a large `ask` table or diff), read from agent-runs. |
+| `GET {path}/runs/{run_id}/files/{name}` | A file the run kept for its user (`Runtime.save_file`; its `file` event names it), from the file store (`TRELLIS_FILES_URL`): a `307` to a link signed for 5 minutes where the store signs (GCS, S3, Azure), else the bytes streamed. Only the run's own user. |
 
 What the agent is asked: the latest `user` message's text (its text parts, when its content is
 a list of AG-UI content parts), or the input's `state` when there is none. Its file parts are
@@ -52,6 +53,36 @@ and the interrupt arrive as they are, through the agent's `on_output` hooks
 and a `TOOL_CALL_RESULT` its result's (`result:<call>`): the ids the memory service keeps the
 messages under ([ADR 0005](adr/0005-conversations-across-runs.md)).
 
+**What the front end gives the run** (a CopilotKit-style client: `frontend.py`). The request's
+`tools`, `context` and `state` are kept with the run, so a resume on any replica has them.
+
+- `tools` (each `{name, description, parameters}`, `name` letters, digits, `_` and `-`, at most
+  64): offered to the model beside the agent's own; one of the agent's tools by the same name
+  wins (a `warning` event, code `frontend_tools`). A graph built with its own tools offers only
+  those (build it with `trellis.middleware()`, or use `ReAct`). The front end runs a call: its
+  `TOOL_CALL_START`/`ARGS`/`END` stream, and the run pauses — `RUN_FINISHED` with an interrupt
+  whose `reason` is `frontend_tool` and whose `toolCallId` is the call's (`metadata.tool_call`
+  holds its name and arguments). The client answers with the next request: the thread's
+  messages ending with a `tool` message whose `toolCallId` is that call (its `content`, else
+  its `error`, is the result), or a `resume` entry whose `payload` is the result. The model
+  reads it as the call's output. A `tool` message no paused call of the thread waits on is a
+  `409`. The call is governed as a read unless the tenant's catalog says otherwise (it runs in
+  the person's own app).
+- `context` (each `{description, value}`) and `state`: the model reads them after the memory
+  context, as `From the app you work in:` lines, together at most half of the pushed context's
+  token budget (entries whole, in order, the rest said left out; the state last, cut to fit;
+  an empty state is not shown). The memory context gets the rest of the budget.
+- `state` is the run's shared state too: the run's code reads it as `agent.state`
+  (`trellis.current().state` in a tool) and sets it by assigning a new value. Each change
+  streams as `STATE_DELTA` (a JSON Patch, RFC 6902, from the state before), or as
+  `STATE_SNAPSHOT` where there was no JSON object or array to patch. A resume reads the state
+  the request sends (the client holds it, with the changes applied), else the one the run kept.
+- `forwardedProps.mode`: what the message does while another run of the thread works here, as
+  `agent.run(mode=)`: `queue` (the default), `interrupt`, `steer`. Any other value is a `422`.
+
+A call that paused the run (a front-end tool, or a tool that asked a person) has no result yet:
+its `TOOL_CALL_RESULT` is not sent until the run resumes and the call ends.
+
 How a resume entry becomes a decision: `decision` wins when present; `status: "cancelled"` is
 `CANCEL`; a question is `ANSWER` with `payload`; an approval is `APPROVE` for `true`, `REJECT`
 for `false`, `EDIT` for an object (the edited arguments), and anything else is refused. With
@@ -69,9 +100,9 @@ application's key unless every person's runs are assigned to that person.
 |---|---|
 | `401` `AUTHENTICATION` | no `x-trellis-identity` header, or one that is refused (above); with `identity=`, it named nobody |
 | `404` `NOT_FOUND` | an attached document the memory service does not let the caller read, or does not know; a resume names no interrupt of this thread; a reconnect to a run this caller does not own or this process never served; an artifact the awaited interrupt does not reference, or agent-runs no longer has |
-| `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused), or an answer that does not fit the question or the tool ([interrupts.md](interrupts.md#answering)) |
+| `409` `CONFLICT` (`detail` `BAD_RESUME: …`) | a `tool` message (the thread's last) that no paused front-end tool call of the thread waits on; a resume that cannot be read as a decision (an approval answered with neither `true`, `false` nor arguments), or that the run refuses (it waits on another interrupt, it is not paused), or an answer that does not fit the question or the tool ([interrupts.md](interrupts.md#answering)) |
 | `429` `RATE_LIMIT` (`Retry-After`, `retryable: true`) | agent-runs refused the run's start for the tenant's rate limit, after its SDK's retries ([runs.md](runs.md#admission-agent-runs-rate-limit)) |
-| `422` `VALIDATION` | a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here); a file part not attached by its document id; an attachment with no memory service (`MEMORY_URL`) |
+| `422` `VALIDATION` | a `forwardedProps.mode` other than `queue`, `interrupt`, `steer`; a `runId` that is not a fresh identifier (letters, digits, `-_.:`; one already used here); a file part not attached by its document id; an attachment with no memory service (`MEMORY_URL`) |
 | `422` (FastAPI's validation error) | a body that is not a `RunAgentInput`: a `decision` outside `answer`/`approve`/`reject`/`edit`/`cancel` (any case), a message `role` outside AG-UI's (`developer`, `system`, `assistant`, `user`, `tool`, `activity`, `reasoning`) |
 | `RUN_ERROR` `RUN_ABORTED` | the run ended without telling its client (the harness itself failed, e.g. agent-runs refused a write) |
 
@@ -126,6 +157,10 @@ The task id is the run id, the context id the thread. Task states follow the run
 in push notifications: A2A is the deployment's own agents talking
 ([observability.md](observability.md#redaction)). A task this process does not hold (a restart, another replica) is
 rebuilt from the run record when its own user asks for it.
+
+A new message's `metadata.mode` says what it does while another run of its context works here,
+as `agent.run(mode=)`: `queue` (the default), `interrupt` (that run's task ends `canceled`),
+`steer`. Any other value is refused (`InvalidRequestError`).
 
 The next message on an `input-required` task resumes it, as the person it belongs to (another
 user is told "this task is not yours to answer" and the task keeps waiting). The decision comes

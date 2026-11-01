@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import time
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
+import jsonpatch
 from pydantic import BaseModel
 
 from trellis.contracts import (
@@ -31,14 +33,17 @@ from trellis.contracts import (
     InterruptResolution,
     ModelError,
     Option,
+    RunEventType,
     ToolCall,
     ToolError,
     ToolSpec,
 )
-from trellis.harness import telemetry
+from trellis.harness import snapshots, telemetry
 from trellis.harness.asking import Question
 from trellis.harness.events import LOG, RunEvents
 from trellis.harness.features import Feature
+from trellis.harness.files import EVENT as FILE_EVENT
+from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
@@ -50,6 +55,7 @@ if TYPE_CHECKING:
     from trellis.harness.budget import Budget
     from trellis.harness.clients.memory import RunMemory
     from trellis.harness.conversation import Steer
+    from trellis.harness.frontend import Frontend
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
@@ -76,6 +82,8 @@ PROGRESS_SECONDS: Final = 20.0
 STALL_SECONDS: Final = 600.0
 #: The message a stalled step's watchdog cancels the attempt with.
 STALLED: Final = "trellis: the model call stalled"
+#: The run's last tool calls a kept file's record names (``Runtime.save_file``).
+RECORDED_CALLS: Final = 20
 
 
 class ModelTimeout(ModelError):
@@ -94,10 +102,11 @@ _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=Non
 @dataclass(frozen=True, slots=True)
 class _Call:
     """The tool or model call the code running now is in: when it must end (``time.monotonic``)
-    and, for a tool call, its idempotency key."""
+    and, for a tool call, its idempotency key and the id the run's stream gives it."""
 
     ends: float | None
     key: str | None
+    ref: str | None = None
 
 
 _call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
@@ -176,6 +185,10 @@ class Runtime:
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
+    #: the latest harness tool call (its key) and how many times in a row it was made
+    #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
+    #: not run again)
+    repeating: tuple[str, int] = ("", 0)
     #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
     #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
@@ -192,11 +205,18 @@ class Runtime:
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
     #: when each tool call of this attempt returned, by its reference (the framework's call
-    #: id): the time a replayed result says it was fetched (``snapshots.stamped``)
+    #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
     fetched: dict[str, datetime] = field(default_factory=dict)
     #: the tool each result this attempt kept came from, by its path (``tools.results.keep``):
-    #: its table's name in a query (``tools.query.tables``)
+    #: its table's name in a query (``tools.query.tables``); and when it was fetched (kept)
     kept_from: dict[str, str] = field(default_factory=dict)
+    kept_at: dict[str, datetime] = field(default_factory=dict)
+    #: what the run is told of the files kept for its user (``tools.stored.noted``): its
+    #: conversation's, or that other chats have some — ``None`` when there are none
+    files_note: str | None = None
+    #: the results the conversation's earlier turns saved in this process, by path
+    #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
+    earlier_results: dict[str, str] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
@@ -245,6 +265,33 @@ class Runtime:
     _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
     #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
     stalled: ModelTimeout | None = None
+    #: what the run's front end gave it: its tools, context and state (``frontend.py``)
+    frontend: Frontend | None = None
+    _state: Any = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.frontend is not None:
+            self._state = copy.deepcopy(self.frontend.state)
+
+    # ------------------------------------------------------------------ the front end's state
+    @property
+    def state(self) -> Any:
+        """The front end's shared state (AG-UI ``state``) as the run has it now; ``None``
+        without one. Set it to change it: each change is streamed — ``STATE_DELTA`` (a JSON
+        Patch from the state before) or, where either is not a JSON object or array,
+        ``STATE_SNAPSHOT``."""
+        return self._state
+
+    @state.setter
+    def state(self, value: Any) -> None:
+        if value == self._state:
+            return
+        operations = _patch(self._state, value)
+        self._state = copy.deepcopy(value)  # a change made in place later is a change too
+        if operations is None:
+            self.events.emit(RunEventType.STATE_SNAPSHOT, data={"snapshot": self._state})
+        else:
+            self.events.emit(RunEventType.STATE_DELTA, data={"delta": operations})
 
     # ------------------------------------------------------------------ the memory context
     @property
@@ -380,6 +427,13 @@ class Runtime:
         call = _call.get()
         return call.key if call is not None else None
 
+    @property
+    def call_id(self) -> str | None:
+        """Inside a tool call: the id its ``TOOL_CALL_*`` events carry (the framework's call
+        id, else the run's and the call's step). ``None`` outside a tool call."""
+        call = _call.get()
+        return call.ref if call is not None else None
+
     def remaining(self) -> float | None:
         """The seconds the code running now may still take: what is left of the run's time
         (its ``timeout`` and ``deadline``) and of the tool or model call it is in; ``None``
@@ -392,15 +446,16 @@ class Runtime:
 
     @contextlib.asynccontextmanager
     async def limited(
-        self, seconds: float | None, *, key: str | None = None
+        self, seconds: float | None, *, key: str | None = None, ref: str | None = None
     ) -> AsyncIterator[None]:
-        """The code inside — a tool call (``key``: its idempotency key) or a model call —
+        """The code inside — a tool call (``key``: its idempotency key, ``ref``: its id on the
+        stream) or a model call —
         takes at most ``seconds`` (``None``: no limit of its own), or raises ``TimeoutError``;
         the run's own time bounds it as well (the pipeline stops the run)."""
         own = None if seconds is None else time.monotonic() + seconds
         outer = _call.get()
         ends = [t for t in (own, outer.ends if outer else None) if t is not None]
-        token = _call.set(_Call(min(ends) if ends else None, key))
+        token = _call.set(_Call(min(ends) if ends else None, key, ref))
         try:
             async with asyncio.timeout(seconds):
                 yield
@@ -564,6 +619,49 @@ class Runtime:
             props=None if decision.props is None else dict(decision.props),
         )
 
+    def files_folder(self) -> str:
+        """Where this run's files are kept in the store: its tenant, user, conversation and run
+        (``files.scope``)."""
+        return scope(self.tenant, self.user, self.conversation, self.run_id)
+
+    async def save_file(
+        self,
+        name: str,
+        data: bytes,
+        *,
+        source: str,
+        content_type: str | None = None,
+        made: dict[str, Any] | None = None,
+    ) -> StoredFile:
+        """Keep ``data`` as the file ``name`` for the run's user (``harness.files``: stored, never
+        parsed or remembered), named in the run's journal and announced on its stream (the
+        ``file`` event: the file's name, size, media type, source), where AG-UI serves it
+        (``GET .../runs/{run_id}/files/{name}``). ``source``: what made it (a tool's name);
+        ``made``: how (``query_result``'s query, the results it read). Beside it is kept its
+        record (``FileStore.record``): the run, when, ``source``, ``made`` and the run's last
+        :data:`RECORDED_CALLS` tool calls, so a later run reads how it was made."""
+        files, folder = self.agent.harness.files, self.files_folder()
+        stored = await files.put(folder, name, data, source=source, content_type=content_type)
+        calls = self.replay.journal.trajectory[-RECORDED_CALLS:]
+        await files.keep_record(
+            folder,
+            name,
+            {
+                "run": self.run_id,
+                "saved_at": snapshots.now().isoformat(),
+                "source": source,
+                **(made or {}),
+                "calls": [
+                    {"tool": c.tool, "args": c.args, "status": o.status.value} for c, o in calls
+                ],
+            },
+        )
+        kept = self.replay.journal.files
+        kept[:] = [f for f in kept if f["name"] != name] + [stored.model_dump()]
+        announced = stored.model_dump(exclude={"name"})
+        self.events.custom(FILE_EVENT, file=stored.name, **announced)
+        return stored
+
     async def interrupt(
         self, key: str, *, payload: dict[str, Any] | None = None, **fields: Any
     ) -> InterruptResolution:
@@ -615,6 +713,14 @@ MARKER: Final = "trellis_interrupt"
 #: earlier call of the same model step paused (``middleware.HarnessTools``): no question —
 #: the call runs, in its turn, when the run resumes.
 DEFERRED: Final = "trellis_deferred"
+
+
+def _patch(before: Any, after: Any) -> list[dict[str, Any]] | None:
+    """The JSON Patch from ``before`` to ``after`` (RFC 6902), or ``None`` where it cannot be
+    one (either is not a JSON object or array: a snapshot says it then)."""
+    if not isinstance(before, (dict, list)) or not isinstance(after, (dict, list)):
+        return None
+    return list(jsonpatch.make_patch(before, after).patch)
 
 
 def interrupt_id(run_id: str, attempt: int, n: int) -> str:

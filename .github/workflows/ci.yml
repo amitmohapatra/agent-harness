@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to a pull request cancels the run of the commit it replaced: only the head's
+# result can merge it. A run on main is never cancelled (one group per commit).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   gates:
     # every gate on each Python the harness supports (requires-python >=3.12)

@@ -9,7 +9,9 @@ As a backend (``ReAct``, Deep Agents: ``trellis.harness.sandbox.backend``) Deep 
 tools and its ``execute`` work in the run's sandbox. As tools (:meth:`SandboxSource.tools`) the
 model gets three harness tools: :data:`EXEC` (a shell command: its exit code, stdout and
 stderr), :data:`READ` (a file, as text) and :data:`WRITE` (a file). Each call goes through the
-bridge like any tool's: governed (``sandbox_exec`` and ``sandbox_write`` write,
+bridge like any tool's — a failed command's result adds a ``hint`` when the sandbox knows why
+(:func:`~trellis.harness.sandbox.base.hint`: the memory limit it went past, a module it cannot
+install) — governed (``sandbox_exec`` and ``sandbox_write`` write,
 ``sandbox_read`` reads; the catalog may say more), journaled (a resumed run reads the same
 output and runs nothing again), recorded and redacted, and bounded by its ``call_timeout`` — a
 command out of time is killed, and its effect is unknown to the model, as any write's.
@@ -38,9 +40,12 @@ The provider is the one given (``sandbox(provider)``), else Docker (:class:`Dock
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import logging
 import re
 import time
+import uuid
 import weakref
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
@@ -60,8 +65,10 @@ from trellis.harness.sandbox.base import (
     SandboxSpec,
     SupportsPause,
     SupportsSnapshot,
+    hint,
 )
 from trellis.harness.sandbox.docker import DockerSandbox
+from trellis.harness.tools import query
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
 if TYPE_CHECKING:
@@ -84,6 +91,37 @@ NAME_CHARS: Final = 63
 #: How often a process deletes, in the background, a tenant's sandboxes whose runs ended
 #: without deleting them (the first time it makes one, then at most this often).
 REAP_SECONDS: Final = 600.0
+#: What the environment card is read with, in a sandbox made for it alone: the Python version,
+#: then each installed distribution as ``name==version`` (the standard library's
+#: ``importlib.metadata``; pip's own tools left out).
+PROBE: Final = (
+    'python3 -c "import sys, importlib.metadata as m; '
+    "print(sys.version.split()[0]); "
+    "print(' '.join(sorted({d.metadata['Name'].lower() + '==' + d.version "
+    "for d in m.distributions() if d.metadata['Name'] "
+    "and d.metadata['Name'].lower() not in ('pip', 'setuptools', 'wheel')})))\""
+)
+#: The most a probe may take, in seconds (its sandbox made, the script run).
+PROBE_SECONDS: Final = 60.0
+#: The most distributions the card names; the rest are counted.
+CARD_PACKAGES: Final = 80
+#: The label of a sandbox made only to read the environment card.
+PROBE_LABEL: Final = "trellis.probe"
+#: Where code in the sandbox puts the files the user gets: each file directly in it is kept in
+#: the file store when the run succeeds (:func:`delivered`), before the sandbox is deleted.
+OUTPUTS: Final = "outputs"
+#: Each output file's size and name, one per line (POSIX sh: any image's shell).
+LIST_OUTPUTS: Final = (
+    f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
+    'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
+)
+#: The largest output file kept; a larger one is left, said in a warning.
+OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
+#: What the command tool's description says about outputs.
+DELIVERS: Final = (
+    f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
+    "finish."
+)
 
 
 class SandboxSource:
@@ -103,7 +141,7 @@ class SandboxSource:
                 _spec(
                     EXEC,
                     "Run a shell command in your sandbox (sh -c, in its working directory): "
-                    "its exit code, stdout and stderr.",
+                    f"its exit code, stdout and stderr. {DELIVERS}",
                     {"command": "the command"},
                     side_effects="write",
                 ),
@@ -132,6 +170,39 @@ class SandboxSource:
         self._reaped: LRU[str, float] = LRU()
         #: the kept results each attempt has written into its sandbox (:meth:`with_results`)
         self._written: weakref.WeakKeyDictionary[Runtime, set[str]] = weakref.WeakKeyDictionary()
+        #: the environment card, once read (:meth:`card`); ``""`` when none could be
+        self._card: str | None = None
+        self._probing = asyncio.Lock()
+
+    async def card(self) -> str:
+        """What the sandbox's image holds, for the model to write code that runs there the
+        first time: its Python version and installed distributions, and — with no network —
+        that nothing else can be installed. Read once per process, in a sandbox made for it
+        alone and deleted at once; ``""`` when it cannot be read (no daemon: said once in the
+        log; an image without Python: said in the card)."""
+        async with self._probing:
+            if self._card is None:
+                self._card = await self._probed()
+            return self._card
+
+    async def _probed(self) -> str:
+        provider = self.provider_for()
+        ref = SandboxRef(
+            provider=provider.name,
+            id=f"trellis-probe-{uuid.uuid4().hex[:16]}",
+            labels={PROBE_LABEL: "1"},
+        )
+        try:
+            async with asyncio.timeout(PROBE_SECONDS):
+                box = await provider.create(ref, self.spec.model_copy(update={"files": {}}))
+                try:
+                    found = await box.exec(PROBE, timeout=PROBE_SECONDS)
+                finally:
+                    await provider.delete(ref)
+        except Exception as exc:
+            log.warning("the sandbox's environment card was not read: %s", exc)
+            return ""
+        return card_of(found, offline=self.spec.network == "none")
 
     def tools(self) -> SandboxTools:
         """The sandbox as three harness tools (:data:`EXEC`, :data:`READ`, :data:`WRITE`), a
@@ -195,12 +266,13 @@ class SandboxSource:
 
     async def with_results(self, runtime: Runtime, box: Sandbox) -> None:
         """The results the run keeps (``tools.results``: a large one, or one cut to fit the
-        window) written into its sandbox at the path the model was given, before a command
-        runs or a file is read there — so code counts, sums, filters and ranks every row of
-        one, instead of the model paging it into its context. Each once per attempt (a later
-        attempt's sandbox may be one made again from a snapshot)."""
+        window; its conversation's earlier turns' too, ``tools.query.saved``) written into its
+        sandbox at the path the model was given, before a command runs or a file is read
+        there — so code counts, sums, filters and ranks every row of one, instead of the model
+        paging it into its context. Each once per attempt (a later attempt's sandbox may be one
+        made again from a snapshot)."""
         written = self._written.setdefault(runtime, set())
-        kept = runtime.replay.journal.results
+        kept = query.saved(runtime)
         for path in [p for p in kept if p not in written]:
             await box.write(path, kept[path].encode())
             written.add(path)
@@ -224,7 +296,9 @@ class SandboxSource:
         runtime = _running()
         box = await self.opened(runtime, changes=True)
         await self.with_results(runtime, box)
-        return (await box.exec(str(args["command"]), timeout=runtime.remaining())).model_dump()
+        result = await box.exec(str(args["command"]), timeout=runtime.remaining())
+        why = hint(result.exit_code, result.stderr, self.spec)
+        return result.model_dump() if why is None else {**result.model_dump(), "hint": why}
 
     async def _read(self, args: dict[str, Any]) -> str:
         runtime = _running()
@@ -254,7 +328,14 @@ class SandboxTools:
         self.source = source
 
     async def resolve(self) -> list[Tool]:
-        return list(self.source._tools)
+        """The three tools, ``sandbox_exec`` described with the environment card
+        (:meth:`SandboxSource.card`)."""
+        run, *rest = self.source._tools
+        card = await self.source.card()
+        if not card:
+            return [run, *rest]
+        described = run.spec.model_copy(update={"description": f"{run.spec.description} {card}"})
+        return [dataclasses.replace(run, spec=described), *rest]
 
 
 def sandbox(
@@ -274,6 +355,44 @@ def sandbox(
     if image is not None:
         given = given.model_copy(update={"image": image})
     return SandboxSource(provider, given, call_timeout)
+
+
+async def delivered(runtime: Runtime) -> None:
+    """The run succeeded: each file its code wrote directly in :data:`OUTPUTS` of its sandbox
+    kept in the file store for its user (``Runtime.save_file``: named in its journal, announced,
+    served over AG-UI), before the sandbox is deleted. A file that cannot be kept (its name, its
+    size past :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
+    box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
+    if box is None or source is None:
+        return
+    tool = EXEC if EXEC in runtime.toolbox else "execute"
+    listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
+    for line in listed.stdout.splitlines():
+        size, _, name = line.strip().partition(" ")
+        try:
+            if int(size) > OUTPUT_MAX_BYTES:
+                raise ToolError(f"{size} bytes, past the {OUTPUT_MAX_BYTES} kept", source="tools")
+            data = await box.read(f"{OUTPUTS}/{name}")
+            await runtime.save_file(name, data, source=tool)
+        except ToolError as exc:
+            runtime.events.warning(EVENT, f"the output {name} was not kept: {exc}")
+
+
+def card_of(found: ExecResult, *, offline: bool) -> str:
+    """The environment card a probe's output makes (:data:`PROBE`): ``Python <version>; installed:
+    name version, ...`` — at most :data:`CARD_PACKAGES` named, the rest counted — and, with no
+    network, that nothing else can be installed."""
+    lines = found.stdout.strip().splitlines()
+    if found.exit_code != 0 or not lines:
+        return "The sandbox has no Python (python3): run shell commands only."
+    version, packages = lines[0], (lines[1].split() if len(lines) > 1 else [])
+    named = ", ".join(p.replace("==", " ") for p in packages[:CARD_PACKAGES])
+    more = len(packages) - CARD_PACKAGES
+    listed = (f"{named} and {more} more" if more > 0 else named) or "the standard library only"
+    card = f"Its environment: Python {version}; installed: {listed}."
+    if offline:
+        card += " It has no network: nothing else can be installed."
+    return card
 
 
 def ref_of(runtime: Runtime, provider: str) -> SandboxRef:
@@ -394,6 +513,8 @@ __all__ = [
     "SandboxTools",
     "SupportsPause",
     "SupportsSnapshot",
+    "card_of",
+    "delivered",
     "reap",
     "sandbox",
 ]

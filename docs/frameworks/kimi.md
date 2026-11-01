@@ -58,7 +58,7 @@ command="kimi")`:
 
 | | |
 |---|---|
-| Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt) |
+| Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt), marked off from the question as `ReAct`'s is (`<memory_context>`, `history.ASKED_WITH`) |
 | Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the attempt on `127.0.0.1` with a bearer token of its own, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run; `read_file` pages a large result |
 | Kimi's own tools | every call Kimi asks permission for (`Bash`, `Write`, `Edit`... in its default mode) is decided as a harness call is: the run's `before_tool` hooks, governance by its risk, a person when it asks. `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` write; `Bash` is irreversible; the catalog overrides |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
@@ -141,7 +141,10 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   (`helper_started`, `helper_finished`).
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
-  `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer.
+  `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer
+  (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run asks it
+  once more in the same session, told the limit is reached, as `ReAct` does at `max_steps` (a
+  `step_limit` warning).
 
 ## Streaming
 

@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from benchmark.cost import breakfix, judge, run
+from benchmark.cost import breakfix, judge, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from trellis import Settings
@@ -135,8 +135,9 @@ def test_the_cases_cover_every_category_and_tier() -> None:
     assert {c.tier for c in cases} == set(cx.TIERS)
     kinds = collections.Counter(t.expect.kind for c in cases for t in c.turns if t.expect)
     assert set(kinds) == {*cx.STRICT_KINDS, "judge"}
-    # the harness's own tools a gold call may use, and the made-up name a malformed call uses
-    builtin = {"query_result", "read_file", "write_todos", "task", "stock_levels"}
+    # the harness's own tools a gold call may use (memory's with memory on), and the made-up
+    # name a malformed call uses
+    builtin = {"query_result", "read_file", "write_todos", "task", "memory_forget", "stock_levels"}
     for c in cases:
         tools = {t.spec.name for t in (*r.TOOLS, *c.tools)} | builtin
         assert any(t.expect for t in c.turns), c.id
@@ -223,12 +224,17 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
 
 async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> None:
     out = tmp_path / "cap"
-    # the scripted model reports 1,000 in and 50 out a call: $0.000125 at this price
+    # the scripted model reports each request's own size in and 50 out: the run stops at the
+    # call that reaches the cap, so it spends less than the cap and that one call
     report = await cx.bench(
         _args(out, cases=PICK, price="claude-haiku-5-5", max_usd=0.0005), progress=lambda _: None
     )
     assert report["stopped"] and "spend cap" in report["stopped"]
-    assert report["usd"] >= 0.0005 and report["usd"] < 0.0005 + 0.000125 * 2
+    sent = [json.loads(x) for x in out.with_suffix(".requests.jsonl").read_text().splitlines()]
+    price = prices.PRICES["claude-haiku-5-5"]
+    calls = [prices.dollars(price, input_tokens=q["input_tokens"], output_tokens=50) for q in sent]
+    assert len(set(calls)) > 1  # priced by what each request held, not one constant
+    assert report["usd"] >= 0.0005 and report["usd"] < 0.0005 + 2 * max(calls)
     kept = out.with_suffix(".jsonl").read_text().splitlines()
     assert len(kept) < 7 and all(not json.loads(x)["stopped"] for x in kept)
 
@@ -698,11 +704,75 @@ def test_a_current_figure_may_name_the_earlier_one_as_earlier() -> None:
     gives the stale figure as the answer still fails."""
     case = next(c for c in cx.cases() if c.id == "freshness-01")
     turn = case.turns[1]
-    now = str(int(turn.expect.value))
-    old = turn.expect.forbidden[0]
+    expect = turn.expect
+    assert expect is not None
+    now = str(int(expect.value))
+    old = expect.forbidden[0]
     right = f"The current total is **{now} units**. This is down from the {old} I reported earlier."
-    assert cx.score(turn.expect, right, [], turn.text)["correct"], right
-    assert not cx.score(turn.expect, f"We have {old} units on hand.", [], turn.text)["correct"]
-    assert not cx.score(turn.expect, f"{old} units now; {now} were reserved.", [], turn.text)[
-        "correct"
-    ]
+    assert cx.score(expect, right, [], turn.text)["correct"], right
+    assert not cx.score(expect, f"We have {old} units on hand.", [], turn.text)["correct"]
+    assert not cx.score(expect, f"{old} units now; {now} were reserved.", [], turn.text)["correct"]
+
+
+def test_the_scripted_model_reports_the_size_of_the_request_it_was_sent() -> None:
+    """Its input tokens are the request it received, counted as ``FitWindow`` counts one (its
+    messages and its tools: ``middleware._size``). A constant taught ``FitWindow`` a false ratio
+    (``middleware._calibrated``), so a long chat's request went past the window (advconv-05)."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+    from langchain_core.tools import tool as as_tool
+
+    @as_tool
+    def lookup(topic: str) -> str:
+        """Look a topic up in the knowledge base, by its name."""
+        return topic
+
+    case = next(c for c in cx.cases() if c.id == "advconv-05")
+    for keyed in (True, False):
+        model = cx.scripted_model(case if keyed else cx.cases()[0])
+        sent = [SystemMessage("s"), HumanMessage("What was the west's revenue in Q1 2026?" * 40)]
+        reply = model.bind_tools([lookup]).invoke(sent)
+        assert reply.usage_metadata["input_tokens"] == count_tokens_approximately(
+            sent, tools=[lookup]
+        )
+        assert reply.usage_metadata["output_tokens"] == 50
+        assert all("offered" not in r for r in model.requests)  # what it was bound with, as before
+
+
+async def test_revoking_an_approval_pauses_to_forget_the_users_words_and_goes_on_approved(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bf3-past-02: revoking an approval forgets what the user said, which the harness asks a
+    person about (``harness._forgotten``). The turn pauses for that approval, is resumed
+    approved, and ends with the statement forgotten as the user — the pause is the harness's
+    intended behaviour, not a run that should have ended at once."""
+    import uuid
+
+    from tests.support.memory import NOW, FakeMemoryService
+    from trellis import Harness
+
+    memory = FakeMemoryService()
+    said = "I'm approving the SUP-12 contract renewal."
+    memory.memories[breakfix.SUP12_APPROVAL] = {
+        "content": said,
+        "user": f"{run.USER}-abcdef-bf3-past-02",  # the case's user in this run (its tag)
+        "visibility": "USER",
+        "memory_type": "SEMANTIC",
+        "current": True,
+        "superseded_by": None,
+        "supersedes": None,
+        "created_at": NOW,
+    }
+    out = tmp_path / "bf"
+    async with Harness(config=Settings(), memory=memory.client()) as h:
+        real, tagged = uuid.uuid4, iter([uuid.UUID(int=0xABCDEF << 104)])
+        monkeypatch.setattr(cx.uuid, "uuid4", lambda: next(tagged, None) or real())  # its tag
+        await cx.bench(
+            _args(out, cases="bf3-past-02", history="memory"), harness=h, progress=lambda _: None
+        )
+    [row] = map(json.loads, out.with_suffix(".jsonl").read_text().splitlines())
+    revoke = row["turns"][1]
+    asks = [c for c in revoke["checks"] if c["check"] == "asks"]
+    assert [c["ok"] for c in asks] == [True], revoke["checks"]
+    assert revoke["status"] == "SUCCESS", revoke
+    assert memory.memories[breakfix.SUP12_APPROVAL]["current"] is False  # forgotten, as the user

@@ -6,7 +6,10 @@
   replaces it in place (``add_messages``) — and it leaves out the recent conversation, which
   the checkpointer already holds. Where memory keeps the conversation instead, its recent
   messages follow the context as LangChain's own — ``HumanMessage``, ``AIMessage`` with its
-  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay;
+  ``tool_calls``, ``ToolMessage`` — the messages a checkpointer would replay. A
+  ``create_agent`` graph (``ReAct``'s, Deep Agents') sends its model the context as the first
+  part of the turn's question instead, after the history a prompt cache keeps
+  (``middleware.with_question``);
 * transcript: the messages the run added after the question — tool calls and their results
   with the answer — so the conversation memory keeps replays as the framework's would;
 * run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
@@ -123,9 +126,11 @@ class LangGraphAdapter:
         from trellis.harness import accounting  # noqa: F401
 
         # and every tool node's calls governed, the harness's middleware or not
-        from trellis.harness.middleware import govern_tool_nodes
+        from trellis.harness.middleware import declare_files, govern_tool_nodes
 
         govern_tool_nodes()
+        # a Deep Agent's file tools on a disk, a store or a sandbox change real files: governed
+        declare_files(target)
 
         #: the graph takes the run's tools per model call (``middleware.HarnessTools``): it
         #: converts them itself, so nothing is converted for it here

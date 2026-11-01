@@ -36,10 +36,10 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   journal and the next attempt resumes it, told to call the tool again, which the journal
   answers. The agent keeps its sessions on its machine (Kimi: ``KIMI_CODE_HOME``): a resume
   elsewhere says so and runs the prompt again in a new session, against the journal;
-* spending: ACP's own ``usage`` on the prompt's answer when the agent gives it; Kimi gives none,
-  and its own usage log (``usage.record``, every model request of every agent, sub-agents
-  included) is read as the turn runs — tokens only (dollars need the gateway's log: not yet);
-  past the budget the turn is cancelled;
+* spending: ACP's own ``usage`` on the prompt's answer when the agent gives it and the harness
+  keeps no usage log of it; Kimi gives none, and its own usage log (``usage.record``, every
+  model request of every agent, sub-agents included) is read as the turn runs — tokens only
+  (dollars need the gateway's log: not yet); past the budget the turn is cancelled;
 * models: with a route that attributes calls (``Capability.ATTRIBUTION``: Bifrost) serving the
   harness and a ``model`` named, Kimi's model calls go through
   Bifrost's OpenAI route with the virtual key, carrying the deny-all MCP scope, the run's
@@ -94,7 +94,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import ASKED_WITH, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
@@ -108,6 +108,8 @@ SERVER: Final = "trellis"
 HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 #: The key a turn's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "acp"
+#: The model name an ACP agent's own usage is counted under when the target names none.
+ACP_MODEL: Final = "acp"
 #: How often the agent's usage log is read while a turn runs (and the budget checked).
 USAGE_SECONDS: Final = 0.5
 #: How long, after a turn, the agent's usage log is read until it stops growing (at most), and
@@ -190,6 +192,10 @@ KIMI_HOME: Final = "~/.kimi-code"
 KIMI_HEADERS: Final = "KIMI_CODE_CUSTOM_HEADERS"
 #: The line of Kimi's usage log a model request's usage is on (``agents/<id>/wire.jsonl``).
 USAGE_RECORD: Final = "usage.record"
+#: The line a turn's end is on, and the error of a turn Kimi ended at its step limit
+#: (``loop_control.max_steps_per_turn``) — over ACP a finished turn with no answer.
+TURN_ENDED: Final = "turn.ended"
+AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +267,8 @@ class UsageLog:
         self.session_id = session_id
         #: how far each file was read, in bytes
         self.read_to: dict[Path, int] = {}
+        #: the main agent's step limit, when its turn ended there (:data:`AT_STEP_LIMIT`)
+        self.limited: int | None = None
 
     def _files(self) -> list[Path]:
         return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
@@ -284,6 +292,10 @@ class UsageLog:
                 entry = _json_line(line)
                 if entry.get("type") == USAGE_RECORD and isinstance(entry.get("usage"), dict):
                     found.append(entry)
+                elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
+                    error = entry.get("error") or {}
+                    if error.get("code") == AT_STEP_LIMIT:
+                        self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
         return found
 
 
@@ -558,6 +570,7 @@ class ACPAdapter:
             servers = [_server(s) for s in target.mcp_servers]
             if run.native_tools is not None:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
+                attempt.served = run.native_tools
             conn, process = await stack.enter_async_context(
                 spawn_agent_process(
                     cast("Any", attempt),  # an ACP ``Client``: the methods the agent calls
@@ -696,6 +709,8 @@ class Attempt:
         self.drain: asyncio.Task[None] | None = None
         #: the agent's requests being answered now (each in a task of the connection's)
         self.handling: set[asyncio.Task[Any]] = set()
+        #: the harness's tools as the attempt serves them (``tools.convert.mcp.Tools``)
+        self.served: Any = None
 
     def bind(self, conn: Any, process: Any) -> None:
         self.conn = conn
@@ -766,6 +781,7 @@ class Attempt:
         something (a rejection's reason, an edit) — the next turn's, until one ends on its own
         or the run pauses."""
         prompt = self._first(native_input)
+        asked_at_limit = False
         while prompt is not None:
             self.cancelled = False
             async with contextlib.aclosing(self._turn(prompt)) as items:
@@ -774,6 +790,14 @@ class Attempt:
             prompt, self.followup = self.followup, None
             if self.runtime.pending is not None or self.runtime.budget_spent is not None:
                 return
+            limit = self.usage.limited if self.usage is not None else None
+            if prompt is None and limit is not None and not asked_at_limit:
+                # the turn ended at the agent's step limit, with no answer: asked once more
+                asked_at_limit, self.usage.limited = True, None  # type: ignore[union-attr]
+                stopped = f"stopped: the step limit ({limit}) was reached"
+                log.warning("run %s %s", self.runtime.run_id, stopped)
+                self.runtime.events.warning("step_limit", stopped)
+                prompt = budget.TURN_LIMIT.format(limit=limit)
 
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block
@@ -781,8 +805,8 @@ class Attempt:
         if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
         blocks = [text_block(native_input.prompt)]
-        if native_input.context:
-            blocks.insert(0, text_block(native_input.context))
+        if native_input.context:  # marked off: the question is the block after it
+            blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:
@@ -812,12 +836,15 @@ class Attempt:
                     async with asyncio.timeout(USAGE_SECONDS):
                         item = await self.queue.get()
                 except TimeoutError:
+                    self._died()
                     await self._spent()
                     continue
+                self._died()
                 if isinstance(item, _Ended):
                     await self._settled()
                     if item.error is not None:
                         raise await self._failed(item.error)
+                    self._answered_usage(item.answer)
                     yield item.answer
                     return
                 if await self._seen(item):
@@ -829,6 +856,13 @@ class Attempt:
             runtime.model_ended(STEP)
             if not asking.done():
                 asking.cancel()
+
+    def _died(self) -> None:
+        """What ended a harness call that was not an error (the worker dying), raised in the
+        attempt: in the server's request it ended only the server."""
+        fatal = self.served.fatal if self.served is not None else None
+        if fatal is not None:
+            raise fatal
 
     async def _failed(self, error: BaseException) -> BaseException:
         """The agent's error — or, when the connection closed (its process ended), why the
@@ -880,6 +914,21 @@ class Attempt:
         if spent is not None and runtime.budget_spent is None:
             budget.stopped(runtime, spent)
             await self.cancel()
+
+    def _answered_usage(self, answer: Any) -> None:
+        """ACP's own usage on the prompt's answer, on the run's budget — for an agent the
+        harness keeps no usage log of (its profile's ``usage``: Kimi's log counts every request,
+        and is its count)."""
+        usage = getattr(answer, "usage", None)
+        if usage is None or self.usage is not None:
+            return
+        budget.account(
+            self.runtime,
+            model=self.target.model or ACP_MODEL,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cached=usage.cached_read_tokens or 0,
+        )
 
     def _accounted(self) -> int:
         """The usage records the agent logged since the last read, on the run's budget: how

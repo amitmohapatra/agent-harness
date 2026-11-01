@@ -1,11 +1,10 @@
 """Tool results as snapshots: a value a tool returned is what it was when it was fetched, and a
 conversation that replays it in a later turn says so.
 
-* **stamped** — where memory owns the conversation, each tool result the run writes to it
-  (``Agent.recorded_run``) starts with :data:`STAMP`: the tool, and when the call returned
-  (``Runtime.fetched``, else the time it is written). A later turn's window replays it with
-  that line, so the model can say where a number came from and when, and can tell an old
-  value from a current one.
+* **fetched** — when a call returned (``Runtime.fetched``) is said in one place: the run's
+  record of the call (``Said.facts``, :data:`FETCHED`), which the run writes with its turn
+  (``pipeline._with_facts``) and the memory service's steps list shows on the call's line. A
+  result's own text is never stamped with it.
 * **out of date** — a tool's data is live unless it declares otherwise (``tools.base.max_age``:
   0 by default, ``max_age`` seconds, or none for ``freshness="static"`` reference data), so an
   earlier result replayed past that age says it is out of date (:data:`STALE`), the run's
@@ -18,30 +17,42 @@ conversation that replays it in a later turn says so.
 from __future__ import annotations
 
 import dataclasses
-import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
-from typing import Final
+from typing import Any, Final
 
 from trellis.harness.history import Said, Speaker
 
-#: The line a replayed tool result starts with: which tool returned it, and when (UTC).
-STAMP: Final = "[snapshot of {tool} from {at}]"
-#: The stamp of a result past its tool's max age.
-STALE: Final = (
-    "[snapshot of {tool} from {at}: out of date, {tool}'s values change — call {tool} again "
-    "for the current value]"
-)
-_STAMPED: Final = re.compile(
-    r"^\[snapshot of (?P<tool>[^\]\s]+) from (?P<at>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)[^\]\n]*\]\n"
+#: The run-record fact of when a call returned (UTC, :data:`TIME`), and of how long its value
+#: stays current (seconds; absent for a tool whose data is static).
+FETCHED: Final = "fetched"
+MAX_AGE: Final = "max_age"
+#: The line a replayed result past its tool's max age starts with.
+STALE: Final = "[out of date: call {tool} again for the current value]"
+#: The mark of a live tool's result from an earlier turn of a thread its framework keeps (a
+#: graph's checkpointer: no fetch time is kept with it, and it is from before this turn).
+EARLIER: Final = (
+    "[{tool}'s result from an earlier turn: out of date, {tool}'s values change — call {tool} "
+    "again for the current value]"
 )
 #: What the context says of the tools whose replayed results are out of date.
 NOTE: Final = (
     "The values {tools} returned in earlier turns are out of date (older than they stay "
-    "current): call {tools} again for the current values; never answer from the earlier ones."
+    "current): for a value the question needs, call its tool again; never answer with an "
+    "earlier one."
 )
-#: The time format of a stamp: to the second, UTC.
+#: The time format of a fetch time: to the second, UTC.
 TIME: Final = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def declared_max_age(runtime: Any, name: str) -> float | None:
+    """How long a value of ``runtime``'s tool ``name`` stays current, as it declared it
+    (``tools.base.max_age``; ``None``: it did not say, or it is not the run's tool)."""
+    from trellis.harness.tools.base import max_age  # noqa: PLC0415 - the tools import this
+
+    found = runtime.toolbox.get(name)
+    spec = found.spec if found is not None else runtime.native.get(name)
+    return None if spec is None else max_age(spec)
 
 
 def now() -> datetime:
@@ -49,42 +60,24 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
-def stamped(messages: Sequence[Said], fetched: Mapping[str, datetime]) -> list[Said]:
-    """``messages`` with each tool result that has no stamp yet starting with :data:`STAMP`:
-    its tool (named by the call it answers), and when it was fetched (``fetched``, by call id;
-    else now)."""
-    tools = {c.id: c.name for m in messages for c in m.tool_calls}
-    written = now()
-
-    def one(m: Said) -> Said:
-        if m.role is not Speaker.TOOL or m.tool_call_id is None or _STAMPED.match(m.content):
-            return m
-        when = fetched.get(m.tool_call_id, written)
-        stamp = STAMP.format(tool=tools.get(m.tool_call_id, "a tool"), at=when.strftime(TIME))
-        return dataclasses.replace(m, content=f"{stamp}\n{m.content}")
-
-    return [one(m) for m in messages]
-
-
 def out_of_date(
     history: Sequence[Said], max_age: Callable[[str], float | None]
 ) -> tuple[list[Said], list[str]]:
-    """``history`` with each stamped tool result past its tool's ``max_age`` (seconds; ``None``:
-    the tool did not say) stamped :data:`STALE` instead, and those tools, in the order met."""
+    """``history`` with each tool result whose recorded fetch time (``Said.facts``,
+    :data:`FETCHED`) is past its tool's ``max_age`` (seconds; ``None``: the tool did not say)
+    starting with :data:`STALE`, and those tools, in the order met."""
     at = now()
+    tools = {c.id: c.name for m in history for c in m.tool_calls}
     stale: dict[str, None] = {}
 
     def one(m: Said) -> Said:
-        found = _STAMPED.match(m.content) if m.role is Speaker.TOOL else None
-        if found is None:
-            return m
-        tool, when = found.group("tool"), _parsed(found.group("at"))
-        limit = max_age(tool)
-        if when is None or limit is None or (at - when).total_seconds() <= limit:
+        tool = tools.get(m.tool_call_id or "") if m.role is Speaker.TOOL else None
+        when = _parsed((m.facts or {}).get(FETCHED))
+        limit = None if tool is None else max_age(tool)
+        if tool is None or when is None or limit is None or (at - when).total_seconds() <= limit:
             return m
         stale[tool] = None
-        said = STALE.format(tool=tool, at=found.group("at"))
-        return dataclasses.replace(m, content=f"{said}\n{m.content[found.end() :]}")
+        return dataclasses.replace(m, content=f"{STALE.format(tool=tool)}\n{m.content}")
 
     marked = [one(m) for m in history]
     return marked, list(stale)
@@ -97,11 +90,24 @@ def note(tools: Iterable[str]) -> str | None:
     return NOTE.format(tools=named) if named else None
 
 
-def _parsed(text: str) -> datetime | None:
+def _parsed(text: object) -> datetime | None:
+    if not isinstance(text, str):
+        return None
     try:
         return datetime.strptime(text, TIME).replace(tzinfo=UTC)
     except ValueError:
         return None
 
 
-__all__ = ["NOTE", "STALE", "STAMP", "note", "now", "out_of_date", "stamped"]
+__all__ = [
+    "EARLIER",
+    "FETCHED",
+    "MAX_AGE",
+    "NOTE",
+    "STALE",
+    "TIME",
+    "declared_max_age",
+    "note",
+    "now",
+    "out_of_date",
+]
