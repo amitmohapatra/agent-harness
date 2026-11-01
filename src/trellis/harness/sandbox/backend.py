@@ -36,6 +36,7 @@ from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.sandbox.base import hint
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
+from trellis.harness.tools.results import EXECUTE
 
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
 ASYNC_ONLY: Final = "the sandbox backend runs in a harness run's graph, asynchronously (ainvoke)"
@@ -108,10 +109,6 @@ class SandboxBackend(BaseSandbox):
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         raise ConfigurationError(ASYNC_ONLY)
-
-
-#: Deep Agents' tool that runs a command on its backend.
-EXECUTE: Final = "execute"
 
 
 class SandboxCard(AgentMiddleware):

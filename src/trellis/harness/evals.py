@@ -73,6 +73,7 @@ from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal
 from trellis.harness.removed import removed
 from trellis.harness.settings import Settings
+from trellis.harness.tools.base import FAILED
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -95,8 +96,6 @@ EVAL_REVIEWER: Final = "trellis:evaluate"
 #: should not need (a broader tool the needed ones are more specific than).
 NEEDED_TOOLS: Final = "needed_tools"
 AVOID_TOOLS: Final = "avoid_tools"
-#: The outcomes of a call that failed (:func:`tool_coverage` says so).
-FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The ``ToolOutcome.metadata`` flag of the call an item's run paused on for approval (on the
 #: trajectory the evaluators that score a paused run read: ``scores_paused``).
 PAUSED: Final = "paused"

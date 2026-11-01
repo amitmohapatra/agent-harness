@@ -21,7 +21,8 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
 * ``{"usage": {...}, "agent": "main"}`` a model request's usage, in its usage log under
   ``KIMI_CODE_HOME`` (Kimi's ``usage.record`` line);
 * ``{"stall": seconds}`` sends nothing for that long; ``{"crash": "why"}`` the process ends;
-  ``{"stop": "refusal"}`` ends the turn so; ``{"prompt_usage": {...}}`` puts ACP's own usage on
+  ``{"stop": "refusal"}`` ends the turn so; ``{"step_limit": n}`` ends it at Kimi's step limit (no
+  answer, the reason only in its log's ``turn.ended``); ``{"prompt_usage": {...}}`` puts ACP's own usage on
   the prompt's answer; ``{"plan": true}`` a plan update; ``{"wait": seconds}`` a tool call that
   runs that long (a cancel stops it).
 
@@ -116,6 +117,19 @@ def logged_usage(session_id: str, agent: str, usage: dict[str, Any]) -> None:
     line = {"type": "usage.record", "agentId": agent, "model": "__kimi_env_model__", "usage": usage}
     with path.open("a") as file:
         file.write("not json\n" if usage.get("garbled") else json.dumps(line) + "\n")
+
+
+def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
+    """The turn's end, as Kimi 2.1 logs every turn's after its usage (its durable
+    ``TurnEnded``: ``reason`` completed, cancelled or failed; at its step limit failed, with
+    ``loop.max_steps_exceeded``)."""
+    path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line: dict[str, Any] = {"type": "turn.ended", "agentId": "main", "turnId": 0, "reason": reason}
+    if limit is not None:
+        line["error"] = {"code": "loop.max_steps_exceeded", "details": {"maxSteps": limit}}
+    with path.open("a") as file:
+        file.write(json.dumps(line) + "\n")
 
 
 class Stopped(Exception):
@@ -213,6 +227,17 @@ class FakeAgent:
         self.cancelled.setdefault(session_id, asyncio.Event()).set()
 
     async def prompt(self, prompt: list[Any], session_id: str, **kw: Any) -> Any:
+        self.limit: int | None = None
+        reason = "failed"
+        try:
+            answered = await self._prompt(prompt, session_id)
+            stopped = answered.stop_reason == "cancelled"
+            reason = "cancelled" if stopped else "failed" if self.limit else "completed"
+            return answered
+        finally:
+            logged_end(session_id, reason, self.limit)
+
+    async def _prompt(self, prompt: list[Any], session_id: str) -> Any:
         text = "\n".join(getattr(b, "text", "") for b in prompt)
         record("prompts", text)
         self.cancelled[session_id] = asyncio.Event()
@@ -234,6 +259,11 @@ class FakeAgent:
                     data["done"] += 1
                     save(session_id, data)
                     return PromptResponse(stop_reason=step["stop"])
+                if "step_limit" in step:  # a finished turn with no answer, over ACP
+                    data["done"] += 1
+                    save(session_id, data)
+                    self.limit = int(step["step_limit"])
+                    return PromptResponse(stop_reason="end_turn")
                 if "prompt_usage" in step:
                     usage = Usage.model_validate(step["prompt_usage"])
                     data["done"] += 1

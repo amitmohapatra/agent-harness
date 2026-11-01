@@ -99,6 +99,9 @@ RETRY_BACKOFF_SECONDS: Final = 0.5
 #: How long one call of a remote tool may take unless its ``call_timeout=`` says: an OpenAPI
 #: operation (and the fetch of its document) and an A2A exchange alike.
 REMOTE_TIMEOUT_SECONDS: Final = 120.0
+#: The outcomes of a call that failed (a streak of them stops ``ReAct``; an eval's coverage
+#: does not count them).
+FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The ``ToolOutcome.metadata`` flag of a call whose effect is not known: it does more than
 #: read, and timed out or was running when its worker died. Its ``error_class`` says so too
 #: (:data:`OUTCOME_UNKNOWN`), which the memory service's tool records keep.
