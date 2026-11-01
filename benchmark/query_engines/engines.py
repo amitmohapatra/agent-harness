@@ -2,43 +2,41 @@
 same SQL, as the harness's ``query_result`` would use it: a database made for the call from the
 texts, read-only from then on, closed after.
 
-* ``sqlite`` — the harness's own code (``tools.query._loaded``: Python's parse, ``executemany``,
-  the statistics aggregates, the authorizer);
-* ``duckdb`` — each text written to a private temporary file and read by DuckDB's own CSV and
-  JSON readers, then ``enable_external_access = false`` and ``lock_configuration = true``, a
-  ``memory_limit``, and only a single ``SELECT`` admitted (``duckdb.extract_statements``);
+* ``sqlite`` and ``duckdb`` — the harness's own engines, through their ``load`` and ``execute``:
+  ``tools.query.SQLite``, the fallback (Python's parse, ``executemany``, the statistics
+  aggregates, the authorizer), and ``tools.query.DuckDB``, the engine when the ``query`` extra
+  is installed (DuckDB's own CSV and JSON readers from a private temporary file, the harness's
+  typing rules in one SQL pass, then ``enable_external_access = false``,
+  ``lock_configuration = true``, a ``memory_limit`` and only a single ``SELECT``);
 * ``polars`` — ``pl.read_csv`` / ``pl.read_json`` (whole-column type inference) and
   ``pl.SQLContext``;
 * ``pandasql`` — pandas' readers and ``pandasql.sqldf`` (SQLite underneath, a copy per query).
 
-DuckDB, Polars and pandasql are not dependencies of the harness: an engine that does not import
-is reported as not installed. ``QUERY_ENGINES_SITE`` names a folder they were installed in
-(``pip install --target``), searched after the harness's own packages."""
+Polars and pandasql are not dependencies of the harness (DuckDB is its ``query`` extra): an
+engine that does not import is reported as not installed. ``QUERY_ENGINES_SITE`` names a
+folder they were installed in (``pip install --target``), searched after the harness's own
+packages."""
 
 from __future__ import annotations
 
 import contextlib
 import io
 import json
-import math
 import os
-import sqlite3
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Protocol
 
+from trellis.harness.tools import query
+
 if os.environ.get("QUERY_ENGINES_SITE"):
     sys.path.append(os.environ["QUERY_ENGINES_SITE"])
 
 #: The most rows an answer holds (as the harness's ``query.ROWS``, and one more to say so).
-ROWS: Final = 201
-#: DuckDB's memory limit per query database, as the harness bounds SQLite's pages
-#: (``QUERY_ENGINES_DUCKDB_MEMORY`` to measure past it).
-DUCKDB_MEMORY: Final = os.environ.get("QUERY_ENGINES_DUCKDB_MEMORY", "512MB")
+ROWS: Final = query.ROWS + 1
 
 
 class Engine(Protocol):
@@ -55,89 +53,37 @@ def _json(text: str) -> bool:
     return text.lstrip()[:1] in ("[", "{")
 
 
-# ------------------------------------------------------------------------------------- SQLite
+# --------------------------------------------------------------------------- the harness's own
 
 
-class SQLite:
-    """The harness's engine, through its own code."""
+class Harness:
+    """One of the harness's engines (``tools.query.Engine``), as ``query_result`` runs it:
+    ``opened``, ``load``, ``execute``, ``fetchmany`` (its limits on time and concurrency are
+    ``query._answer``'s, which ``worker.concurrent`` runs)."""
 
-    name = "sqlite"
-
-    def __init__(self) -> None:
-        from trellis.harness.tools import query
-
-        self.query = query
-
-    def load(self, texts: Mapping[str, str], own: str) -> sqlite3.Connection:
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        self.query._loaded(db, texts, own, math.inf)
-        return db
-
-    def run(self, db: sqlite3.Connection, sql: str) -> tuple[list[str], list[list[Any]]]:
-        cursor = db.execute(sql)
-        rows = cursor.fetchmany(ROWS)
-        return [d[0] for d in cursor.description or ()], [list(r) for r in rows]
-
-    def close(self, db: sqlite3.Connection) -> None:
-        db.close()
-
-
-# ------------------------------------------------------------------------------------- DuckDB
-
-
-class DuckDB:
-    """DuckDB, locked down after its tables are loaded."""
-
-    name = "duckdb"
-
-    def __init__(self, threads: int | None = None) -> None:
-        import duckdb  # pyright: ignore[reportMissingImports]
-
-        self.duckdb = duckdb
-        self.threads = threads
+    def __init__(self, engine: query.Engine) -> None:
+        self.engine = engine
+        self.name = engine.name.lower()
+        self._open: dict[int, contextlib.AbstractContextManager[Any]] = {}
 
     def load(self, texts: Mapping[str, str], own: str) -> Any:
-        config: dict[str, Any] = {
-            "memory_limit": DUCKDB_MEMORY,
-            "autoinstall_known_extensions": False,
-            "autoload_known_extensions": False,
-        }
-        if self.threads:
-            config["threads"] = self.threads
-        con = self.duckdb.connect(":memory:", config=config)
-        with tempfile.TemporaryDirectory(prefix="duckq-") as folder:
-            for name, text in texts.items():
-                path = os.path.join(folder, name)
-                with open(path, "w") as out:
-                    out.write(text)
-                con.execute(f'CREATE TABLE "{name}" AS {self._reader(con, path, text)}')
-        con.execute(f'CREATE VIEW result AS SELECT * FROM "{own}"')
-        con.execute("SET enable_external_access = false")
-        con.execute("SET lock_configuration = true")
-        return con
-
-    def _reader(self, con: Any, path: str, text: str) -> str:
-        quoted = path.replace("'", "''")
-        if not _json(text):
-            return f"SELECT * FROM read_csv('{quoted}')"
-        if text.lstrip().startswith("["):
-            return f"SELECT * FROM read_json('{quoted}', format = 'array')"
-        # an object holding the array (a paged tool's rows): its first list of objects
-        whole = f"read_json('{quoted}', maximum_object_size = {len(text) + 1})"
-        rel = con.sql(f"SELECT * FROM {whole}")
-        key = next(c for c, t in zip(rel.columns, rel.types, strict=True) if "STRUCT" in str(t))
-        return f'SELECT u.* FROM (SELECT unnest("{key}") AS u FROM {whole})'
+        opened = self.engine.opened()
+        db = opened.__enter__()
+        self._open[id(db)] = opened
+        try:
+            self.engine.load(db, texts, own)
+        except BaseException:
+            self.close(db)
+            raise
+        return db
 
     def run(self, db: Any, sql: str) -> tuple[list[str], list[list[Any]]]:
-        statements = self.duckdb.extract_statements(sql)
-        if len(statements) != 1 or statements[0].type != self.duckdb.StatementType.SELECT:
-            raise PermissionError("only one SELECT runs")
-        cursor = db.execute(sql)
+        cursor = self.engine.execute(db, sql, ())
         rows = cursor.fetchmany(ROWS)
         return [d[0] for d in cursor.description or ()], [list(r) for r in rows]
 
     def close(self, db: Any) -> None:
-        db.close()
+        self._open.pop(id(db)).__exit__(None, None, None)
 
 
 # ------------------------------------------------------------------------------------- Polars
@@ -216,8 +162,8 @@ class PandaSQL:
 
 
 ENGINES: Final[dict[str, Callable[[], Engine]]] = {
-    "sqlite": SQLite,
-    "duckdb": DuckDB,
+    "sqlite": lambda: Harness(query.SQLite()),
+    "duckdb": lambda: Harness(query.DuckDB()),
     "polars": Polars,
     "pandasql": PandaSQL,
 }
