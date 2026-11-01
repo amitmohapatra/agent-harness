@@ -657,4 +657,9 @@ def test_a_store_named_as_above_the_line_is_not_listed_under_it() -> None:
         "£39,481.85. The closest was S18 at £45,542.57. S22 was the highest at £205,983.47."
     )
     assert _right("bf3-past-04", 1, honest)
+    figure_first = (
+        "Only one south store was under the line: S26 Truro, £39,481.85. Bath (S22) reported "
+        "£205,983.47, far above every other south store."
+    )
+    assert _right("bf3-past-04", 1, figure_first)
     assert not _right("bf3-past-04", 1, "S26 and S22 were under the line.")

@@ -2638,7 +2638,8 @@ _ASKS: Final = re.compile(
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
 #: above the line").
 _NOT_IN: Final = re.compile(
-    r"[^.\n]*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below))\b[^.\n]*",
+    r"(?:[^.\n]|\.(?=\S))*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below))\b"
+    r"(?:[^.\n]|\.(?=\S))*",
     re.IGNORECASE,
 )
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
