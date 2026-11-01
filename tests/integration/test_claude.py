@@ -383,6 +383,27 @@ async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
     assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
 
 
+async def test_a_large_result_is_the_harness_s_to_keep_not_the_cli_s(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code saves an MCP result over its own output limit (``MAX_MCP_OUTPUT_TOKENS``,
+    25,000 tokens by default: about 50,000 characters of a CSV) to a file of its session and
+    gives the model that path, which the harness's ``read_file`` and ``query_result`` do not
+    read ("not found", the gate's Haiku run). The harness keeps a result over
+    ``results.MAX_CHARS`` itself: the CLI's limit is raised above that, so the harness's
+    keeping acts first; a team's own limit is kept."""
+    from trellis.harness.adapters.claude import MCP_OUTPUT_TOKENS
+    from trellis.harness.tools.results import MAX_CHARS
+
+    assert MCP_OUTPUT_TOKENS * 1.5 >= MAX_CHARS  # a CSV is under 2 characters a token
+    await harness.wrap(options(tmp_path, [{"text": "ok"}]), id="mcp-out").run("go", user="u1")
+    assert started_with(tmp_path)["max_mcp_output_tokens"] == str(MCP_OUTPUT_TOKENS)
+    own = options(tmp_path, [{"text": "ok"}])
+    own.env["MAX_MCP_OUTPUT_TOKENS"] = "90000"
+    await harness.wrap(own, id="mcp-own").run("go", user="u1")
+    assert started_with(tmp_path)["max_mcp_output_tokens"] == "90000"
+
+
 async def test_the_harness_tools_are_loaded_from_the_first_step(
     harness: Harness, tmp_path: Path
 ) -> None:

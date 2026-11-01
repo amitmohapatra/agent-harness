@@ -122,7 +122,7 @@ after any of yours:
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 30 tools in the run, the `trellis` server lists the hinted tools (and the memory tools, and those already used) for the run: the CLI lists an MCP server's tools once per query |
-| Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with the `trellis` server's `read_file` (listed from the start: the CLI lists a server's tools once) ([tools.md](../tools.md#large-results)) |
+| Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with the `trellis` server's `read_file` (listed from the start: the CLI lists a server's tools once) ([tools.md](../tools.md#large-results)); the CLI's own MCP output limit (`MAX_MCP_OUTPUT_TOKENS`, 25,000 tokens by default, about 50,000 characters of a CSV) is raised to 60,000 so the harness keeps such a result first: a result the CLI saves to its session's own file is one `read_file` and `query_result` cannot read (your own value, in the options' `env` or the environment, is kept) |
 | Grounding, judges, tracing | as for every target |
 
 The answer is the `ResultMessage`'s `structured_output` (an `output_format`) or its `result`; a
