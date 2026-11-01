@@ -23,6 +23,7 @@ import json
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ErrorCategory, HarnessError
+from trellis.harness import snapshots
 from trellis.harness.history import Said, Speaker, answered, said_of
 from trellis.memory.errors import NotFoundError
 
@@ -72,6 +73,13 @@ class MemorySession:
             and (m.kind == "VISIBLE" or (m.model_extra or {}).get("tool_call_id"))
             and (m.model_extra or {}).get("agent_run_id") != run_id
         ]
+        # an earlier value of a live tool is out of date, as the memory window's replay says,
+        # and its tool stays offered: the model fetches it again
+        said, stale = snapshots.out_of_date(
+            said, lambda name: snapshots.declared_max_age(self.runtime, name)
+        )
+        if stale and self.runtime.offered is not None:
+            self.runtime.offered |= set(stale)
         items = [item for s in answered(said) for item in input_items(s)]
         return items if limit is None else items[-limit:] if limit > 0 else []
 

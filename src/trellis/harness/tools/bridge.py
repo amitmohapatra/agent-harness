@@ -43,6 +43,7 @@ the first call's.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -80,6 +81,8 @@ from trellis.harness.tools.base import (
     not_run,
 )
 
+log = logging.getLogger("trellis.run")
+
 #: The ``error_class`` of a call whose arguments did not fit the tool's schema.
 INVALID_ARGUMENTS: Final = "InvalidArguments"
 #: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
@@ -94,6 +97,19 @@ CUT: Final = {
 }
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
+#: What a model that stalled — the same call with the same arguments over and over — is told,
+#: for its one answer without tools (``middleware.StallGuard``; every adapter's loop).
+STALLED: Final = (
+    "You called {tool} with the same arguments {times} times in a row and it did not give you "
+    "what you need: do not call it again. Do not call tools: answer now with what you have, and "
+    "say what went wrong."
+)
+#: The times in a row one call (the same tool, the same arguments) is made before it is not run
+#: again (:func:`_repeated`, the model reading :data:`STALLED` instead of its result): a model
+#: looping on one call, whatever its framework.
+MAX_REPEATS: Final = 3
+#: The ``error_class`` of that call, and the warning on the run's stream (once).
+REPEATED: Final = "Repeated"
 
 
 async def call(
@@ -211,7 +227,7 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    refused = _refused(runtime, tool, args)
+    refused = _refused(runtime, tool, args, key)
     if refused is not None:
         _events(runtime, ref, tool_call, refused)
         return refused
@@ -309,11 +325,36 @@ def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
     )
 
 
-def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any]) -> ToolOutcome | None:
-    """Why a call is not run at all, as the model reads it: the run's budget is spent, a tool
-    the framework was built with of a feature this run is without, or arguments that do not
-    fit its schema (nothing runs, nothing is journaled: the model corrects them)."""
-    over = _over_budget(runtime, tool)
+def _repeated(runtime: Runtime, tool: Tool, key: str) -> ToolOutcome | None:
+    """The call, refused when it is the same call (the same tool, the same arguments) the run
+    made the :data:`MAX_REPEATS` - 1 calls before it: a model looping on one call is told to
+    answer with what it has (:data:`STALLED`), whatever its framework — the harness's tools
+    are where every adapter's calls meet, so a graph without the harness's middleware, a Deep
+    Agent, OpenAI Agents and the Claude CLI are stopped as ``ReAct``'s ``StallGuard`` stops its
+    own loop (which acts before its step's calls reach here). Said once on the run's stream."""
+    last, times = runtime.repeating
+    times = times + 1 if key == last else 1
+    runtime.repeating = (key, times)
+    if times < MAX_REPEATS:
+        return None
+    if times == MAX_REPEATS:
+        said = f"stopped {tool.name}: the same call {times} times in a row (a stall)"
+        log.warning("run %s %s", runtime.run_id, said)
+        runtime.events.warning("stalled", said)
+    return ToolOutcome(
+        tool=tool.name,
+        status=ToolStatus.ERROR,
+        output=STALLED.format(tool=tool.name, times=times),
+        error_class=REPEATED,
+    )
+
+
+def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any], key: str) -> ToolOutcome | None:
+    """Why a call is not run at all, as the model reads it: the run's budget is spent, the
+    same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
+    feature this run is without, or arguments that do not fit its schema (nothing runs,
+    nothing is journaled: the model corrects them)."""
+    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key)
     if over is not None:
         return over
     if tool.feature is not None and not runtime.uses(tool.feature):

@@ -71,7 +71,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 
 | Block | Content | Status (checked against the code) |
 |---|---|---|
-| Fixed prefix (cached) | the system prompt and the tools, in a stable order; then the history | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context is sent with the question, after the history, so the next turn's request repeats it (`middleware.with_question`, audit K1) |
+| Fixed prefix (cached) | the system prompt and the tools, in a stable order; then the history | exists (tools offered in a stable order, `react.py`, [tools.md](../tools.md#tool-hints-what-the-model-is-offered)). The memory context is sent with the question, after the history, so the next turn's request repeats it (`middleware.with_question`, audit K1); for any Anthropic chat model, a model name too, Anthropic's cache marks the tools, the instructions and the answer that ends the history (`middleware.PromptCache`) |
 | Data map | one short block: this chat (N turns, steps available), saved results (names), memory (facts and preferences present), past chats (searchable), tool areas | new (small) |
 | Memory context | facts and preferences for this question, evidence status, tool hints | exists (`agent.py` `remembered`). Expanding a follow-up query with recent turns is new (audit A1). Tool chains are said in the tools' descriptions, not in this block (`tools/links.py`, #65) |
 | History | recent turns whole; older turns as steps lists (tool, arguments, source, fetch time, status); the chat summary | the summary exists (memory service). Steps lists are in flight, not on main (`-explain2`, arm D) |
