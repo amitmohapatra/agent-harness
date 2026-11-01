@@ -232,10 +232,10 @@ resume after a pause, a crash or a requeue continues the graph where it stopped.
 Last of what changes a request, where Deep Agents puts its own, both bases have `PromptCache`:
 LangChain's `AnthropicPromptCachingMiddleware` (the one you give `ReAct(middleware=)`, its
 settings kept) run on the chat model the call is made with — a `ChatAnthropic`, or a model name
-routed to Anthropic's own SDK — so the tools, the instructions, the request's end and the
+routed to Anthropic's own SDK or to Anthropic's API as an OpenAI-compatible endpoint — so the tools, the instructions, the request's end and the
 answer that ends the history are marked (4 breakpoints). Any other model's request is sent as
-it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); an OpenAI-compatible
-endpoint's chat completions carry no breakpoints.
+it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); any other
+OpenAI-compatible endpoint's chat completions carry no breakpoints.
 
 A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `ModelHooks` and
 `PromptCache` too (its own of those names kept), and a model name of its own is routed as

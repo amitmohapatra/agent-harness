@@ -103,6 +103,7 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -286,6 +287,9 @@ class Agent:
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
         self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
+        #: the large results each conversation's turns saved in this process (``tools.results``):
+        #: its later turns read and query them where its history names them (``pipeline``)
+        self.results = Conversations()
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
