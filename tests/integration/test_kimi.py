@@ -161,9 +161,19 @@ async def test_kimis_usage_log_is_the_contract_the_budget_reads(
             "inputCacheCreation",
         }
         assert record["usage"]["inputOther"] == 10 and record["usage"]["output"] == 5
-    # each turn's end is logged too (a step limit's reason in it): the turn settles on it
-    ends = [json.loads(line) for line in log.read_text().splitlines() if "turn.ended" in line]
-    assert ends and all(e["type"] == "turn.ended" and e["agentId"] == "main" for e in ends)
+    # every turn's end is logged too (Kimi's durable ``TurnEnded``; a step limit is reason
+    # "failed" with error.code loop.max_steps_exceeded): the turn settles on it. Its
+    # ``agent.turn.ended`` lines are another record (``outcome``), not read
+    ends = [
+        entry
+        for entry in map(json.loads, log.read_text().splitlines())
+        if entry.get("type") == "turn.ended"
+    ]
+    assert ends, "Kimi logs each turn's end as a turn.ended line"
+    for end in ends:
+        assert end["agentId"] == "main" and isinstance(end["turnId"], int)
+        assert end["reason"] in {"completed", "cancelled", "failed", "blocked"}, end
+    assert ends[-1]["reason"] == "cancelled"  # the budget stopped the turn
     # 15 tokens a request: past 20 after the second, and the run stops there
     assert result.status is RunStatus.PARTIAL and result.error is not None
     assert result.error.code == "BUDGET_EXCEEDED"

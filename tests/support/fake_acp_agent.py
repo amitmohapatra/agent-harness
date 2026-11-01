@@ -119,12 +119,13 @@ def logged_usage(session_id: str, agent: str, usage: dict[str, Any]) -> None:
         file.write("not json\n" if usage.get("garbled") else json.dumps(line) + "\n")
 
 
-def logged_end(session_id: str, limit: int | None = None) -> None:
-    """The turn's end, as Kimi logs it after the turn's usage (``turn.ended``; at its step
-    limit, the reason)."""
+def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
+    """The turn's end, as Kimi 2.1 logs every turn's after its usage (its durable
+    ``TurnEnded``: ``reason`` completed, cancelled or failed; at its step limit failed, with
+    ``loop.max_steps_exceeded``)."""
     path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    line: dict[str, Any] = {"type": "turn.ended", "agentId": "main"}
+    line: dict[str, Any] = {"type": "turn.ended", "agentId": "main", "turnId": 0, "reason": reason}
     if limit is not None:
         line["error"] = {"code": "loop.max_steps_exceeded", "details": {"maxSteps": limit}}
     with path.open("a") as file:
@@ -227,10 +228,14 @@ class FakeAgent:
 
     async def prompt(self, prompt: list[Any], session_id: str, **kw: Any) -> Any:
         self.limit: int | None = None
+        reason = "failed"
         try:
-            return await self._prompt(prompt, session_id)
+            answered = await self._prompt(prompt, session_id)
+            stopped = answered.stop_reason == "cancelled"
+            reason = "cancelled" if stopped else "failed" if self.limit else "completed"
+            return answered
         finally:
-            logged_end(session_id, self.limit)
+            logged_end(session_id, reason, self.limit)
 
     async def _prompt(self, prompt: list[Any], session_id: str) -> Any:
         text = "\n".join(getattr(b, "text", "") for b in prompt)

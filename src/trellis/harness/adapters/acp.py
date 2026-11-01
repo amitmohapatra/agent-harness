@@ -192,8 +192,10 @@ KIMI_HOME: Final = "~/.kimi-code"
 KIMI_HEADERS: Final = "KIMI_CODE_CUSTOM_HEADERS"
 #: The line of Kimi's usage log a model request's usage is on (``agents/<id>/wire.jsonl``).
 USAGE_RECORD: Final = "usage.record"
-#: The line a turn's end is on, and the error of a turn Kimi ended at its step limit
-#: (``loop_control.max_steps_per_turn``) — over ACP a finished turn with no answer.
+#: The line every turn's end is on (Kimi 2.1's durable ``TurnEnded``: ``agentId``, ``turnId``,
+#: ``reason`` completed, cancelled, failed or blocked), and the error code of a turn it ended
+#: at its step limit (``loop_control.max_steps_per_turn``: reason failed) — over ACP a
+#: finished turn with no answer. Its ``agent.turn.ended`` lines are another record.
 TURN_ENDED: Final = "turn.ended"
 AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
 
