@@ -87,6 +87,7 @@ from trellis.harness.adapters.base import (
     Narrowing,
     Output,
     ToolFormat,
+    builtin,
     helper,
     unique,
 )
@@ -573,7 +574,7 @@ class ACPAdapter:
     async def _attempt(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
-        from acp import PROTOCOL_VERSION, spawn_agent_process
+        from acp import PROTOCOL_VERSION
         from acp.schema import ClientCapabilities
 
         runtime = run.runtime
@@ -599,7 +600,7 @@ class ACPAdapter:
                 servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
                 attempt.served = run.native_tools
             conn, process = await stack.enter_async_context(
-                spawn_agent_process(
+                _spawned(
                     cast("Any", attempt),  # an ACP ``Client``: the methods the agent calls
                     *target.command,
                     env=env,
@@ -627,6 +628,28 @@ class ACPAdapter:
         """A tool the agent ran itself: an MCP server's joins the tool set."""
         if name.startswith("mcp__") and not name.startswith(HARNESS_PREFIX):
             self.seen.add(name)
+
+
+@contextlib.asynccontextmanager
+async def _spawned(client: Any, *command: str, **options: Any) -> AsyncIterator[tuple[Any, Any]]:
+    """The agent's process and its connection (the SDK's ``spawn_agent_process``), stopped by
+    the SDK's own shutdown — a process already gone not an error. The shutdown waits for the
+    process (``shutdown_timeout``), then signals it; when the wait's deadline falls in the
+    moment the process ends, asyncio loses the wait's wake-up, and the signal raises
+    ``ProcessLookupError`` (its transport is closed: the process exited, its pipes too). The
+    process gone is what the shutdown is for: the attempt's own outcome stands."""
+    from acp import spawn_agent_process
+
+    spawned = spawn_agent_process(client, *command, **options)
+    pair = await spawned.__aenter__()
+    try:
+        yield pair
+    except BaseException as exc:
+        with contextlib.suppress(ProcessLookupError):
+            await spawned.__aexit__(type(exc), exc, exc.__traceback__)
+        raise
+    with contextlib.suppress(ProcessLookupError):
+        await spawned.__aexit__(None, None, None)
 
 
 def _buffer_limit() -> int:
@@ -676,12 +699,13 @@ async def _harness_server(server: Any) -> AsyncIterator[Any]:
 
 def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     """A tool the agent runs itself, as the harness records and publishes it: a built-in by its
-    risk (its profile's), an MCP server's tool (``mcp__<server>__<tool>``) by its server."""
+    risk (its profile's) and tagged ``BUILTIN``, an MCP server's tool (``mcp__<server>__<tool>``)
+    by its server."""
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
     builtins = profile.builtins if profile is not None else {}
-    spec = ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS))
+    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 

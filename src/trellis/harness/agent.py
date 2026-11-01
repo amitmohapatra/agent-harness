@@ -131,10 +131,12 @@ NARROW_FLOOR: Final = 0.5
 REPLY_TOKENS: Final = 1024
 #: The fewest and most tokens the memory service sizes a conversation window to.
 CONVERSATION_TOKENS: Final = (100, 1_000_000)
-#: The fewest tools a run offers (its own, its framework's and memory's) before the hints narrow
-#: them: fewer fit the model's attention whole, and narrowing them hid a tool the question
-#: needed. Measured (the holistic small-model run, 20 tools offered): a needed tool was
-#: narrowed away in 22-26% of turns, and those turns were wrong 2-3 times as often.
+#: The fewest tools of the run's own (``Runtime.own_tools``: not its framework's built-ins,
+#: Claude Code's, Kimi's or Deep Agents', nor memory's) before the hints narrow them: fewer fit
+#: the model's attention whole, and narrowing them hid a tool the question needed. Measured
+#: (the holistic small-model run, 20 tools offered): a needed tool was narrowed away in 22-26%
+#: of turns, and those turns were wrong 2-3 times as often. Counted with Claude's or Kimi's ~20
+#: built-ins, a run of 14 tools narrowed and hid ``find_sku`` (the break-and-fix gate: 4 turns).
 NARROW_FROM: Final = 30
 #: How a run's memory context reaches an agent whose input has no place for it, by framework
 #: (``Agent.unreached``): what the warning names as the fix.
@@ -1020,7 +1022,7 @@ class Agent:
             hints
             and candidates
             and best >= NARROW_FLOOR
-            and len(own) >= NARROW_FROM
+            and len(runtime.own_tools()) >= NARROW_FROM
             and self.adapter.narrows != "none"
         ):
             offered = set(candidates) | named_in(pushed.rendered, runtime.tool_set())
