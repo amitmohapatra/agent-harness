@@ -104,7 +104,9 @@ async def test_its_file_tools_on_a_disk_are_governed_as_any_tool(
             backend=backend,
             checkpointer=InMemorySaver(),
         )
-        events = [e async for e in harness.wrap(graph, id=f"files-{governed}").stream("w", user="u")]
+        events = [
+            e async for e in harness.wrap(graph, id=f"files-{governed}").stream("w", user="u")
+        ]
         called = {
             e.data["tool"]: e.data["status"]
             for e in events
