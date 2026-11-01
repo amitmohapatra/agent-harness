@@ -30,6 +30,7 @@ from deepagents.backends.protocol import (
 )
 from deepagents.backends.sandbox import BaseSandbox
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.tools import BaseTool
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
@@ -133,7 +134,7 @@ class SandboxCard(AgentMiddleware):
         said = f"\n\n{DELIVERS}" + (f" {card}" if card else "")
         tools = [
             t.model_copy(update={"description": t.description + said})
-            if getattr(t, "name", None) == EXECUTE
+            if isinstance(t, BaseTool) and t.name == EXECUTE
             else t
             for t in request.tools
         ]
