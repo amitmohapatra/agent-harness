@@ -29,7 +29,8 @@
   arguments, is approved in the same attempt instead of asking again;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
   ``run_config``, ``context``...), except the ones the harness gives itself
-  (:data:`OWN_ARGUMENTS`), which are refused.
+  (:data:`OWN_ARGUMENTS`), which are refused; a call to a tool the model made up is an error
+  the model reads (``RunConfig.tool_not_found_behavior``), as on every other adapter.
 """
 
 from __future__ import annotations
@@ -639,7 +640,8 @@ def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, options)))
+    told = _told_unknown_tools(options)
+    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, told)))
 
 
 def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
@@ -681,6 +683,18 @@ def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
     handlers = dict(options.get("error_handlers") or {})
     handlers.setdefault("max_turns", last_answer)
     return {**options, "error_handlers": handlers}
+
+
+def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:
+    """The options with a call to a tool the model made up answered as an error the model
+    reads, so the run goes on — as on every other adapter — and not a ``ModelBehaviorError``
+    that ends it: the SDK's own ``RunConfig.tool_not_found_behavior="return_error_to_model"``
+    (its message: ``Tool '<name>' not found.``)."""
+    from agents import RunConfig
+
+    config = options.get("run_config") or RunConfig()
+    told = dataclasses.replace(config, tool_not_found_behavior="return_error_to_model")
+    return {**options, "run_config": told}
 
 
 def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:

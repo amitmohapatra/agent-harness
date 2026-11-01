@@ -24,29 +24,33 @@ from trellis.contracts import (
     FeedbackSource,
     FeedbackVerdict,
     RunStatus,
+    ToolCall,
     ToolSpec,
 )
 from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
+from trellis.harness.asking import answer_of
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import TOOL_SEARCH, Memory, RunMemory
+from trellis.harness.clients.memory import FORGET, TOOL_SEARCH, USERS_OWN, Memory, RunMemory
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature
+from trellis.harness.files import FileStore
 from trellis.harness.fresh import Fresh
 from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
+from trellis.harness.governance.decision import Action, Decision
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
-from trellis.harness.runtime import current
-from trellis.harness.settings import Settings
+from trellis.harness.runtime import Runtime, current, reason_of
+from trellis.harness.settings import Settings, default_files_url
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
 from trellis.harness.tools.mcp import MCPSource
@@ -150,6 +154,9 @@ class Harness:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
+        #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
+        #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
+        self.files = FileStore(s.files_url or default_files_url())
         #: every agent wrapped here, by id (what ``python -m trellis.harness.worker`` serves)
         self.agents: dict[str, Agent] = {}
         self._key = Fresh(
@@ -171,12 +178,13 @@ class Harness:
         self.prompts = Prompts(self.gateway)
         telemetry.configure()
         log.info(
-            "trellis harness: models %s, memory %s, runs %s, spool %s, traces %s "
+            "trellis harness: models %s, memory %s, runs %s, spool %s, files %s, traces %s "
             "(trellis doctor prints each setting and its source)",
             f"{self.model_gateway.title} {self.model_gateway.where}",
             s.memory_url or "off",
             s.runs_url or "in process",
             s.spool_dir or "none",
+            self.files.url,
             "on" if telemetry.exporting() else "off",
         )
 
@@ -557,7 +565,7 @@ class Harness:
         """The memory service's agent tools, each calling the service in the current run."""
         return [
             Tool(
-                spec,
+                spec.model_copy(update={"description": FORGETS}) if spec.name == FORGET else spec,
                 _memory_call(spec),
                 feature="tool_search" if spec.name == TOOL_SEARCH else "memory_pull",
             )
@@ -635,6 +643,45 @@ def _memory_call(spec: ToolSpec) -> Callable[[dict[str, Any]], Any]:
             hints = await runtime.tools.hints(str(args.get("task", "")))
             # what the model reads: each tool's confidence, arguments and gaps, and the plan
             return hints.model_dump(mode="json", exclude_defaults=True)
+        if spec.name == FORGET:
+            return await _forgotten(runtime, args)
         return await runtime.run_memory.call_agent_tool(spec.name, args)
 
     return run
+
+
+#: What the model reads about ``memory_forget``: the service's tool, with what the harness adds
+#: for the user's own words (:func:`_forgotten`).
+FORGETS: Final = (
+    "Forget a memory: it is no longer retrieved. One you wrote goes at once. What the user "
+    'said ("forget my address") is theirs: the user is asked to approve, then it is forgotten '
+    "as them."
+)
+
+
+async def _forgotten(runtime: Runtime, args: dict[str, Any]) -> Any:
+    """``memory_forget``: the agent's own memory, forgotten by the service as the agent. What
+    the user said, the service refuses an agent (``users_own_statement``, naming the memory):
+    a person is asked the way any call is (``Runtime.approve``, which pauses the run), and the
+    statement is forgotten as the user once approved — through the service's own route for
+    them. A rejection is what the model reads; any other refusal is the error it was."""
+    memory = runtime.run_memory
+    assert memory is not None  # a memory tool runs only in a run whose memory is on
+    try:
+        return await memory.call_agent_tool(FORGET, args)
+    except AuthorizationError as refused:
+        if refused.details.get("reason") != USERS_OWN or not refused.details.get("memory_id"):
+            raise
+        memory_id = str(refused.details["memory_id"])
+    asked = {"id": memory_id}
+    call = ToolCall(tool=FORGET, args=asked, task=runtime.task)
+    why = f"{memory_id} is what the user said: forgetting it removes their own words."
+    resolution = await runtime.approve(
+        call, Decision(FORGET, asked, Action.ASK, why, "irreversible")
+    )
+    if answer_of(resolution) is False:  # a cancel raises: the run ends
+        reason = reason_of(resolution)
+        return {"id": memory_id, "forgotten": False, "why": reason or "the approver kept it"}
+    assert runtime.user is not None  # the user's own statement is only ever a user's
+    await memory.memory.for_user(runtime.tenant, runtime.user).ctx.forget(memory_id)
+    return {"id": memory_id, "forgotten": True}

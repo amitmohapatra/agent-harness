@@ -71,6 +71,9 @@ which the SDK hands the model as the tool's error. `Runner.run`'s own arguments 
 agent's) — `max_turns`, `run_config`, `context`, `session`... The harness gives `Runner.run` the
 agent, its input and its hooks itself: `starting_agent`, `input` and `hooks` are refused, and so
 is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+A call to a tool the model made up is an error the model reads (`Tool '<name>' not found.`) and
+the run goes on, as on every other adapter: the harness sets the SDK's own
+`RunConfig.tool_not_found_behavior="return_error_to_model"` on every run.
 
 ```python
 agent = h.wrap(

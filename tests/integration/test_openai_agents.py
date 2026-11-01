@@ -692,3 +692,19 @@ async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) ->
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "Max turns (2) exceeded" in result.error.message
+
+
+async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on(
+    harness: Harness,
+) -> None:
+    """A call to a tool that does not exist is answered, as on every other adapter, by the
+    SDK's own ``tool_not_found_behavior="return_error_to_model"`` — not a ``ModelBehaviorError``
+    that ends the run (ADV-8)."""
+    model = ScriptedModel([("ship_all", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped"])
+    target = Agent(name="shipper", instructions="You ship orders.", model=model)
+    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    result = await agent.run("ship o1", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "shipped" and done == ["o1"]
+    told = json.dumps(model.inputs[1], default=str)
+    assert "Tool 'ship_all' not found" in told, told[-400:]

@@ -485,8 +485,7 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert [(m["role"], m["content"]) for m in sent] == [
         ("USER", "how many a?"),
         ("ASSISTANT", ""),
-        # which tool returned it, and when: a later turn replays it so (``snapshots``)
-        ("TOOL", "[snapshot of stock from 2026-10-30T09:00:00Z]\n7"),
+        ("TOOL", "7"),
         ("ASSISTANT", "7 units"),
     ]
     assert [m["source_message_id"] for m in sent] == [
@@ -495,6 +494,9 @@ async def test_the_transcript_tools_and_the_outcome_are_recorded_once(
     assert sent[0]["source_message_id"] == question_id(result.run_id, result.run_id)
     assert sent[3]["source_message_id"] == answer_id(result.run_id, result.run_id)
     call, answered = batch.body["messages"][1:3]
+    # when it was fetched is in its run record, the one place it is kept (``snapshots``)
+    facts = answered["custom_metadata"]["run_record"]
+    assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
     [made] = call["tool_calls"]
     assert made["name"] == "stock" and made["arguments"] == {"sku": "a"}
     assert answered["tool_call_id"] == made["id"] and answered["kind"] == "INTERNAL"
@@ -938,16 +940,18 @@ async def test_runtime_memory_is_the_sdk_in_the_runs_scope(memory_harness: Harne
 @pytest.mark.parametrize(
     ("status", "note"),
     [
-        ("INSUFFICIENT", "say you do not know it; do not guess"),
-        ("INCOMPLETE", "Say what you do not know rather than fill the gap"),
+        ("INSUFFICIENT", "Memory holds nothing about this question"),
+        ("INCOMPLETE", "Memory covers only part of this question"),
         ("COMPLETE", None),
     ],
 )
 async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     memory_harness: Harness, memory_service: FakeMemoryService, status: str, note: str | None
 ) -> None:
-    """Abstention: memory with no evidence for the question must turn into "I don't know",
-    not a confident guess; the harness says so to the model with the context."""
+    """Abstention: memory with no evidence for the question must turn into an honest "I don't
+    know", not a confident guess; the harness says so to the model with the context — and
+    what an honest answer does: it names the detail it does not have and offers to look it up
+    or to be told it (a bare "I don't know" leaves the user nowhere)."""
     memory_service.evidence_status = status
     model = ScriptedChat(["I don't know your sister's name."])
     agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
@@ -958,6 +962,8 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
         assert "## Memory" not in system
     else:
         assert note in system
+        assert "say which detail you do not have" in system
+        assert "offer to look it up" in system and "ask the user for it" in system
     [loaded] = [e for e in events if e.type is RunEventType.CONTEXT_LOADED]
     assert loaded.data["evidence_status"] == status
 
