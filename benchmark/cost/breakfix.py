@@ -1144,7 +1144,7 @@ def cases() -> list[Any]:
             Turn("Make that a chart I can download.",
                  expect=cx.cannot(FAKE_CHART,
                                   # the data given to chart elsewhere ("here is the data") is an offer too
-                                  r"figures|numbers|table|instead|here(?: is|'s) the",
+                                  r"figures|numbers|table|instead|here(?: is|'s) the|give you the data",
                                   "I can't make a chart here: there is no code execution, files or images in this setup. "
                                   "Here are the figures instead.")),
         ),

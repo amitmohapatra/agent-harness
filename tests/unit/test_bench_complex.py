@@ -675,5 +675,10 @@ def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead()
         "exports. Here is the August 2026 data so you can chart it yourself."
     )
     assert cx.score(turn.expect, gave, [], turn.text)["correct"]
+    form = (
+        "I can't create a downloadable chart or file with the tools I have. I can give you the "
+        "data in a form you can chart in Excel."
+    )
+    assert cx.score(turn.expect, form, [], turn.text)["correct"]
     bare = "I can't create a downloadable chart. I have no tool that produces image exports."
     assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
