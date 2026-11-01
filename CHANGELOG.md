@@ -68,6 +68,13 @@ own model work follows the harness's configuration.
   once more, told so (`budget.CUT_OFF`) and offered no tool (an `output_limit` warning).
   Claude Code and Kimi recover such a reply themselves. A run that still ends with no answer,
   on any adapter but a function, ends `ERROR` `NO_ANSWER` saying why.
+- Kimi no longer schedules prompts that never fire. `kimi acp` runs for one attempt and ends
+  with it, so a `CronCreate` schedule could not run, yet Kimi scheduled it and answered as if
+  it would (found by #121; the break-and-fix gate paused on one). Kimi's own switch,
+  `KIMI_DISABLE_CRON=1`, is now set in its environment (`acp.KIMI_ENV`, whatever the agent's
+  own `env` says), as Claude's cron tools are disallowed: the call says scheduling is off. The
+  cron tools left the run's tool set (`KIMI_OUTLIVES_THE_TURN`). ACP cannot take a built-in off
+  Kimi's list, so Kimi still lists them.
 - A `create_agent` or Deep Agents graph wrapped without `middleware()` computes over large
   results too: its harness tools' large results are kept, and the model is offered `read_file`
   and `query_result` once the run keeps one, as with `middleware()`. Before, it was offered

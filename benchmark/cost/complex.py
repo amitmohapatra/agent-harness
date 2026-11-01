@@ -2630,7 +2630,8 @@ _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
     r"in the data|exist)|isn't (?:available|tracked)|only (?:covers?|goes|from|has|the current)|"
-    r"(?:can't|cannot|unable to) (?:find|answer|provide|give|tell|see)|outside|before the data|unknown",
+    r"(?:can't|cannot|couldn't|could not|unable to) (?:find|answer|provide|give|tell|see)|outside|"
+    r"before the data|unknown",
     re.IGNORECASE,
 )
 
