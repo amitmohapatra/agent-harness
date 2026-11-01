@@ -442,6 +442,19 @@ def test_a_rank_said_as_an_ordinal_is_that_number() -> None:
     assert not cx.score(turn.expect, said.replace("third", "second"), [], turn.text)["correct"]
 
 
+def test_an_iso_date_in_an_abstain_answer_is_no_made_up_figure() -> None:
+    case = next(c for c in breakfix.cases() if c.id == "bf1-past-03")
+    turn = case.turns[1]
+    assert turn.expect is not None and turn.expect.kind == "abstain"
+    said = (
+        "I couldn't find a gross margin target for denim that you set. I searched your saved "
+        "memories and nothing came back. I also pulled the finance margin feed for denim (as "
+        "of 2026-10-29); it has no target field."
+    )
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said + " Your target is 61%.", [], turn.text)["correct"]
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",

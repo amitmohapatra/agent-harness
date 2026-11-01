@@ -2670,6 +2670,8 @@ _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+#: A date written as ISO 8601 ("2026-10-29"): its month and day are no figures of the answer.
+_ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
 _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
 #: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",
@@ -2883,7 +2885,7 @@ def score(
         # what the question or the model's own input holds (an error's code), and a date's
         # day, are not made up
         allowed = set(numbers(question)) | set(numbers(context)) | {2026.0, 2025.0}
-        undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", a))
+        undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", _ISO_DATE.sub(" ", a)))
         made_up = [str(n) for n in numbers(undated) if n not in allowed and abs(n) >= 10]
         if k == "clarify":
             made_up = []  # options may carry ids and prices
