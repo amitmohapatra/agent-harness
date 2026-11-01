@@ -334,7 +334,7 @@ async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
     (``loop.max_steps_exceeded``). As a ``ReAct`` run at ``max_steps`` does, the run asks once
     more in the same session, told the limit is reached (``budget.LIMIT``): its answer is the
     run's, said as a ``step_limit`` warning."""
-    from trellis.harness.budget import LIMIT
+    from trellis.harness.budget import TURN_LIMIT
 
     lookups.clear()
     endpoint.plan = [("lookup", {"topic": "tea"}), ("lookup", {"topic": "coffee"})]
@@ -346,4 +346,5 @@ async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
     assert said.endswith("Done. facts about tea") and lookups == ["tea"]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
     assert warned == ["stopped: the step limit (1) was reached"]
-    assert LIMIT.format(limit=1) in endpoint.said()
+    # Kimi's session keeps it: told it holds for this turn only (a later turn calls tools again)
+    assert TURN_LIMIT.format(limit=1) in endpoint.said()

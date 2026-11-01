@@ -57,8 +57,8 @@ NOT_RUN: Final = ("approval request was cancelled", "Waiting for a person's appr
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
 _DENIED = "the person denied it"
-#: The harness's prompt at a step limit (``budget.LIMIT``): a model told so answers.
-_LIMIT = "This run has reached its limit"
+#: The harness's prompt at a step limit (``budget.TURN_LIMIT``): a model told so answers.
+_LIMIT = "This turn has reached its limit"
 _EDITED = re.compile(
     r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$"
 )

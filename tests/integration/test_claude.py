@@ -394,7 +394,7 @@ async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
     once more: its session resumed (Claude's own ``resume``), told the limit is reached
     (``budget.LIMIT``), one turn and no tool. Its answer is the run's, said as a
     ``step_limit`` warning."""
-    from trellis.harness.budget import LIMIT
+    from trellis.harness.budget import TURN_LIMIT
 
     refunds.clear()
     script = [
@@ -413,7 +413,8 @@ async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
     assert warned == ["stopped: the turn limit (1) was reached"]
     last = started_with(tmp_path)  # the last query the CLI was started with
-    assert last["prompt"] == LIMIT.format(limit=1) and last["resume"] is not None
+    # the session keeps it: told it holds for this turn only, a later turn calls tools again
+    assert last["prompt"] == TURN_LIMIT.format(limit=1) and last["resume"] is not None
     assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
 
 

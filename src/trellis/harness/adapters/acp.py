@@ -794,7 +794,7 @@ class Attempt:
                 stopped = f"stopped: the step limit ({limit}) was reached"
                 log.warning("run %s %s", self.runtime.run_id, stopped)
                 self.runtime.events.warning("step_limit", stopped)
-                prompt = budget.LIMIT.format(limit=limit)
+                prompt = budget.TURN_LIMIT.format(limit=limit)
 
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block

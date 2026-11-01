@@ -337,9 +337,10 @@ class ClaudeAdapter:
     ) -> AsyncGenerator[Any, None]:
         """The query's messages (:meth:`_attempted`) — and, when it reached its turn limit
         (``error_max_turns``: no answer), one last answer instead of that error: its session
-        resumed (Claude's own ``resume``), told the limit is reached (``budget.LIMIT``), for one
-        turn with no tool, as a ``ReAct`` run at ``max_steps`` answers. A last query that gives
-        no answer leaves the error."""
+        resumed (Claude's own ``resume``), told the limit is reached for this turn
+        (``budget.TURN_LIMIT``: the session keeps it, and the next turn has its tools again),
+        for one turn with no tool, as a ``ReAct`` run at ``max_steps`` answers. A last query
+        that gives no answer leaves the error."""
         from claude_agent_sdk import ResultError, ResultMessage
 
         runtime = run.runtime
@@ -361,7 +362,7 @@ class ClaudeAdapter:
         # the result names the session it ran in (the journal's): resumed for the last answer
         session = runtime.replay.journal.session
         limit = int(runtime.framework_options.get("max_turns") or target.max_turns or 0)
-        told = dataclasses.replace(native_input, prompt=budget.LIMIT.format(limit=limit))
+        told = dataclasses.replace(native_input, prompt=budget.TURN_LIMIT.format(limit=limit))
         last: list[Any] = []
         async with aclosing(self._query(target, told, run, session, last=True)) as messages:
             async for message in messages:

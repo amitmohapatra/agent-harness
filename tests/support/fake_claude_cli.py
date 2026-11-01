@@ -62,8 +62,8 @@ SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir())
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
 #: How the harness begins the prompt that asks for one last answer at the turn limit
-#: (``budget.LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
-LIMIT_PROMPT = "This run has reached its limit"
+#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
+LIMIT_PROMPT = "This turn has reached its limit"
 #: The tools ``--permission-mode acceptEdits`` lets run without asking.
 EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 #: The input and output tokens each step of a query reports.

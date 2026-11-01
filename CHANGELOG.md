@@ -52,9 +52,12 @@ own model work follows the harness's configuration.
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
-  the limit is reached (`budget.LIMIT`), for one turn with no tool. Kimi ended the turn with no
+  the limit is reached, for one turn with no tool. Kimi ended the turn with no
   answer, the reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in
-  the same session. A `step_limit` warning says so on the stream.
+  the same session. A `step_limit` warning says so on the stream. Both are told the limit is
+  for this turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's
+  "This run has reached its limit", a model answered the conversation's next turn "I've reached
+  the tool-call limit" without calling a tool.
 - A large result a conversation's turn saved stays readable in its later turns: a follow-up's
   `read_file` or `query_result` on the path its history names found "File not found", so every
   what-if needed the whole fetch again. Kept per conversation in the process that saved them
