@@ -29,11 +29,12 @@ from trellis.memory.models import MessageInfo
 
 
 def said_to_model(model: ScriptedModel, turn: int) -> list[tuple[str, str]]:
-    """The messages the model was given on ``turn``, as ``(role, text)``."""
+    """The messages the model was given on ``turn``, as ``(role, text)``: a message in parts
+    (the user's turn the memory context is marked off in) as its last part, the question."""
     return [
-        (item["role"], item["content"])
+        (item["role"], c if isinstance(c, str) else c[-1]["text"])
         for item in model.inputs[turn]
-        if isinstance(item, dict) and isinstance(item.get("content"), str)
+        if isinstance(item, dict) and isinstance(c := item.get("content"), (str, list)) and c
     ]
 
 

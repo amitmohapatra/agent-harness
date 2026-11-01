@@ -7,8 +7,12 @@ parsed, indexed or remembered.
 
 A file is kept under its run's scope — ``<tenant>/<user>/<conversation>/<run>/<name>`` (each
 part made safe for a path: :func:`part`) — so the AG-UI route that serves it rebuilds the path
-from the run's record alone, and one user never reaches another's. A store that signs URLs
-(GCS, S3, Azure) gives a link valid :data:`LINK_SECONDS`; any other is streamed by the harness
+from the run's record alone, and one user never reaches another's. Beside it is its record
+(``.<name>.json``: :meth:`FileStore.record`), how it was made — the run, what made it, the
+results it was made from and when each was fetched, the run's tool calls — so a later run reads
+it back (``tools.stored``) without the run's journal, which a finished run does not keep. A
+store that signs URLs (GCS, S3, Azure) gives a link valid :data:`LINK_SECONDS`; any other is
+streamed by the harness
 (:meth:`FileStore.chunks`). How long a file is kept is the store's: a bucket's lifecycle rule;
 on local disk, until it is deleted.
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import re
 from collections.abc import AsyncIterator
@@ -95,6 +100,9 @@ class FileStore:
     def path(self, folder: str, name: str) -> str:
         return f"{self.root}/{folder}/{file_name(name)}"
 
+    def _record_path(self, folder: str, name: str) -> str:
+        return f"{self.root}/{folder}/.{file_name(name)}.json"
+
     async def put(
         self, folder: str, name: str, data: bytes, *, source: str, content_type: str | None = None
     ) -> StoredFile:
@@ -109,6 +117,70 @@ class FileStore:
 
         await asyncio.to_thread(write)
         return StoredFile(name=name, size=len(data), content_type=kind, source=source)
+
+    async def keep_record(self, folder: str, name: str, record: dict[str, Any]) -> None:
+        """Keep how the file ``name`` in ``folder`` was made (``record``, JSON) beside it."""
+        data = json.dumps(record, default=str).encode()
+        await asyncio.to_thread(self.fs.pipe_file, self._record_path(folder, name), data)
+
+    async def record(self, folder: str, name: str) -> dict[str, Any] | None:
+        """How the file ``name`` in ``folder`` was made (:meth:`keep_record`), ``None`` when
+        nothing says."""
+        path = self._record_path(folder, name)
+
+        def read() -> dict[str, Any] | None:
+            if not self.fs.isfile(path):
+                return None
+            found = json.loads(self.fs.cat_file(path))
+            return found if isinstance(found, dict) else None
+
+        return await asyncio.to_thread(read)
+
+    async def files(self, folder: str) -> list[tuple[str, str, int | None]]:
+        """Every file kept below ``folder`` (a scope's beginning: a user's, a conversation's),
+        one listing: its folder (below the store's root), its name and its size — and each
+        file deleted whose record is left (:meth:`record`), its size ``None``."""
+        base = f"{self.root}/{folder}"
+
+        def find() -> list[tuple[str, str, int | None]]:
+            found = self.fs.find(base, detail=True) if self.fs.exists(base) else {}
+            sizes: dict[tuple[str, str], int | None] = {}
+            for path, info in found.items():
+                where, _, name = str(path).rstrip("/").rpartition("/")
+                where = where[len(self.root) + 1 :]
+                if name.startswith(".") and name.endswith(".json"):
+                    sizes.setdefault((where, name[1:-5]), None)  # its file, unless listed
+                else:
+                    sizes[where, name] = int(info.get("size") or 0)
+            return [(where, name, size) for (where, name), size in sizes.items()]
+
+        return await asyncio.to_thread(find)
+
+    async def folders(self, folder: str) -> list[str]:
+        """The names of the folders directly in ``folder`` (a user's: their conversations), one
+        listing — none when there is no such folder."""
+        base = f"{self.root}/{folder}"
+
+        def ls() -> list[str]:
+            if not self.fs.isdir(base):
+                return []
+            found = self.fs.ls(base, detail=True)
+            return [
+                str(f["name"]).rstrip("/").rsplit("/", 1)[-1]
+                for f in found
+                if f["type"] == "directory"
+            ]
+
+        return await asyncio.to_thread(ls)
+
+    async def read(self, folder: str, name: str) -> bytes | None:
+        """The file's bytes, ``None`` when there is none."""
+        path = self.path(folder, name)
+
+        def cat() -> bytes | None:
+            return bytes(self.fs.cat_file(path)) if self.fs.isfile(path) else None
+
+        return await asyncio.to_thread(cat)
 
     async def size(self, folder: str, name: str) -> int | None:
         """The file's size, ``None`` when there is none."""

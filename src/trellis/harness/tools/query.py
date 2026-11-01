@@ -71,7 +71,10 @@ from decimal import Decimal
 from functools import cached_property
 from typing import Any, Final, Protocol
 
+from trellis.contracts import ToolError
+from trellis.harness.files import file_name
 from trellis.harness.runtime import current
+from trellis.harness.tools import export
 from trellis.harness.tools.base import arguments_problem, not_run
 
 #: The tool, and what it is told and given.
@@ -90,6 +93,23 @@ QUERY_RESULT_SCHEMA: Final[dict[str, Any]] = {
     "required": ["file_path", "sql"],
     "additionalProperties": False,
 }
+#: The schema of a run that saves a query's result as a file (:func:`saving`): with
+#: ``save_as`` and ``file_name`` (``tools.export``).
+QUERY_RESULT_SAVING_SCHEMA: Final[dict[str, Any]] = {
+    **QUERY_RESULT_SCHEMA,
+    "properties": {
+        **QUERY_RESULT_SCHEMA["properties"],
+        "save_as": {
+            "enum": list(export.formats()),
+            "description": "Also save the query's whole result as a file the user downloads.",
+        },
+        "file_name": {"type": "string", "description": "With save_as: the file's name."},
+    },
+}
+#: The rows a saved file's answer shows (the file holds them all).
+SAVED_ROWS: Final = 5
+#: The seconds a query saving its whole result may run, writing included.
+SAVE_SECONDS: Final = 60.0
 #: The most rows a query answers with, its longest text, the seconds it may run, the memory
 #: its database may take, and the delimiters a CSV result is read with.
 ROWS: Final = 200
@@ -172,9 +192,24 @@ def _keys(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return list(dict.fromkeys(k for row in rows for k in row))
 
 
-def columns_of(text: str) -> list[str]:
+#: A table given as rows (a kept Excel file's: ``tools.stored``): its columns and its rows.
+Table = tuple[list[str], list[list[Any]]]
+
+
+def columns_of(text: str | Table) -> list[str]:
     """The columns a kept result's table has (as :func:`query` names them)."""
-    return column_names(rows_of(text)[0])
+    return column_names(_rows(text)[0])
+
+
+def _rows(text: str | Table) -> Table:
+    return rows_of(text) if isinstance(text, str) else text
+
+
+def _size(text: str | Table) -> int:
+    """What a table takes to load, in characters (a table given as rows: its cells' text)."""
+    if isinstance(text, str):
+        return len(text)
+    return sum(len(str(v)) for row in text[1] for v in row)
 
 
 #: Where a large result is kept (``tools.results.PREFIX``), and what a path there that no run
@@ -225,29 +260,146 @@ def tables(runtime: Any) -> dict[str, str]:
     return found
 
 
+def saving(runtime: Any) -> bool:
+    """Whether ``query_result`` saves a query's whole result as a file in ``runtime``'s run
+    (``save_as``): a run with no tool that runs code (``tools.export.runs_code``) — a run with
+    one writes its files with its code."""
+    return runtime is not None and export.runs_code(runtime) is None
+
+
+def schema(runtime: Any) -> dict[str, Any]:
+    """``query_result``'s input schema in ``runtime``'s run (:func:`saving`)."""
+    return QUERY_RESULT_SAVING_SCHEMA if saving(runtime) else QUERY_RESULT_SCHEMA
+
+
 async def query(args: dict[str, Any], text: str | None = None) -> str:
     """``query_result``: the query's rows as CSV (a header line first), at most :data:`ROWS`
     and :data:`OUTPUT_CHARS`; or what is wrong — the arguments, the path, the SQL (the engine's
     own words, and the tables there are). The file asked about is the table :data:`TABLE`;
     every other result the run keeps is a table too (:func:`tables`), so one query joins and
-    groups across them — only the run's own: nothing else is ever loaded.
+    groups across them — only the run's own: nothing else is ever loaded. With ``save_as`` (a
+    run that is :func:`saving`), the query's every row is also kept as a file for the user
+    (``Runtime.save_file``), and the answer says so, with its first :data:`SAVED_ROWS` rows.
 
     The query runs in a worker thread (the event loop never waits on it), at most
     :data:`CONCURRENT` at once in the process, on a database made for it and closed after it
     whatever happens; a cancelled call (the run cancelled, or out of time) interrupts it."""
-    problem = arguments_problem(QUERY_RESULT_SCHEMA, args)
+    runtime = current()
+    problem = arguments_problem(schema(runtime), args)
     if problem is not None:
         return not_run(QUERY_RESULT, problem)
     sql = str(args["sql"]).strip().rstrip(";")
     if len(sql) > SQL_CHARS:
         return f"Error: the query is longer than {SQL_CHARS} characters"
-    return await run(str(args["file_path"]), sql, (), text)
+    path = "/" + str(args["file_path"]).lstrip("/")
+    record: dict[str, Any] | None = None
+    given: str | Table | None = text
+    if text is None and _stored(path):
+        found = await _kept_file(path)
+        if isinstance(found, str):
+            return found
+        given, record = found
+    if args.get("save_as") is not None:
+        return await _save(runtime, args, sql, given, record)
+    answer = await run(path, sql, (), given)
+    if record is None or answer.startswith("Error"):
+        return answer
+    return f"{_told(runtime, path, record, sql)}\n{answer}"
 
 
-def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], str] | str:
+def _stored(path: str) -> bool:
+    from trellis.harness.tools import stored  # noqa: PLC0415 - it reads the results' pages
+
+    return stored.is_stored(path)
+
+
+async def _kept_file(path: str) -> tuple[str | Table, dict[str, Any]] | str:
+    """A file kept for the user (``tools.stored``), loaded from the store: its table and its
+    record, or what is wrong."""
+    from trellis.harness.tools import stored  # noqa: PLC0415
+
+    return await stored.table(path)
+
+
+def _told(runtime: Any, path: str, record: dict[str, Any], sql: str) -> str:
+    """Where a query over a kept file read its rows: the file — when it was saved, by what,
+    from what fetched when (its record) — and each of this run's results it names, fetched
+    when: what a comparison of the two cites."""
+    from trellis.harness.tools import stored  # noqa: PLC0415
+
+    said = [f"{TABLE} is {path} ({stored.made(record)})"]
+    said.extend(
+        f"{s['table']} is this run's {s['tool']} result, fetched {stored.when(s['fetched_at'])}"
+        for s in _sources(runtime, path, sql)
+        if s["table"] != TABLE
+    )
+    return "; ".join(said) + "."
+
+
+async def _save(
+    runtime: Any,
+    args: dict[str, Any],
+    sql: str,
+    text: str | Table | None,
+    record: dict[str, Any] | None = None,
+) -> str:
+    """``query_result`` with ``save_as``: the query's every row kept as a file for the user
+    (``Runtime.save_file``), its name ``file_name`` with the format's extension; what was kept,
+    and its first :data:`SAVED_ROWS` rows — or why nothing was."""
+    kind = args["save_as"]
+    if kind not in export.formats():
+        return not_run(QUERY_RESULT, f"save_as is one of: {', '.join(export.formats())}")
+    name = str(args.get("file_name") or QUERY_RESULT)
+    name = name if name.lower().endswith(f".{kind}") else f"{name}.{kind}"
+    try:
+        file_name(name)
+    except ToolError as exc:
+        return not_run(QUERY_RESULT, exc.message)
+    found = await run(str(args["file_path"]), sql, (), text, save=kind)
+    if isinstance(found, str):
+        return found
+    data, count, shown = found
+    made = {"sql": sql, "from": _sources(runtime, str(args["file_path"]), sql, record)}
+    stored = await runtime.save_file(name, data, source=QUERY_RESULT, made=made)
+    return (
+        f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
+        f"its download link. Its first rows:\n{shown}"
+    )
+
+
+def _sources(
+    runtime: Any, file_path: str, sql: str, record: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """The results a query read — the file asked about, and each other result the run keeps
+    whose table the query names — each as its table, the tool it came from and when it was
+    fetched (``results.keep``), for how a file it made was made (``FileStore.record``); a file
+    kept for the user (its ``record``) as its path and when it was saved."""
+    path = "/" + file_path.lstrip("/")
+    named = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql)
+    tools, times = getattr(runtime, "kept_from", {}), getattr(runtime, "kept_at", {})
+    found: list[dict[str, Any]] = []
+    if record is not None:
+        found.append({"table": TABLE, "path": path, "fetched_at": record.get("saved_at")})
+    for kept, table in tables(runtime).items():
+        if kept == path or table in named:
+            fetched = times.get(kept)
+            found.append(
+                {
+                    "table": TABLE if kept == path else table,
+                    "tool": tools.get(kept),
+                    "fetched_at": fetched.isoformat() if fetched is not None else None,
+                }
+            )
+    return found
+
+
+def loadable(
+    file_path: str, text: str | Table | None = None
+) -> tuple[dict[str, str | Table], str] | str:
     """What a query of ``file_path`` loads — the run's saved results by table name (the file
     asked about among them, given as ``text`` when it is no result the run keeps: a file Deep
-    Agents saved) — and the file's own table; or why there is nothing to load."""
+    Agents saved, a file kept for the user, read from the store) — and the file's own table;
+    or why there is nothing to load."""
     path = "/" + file_path.lstrip("/")
     runtime = current()
     kept = saved(runtime) if runtime is not None else {}
@@ -256,10 +408,10 @@ def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], s
         text = kept.get(path)
     if text is None or runtime is None:
         return not_found(path)
-    texts = {named[p]: kept[p] for p in named}
+    texts: dict[str, str | Table] = {named[p]: kept[p] for p in named}
     if path not in named:
-        texts[f"{TABLE}_file"] = text  # a file Deep Agents saved: queried as ``result``
-    if sum(map(len, texts.values())) > LOAD_CHARS:
+        texts[f"{TABLE}_file"] = text  # a file Deep Agents saved, a kept one: ``result``
+    if sum(map(_size, texts.values())) > LOAD_CHARS:
         return (
             f"Error: this run's saved results are more than {LOAD_CHARS} characters, more than a "
             "query here loads: filter on the tool's side, or compute in a sandbox"
@@ -267,15 +419,27 @@ def loadable(file_path: str, text: str | None = None) -> tuple[dict[str, str], s
     return texts, named.get(path, f"{TABLE}_file")
 
 
-async def run(file_path: str, sql: str, params: Sequence[Any] = (), text: str | None = None) -> str:
+async def run(
+    file_path: str,
+    sql: str,
+    params: Sequence[Any] = (),
+    text: str | Table | None = None,
+    *,
+    save: str | None = None,
+) -> Any:
     """``sql`` (with ``params``) over the run's saved results (:func:`loadable`), in a worker
-    thread (see :func:`query`)."""
+    thread (see :func:`query`): its rows shown, or — ``save``, a format of ``tools.export`` —
+    every row as a file of that format, how many, and the first :data:`SAVED_ROWS` shown; or
+    what is wrong, as text."""
     found = loadable(file_path, text)
     if isinstance(found, str):
         return found
     texts, own = found
     call = _Call()
-    work = asyncio.to_thread(_answer, texts, own, sql, params, call=call)
+    take, seconds = (_first, SECONDS) if save is None else (_saved(save), SAVE_SECONDS)
+    work = asyncio.to_thread(
+        _answer, texts, own, sql, params, call=call, take=take, seconds=seconds
+    )
     try:
         return await asyncio.shield(asyncio.ensure_future(work))
     except asyncio.CancelledError:
@@ -327,16 +491,19 @@ class _Call:
 
 
 def _answer(
-    texts: Mapping[str, str],
+    texts: Mapping[str, str | Table],
     own: str,
     sql: str,
     params: Sequence[Any],
     *,
     call: _Call,
-) -> str:
+    take: Callable[[Any, list[str]], Any] | None = None,
+    seconds: float = SECONDS,
+) -> Any:
     """The query over ``texts`` (:func:`query`) on :data:`ENGINE`, in this worker thread, once
-    its turn comes (and its call was not cancelled meanwhile); ``call`` holds its database
-    while it is open."""
+    its turn comes (and its call was not cancelled meanwhile), within ``seconds``; what
+    ``take`` makes of its rows (:func:`_first` by default) while its database is open, which
+    ``call`` holds."""
     if not _RUNNING.acquire(timeout=WAIT_SECONDS):
         return f"Error: the query waited {WAIT_SECONDS:g} s for others to finish: ask it again"
     engine = ENGINE
@@ -352,10 +519,12 @@ def _answer(
                     engine.load(db, texts, own)
                     if time.monotonic() > call.ends:
                         raise TimeoutError("loading the saved results took too long")
-                    call.ends = time.monotonic() + SECONDS  # the query's own, from here
+                    call.ends = time.monotonic() + seconds  # the query's own, from here
                     cursor = engine.execute(db, sql, params)
-                    rows = cursor.fetchmany(ROWS + 1)
                     names = [d[0] for d in cursor.description or ()]
+                    return (take or _first)(cursor, names)
+            except export.TooManyRows as exc:
+                return f"Error: the query has {exc}: aggregate, or narrow it with WHERE"
             except (*engine.errors, TimeoutError) as exc:
                 said = "took too long" if time.monotonic() > call.ends else engine.said(exc)
                 there = "; ".join(f"{t} ({', '.join(columns_of(x))})" for t, x in texts.items())
@@ -368,16 +537,50 @@ def _answer(
                     call.db = None  # no interrupt from here on: it closes
     finally:
         _RUNNING.release()
-    out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(names)
-    writer.writerows([_shown(v) for v in row] for row in rows[:ROWS])
-    shown = out.getvalue().rstrip("\n")
+
+
+def _first(cursor: Any, names: list[str]) -> str:
+    """A query's first :data:`ROWS` rows as CSV, at most :data:`OUTPUT_CHARS`, saying when
+    there were more."""
+    rows = cursor.fetchmany(ROWS + 1)
+    shown = _csv(names, rows[:ROWS])
     if len(shown) > OUTPUT_CHARS:
         shown = shown[:OUTPUT_CHARS] + f"\n…[cut at {OUTPUT_CHARS} characters: aggregate more]"
     elif len(rows) > ROWS:
         shown += f"\n…[only the first {ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     return shown
+
+
+#: How many rows a saved query's cursor gives at a time.
+BATCH_ROWS: Final = 1_000
+
+
+def _saved(kind: str) -> Callable[[Any, list[str]], tuple[bytes, int, str]]:
+    """What a query saving its result as a ``kind`` file takes of its rows: every row written
+    as they come (``tools.export.written``; read with ``fetchmany`` on either engine), how
+    many, and the first :data:`SAVED_ROWS` as CSV."""
+
+    def take(cursor: Any, names: list[str]) -> tuple[bytes, int, str]:
+        first: list[Any] = []
+
+        def rows() -> Iterator[Any]:
+            while batch := cursor.fetchmany(BATCH_ROWS):
+                first.extend(batch[: SAVED_ROWS - len(first)])
+                yield from batch
+
+        data, count = export.written(kind, names, rows())
+        return data, count, _csv(names, first)
+
+    return take
+
+
+def _csv(names: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    """Rows as an answer shows them: CSV under a header, each cell :func:`_shown`."""
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(names)
+    writer.writerows([_shown(v) for v in row] for row in rows)
+    return out.getvalue().rstrip("\n")
 
 
 def _shown(value: Any) -> Any:
@@ -412,7 +615,7 @@ class Engine(Protocol):
         """A database for one call, closed at the end; its ``interrupt()`` stops what it runs."""
         ...
 
-    def load(self, db: Any, texts: Mapping[str, str], own: str) -> None:
+    def load(self, db: Any, texts: Mapping[str, str | Table], own: str) -> None:
         """Each of ``texts`` as a table (by its name), the view :data:`TABLE` on ``own``, then
         nothing but reading."""
         ...
@@ -439,7 +642,7 @@ class SQLite:
         with contextlib.closing(sqlite3.connect(":memory:", check_same_thread=False)) as db:
             yield db
 
-    def load(self, db: sqlite3.Connection, texts: Mapping[str, str], own: str) -> None:
+    def load(self, db: sqlite3.Connection, texts: Mapping[str, str | Table], own: str) -> None:
         """Its tables' pages at most :data:`DB_BYTES`, a value :data:`VALUE_CHARS`, its sorts'
         and joins' memory :data:`TEMP_CACHE_BYTES`."""
         for name, arguments, aggregate in AGGREGATES:
@@ -500,7 +703,7 @@ class DuckDB:
         with contextlib.closing(self.duckdb.connect(":memory:", config=config)) as db:
             yield db
 
-    def load(self, db: Any, texts: Mapping[str, str], own: str) -> None:
+    def load(self, db: Any, texts: Mapping[str, str | Table], own: str) -> None:
         with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
             for n, (name, text) in enumerate(texts.items()):
                 self._typed(db, name, self._read(db, os.path.join(folder, str(n)), text))
@@ -510,11 +713,18 @@ class DuckDB:
         db.execute("SET enable_external_access = false")
         db.execute("SET lock_configuration = true")
 
-    def _read(self, db: Any, path: str, text: str) -> list[str]:
+    def _read(self, db: Any, path: str, text: str | Table) -> list[str]:
         """``text`` as the table ``raw``, every column ``VARCHAR`` (an empty cell ``NULL``),
         read by DuckDB's own reader from ``path`` (written here: the text, or its lines as
-        CSV); its columns (:func:`column_names`). Its shape is :func:`_shape`'s."""
-        kind, found = _shape(text, values=False)  # DuckDB reads the values
+        CSV); its columns (:func:`column_names`). Its shape is :func:`_shape`'s; a table given
+        as rows (a kept Excel file's) is written as CSV under its columns and read as one."""
+        found: Any
+        if not isinstance(text, str):
+            written = io.StringIO()
+            csv.writer(written, lineterminator="\n").writerows([text[0], *text[1]])
+            text, kind, found = written.getvalue(), "csv", ","
+        else:
+            kind, found = _shape(text, values=False)  # DuckDB reads the values
         file = _quoted(path)
         with open(path, "w", encoding="utf-8", errors="replace", newline="") as out:
             if kind == "lines":
@@ -837,10 +1047,11 @@ EXACT: Final[tuple[tuple[str, type], ...]] = (
 _STORED: Final = {"DECIMAL": "REAL"}
 
 
-def _table(db: sqlite3.Connection, name: str, text: str) -> bool:
-    """``text`` as the table ``name`` in SQLite: typed columns (see the module; a ``DECIMAL``
-    one stored ``REAL``), its rows; whether one of its columns is ``DECIMAL``."""
-    columns, rows = rows_of(text)
+def _table(db: sqlite3.Connection, name: str, text: str | Table) -> bool:
+    """``text`` (or a table's rows) as the table ``name`` in SQLite: typed columns (see the
+    module; a ``DECIMAL`` one stored ``REAL``), its rows; whether one of its columns is
+    ``DECIMAL``."""
+    columns, rows = _rows(text)
     names = column_names(columns)
     kinds = [_kind([r[n] for r in rows]) for n in range(len(names))]
     typed = ", ".join(f'"{n}" {_STORED.get(k, k)}' for n, k in zip(names, kinds, strict=True))
