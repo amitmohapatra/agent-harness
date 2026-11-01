@@ -857,7 +857,8 @@ class Agent:
         return await self.remembered(runtime)
 
     async def recalled(self, runtime: Runtime) -> None:
-        """With memory off, the conversation's earlier turns from the run store
+        """With memory off (or unreachable where it replays the conversation), the
+        conversation's earlier turns from the run store
         (``conversation.earlier``: each one's question and answer) — only where nothing else
         keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
         a session of the run's, a conversation on OpenAI's servers) or continues the session
@@ -914,6 +915,9 @@ class Agent:
                 )
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory context: {exc}")
+                if window is not Window.NONE:
+                    # memory replays the conversation: without it, the run store's turns do
+                    await self.recalled(runtime)
                 return None
             output(span, pushed.rendered)
         stale: list[str] = []

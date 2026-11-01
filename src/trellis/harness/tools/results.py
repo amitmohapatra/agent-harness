@@ -48,7 +48,7 @@ PREVIEW_LINE: Final = 1_000
 HEAD: Final = 5
 TAIL: Final = 5
 #: The tool that pages a kept result, the lines it reads by default, and the most characters
-#: one page holds (as ``read_result`` reads).
+#: one page holds — a kept result's and a cleared one's alike.
 READ_FILE: Final = "read_file"
 READ_LINES: Final = 100
 PAGE_CHARS: Final = 20_000
@@ -69,6 +69,8 @@ READ_FILE_SCHEMA: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
+#: How a result Deep Agents (or :func:`readable`) saved to a file reads in its place: its stub.
+EVICTED: Final = "Tool result too large"
 #: What a stub says first: the kept rows are a table that ``query_result`` computes over
 #: (``tools.query``) — a count, a sum, a filter, a top-N or a group, exact, with no sandbox.
 QUERY: Final = (
@@ -201,20 +203,26 @@ def kept() -> bool:
     return runtime is not None and bool(runtime.replay.journal.results)
 
 
-def read(args: dict[str, Any]) -> str:
-    """``read_file``: a page of a kept result, as the model asked for it (``args``)."""
+def read(args: dict[str, Any], *, text: str | None = None) -> str:
+    """``read_file``: a page of a kept result, as the model asked for it (``args``) — or of
+    ``text``, a cleared result the graph's state keeps (:func:`read_file`)."""
     problem = arguments_problem(READ_FILE_SCHEMA, args)
     if problem is not None:
         return not_run(READ_FILE, problem)
-    return read_file(**args)
+    return read_file(**args, text=text)
 
 
-def read_file(file_path: str, offset: int = 0, limit: int = READ_LINES) -> str:
+def read_file(
+    file_path: str, offset: int = 0, limit: int = READ_LINES, *, text: str | None = None
+) -> str:
     """Lines ``offset`` on (at most ``limit``, and :data:`PAGE_CHARS`) of the result kept at
-    ``file_path``, numbered, then where the next page starts."""
+    ``file_path`` — or of ``text`` given for it (a result cleared from the request, which the
+    graph's state keeps: ``middleware.HarnessTools``) — numbered, then where the next page
+    starts. The one paging every read-back uses."""
     runtime = current()
     path = "/" + file_path.lstrip("/")
-    text = None if runtime is None else runtime.replay.journal.results.get(path)
+    if text is None and runtime is not None:
+        text = runtime.replay.journal.results.get(path)
     if text is None:
         return f"Error: File '{path}' not found"
     lines = _lines(text)

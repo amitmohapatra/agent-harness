@@ -123,6 +123,15 @@ on Claude it is on the `trellis` server from the start (the CLI lists a server's
 A page holds at most 20,000 characters and says where the next one starts; a line longer than
 5,000 characters reads as several, so a one-line JSON result pages too.
 
+Claude and Kimi have file readers of their own (Claude's `Read`, Kimi's `Read`); the harness's
+`read_file` on its server is still the one that reads a kept result, by measurement
+(`test_kimi.py::test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read`):
+writing the result into the agent's workspace instead would put a second copy in the user's
+working directory, which a resume on another worker does not have (the journal is what
+survives it), and Kimi's `Read` returns 100,000 characters at once by default — the whole
+96,899-character result, about 25,000 tokens, in one call — where a `read_file` page is 100
+lines (1,219 characters in that test) and `query_result` computes without reading rows.
+
 A result under 80,000 characters that still does not fit a small window is cut to its head
 and tail by `FitWindow`; the cut is kept the same way and says where the rest is
 (`…[N characters cut to fit the window; the rest: read_file(file_path="…", offset=L)]…`, the

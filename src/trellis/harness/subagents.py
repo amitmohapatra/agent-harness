@@ -326,7 +326,7 @@ def _unseen(agent: Agent) -> bool:
     know: a function target's (its code's calls), Claude's built-in tools, an OpenAI Agents
     agent's own tools or handoffs, a graph's own tools (a ``ReAct``'s are only the harness's
     own read tools)."""
-    from trellis.harness.middleware import READ_RESULT, STATE_TOOLS  # noqa: PLC0415 - react
+    from trellis.harness.middleware import STATE_TOOLS  # noqa: PLC0415 - react
 
     target, framework = agent.target, agent.adapter.name
     if framework == "function":  # its code calls what it calls (``agent.tools.call``)
@@ -335,7 +335,7 @@ def _unseen(agent: Agent) -> bool:
         return True
     if framework == "openai_agents":
         return bool(target.tools or target.handoffs)
-    harness_own = {READ_RESULT, *STATE_TOOLS}
+    harness_own = STATE_TOOLS
     return any(getattr(t, "name", None) not in harness_own for t in bound_tools(target))
 
 
