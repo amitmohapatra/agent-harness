@@ -120,7 +120,6 @@ from trellis.contracts import (
     ToolError,
     ToolOutcome,
     ToolSpec,
-    ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
@@ -144,6 +143,7 @@ from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
+    FAILED,
     SideEffects,
     Sourced,
     Tool,
@@ -153,29 +153,24 @@ from trellis.harness.tools.base import (
     max_age,
     not_run,
 )
+from trellis.harness.tools.bridge import MAX_REPEATS
 from trellis.harness.tools.convert import langchain as converted
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.mcp import side_effects_of as annotated
+from trellis.harness.tools.results import READ_FILE
 
 log = logging.getLogger("trellis.run")
 
 #: Model calls one run may make (:func:`step_limit`: LangChain's ``ModelCallLimitMiddleware``).
 MAX_STEPS: Final = 12
-#: Consecutive steps making the same call with the same arguments that stop the run.
-MAX_REPEATS: Final = 3
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
 #: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
-#: Deep Agents' tool that reads a large result saved as a file — and, by the path
-#: ``/large_tool_results/<call id>`` (Deep Agents' own), a result cleared from the request.
-READ_FILE: Final = "read_file"
 #: What a model whose every call failed in a row is told, for its one answer without tools.
 FAILING: Final = (
     "Every tool call failed in the last {steps} steps. Do not call tools: answer now with what "
     "you have, and say what failed."
 )
-#: The tool outcomes that count as a failed call (in a streak; a ``ToolMessage``'s status).
-FAILED: Final = frozenset({ToolStatus.ERROR, ToolStatus.TIMEOUT})
 #: The free variable of ``create_agent``'s model node holding its composed ``awrap_model_call``
 #: handler (:func:`narrowing`).
 HANDLER: Final = "awrap_model_call_handler"

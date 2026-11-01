@@ -65,6 +65,7 @@ from trellis.contracts import (
 )
 from trellis.harness import pipeline
 from trellis.harness.agent import Throttled
+from trellis.harness.agui.activity import Activity
 from trellis.harness.agui.events import (
     AGUIEvent,
     AGUIEventType,
@@ -415,13 +416,20 @@ class _Surface:
         record = await agent.harness.runs.get(run_id, tenant=tenant)
         if record is None or record.agent_id != agent.id or record.user_id != user:
             raise HTTPException(404, f"no run {run_id}")
-        entries = store.stream_events(run_id, after=max(after, 0), tenant=tenant)
+        # from the start: the activity lines count the calls before ``after`` too
+        entries = store.stream_events(run_id, after=0, tenant=tenant)
+        activity = Activity()
 
         async def read() -> AsyncIterator[str]:
             async for entry in entries:
                 translated = translate(entry.event)
+                grouped = activity.seen(entry.event)
+                if entry.position <= after:
+                    continue
                 if translated is not None:
                     yield encode(translated, entry.position)
+                if grouped is not None:
+                    yield encode(grouped, entry.position)
 
         return read()
 
@@ -437,13 +445,18 @@ class _Surface:
         # window reads it) and runs its end hooks after it — a client that sends the next
         # message, or a resume, once the stream closed finds them done
         ended = False
+        activity = Activity()
 
         def listen(event: RunEvent) -> None:
             nonlocal ended
-            translated = translate(self.agent.hooks.event(event))
+            shown = self.agent.hooks.event(event)
+            translated = translate(shown)
             if translated is not None:
                 ended = ended or event.type is RunEventType.RUN_FINISHED
                 buffer.publish(translated)
+            grouped = activity.seen(shown)
+            if grouped is not None:
+                buffer.publish(grouped, derived=True)
 
         async def guarded() -> None:
             try:

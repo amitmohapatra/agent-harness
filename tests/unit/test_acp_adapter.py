@@ -126,8 +126,44 @@ async def test_the_usage_log_is_read_until_it_stops_growing(
 ) -> None:
     monkeypatch.setattr(acp, "SETTLE_STEP", 0.0)
     attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
-    attempt.usage = SimpleNamespace()  # type: ignore[assignment]
+    attempt.usage = SimpleNamespace(ended=True)  # type: ignore[assignment]  # its end is read
     reads = iter([2, 1, 1, 0, 5])
     monkeypatch.setattr(attempt, "_accounted", lambda: next(reads))
     await attempt._settled()
     assert next(reads) == 5  # read until a read found nothing new
+
+
+async def test_a_turns_end_logged_late_is_still_read(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi logs a turn's end (``turn.ended``, a step limit's reason in it) a moment after the
+    turn's last usage: the turn is settled only once that line is read."""
+    import asyncio
+    import json
+
+    monkeypatch.setattr(acp, "SETTLE_STEP", 0.01)
+    folder = tmp_path / "sessions" / "wd" / "s1" / "agents" / "main"
+    folder.mkdir(parents=True)
+    log = folder / "wire.jsonl"
+    log.write_text('{"type": "usage.record", "usage": {"output": 1}}\n')
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt.runtime = SimpleNamespace()  # type: ignore[assignment]
+    attempt.target = SimpleNamespace(model=None)  # type: ignore[assignment]
+    attempt.usage = acp.UsageLog(tmp_path, "s1")
+    monkeypatch.setattr(acp.budget, "account", lambda *args, **kwargs: None)
+    ended = {
+        "type": acp.TURN_ENDED,
+        "agentId": "main",
+        "error": {"code": acp.AT_STEP_LIMIT, "details": {"maxSteps": 1}},
+    }
+
+    async def late() -> None:
+        await asyncio.sleep(0.1)  # past several settle steps with nothing new
+        with log.open("a") as file:
+            file.write(json.dumps(ended) + "\n")
+
+    writing = asyncio.create_task(late())
+    await attempt._settled()
+    await writing
+    assert attempt.usage.limited == 1  # the step limit was read: the run asks once more
+    assert attempt.usage.ended
