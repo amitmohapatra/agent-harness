@@ -65,6 +65,7 @@ from trellis.harness.sandbox.base import (
     SupportsSnapshot,
 )
 from trellis.harness.sandbox.docker import DockerSandbox
+from trellis.harness.tools import query
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
 
 if TYPE_CHECKING:
@@ -247,12 +248,13 @@ class SandboxSource:
 
     async def with_results(self, runtime: Runtime, box: Sandbox) -> None:
         """The results the run keeps (``tools.results``: a large one, or one cut to fit the
-        window) written into its sandbox at the path the model was given, before a command
-        runs or a file is read there — so code counts, sums, filters and ranks every row of
-        one, instead of the model paging it into its context. Each once per attempt (a later
-        attempt's sandbox may be one made again from a snapshot)."""
+        window; its conversation's earlier turns' too, ``tools.query.saved``) written into its
+        sandbox at the path the model was given, before a command runs or a file is read
+        there — so code counts, sums, filters and ranks every row of one, instead of the model
+        paging it into its context. Each once per attempt (a later attempt's sandbox may be one
+        made again from a snapshot)."""
         written = self._written.setdefault(runtime, set())
-        kept = runtime.replay.journal.results
+        kept = query.saved(runtime)
         for path in [p for p in kept if p not in written]:
             await box.write(path, kept[path].encode())
             written.add(path)

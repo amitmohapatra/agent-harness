@@ -633,6 +633,67 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
     ]
 
 
+@tool(side_effects="read")
+def look(topic: str) -> str:
+    """Facts about a topic."""
+    return f"facts about {topic}"
+
+
+async def test_at_its_turn_limit_a_run_ends_with_one_last_answer(harness: Harness) -> None:
+    """``max_turns`` reached: the last agent is called once more, told the limit is reached and
+    given no tool (the SDK's own ``max_turns`` error handler), and its answer is the run's — as
+    a ``ReAct`` run's at ``max_steps`` — not ``MaxTurnsExceeded`` with no answer."""
+    turns: list[Any] = [("look", {"topic": f"t{n}"}) for n in range(3)]
+    model = ScriptedModel([*turns, "found t0 to t2; t3 is left"])
+    target = Agent(name="looper", instructions="Look.", model=model)
+    agent = arm(harness.wrap(target, id="turns", framework_options={"max_turns": 3}), [look])
+    events = [e async for e in agent.stream("x", user="u")]
+    assert events[-1].data["result"] == "found t0 to t2; t3 is left", events[-1]
+    assert len(model.inputs) == 4  # one call past the limit
+    assert model.tools[-1] == []  # offered no tool
+    assert json.dumps(model.inputs[-1][-1]) == json.dumps(
+        {"role": "user", "content": budget.LIMIT.format(limit=3)}
+    )
+    warned = [e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("code")]
+    assert warned[-1]["code"] == "step_limit"
+
+
+async def test_a_structured_answer_or_a_teams_handler_keeps_its_way(harness: Harness) -> None:
+    from pydantic import BaseModel
+
+    class Plan(BaseModel):
+        steps: list[str]
+
+    model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
+    target = Agent(name="planner", instructions="Plan.", model=model, output_type=Plan)
+    options = {"max_turns": 2}
+    agent = arm(harness.wrap(target, id="planner", framework_options=options), [look])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Max turns (2) exceeded" in result.error.message
+
+    model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
+    target = Agent(name="looper", instructions="Look.", model=model)
+    theirs = {"max_turns": lambda given: "ours, not the harness's"}
+    agent = arm(
+        harness.wrap(
+            target, id="own", framework_options={"max_turns": 2, "error_handlers": theirs}
+        ),
+        [look],
+    )
+    result = await agent.run("x", user="u")
+    assert result.answer == "ours, not the harness's"
+
+
+async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) -> None:
+    model = ScriptedModel([("look", {"topic": "a"}), ("look", {"topic": "b"})])  # then nothing
+    target = Agent(name="looper", instructions="Look.", model=model)
+    agent = arm(harness.wrap(target, id="dry", framework_options={"max_turns": 2}), [look])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Max turns (2) exceeded" in result.error.message
+
+
 async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on(
     harness: Harness,
 ) -> None:
