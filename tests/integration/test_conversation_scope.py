@@ -105,9 +105,10 @@ async def test_the_openai_agents_session_reads_only_its_users_thread(
     await agent.run("what is my secret?", user="ada", thread=THREAD)
 
     def told(turn: int) -> list[str]:
+        """What each message said: the question's last part (the memory context comes first)."""
         chat = ("user", "assistant")
         return [
-            i["content"]
+            c if isinstance(c := i["content"], str) else c[-1]["text"]
             for i in model.inputs[turn]
             if isinstance(i, dict) and i.get("role") in chat
         ]

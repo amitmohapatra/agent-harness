@@ -196,8 +196,8 @@ async def test_an_openai_agents_own_tools_count_for_its_skills_and_hints(
     [asked] = memory_service.named("context")
     # the harness's tool and the agent's own four: five, the hints' threshold
     assert asked.body["tools"]["available"] == ["stock", "own0", "own1", "own2", "own3"]
-    told = model.inputs[0][0]
-    assert told["role"] == "system" and "## Tools" in told["content"]
+    told = model.inputs[0][-1]  # the context, marked off in the user's turn
+    assert told["role"] == "user" and "## Tools" in told["content"][0]["text"]
 
 
 async def test_a_graphs_own_tools_count_and_never_narrow_it(

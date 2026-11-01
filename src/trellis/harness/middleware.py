@@ -521,9 +521,11 @@ def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) ->
     )
 
 
-#: The harness's ``read_file`` and ``query_result`` as LangChain tools.
+#: The harness's ``read_file`` and ``query_result`` as LangChain tools; and as a run that saves a
+#: query's result as a file is offered them (``results.SAVING``), made once each.
 READERS: Final = {r[0]: _reader(*r) for r in results.READERS}
 READ_FILE_TOOL: Final = READERS[READ_FILE]
+SAVING: Final = {**READERS, query.QUERY_RESULT: _reader(*results.SAVING[1])}
 #: The runs a :class:`HarnessTools` offers the harness's tools to (:func:`_paged`).
 _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
@@ -700,7 +702,8 @@ class HarnessTools(AgentMiddleware):
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         if _saved(request.state):  # a large result kept: read in pages, or queried
             names = {_named(t) for t in own}
-            offered.extend(t for name, t in READERS.items() if name not in names)
+            readers = SAVING if query.saving(runtime) else READERS
+            offered.extend(t for name, t in readers.items() if name not in names)
         return await handler(request.override(tools=sorted([*own, *offered], key=_named)))
 
     def _converted(self, runtime: Runtime) -> dict[str, BaseTool]:
