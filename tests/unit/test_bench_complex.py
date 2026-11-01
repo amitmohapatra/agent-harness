@@ -634,6 +634,12 @@ def test_a_clarifying_answer_that_asks_which_one_without_a_question_mark_counts(
         "SKU-00601, Black Slim Jeans Navy. Give me the SKU and I'll look up the north stock."
     )
     assert _right("bf2-clarify-01", 0, asked)
+    picked = (
+        "I found 14 products that could match, so I need you to pick one before I check stock: "
+        "SKU-00502 Raw Slim Jeans Black, SKU-00601 Black Slim Jeans Navy, SKU-00602 Black Slim "
+        "Jeans Black."
+    )
+    assert _right("bf2-clarify-01", 0, picked)
     guessed = (
         "The north stock of **Black Slim Jeans Black** (SKU-00602) is **1 unit**. Your search "
         "matched 14 products, so please confirm this is the one you meant. Other possibilities "

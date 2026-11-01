@@ -2631,7 +2631,8 @@ _ABSTAIN: Final = re.compile(
 #: A request to choose that ends with no question mark ("confirm which product you mean").
 _ASKS: Final = re.compile(
     r"\b(?:confirm|tell me|let me know|say|specify|choose|pick)\b[^.?!\n]{0,30}\bwhich\b|"
-    r"\bwhich (?:one|product|item|sku|of these)\b[^.?!\n]{0,30}\byou (?:mean|meant|want)",
+    r"\bwhich (?:one|product|item|sku|of these)\b[^.?!\n]{0,30}\byou (?:mean|meant|want)|"
+    r"\b(?:need you to|please) (?:pick|choose) one\b",
     re.IGNORECASE,
 )
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
