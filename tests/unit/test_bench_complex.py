@@ -401,6 +401,35 @@ def test_a_cannot_do_why_reads_what_the_tools_have_no_way_to_do() -> None:
     ]  # no why
 
 
+def test_more_honest_answer_shapes_of_the_gate_run() -> None:
+    """Deep Agents, Haiku, the gate's run: three right answers the scorer read as wrong."""
+    turn = {(c.id, n): t for c in breakfix.cases() for n, t in enumerate(c.turns)}
+
+    def ok(case: str, n: int, answer: str) -> bool:
+        expect = turn[case, n].expect
+        assert expect is not None
+        return bool(cx.score(expect, answer, [], turn[case, n].text)["correct"])
+
+    # the reason with a hyphen
+    arima = (
+        "I can't produce an ARIMA forecast. I don't have a modelling or code-execution tool, so "
+        "I can't fit or validate an ARIMA model. Here is a simple trend from monthly revenue."
+    )
+    assert ok("bf3-cantdo-01", 0, arima)
+    # a count said as "only one of"
+    assert ok("bf3-cantdo-02", 1, "Only one of our stores is in Leeds: S01, in the north region.")
+    assert not ok("bf3-cantdo-02", 1, "One of our stores is in Leeds, S01; there may be more.")
+    # a chart it made in its scratch space, said to be out of reach, its SVG source given
+    svg = (
+        "I made the chart, but I can't give you a download link: the file is in my scratch "
+        "space and you can't open it from there. Here is the SVG source instead.\n"
+        '```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="600"><rect/></svg>\n```\n'
+        "The figures: Footwear £379,446.61, Knitwear £346,485.16."
+    )
+    assert ok("bfh-mixed-02", 2, svg)
+    assert not ok("bfh-mixed-02", 2, "I made the chart. The figures: Footwear £379,446.61.")
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",

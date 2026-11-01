@@ -2598,6 +2598,8 @@ _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
 #: A file the run saved for its user, as ``query_result``'s tool message says it (#97): an export
 #: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
 _SAVED: Final = re.compile(r"\bSaved (\S+) for the user\b")
+#: A chart's SVG source in the answer itself: a chart said to be made is then no claimed image.
+_SVG: Final = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
 _CANNOT: Final = re.compile(
     r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
@@ -2605,7 +2607,7 @@ _CANNOT: Final = re.compile(
     re.IGNORECASE,
 )
 _WHY: Final = re.compile(
-    r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
+    r"code[- ]execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
     r"(?:no|without) (?:a )?(?:sandbox|interpreter)|(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
@@ -2674,6 +2676,10 @@ _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", r
 #: "one of them").
 _COUNTS: Final = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
                   "eleven", "twelve")  # fmt: skip
+#: A count said as a share of a group: "only one of our stores", "just two of them".
+_ONLY_OF: Final = re.compile(
+    r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
+)
 _COUNT_WORD: Final = re.compile(
     r"(?<!\bthe )(?<!\bwhich )(?<!\bthis )(?<!\bthat )(?<!\beach )(?<!\bany )\**\b("
     + "|".join(_COUNTS)
@@ -2702,6 +2708,7 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
         found += [p / 100 for p in _percentages(answer)]
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _ONLY_OF.findall(answer)]
     if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
         found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]
     return any(abs(n - value) <= tol + 1e-9 for n in found)
@@ -2842,7 +2849,10 @@ def score(
             missing.append("says why (no code execution, files or images here)")
         if not re.search(expect.value["offer"], a, re.IGNORECASE):
             missing.append("offers what it can do instead")
-        fake = re.search(expect.value["fake"], a, re.IGNORECASE) or _FAKE.search(a)
+        fake = re.search(expect.value["fake"], a, re.IGNORECASE)
+        if fake and _SVG.search(a):
+            fake = None  # the chart it made is in the answer itself, as its SVG source
+        fake = fake or _FAKE.search(a)
         if fake:
             made_up.append(fake.group(0))
     elif k == "judge":
