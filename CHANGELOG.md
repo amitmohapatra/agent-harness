@@ -68,6 +68,14 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- A file store for the files runs make for their users (`trellis.harness.files`, on fsspec):
+  `TRELLIS_FILES_URL` (`gs://`, `s3://`, `az://` with `gcsfs`, `s3fs`, `adlfs`; `file://`),
+  else the XDG data folder. `Runtime.save_file(name, data, source=)` keeps a file under
+  `<tenant>/<user>/<conversation>/<run>/`, names it in the run's journal and announces it (the
+  `file` event); `serve_chat` serves it to the run's own user at
+  `GET {path}/runs/{run_id}/files/{name}`: a 5-minute signed link where the store signs, else
+  streamed. Stored only: never parsed or remembered. New dependency: `fsspec`.
+
 - Where a tool's result came from: `tool(response_format="content_and_artifact")` (LangChain's)
   returns `(content, artifact)`, the artifact a `Citation(name, date, link)` or a list of them
   (also a LangChain tool's own artifact); the model reads the content alone and the call's

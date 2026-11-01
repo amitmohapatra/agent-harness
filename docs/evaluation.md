@@ -409,6 +409,40 @@ configured (the repository variable `BENCH_LLM_BASE_URL` and the secret
 `BENCH_LLM_API_KEY`, a Bifrost; without them the job is skipped): the smoke set (10 tools, one
 repeat) on a pull request, the 10- and 50-tool catalogues nightly.
 
+## Tool-chain benchmark
+
+`python -m benchmark.tool_chains --model <name> --arms react,react-cold,react-warm` measures
+dependent tool calls, where one call's output (an id, a name, a date) is the next call's
+input. The world is a retail allocation system (`benchmark/tool_chains/world.py`). It has
+fifteen read-only tools with typed outputs, plus distractors up to `--size` (50 by default).
+The 42 cases (`cases.py`) cover fourteen shapes:
+
+- chains two, three and five calls deep, one of them passing on a date;
+- fan-out (one result feeds several calls) and fan-in (several results combined);
+- a middle step that fails once and is retried, and one that stays down and must be reported
+  with no date made up;
+- an id read from a result of about 110,000 characters, which the run keeps and pages;
+- a follow-up turn that reuses the ids of the chain before it.
+
+Each shape has two `train` cases and one reworded `heldout` case. Answers are scored exactly:
+figures as numbers, and ids, names and dates as written. The arms:
+
+- `react`, `langgraph` (`create_agent` running the harness's tools) and `deep` run with memory
+  off;
+- `react-cold` uses the memory service of `MEMORY_URL` with nothing learned. Its tool hints
+  narrow the tools offered from 30 tools on;
+- `react-warm` first runs the train split `--train-passes` times as one agent. A person
+  confirms each correct run (`h.feedback`), and the tenant administrator approves the verdicts,
+  because only a verified outcome teaches. The memory service's learning job then learns the
+  plans before the cases run.
+
+The report (`<out>.json`, `.md`) gives per arm and split: accuracy, model and tool calls,
+tokens, seconds, dollars, the cases where a needed tool was narrowed away, and the cases whose
+model was offered a learned skill. It also lists the skills learned. Without a model, it checks
+the narrowing: for each needed tool of a case kept as the only hint, which of the case's other
+tools the links keep offered. `--scripted` replays the gold calls with no model, and
+`--max-usd` caps the spend.
+
 ## Thread-history benchmark
 
 `python -m benchmark.thread --model <name>` (with `MEMORY_URL` and a gateway serving the name)
