@@ -325,6 +325,28 @@ async def test_deep_agents_is_an_adapter_of_its_own(tmp_path: Path, offline: Non
     assert out.with_suffix(".md").read_text().startswith("# complex: scripted (deepagents")
 
 
+async def test_a_langgraph_graph_without_the_harness_middleware_is_an_adapter_of_its_own(
+    tmp_path: Path, offline: None
+) -> None:
+    """``graph``: ``create_agent`` as a LangGraph team builds it — its tools bound when it is
+    built (the retail tools, and memory's own from ``h.memory_tools()``), its checkpointer, and
+    no harness middleware (the matrix's ``langgraph`` adapter); its step limit is LangGraph's own
+    ``recursion_limit``: a model call and a tool step for each of ``max_steps``."""
+    out = tmp_path / "cx-graph"
+    report = await cx.bench(
+        _args(out, cases="multihop-01,conversation-01", adapter="graph"),
+        progress=lambda _: None,
+    )
+    assert report["adapter"] == "graph" and report["summary"]["all"]["strict"]["mean"] == 1.0
+    graph, options = cx.target_of("m", "memory", None, 6, adapter="graph", tools=r.TOOLS[:2])
+    assert options == {"framework_options": {"recursion_limit": 13}}
+    assert sorted(graph.nodes["tools"].bound.tools_by_name) == sorted(
+        t.spec.name for t in r.TOOLS[:2]
+    )
+    assert [n for n in graph.nodes if "." in n] == []  # no middleware node
+    assert getattr(graph, "trellis_tools", None) is None  # bound, not declared to the harness
+
+
 def test_the_adapter_follows_the_history_unless_given() -> None:
     assert cx.adapter_of("memory", None) == "react"
     assert cx.adapter_of("thread", None) == "langgraph"
