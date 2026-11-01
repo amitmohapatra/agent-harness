@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from benchmark.cost import catalog, prices, run, stats
+from benchmark.cost import catalog, explain, prices, run, stats
 from benchmark.cost.variants import DEFAULT, VARIANTS
 from trellis.harness.react import window_of
 
@@ -56,9 +56,24 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sets", default="", help="task sets by name (default: all)")
     parser.add_argument(
         "--suite",
-        choices=("default", "classes"),
+        choices=("default", "classes", "explain"),
         default="default",
-        help="the ten tasks (default), or ten tasks per class (catalog.CLASSES)",
+        help="the ten tasks (default), ten tasks per class (catalog.CLASSES), or follow-ups "
+        "about an earlier answer, memory on (benchmark.cost.explain)",
+    )
+    parser.add_argument(
+        "--arm", default="arm", help="with --suite explain: the name its rows carry"
+    )
+    parser.add_argument(
+        "--pick",
+        default="pilot",
+        help="with --suite explain: first:kind,... (pilot: the twelve; all: every one)",
+    )
+    parser.add_argument(
+        "--render",
+        default=None,
+        help="with --suite explain: a llama.cpp server's root, to render each turn-2 request "
+        "with its chat template (POST /apply-template)",
     )
     parser.add_argument(
         "--classes",
@@ -182,6 +197,25 @@ async def bench(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = arguments(argv)
+    if args.suite == "explain":
+        window, _ = window_of(None, args.window)
+        found = asyncio.run(
+            explain.bench(
+                model=args.model,
+                model_name=args.model,
+                window=window,
+                out=args.out,
+                arm=args.arm,
+                pick=explain.picked(args.pick),
+                repeats=args.repeats,
+                max_steps=args.max_steps,
+                run_seconds=args.timeout,
+                render=args.render,
+            )
+        )
+        explain.written(found, args.out)
+        sys.stdout.write(explain.markdown(found))
+        return 0
     report = asyncio.run(bench(args))
     sys.stdout.write(stats.markdown(report))
     return 0

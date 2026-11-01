@@ -2,11 +2,13 @@
 (its files written, its CPU and memory limited, no network unless opened) and deleted at its
 end; a command out of time is killed with what it started; a run paused for a person keeps its
 container snapshotted and paused, and its resume works in the same one; a worker that dies
-leaves the container to the next attempt; the reaper deletes what an ended run left."""
+leaves the container to the next attempt; the reaper deletes what an ended run left; fifty runs
+leave no container and no volume behind, and the process's memory steady."""
 
 from __future__ import annotations
 
 import json
+import resource
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
@@ -14,14 +16,14 @@ import httpx
 import pytest
 
 from tests.integration.test_progress import Crash, crash_once
-from tests.live.conftest import needs_docker
+from tests.live.conftest import DOCKER_UDS, DOCKER_URL, needs_docker
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.runs import LocalRuns
 from trellis.harness.sandbox import DockerSandbox, SandboxRef, SandboxSpec, reap, sandbox
 from trellis.harness.sandbox.base import RUN, TENANT
-from trellis.harness.sandbox.docker import API_VERSION, DOCKER_SOCKET
+from trellis.harness.sandbox.docker import API_VERSION
 
 pytestmark = [pytest.mark.live, needs_docker]
 
@@ -36,8 +38,8 @@ PROCESSES: Final = (
 
 async def engine(method: str, path: str, **kwargs: Any) -> httpx.Response:
     """A call of the daemon's Engine API, to look at what the provider did."""
-    transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCKET)
-    async with httpx.AsyncClient(transport=transport, base_url="http://docker") as client:
+    transport = httpx.AsyncHTTPTransport(uds=DOCKER_UDS)
+    async with httpx.AsyncClient(transport=transport, base_url=DOCKER_URL) as client:
         return await client.request(method, f"/{API_VERSION}{path}", **kwargs)
 
 
@@ -195,3 +197,41 @@ async def test_a_command_killed_past_its_memory_or_missing_a_module_says_why(
     assert missing["exit_code"] == 1 and missing["hint"].startswith(
         "The module polars is not installed in the sandbox, and the sandbox has no network"
     )
+async def volumes() -> set[str]:
+    return {v["Name"] for v in (await engine("GET", "/volumes")).json()["Volumes"] or []}
+
+
+async def test_fifty_runs_leave_no_container_or_volume_and_memory_steady(harness: Harness) -> None:
+    # an image that declares a volume (as many data images do): each container gets its own
+    probe = await engine("POST", "/containers/create", json={"Image": DockerSandbox().image})
+    probe_id = probe.json()["Id"]
+    committed = await engine(
+        "POST",
+        "/commit",
+        params={"container": probe_id, "repo": "trellis-volume-probe", "tag": "1"},
+        json={"Volumes": {"/data": {}}},
+    )
+    await engine("DELETE", f"/containers/{probe_id}", params={"force": "true", "v": "true"})
+    image = committed.json()["Id"]
+    before, runs, rss = await volumes(), [], []
+
+    async def work(input: str, agent: Runtime) -> Any:
+        done = await agent.tools.call(
+            "sandbox_exec", command=f"echo {input} > /data/x; cat /data/x"
+        )
+        return done["stdout"].strip()
+
+    agent = arm(harness.wrap(work, id="leaks"), [sandbox(DockerSandbox(image)).tools()])
+    try:
+        for n in range(50):
+            result = await agent.run(str(n), user=f"user-{n % 5}")
+            assert result.answer == str(n), result.error  # each user's run, its own sandbox
+            runs.append(result.run_id)
+            if n in (9, 49):
+                rss.append(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        left = [run for run in runs if await state(f"trellis-{run}") is not None]
+        assert left == []
+        assert await volumes() - before == set()
+        assert rss[1] - rss[0] < 32 * 1024  # KiB: steady after the first ten runs
+    finally:
+        await engine("DELETE", f"/images/{image}", params={"force": "true"})
