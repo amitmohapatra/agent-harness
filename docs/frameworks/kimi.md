@@ -145,6 +145,11 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   (over ACP a finished turn; its own log says `loop.max_steps_exceeded`), and the run asks it
   once more in the same session, told the limit is reached, as `ReAct` does at `max_steps` (a
   `step_limit` warning).
+  A loop on one call ends the same way: Kimi's own repeat breaker (`KIMI_CODE_REPEAT_BREAKER`,
+  on by default: reminders to answer, then the turn ended at the twelfth identical call; its log
+  says `repeat_breaker`) and the harness's refusal of a harness call repeated three times
+  (`bridge.stalled`) are kept; a turn either ends with no answer is asked once more, told the
+  turn stalled (`bridge.TURN_STALLED`), with a `stalled` warning.
 
 ## Streaming
 

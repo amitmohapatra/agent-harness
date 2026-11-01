@@ -104,6 +104,14 @@ STALLED: Final = (
     "what you need: do not call it again. Do not call tools: answer now with what you have, and "
     "say what went wrong."
 )
+#: The same, told in a framework's session that the conversation's next turn continues (Kimi
+#: Code over ACP, whose own repeat breaker ended the turn with no answer): as
+#: ``budget.TURN_LIMIT``, for this turn only.
+TURN_STALLED: Final = (
+    "This turn was stopped: the same tool call was made over and over and it did not give you "
+    "what you need. Do not call tools now: answer with what you have, and say what went wrong. "
+    "This is for this turn only: the user's next message starts a new turn, with your tools."
+)
 #: The times in a row one call (the same tool, the same arguments) is made before it is not run
 #: again (:func:`_repeated`, the model reading :data:`STALLED` instead of its result): a model
 #: looping on one call, whatever its framework.

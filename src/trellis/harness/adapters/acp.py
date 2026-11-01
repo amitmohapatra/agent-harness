@@ -198,6 +198,9 @@ USAGE_RECORD: Final = "usage.record"
 #: finished turn with no answer. Its ``agent.turn.ended`` lines are another record.
 TURN_ENDED: Final = "turn.ended"
 AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
+#: The ``stopReason`` of a turn Kimi's own repeat breaker ended (``KIMI_CODE_REPEAT_BREAKER``:
+#: the same call 12 times in a row, after reminders to answer): a finished turn with no answer.
+REPEAT_BREAKER: Final = "repeat_breaker"
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +277,8 @@ class UsageLog:
         #: whether the main agent's turn ended in the log (:data:`TURN_ENDED`): it is logged
         #: a moment after the turn's last usage, the step limit's reason in it
         self.ended = False
+        #: whether Kimi's repeat breaker ended the main agent's latest turn (:data:`REPEAT_BREAKER`)
+        self.broken = False
 
     def _files(self) -> list[Path]:
         return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
@@ -299,10 +304,23 @@ class UsageLog:
                     found.append(entry)
                 elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
                     self.ended = True
+                    self.broken = entry.get("stopReason") == REPEAT_BREAKER
                     error = entry.get("error") or {}
                     if error.get("code") == AT_STEP_LIMIT:
                         self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
         return found
+
+
+def _answers(item: Any, answered: bool) -> bool:
+    """Whether the turn has an answer after ``item``: text after its last tool call, as
+    :meth:`ACPAdapter.extract` reads it."""
+    from acp.schema import AgentMessageChunk, TextContentBlock, ToolCallStart
+
+    if isinstance(item, ToolCallStart):
+        return False
+    if isinstance(item, AgentMessageChunk) and isinstance(item.content, TextContentBlock):
+        return answered or bool(item.content.text)
+    return answered
 
 
 def _json_line(line: bytes) -> dict[str, Any]:
@@ -787,23 +805,45 @@ class Attempt:
         something (a rejection's reason, an edit) — the next turn's, until one ends on its own
         or the run pauses."""
         prompt = self._first(native_input)
-        asked_at_limit = False
+        asked_once = False
         while prompt is not None:
             self.cancelled = False
+            answered = False
             async with contextlib.aclosing(self._turn(prompt)) as items:
                 async for item in items:
+                    answered = _answers(item, answered)
                     yield item
             prompt, self.followup = self.followup, None
             if self.runtime.pending is not None or self.runtime.budget_spent is not None:
                 return
-            limit = self.usage.limited if self.usage is not None else None
-            if prompt is None and limit is not None and not asked_at_limit:
-                # the turn ended at the agent's step limit, with no answer: asked once more
-                asked_at_limit, self.usage.limited = True, None  # type: ignore[union-attr]
-                stopped = f"stopped: the step limit ({limit}) was reached"
-                log.warning("run %s %s", self.runtime.run_id, stopped)
-                self.runtime.events.warning("step_limit", stopped)
-                prompt = budget.TURN_LIMIT.format(limit=limit)
+            told = None if prompt is not None or asked_once else self._unanswered(answered)
+            if told is not None:  # the turn ended with no answer: asked once more
+                asked_once, prompt = True, told
+
+    def _unanswered(self, answered: bool) -> str | None:
+        """What the agent is told when its turn ended with no answer where the run asks once
+        more, in the same session (as ``ReAct`` answers at its limits), said as a warning: the
+        agent's step limit (:data:`AT_STEP_LIMIT`, ``budget.TURN_LIMIT``), or a loop on one
+        call — refused by the bridge (``bridge.stalled``, which said so) or ended by Kimi's own
+        repeat breaker (:data:`REPEAT_BREAKER`, ``bridge.TURN_STALLED``). ``None``: not asked."""
+        usage, runtime = self.usage, self.runtime
+        limit = usage.limited if usage is not None else None
+        if limit is not None:
+            usage.limited = None  # type: ignore[union-attr]  # read: asked once
+            stopped = f"stopped: the step limit ({limit}) was reached"
+            log.warning("run %s %s", runtime.run_id, stopped)
+            runtime.events.warning("step_limit", stopped)
+            return budget.TURN_LIMIT.format(limit=limit)
+        if answered:
+            return None
+        if bridge.stalled(runtime):
+            return bridge.TURN_STALLED
+        if usage is not None and usage.broken:
+            stopped = "stopped: the same call over and over (the agent's repeat breaker)"
+            log.warning("run %s %s", runtime.run_id, stopped)
+            runtime.events.warning("stalled", stopped)
+            return bridge.TURN_STALLED
+        return None
 
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block

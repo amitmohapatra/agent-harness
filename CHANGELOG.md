@@ -59,6 +59,12 @@ own model work follows the harness's configuration.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
+- A Kimi run looping on one call ends with one answer (ADV-9): Kimi's own repeat breaker
+  (`KIMI_CODE_REPEAT_BREAKER`: the same call 12 times in a row) ended the turn with no answer,
+  the reason only in its log (`stopReason` `repeat_breaker`). When a turn ends with no answer
+  after a loop (the bridge's refusal, `bridge.stalled`, or Kimi's breaker on its own tools),
+  Kimi is asked once more in the same session, as at its step limit, told the turn stalled
+  (`bridge.TURN_STALLED`, for this turn only); a `stalled` warning says so.
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
