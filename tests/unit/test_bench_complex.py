@@ -386,6 +386,21 @@ def test_a_chart_drawn_as_text_in_the_answer_is_no_claimed_image() -> None:
     assert not cx.score(expect, claimed, [])["correct"]
 
 
+def test_a_cannot_do_why_reads_what_the_tools_have_no_way_to_do() -> None:
+    case = next(c for c in breakfix.cases() if c.id == "bf3-cantdo-01")
+    expect = case.turns[0].expect
+    assert expect is not None
+    answer = (
+        "I can't fit a true ARIMA model here. My tools have no time-series modelling, and "
+        "demand_forecast only returns weekly units for a single SKU. What I can do is pull the "
+        "monthly revenue history and make a transparent trend estimate, which is not ARIMA."
+    )
+    assert cx.score(expect, answer, [])["correct"]
+    assert not cx.score(expect, "I can't fit an ARIMA model. Here is a trend estimate.", [])[
+        "correct"
+    ]  # no why
+
+
 def test_a_cannot_do_why_reads_the_ways_a_model_says_it() -> None:
     for said in (
         "I can't create a downloadable chart file because I have no tool for generating files.",
