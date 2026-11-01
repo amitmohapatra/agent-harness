@@ -36,6 +36,13 @@ own model work follows the harness's configuration.
 
 ### Changed
 
+- The context's line about earlier tool values that are out of date now asks the model to
+  call a tool again only for a value the question needs, and still never to answer with an
+  earlier one (`snapshots.NOTE`). It said "call them again; never answer from the earlier
+  ones", and on a turn that needed none of them ("Put that in a PDF for finance") ReAct
+  re-fetched every input and often dropped why it could not make the file. Haiku, three
+  repeats: that turn 1/3 -> 3/3 (4 of 10 across every ReAct run on main); the freshness
+  cases 27/27 turns before and after.
 - The tool hints narrow what the model is offered only from 30 tools in the run
   (`agent.NARROW_FROM`). Below that, every tool is offered and the hints' tools section
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
@@ -49,6 +56,35 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
+  answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
+  SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
+  the limit is reached, for one turn with no tool. Kimi ended the turn with no answer, the
+  reason only in its own log (`loop.max_steps_exceeded`): it is asked once more in the same
+  session. A `step_limit` warning says so on the stream. Both are told the limit is for this
+  turn only (`budget.TURN_LIMIT`): the session keeps the message, and told ReAct's "This run has
+  reached its limit", a model answered the conversation's next turn "I've reached the
+  tool-call limit" without calling a tool.
+- When memory holds nothing for a question (or only part of it) and the run offers
+  `memory_search`, the note that says so now also tells the model to search the user's
+  earlier conversations first (`kinds=["message"]`) before saying a detail is missing
+  (`agent.EARLIER_CHATS`). Told only to offer to look it up, every adapter asked the user
+  again for what they had said in an earlier chat ("the cardigan in that same colour, but in
+  cotton"). Haiku, ReAct, three repeats: that turn went from 0/3 to 3/3 right, and the turns
+  the note reaches went from 15/18 to 18/18, at about half a model call more each.
+- `ReAct` with memory off and a known window replays each earlier turn whole — its tool calls and
+  their results, not only its question and answer — so a follow-up has the figures behind an
+  earlier answer (the vendor read, the 503 behind an explanation); clearing and `FitWindow`
+  fit them to the window, and a result past its tool's age is marked out of date as memory's
+  window marks it. Kept per conversation in this process (ADV-7).
+- A large result a conversation's turn saved stays readable in its later turns: a follow-up's
+  `read_file` or `query_result` on the path its history names found "File not found", so every
+  what-if needed the whole fetch again. Kept per conversation in the process that saved them
+  (`Agent.results`, bounded); a path no longer kept says so and how to fetch it again (ADV-6).
+- A worker that dies (a `BaseException` that is not an error) in a harness tool an ACP agent
+  called ends the run's attempt, as an in-process tool's does. It ended only the MCP server's
+  own task group, and the run went on as if the call had failed (the `X15-kimi-…` matrix cells,
+  "the worker did not die").
 - An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
   `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
   agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
@@ -63,6 +99,14 @@ own model work follows the harness's configuration.
   file tools run ungoverned: a `write_file` changed a real file with no journal, record or
   approval. They are governed now, reads and writes, as `ReAct(backend=)` has them
   (`middleware.declare_files`, marked when the graph is wrapped).
+- An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
+  is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
+  it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
+  on a small model read it as the user's message ("your message doesn't include a question").
+- A Claude Agent SDK run no longer offers Claude Code's schedules. Its CLI runs for one attempt
+  and ends with it, so a scheduled prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) never
+  fires; offered, Claude answered "set this up every Monday" with a schedule nothing kept. They
+  join the query's `disallowed_tools` (`adapters.claude.OUTLIVES_THE_QUERY`), after the team's.
 - The memory context no longer breaks a provider's prompt cache from one turn to the next.
   A `create_agent` graph (`ReAct`'s, Deep Agents', yours) sent the context, new for every
   question, as a system message ahead of the history, so the next turn shared nothing past
@@ -80,6 +124,11 @@ own model work follows the harness's configuration.
   model the call is made with, in Deep Agents' own one's place, and marks the answer that
   ends the history. Any other provider's request is unchanged. The small hosted model by name,
   18 multi-turn cases: cached share of input 0 → 0.87, uncached input −87%, cost −62%.
+- Anthropic's API given as an OpenAI-compatible endpoint (`LLM_BASE_URL=https://api.anthropic.com/v1/`)
+  is called with Anthropic's own client (`ChatAnthropic`, the same endpoint and key), so its
+  prompt cache is on: the OpenAI compatibility layer drops prompt caching, as Anthropic's docs
+  say. `LLM_GATEWAY=openai-compatible` keeps the OpenAI-compatible client; `trellis doctor`
+  says which client is used.
 - A live tool's value from an earlier turn reads as out of date in every adapter, not only
   where memory's window replays the conversation. A `create_agent` or Deep Agents graph keeps
   its own thread (its checkpointer), so its earlier results are marked in the request it sends
@@ -89,6 +138,12 @@ own model work follows the harness's configuration.
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
 
+- A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
+  `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
+  handler) call the model once more, told the limit is reached and offered no tool, and its
+  answer — what it found, what is left — is the run's: not LangChain's bare "Model call limits
+  exceeded" nor `MaxTurnsExceeded` with no answer. One extra model call at most, through #76's
+  last-answer path.
 - A run's first scratch write (Deep Agents' `write_file` or `edit_file` on the graph's state)
   says the file is the run's own scratch copy, which the user cannot open or download
   (`middleware.SCRATCH_NOTE`). Asked for a chart, a model saved an SVG at `/tmp/…` in the
@@ -136,6 +191,22 @@ own model work follows the harness's configuration.
   ask the user for it, instead of a bare "say you do not know" (`agent.ABSTAIN_NOTES`).
 
 ### Added
+
+- A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
+  killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
+  says whether the sandbox can install it (no network: use the standard library). In
+  `sandbox_exec`'s result as `hint`, at the end of Deep Agents' `execute` output.
+- A sandbox's files for the user: the command tool says that files written in `outputs/` are
+  given to the user. When the run succeeds, each file directly in `outputs/` is kept in the file
+  store (`sandbox.delivered`: named in the journal, announced, served over AG-UI) before the
+  sandbox is deleted.
+
+- The sandbox's environment card: `sandbox_exec`, and Deep Agents' `execute` under
+  `ReAct(backend=sandbox())`, are described with the image's Python version and installed
+  distributions, and with no network, that nothing else can be installed
+  (`SandboxSource.card`). The card is read once per process in a sandbox made for it alone.
+  [sandbox.md](docs/sandbox.md) has an image recipe that installs from your index
+  (`PIP_INDEX_URL`, `UV_INDEX_URL`, a build secret for credentials).
 
 - `trellis.ask_user()`: an opt-in tool the model asks the person with — free text, a choice
   (`options`), a `date`, a `date_range` or a `number` — through the run's own pause, the answer

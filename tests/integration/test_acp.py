@@ -31,6 +31,7 @@ from trellis.harness.adapters.acp import (
 )
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.budget import Budget
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import sandbox
 
 #: What Kimi reads its swarm's concurrency from.
@@ -127,6 +128,37 @@ async def test_an_approval_stops_the_turn_and_a_resume_continues_the_session(
     record = recorded(tmp_path)
     assert [s["how"] for s in record["sessions"]] == ["new", "resume"]
     assert record["prompts"][-1] == RESUMED_CALL.format(tool="mcp__trellis__refund")
+
+
+class Died(BaseException):
+    """What a worker process's death looks like to the code it ran (not an ``Exception``)."""
+
+
+@tool(side_effects="read")
+def dies(order: str) -> str:
+    """A tool whose worker dies while it runs."""
+    raise Died
+
+
+async def test_a_worker_that_dies_in_a_harness_call_dies_in_the_run_not_in_its_server(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A harness tool reaches an ACP agent through an MCP server the attempt serves: a
+    ``BaseException`` that is not an error (the worker dying, ``SystemExit``) raised in its
+    call ended the server's own task group, and the run went on as if the call had failed (a
+    matrix cell, ``X15-kimi-…``: "the worker did not die"). It ends the attempt, as an
+    in-process tool's does."""
+    script = [{"tool": "dies", "args": {"order": "o5"}}, {"text": "went on: {last}"}]
+    agent = arm(harness.wrap(fake(tmp_path, script), id="dies"), [dies])
+    with pytest.raises(BaseException) as raised:
+        await agent.run("go", user="u1")
+    assert any(isinstance(e, Died) for e in _leaves(raised.value)), raised.value
+
+
+def _leaves(error: BaseException) -> list[BaseException]:
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for e in error.exceptions for leaf in _leaves(e)]
+    return [error]
 
 
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
@@ -410,15 +442,19 @@ async def test_the_session_mode_is_set_and_one_that_asks_nothing_refused(
 
 
 # --------------------------------------------------------------------------- the context
-async def test_the_context_goes_before_the_prompt(
+async def test_the_context_goes_before_the_prompt_marked_off_from_it(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
+    """ACP's prompt has no place for background but its blocks: the context goes first, marked
+    off as every adapter's is where it shares the user's message (``history.ASKED_WITH``).
+    Unmarked, a model read the context as the user's message and the question as a note."""
     await memory_harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="ctx").run(
         "reach me?", user="u1"
     )
     [prompt] = recorded(tmp_path)["prompts"]
-    context, asked = prompt.split("\n", 1)[0], prompt.rsplit("\n", 1)[-1]
-    assert memory_service.context_text.split("\n", 1)[0] == context and asked == "reach me?"
+    opened, closed = ASKED_WITH.split("{context}")
+    assert prompt.startswith(opened + memory_service.context_text)
+    assert prompt.endswith(f"{closed}\nreach me?")
     [request] = memory_service.named("context")
     available = request.body["tools"]["available"]
     assert {"Bash", "Read", "AgentSwarm"} <= set(available)  # Kimi's own tools: its tool set

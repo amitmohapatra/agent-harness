@@ -171,6 +171,7 @@ def _middleware(
     held: frozenset[str] = frozenset(),
     files: bool = True,
     summarization: Any = None,
+    card: Any = None,
     scoped: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
@@ -226,6 +227,8 @@ def _middleware(
         automatic.Budgeted(),
         *clearing,
         *reads,
+        # the sandbox's environment card in execute's description (``sandbox.backend``)
+        *([card] if card is not None else []),
         # the request made to fit the window, after everything that adds to it; a
         # summarization after it summarizes the older turns, else it leaves them out
         ours.FitWindow(window, turns=summarization is None),
@@ -394,6 +397,7 @@ def ReAct(
         held=held,
         files=outside or bool(skills) or bool(memory_files),
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        card=_card(files_backend),
         scoped=True,
     )
     graph = create_deep_agent(
@@ -430,6 +434,14 @@ def _deep(
     """Whether a Deep Agents capability is asked for — files on a backend, a sub-agent of its
     own, skills, memory files, permissions — so ``ReAct`` is ``create_deep_agent``'s."""
     return backend is not None or bool(native or skills or memory_files or permissions)
+
+
+def _card(backend: Any) -> Any:
+    """The middleware that describes ``execute`` with the run's sandbox's environment card,
+    for a backend that is one (``sandbox.backend.SandboxCard``)."""
+    from trellis.harness.sandbox.backend import SandboxBackend, SandboxCard
+
+    return SandboxCard(backend.source) if isinstance(backend, SandboxBackend) else None
 
 
 def _backend(given: Any) -> Any:

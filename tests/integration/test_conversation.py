@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,11 @@ from langchain_core.messages import ToolMessage
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
+from tests.support.models import ScriptedChat
 from tests.support.planned import PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
-from trellis.harness import conversation
+from trellis.harness import conversation, snapshots
 from trellis.harness.bounded import LRU
 from trellis.harness.conversation import (
     Mode,
@@ -106,6 +108,47 @@ async def test_a_follow_up_has_the_conversation(
     other = await agent.run("What is the locker code?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS, other.error
     assert "4242" not in told(seen)  # another user's thread named alike is not this one
+
+
+@pytest.mark.parametrize("window", [32_000, None])
+async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
+    harness: Harness, window: int | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADV-7: a follow-up ("why was that?") needs the figures behind the earlier answer, not
+    only its question and answer. With memory off and a known window, ``ReAct``'s history is
+    each earlier turn whole — its tool calls and their results, kept in this process — which
+    ``FitWindow`` and clearing fit to the window, a result past its tool's age marked out of
+    date as memory's window marks it; with no window known (nothing would fit it), its
+    question and answer, as before."""
+
+    @tool(side_effects="read")
+    def supplier(sku: str) -> str:
+        """The supplier of a SKU and its lead time."""
+        return "Acme Fasteners Ltd, lead time 21 days (portal: 503 on retry)"
+
+    turns: list[Any] = [("supplier", {"sku": "NV-1"}), "Acme supplies it.", "Because of Acme."]
+    model = ScriptedChat([*turns, "I do not know."])
+    react = ReAct(system_prompt="You work.", model=model, context_window=window)
+    agent = arm(harness.wrap(react, id=f"whole-{window}", without={"memory"}), [supplier])
+    fetched = datetime(2026, 10, 30, 9, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(snapshots, "now", lambda: fetched)
+    first = await agent.run("Who supplies NV-1?", user="ada", thread=THREAD)
+    assert first.status is RunStatus.SUCCESS, first.error
+    monkeypatch.setattr(snapshots, "now", lambda: fetched + timedelta(hours=1))
+    second = await agent.run("Why is its lead time so long?", user="ada", thread=THREAD)
+    assert second.status is RunStatus.SUCCESS, second.error
+    sent = json.dumps(model.requests[-1]["messages"])
+    assert "Who supplies NV-1?" in sent and "Acme supplies it." in sent
+    if window is None:
+        assert "21 days" not in sent
+        return
+    assert "21 days" in sent  # the tool result behind the answer
+    assert json.dumps(snapshots.STALE.format(tool="supplier"))[1:-1] in sent  # live data
+    roles = [m["role"] for m in model.requests[-1]["messages"]]
+    assert roles[1:] == ["user", "assistant", "tool", "assistant", "user"], roles
+    other = await agent.run("Why so long?", user="bob", thread=THREAD)
+    assert other.status is RunStatus.SUCCESS
+    assert "21 days" not in json.dumps(model.requests[-1]["messages"])  # another user's chat
 
 
 @pytest.mark.parametrize("framework", MODELLED)

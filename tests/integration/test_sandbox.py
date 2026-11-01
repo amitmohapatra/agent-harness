@@ -41,8 +41,10 @@ from trellis.harness.sandbox import (
     READ_BYTES,
     REAP_SECONDS,
     DockerSandbox,
+    ExecResult,
     SandboxRef,
     SandboxSpec,
+    card_of,
     ended,
     paused,
     reap,
@@ -636,3 +638,145 @@ async def test_way_2_a_provider_and_governed_without_a_harness() -> None:
     assert await run(command="echo hi") == {"exit_code": 0, "stdout": "hi TOKEN=t", "stderr": ""}
     await provider.delete(box.ref)
     assert provider.boxes == {}
+
+
+CARD = (
+    "Its environment: Python 3.12.7; installed: numpy 2.1.0, openpyxl 3.1.5. It has no "
+    "network: nothing else can be installed."
+)
+
+
+async def test_sandbox_exec_is_described_with_the_images_environment_read_once() -> None:
+    """The card is read in a sandbox made for it alone, deleted at once, once per process."""
+    provider = FakeSandboxes()
+    box = sandbox(provider)
+    first, again = await box.tools().resolve(), await box.tools().resolve()
+    assert first[0].spec.description.endswith(CARD)
+    assert again[0].spec.description == first[0].spec.description
+    assert [t.spec.description for t in first[1:]] == [t.spec.description for t in box._tools[1:]]
+    [made, deleted] = provider.probes
+    assert made[0] == "create" and deleted == ("delete", made[1]) and provider.boxes == {}
+    assert provider.calls == []  # no run's sandbox was made for it
+
+
+async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_as_it_was(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    open_box = FakeSandboxes()
+    open_box.environment = "3.13.1\n" + " ".join(f"p{n:03}==1" for n in range(85))
+    card = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
+    assert card.startswith("Its environment: Python 3.13.1; installed: p000 1, p001 1")
+    assert card.endswith("p079 1 and 5 more.")  # no network sentence: it has one
+    bare = FakeSandboxes()
+    bare.environment = "3.12.7"
+    assert await sandbox(bare).card() == (
+        "Its environment: Python 3.12.7; installed: the standard library only. It has no "
+        "network: nothing else can be installed."
+    )
+    assert card_of(ExecResult(exit_code=127, stderr="python3: not found"), offline=True) == (
+        "The sandbox has no Python (python3): run shell commands only."
+    )
+    broken = FakeSandboxes()
+
+    async def unreachable(ref: SandboxRef, spec: SandboxSpec) -> Any:
+        raise ToolError("Docker is not reachable", source="tools")
+
+    broken.create = unreachable  # type: ignore[method-assign]
+    source = sandbox(broken)
+    with caplog.at_level("WARNING", logger="trellis.sandbox"):
+        tools = await source.tools().resolve()
+    assert tools[0].spec.description == source._tools[0].spec.description
+    assert "environment card was not read: Docker is not reachable" in caplog.text
+
+
+async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On success each file directly in outputs/ goes to the file store (named in the journal,
+    announced); one it cannot keep is a warning; a run that fails keeps none."""
+    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 8)
+    harness = Harness(config=Settings(files_url=f"memory://outputs-{id(object())}"))
+    provider = FakeSandboxes()
+    box = sandbox(provider)
+    seen: dict[str, Any] = {}
+
+    async def work(input: str, agent: Runtime) -> Any:
+        await agent.tools.use(box.tools())
+        for path in ("outputs/report.csv", "outputs/a b.csv", "outputs/sub/x.txt", "notes.txt"):
+            await agent.tools.call("sandbox_write", path=path, content="n\n1\n")
+        await agent.tools.call("sandbox_write", path="outputs/big.csv", content="x" * 9)
+        seen["runtime"] = trellis.current()
+        if input == "fail":
+            raise RuntimeError("no answer")
+        return "done"
+
+    agent = harness.wrap(work, id="outputs")
+    events = [e async for e in agent.stream("go", user="u")]
+    runtime = seen["runtime"]
+    assert runtime.replay.journal.files == [
+        {"name": "report.csv", "size": 4, "content_type": "text/csv", "source": "sandbox_exec"}
+    ]
+    assert custom(events, "file") == [
+        {"file": "report.csv", "size": 4, "content_type": "text/csv", "source": "sandbox_exec"}
+    ]
+    warned = sorted(w["message"] for w in custom(events, "warning") if w["code"] == "sandbox")
+    assert warned[0].startswith("the output a b.csv was not kept: 'a b.csv' is not a file")
+    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 8 kept"
+    folder = runtime.files_folder()
+    assert await harness.files.size(folder, "report.csv") == 4
+    assert provider.calls[-1][0] == "delete"  # kept before the sandbox went
+    listed = provider.listed
+    failed = [e async for e in agent.stream("fail", user="u")]
+    assert custom(failed, "file") == [] and provider.listed == listed
+    await harness.aclose()
+
+
+MISSING: Final = "exits 1 ModuleNotFoundError: No module named 'polars'"
+
+
+@pytest.mark.parametrize(
+    ("spec", "command", "hint"),
+    [
+        (
+            SandboxSpec(memory=256),
+            "exits 137 ",
+            "Killed (exit 137): the command went past the sandbox's memory limit (256 MiB), or "
+            "was killed. Work on the data in parts (read it in chunks, keep only the columns "
+            "needed) rather than running it again as it is.",
+        ),
+        (
+            SandboxSpec(),
+            "exits 1 MemoryError",
+            "Out of memory: the command went past the sandbox's memory limit (the provider's). "
+            "Work on the data in parts (read it in chunks, keep only the columns needed) rather "
+            "than running it again as it is.",
+        ),
+        (
+            SandboxSpec(),
+            MISSING,
+            "The module polars is not installed in the sandbox, and the sandbox has no network "
+            "to install it: use the standard library (csv, json, statistics, sqlite3) or a "
+            "module that is installed.",
+        ),
+        (
+            SandboxSpec(network="open"),
+            MISSING,
+            "The module polars is not installed in the sandbox: install it (pip install), then "
+            "run the command again.",
+        ),
+        (SandboxSpec(), "exits 2 usage: no such option", None),
+        (SandboxSpec(), "echo fine", None),
+    ],
+)
+async def test_a_failed_command_says_what_the_sandbox_knows_about_why(
+    harness: Harness, spec: SandboxSpec, command: str, hint: str | None
+) -> None:
+    """Facts the command's own output lacks: the memory limit it went past, whether a missing
+    module can be installed there."""
+
+    async def work(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("sandbox_exec", command=command)
+
+    agent = arm(harness.wrap(work, id="hints"), [sandbox(FakeSandboxes(), spec=spec).tools()])
+    result = await agent.run("x", user="u")
+    assert result.answer.get("hint") == hint, result.error

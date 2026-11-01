@@ -103,6 +103,7 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import Source, Tool, arguments_problem
+from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
 from trellis.harness.tools.toolbox import Toolbox
 from trellis.memory.models import PromptContext
@@ -178,6 +179,15 @@ ABSTAIN_NOTES: Final = {
         "have, and offer to look it up or ask the user for it."
     ),
 }
+
+#: The memory service's search tool, and what the note says of it when the run offers it: a
+#: detail the user gave in an earlier conversation is there, and memory's context for this
+#: question does not reach it.
+SEARCH_TOOL: Final = "memory_search"
+EARLIER_CHATS: Final = (
+    "It may be in one of the user's earlier conversations: search them first (memory_search "
+    'with kinds ["message"]) before you say a detail is missing.'
+)
 
 
 def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:
@@ -286,6 +296,9 @@ class Agent:
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
         self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
+        #: the large results each conversation's turns saved in this process (``tools.results``):
+        #: its later turns read and query them where its history names them (``pipeline``)
+        self.results = Conversations()
         #: who follows a run's events in this process (``events``), by run id
         self._watching: dict[str, list[Callable[[RunEvent | None], None]]] = {}
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
@@ -919,25 +932,31 @@ class Agent:
 
     async def recalled(self, runtime: Runtime) -> None:
         """With memory off (or unreachable where it replays the conversation), the
-        conversation's earlier turns from the run store
-        (``conversation.earlier``: each one's question and answer) — only where nothing else
-        keeps them (ADR 0005): not where the framework keeps its own thread (a checkpointer,
-        a session of the run's, a conversation on OpenAI's servers) or continues the session
-        it kept for the conversation's last turn (``Runtime.continued``). A target that takes
-        messages (``Adapter.history_in == "messages"``) gets them as its own (a function as
-        ``agent.history``); the others in the context's text."""
+        conversation's earlier turns from the run store (``conversation.earlier``: each one's
+        question and answer; whole — its tool calls and their results too, as kept here — for a
+        target that takes messages and fits each request to a known window: ``ReAct``'s
+        ``FitWindow`` and clearing, a result past its tool's age marked out of date as memory's
+        window marks it) — only where nothing else keeps them (ADR 0005): not where the
+        framework keeps its own thread (a checkpointer, a session of the run's, a conversation
+        on OpenAI's servers) or continues the session it kept for the conversation's last turn
+        (``Runtime.continued``). A target that takes messages (``Adapter.history_in ==
+        "messages"``) gets them as its own (a function as ``agent.history``); the others in the
+        context's text."""
         store = self.adapter.thread_store(self.target, runtime.framework_options)
         if runtime.continued or (store is not None and store is not history.MEMORY_THREAD):
             return
+        whole = self.adapter.history_in == "messages" and self.model_window is not None
         try:
-            earlier = await conversation.earlier(runtime)
+            earlier = await conversation.earlier(runtime, whole=whole)
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return
         if not earlier:
             return
         if self.adapter.history_in == "messages":
-            runtime.history = earlier
+            runtime.history, _ = snapshots.out_of_date(
+                earlier, lambda name: snapshots.declared_max_age(runtime, name)
+            )
         else:
             runtime.context = conversation.rendered(earlier)
 
@@ -1022,6 +1041,8 @@ class Agent:
         }
         # a question a hinted tool answers is no question memory must answer
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
+        if note is not None and SEARCH_TOOL in runtime.toolbox:
+            note = f"{note}\n{EARLIER_CHATS}"
         parts = (pushed.rendered, note, snapshots.note(stale))
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
@@ -1116,9 +1137,16 @@ class Agent:
         """The attempt's transcript, whether the run succeeded, paused or failed. Where memory
         owns the conversation (``history.owner``), it is written before the run returns, so
         the next turn's window holds it wherever that turn runs; a write that fails there is
-        queued like every other (:mod:`trellis.harness.writes`: retried, spooled)."""
+        queued like every other (:mod:`trellis.harness.writes`: retried, spooled). With memory
+        off it is kept in this process for the conversation's later turns (``Agent.results``,
+        ``conversation.earlier``)."""
         memory = runtime.run_memory
-        if memory is None or not runtime.uses("records") or not messages:
+        if not messages or (memory is not None and not runtime.uses("records")):
+            return
+        if memory is None:
+            # nothing keeps the conversation: its later turns read this one here (``earlier``)
+            if runtime.parent is None and runtime.conversation != runtime.run_id:
+                self.results.said(runtime.conversation, runtime.run_id, messages)
             return
         run_id, attempt = runtime.run_id, runtime.attempt
         if self.owner(runtime) is history.Owner.MEMORY:

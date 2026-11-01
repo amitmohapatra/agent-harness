@@ -104,6 +104,55 @@ box = sandbox(DockerSandbox(), spec=spec, call_timeout=300)
 Nothing is configured in the environment: `sandbox()` is Docker (the daemon `DOCKER_HOST`
 names, Docker's own variable), `sandbox(image=)` its image.
 
+## The image: build in the libraries the agent needs
+
+A sandbox has no network by default, so nothing is installed while a run is going. The
+libraries the agent's code needs are built into the image beforehand, from your package index
+(a Nexus or JFrog proxy of PyPI), by the names pip and uv read: `PIP_INDEX_URL`, `UV_INDEX_URL`.
+
+```dockerfile
+FROM python:3.12-slim
+# A URL without credentials can be a build argument. A URL with credentials goes in a build
+# secret, since build arguments stay in the image's history.
+ARG PIP_INDEX_URL
+ARG UV_INDEX_URL
+COPY requirements.txt /tmp/requirements.txt
+RUN --mount=type=secret,id=PIP_INDEX_URL,env=PIP_INDEX_URL \
+    pip install --no-cache-dir --disable-pip-version-check -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+```
+
+```bash
+docker build --secret id=PIP_INDEX_URL,env=PIP_INDEX_URL -t acme/analyst-sandbox:1 .
+```
+
+Then name the image in code: `sandbox(image="acme/analyst-sandbox:1")`.
+
+**The environment card.** The model is told what the image holds before it writes code: the
+sandbox's command tool (`sandbox_exec`, or Deep Agents' `execute` under `ReAct(backend=sandbox())`)
+is described with the image's Python version and installed distributions, and with no network,
+that nothing else can be installed. For example:
+
+```text
+Its environment: Python 3.12.16; installed: et_xmlfile 2.0.0, openpyxl 3.1.5. It has no network: nothing else can be installed.
+```
+
+The card is read once per process, in a sandbox made only for it and deleted at once (about half a
+second on Docker). It names at most 80 distributions and counts the rest. An image without Python
+is said to have none. When the card cannot be read (no daemon), the tool keeps its plain
+description, and a warning is logged. A missing module that a command still imports is
+explained by its hint (see [On failure](#on-failure)).
+
+## Files for the user: `outputs/`
+
+The command tool tells the model that the files it writes in `outputs/` (in the working
+directory) are given to the user. When the run succeeds, each file directly in `outputs/` is kept
+in the file store (`TRELLIS_FILES_URL`, [configuration.md](configuration.md)) before the sandbox
+is deleted. The file is named in the run's journal and announced with the `file` event, and
+`serve_chat` serves it to the run's user ([surfaces.md](surfaces.md)). A file the store cannot
+take is left behind and reported in a warning: a name that is not one safe path part, or a file
+over 50 MiB. A run that fails keeps none.
+
 ## Automatic
 
 **Its life is the run's.**
@@ -196,6 +245,11 @@ ref travel in checkpoints and snapshots).
 
 ## On failure
 
+* A command that fails says, beside its output, what the sandbox knows about why that the output
+  does not (`hint`: a field of `sandbox_exec`'s result, the last line of `execute`'s output):
+  killed (exit 137) or Python's `MemoryError` — the sandbox's memory limit it went past; Python's
+  `ModuleNotFoundError` — whether the module can be installed there (no network: it cannot). Any
+  other failure has no hint: its output says all there is.
 * No Docker daemon reachable (`sandbox()` without a provider): each call is an error the model
   reads, saying so.
 * A spec the provider cannot enforce — a list of hosts for Docker — is refused when the sandbox

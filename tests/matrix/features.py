@@ -317,41 +317,24 @@ async def cancel(w: World) -> None:
     assert finished[-1].outcome is not None and finished[-1].outcome.value == "cancelled"
 
 
-#: The run time limit of ``run_timeout``: it must run out in the tool, after the model asked
-#: for it, not before the first model call. A run reaches its tool in ~10-40 ms here, but a
-#: loaded CI runner (8 shards at once) was measured past 0.4 s before the first model call
-#: (the run then timed out with no model called): 2 s leaves that margin five times over, and
-#: ``hold`` holds far longer, so the limit still ends the run.
-RUN_LIMIT: Final = 2.0
-#: Kimi Code takes ~1.8 s to start here (a Node program, before it answers ``initialize``), once
-#: per attempt, and far longer on a loaded CI runner: the run's limit leaves this much for each
-#: start. ``elsewhere`` starts it twice (it pauses first, then another process resumes it), all
-#: within the run's one limit; ``hold`` holds longer than either limit.
-KIMI_START_SECONDS: Final = 6.0
-#: ``elsewhere`` hands the run to another process, which builds the graph before its first model
-#: call, all within the run's one limit: on a loaded CI runner that has taken past 2 s (Deep
-#: Agents' graph, ReAct's), so the run timed out before its tool started. The hand-off gets its
-#: own margin; ``hold`` holds longer than the limit with it.
-HANDOFF_SECONDS: Final = 6.0
-
-
-def run_limit(w: World) -> float:
-    handoff = w.mode == "elsewhere"
-    if w.adapter != "kimi":
-        return RUN_LIMIT + (HANDOFF_SECONDS if handoff else 0.0)
-    starts = 2 if handoff else 1
-    return RUN_LIMIT + starts * KIMI_START_SECONDS
+#: The run time limit of ``run_timeout``: an hour, which the wall clock never reaches in a cell
+#: (the cell fails first, ``RUN_LIMIT_SECONDS``). It runs out where the cell means it to, in
+#: ``hold`` — which the model asked for — because ``hold`` lets it pass as it starts
+#: (``RunClocks.run_out``): never before, however long a loaded runner takes to reach the tool
+#: (graph builds, Kimi Code starting, the hand-off to another process). A limit of seconds on
+#: the wall clock ran out there first on loaded CI runners, whatever margin it was given.
+RUN_LIMIT: Final = 3600.0
 
 
 async def run_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run_timeout=run_limit(w))
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run_timeout=RUN_LIMIT)
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.error is not None and o.record.error.code == "run_timeout"
-    assert o.record.timeout_seconds == run_limit(w)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
     # the limit ran out where the cell means it to: in the tool, which the model asked for
-    assert d.started.is_set() and d.ran("hold") == []
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 # --------------------------------------------------------------------------- sub-agents
@@ -1694,11 +1677,13 @@ async def hook_runs(w: World) -> None:
 # --------------------------------------------------------------------------- a run's own options
 async def run_options_timeout(w: World) -> None:
     d = Desk()
-    o = await w.go([d.hold()], [("hold", {})], run={"run_timeout": run_limit(w)})
+    o = await w.go([d.hold(w.clocks.run_out)], [("hold", {})], run={"run_timeout": RUN_LIMIT})
     if o.status is not RunStatus.TIMEOUT:
         raise NotTimedOut((o.status, o.record.error))
-    assert o.record.timeout_seconds == run_limit(w)
-    assert d.started.is_set() and d.ran("hold") == []  # it ran out in the tool (``RUN_LIMIT``)
+    assert o.record.error is not None and o.record.error.code == "run_timeout", o.record.error
+    assert o.record.timeout_seconds == RUN_LIMIT, o.record.timeout_seconds
+    # it ran out in the tool (``RUN_LIMIT``)
+    assert d.started.is_set() and d.ran("hold") == [], (d.started.is_set(), d.done)
 
 
 async def run_options_queue(w: World) -> None:
@@ -1728,11 +1713,14 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "middleware": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "Max turns (1) exceeded"),
-    "claude": ({"max_turns": 1}, "Reached maximum number of turns"),
-    # Kimi ends a turn at its step limit with no answer, as a turn it finished (no error)
-    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, None),
+    # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
+    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    # Claude and Kimi answer at their limit too: asked once more, in the same session
+    "claude": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, "the step limit (1) was reached"),
 }
+#: The adapters whose run answers once more at the framework's limit (a ``step_limit`` warning).
+ANSWER_AT_LIMIT: Final = frozenset({"openai_agents", "claude", "kimi"})
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
     "middleware": {"recursion_limit": 50},
@@ -1759,7 +1747,16 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
+    if w.adapter in ANSWER_AT_LIMIT and (w.adapter != "openai_agents" or w.mode != "elsewhere"):
+        # one last answer at the limit, its warning on the stream; elsewhere the resumed turn's
+        # planned last call is a tool, so the SDK's own error stands (test_framework_options)
+        o.succeeded()
+        warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
+        assert any(said in m for m in warned), o.custom(WARNING)
+        return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
+    if w.adapter == "openai_agents":
+        said = "Max turns (1) exceeded"
     assert said in o.record.error.message, o.record.error.message
 
 
