@@ -53,6 +53,7 @@ import dataclasses
 import functools
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from contextlib import aclosing
@@ -130,6 +131,13 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: so they are disallowed (with the tools that list and delete the schedules): offered, Claude
 #: promised a schedule that nothing keeps.
 OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+#: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
+#: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
+#: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
+#: a result the CLI saves to its own session's file is one neither reads, nor the journal holds
+#: for a resume on another worker. A team's own limit (the options' ``env``, the process's) stays.
+MCP_OUTPUT_ENV: Final = "MAX_MCP_OUTPUT_TOKENS"
+MCP_OUTPUT_TOKENS: Final = 60_000
 #: The most MCP tools a Claude agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
 #: The most one message from the CLI may be (the SDK's ``max_buffer_size``: 1 MiB unless the
@@ -617,9 +625,10 @@ def _options(
     changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
-    env = routed_env(options.env, runtime)
-    if env is not None:
-        changes["env"] = env
+    env = dict(routed_env(options.env, runtime) or options.env)
+    if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
+        env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
+    changes["env"] = env
     return dataclasses.replace(options, **changes)
 
 

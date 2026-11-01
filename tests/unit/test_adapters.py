@@ -32,6 +32,8 @@ from trellis.harness.adapters import convert, detect
 from trellis.harness.adapters.base import Invocation, Output, query_of
 from trellis.harness.adapters.claude import (
     CLI_MESSAGE_BYTES,
+    MCP_OUTPUT_ENV,
+    MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
     ClaudeAdapter,
     ClaudeRunError,
@@ -216,11 +218,13 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
     assert sent.disallowed_tools == list(OUTLIVES_THE_QUERY)  # nothing narrowed: only these
+    assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
     unchanged = {
         "hooks": None,
         "max_buffer_size": None,
         "session_store": None,
         "disallowed_tools": [],
+        "env": {},
     }
     assert dataclasses.replace(sent, session_store_flush="batched", **unchanged) == options
 
