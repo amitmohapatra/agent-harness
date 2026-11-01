@@ -24,8 +24,8 @@ from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
 from trellis.harness.agent import TURN_WRITE_SECONDS
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import conversation_key
-from trellis.harness.middleware import ASKED_WITH
 
 pytestmark = pytest.mark.asyncio
 THREAD = "conv-1"

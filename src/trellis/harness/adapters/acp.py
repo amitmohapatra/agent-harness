@@ -94,7 +94,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import ASKED_WITH, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
@@ -783,8 +783,8 @@ class Attempt:
         if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
         blocks = [text_block(native_input.prompt)]
-        if native_input.context:
-            blocks.insert(0, text_block(native_input.context))
+        if native_input.context:  # marked off: the question is the block after it
+            blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:
