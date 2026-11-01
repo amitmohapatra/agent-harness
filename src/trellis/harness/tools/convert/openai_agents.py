@@ -1,6 +1,8 @@
 """Harness tools as OpenAI Agents SDK ``FunctionTool``\\ s. Each is enabled per turn only while
 the run offers it (``Runtime.offers``: the tool hints' candidates, the memory tools, the tools
-already used), so the model sees the tool schemas that fit the task.
+already used), so the model sees the tool schemas that fit the task — and none on the turn
+after a stall (``tools.bridge.stalled``: the same call refused as a loop), so the model's
+reply to ``bridge.STALLED`` is the run's answer, as ``StallGuard``'s last call on LangChain.
 
 The SDK hands a ``FunctionTool`` the model's arguments as the text the model wrote; text that
 is not a JSON object is what the model reads back (:func:`arguments_of`), as the SDK's own
@@ -212,10 +214,12 @@ def _reader(
         params_json_schema=schema,
         on_invoke_tool=invoke,
         strict_json_schema=False,
-        is_enabled=lambda _context, _agent: results.kept(),
+        is_enabled=lambda _context, _agent: results.kept() and _offered(name),
     )
 
 
 def _offered(name: str) -> bool:
+    """Whether the run offers ``name`` this turn: none after a stall (``bridge.stalled``), so
+    the model's next reply answers."""
     runtime = current()
-    return runtime is None or runtime.offers(name)
+    return runtime is None or (runtime.offers(name) and not bridge.stalled(runtime))
