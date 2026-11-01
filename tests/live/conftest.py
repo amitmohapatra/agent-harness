@@ -43,7 +43,7 @@ from trellis.harness import agent as agent_module
 from trellis.harness import evals, telemetry
 from trellis.harness.agent import Agent
 from trellis.harness.evals import Evaluator
-from trellis.harness.sandbox.docker import DOCKER_SOCKET
+from trellis.harness.sandbox.docker import docker_host
 from trellis.memory import MemoryClient
 
 #: How long a memory call may take here (a deployment keeps the SDK's 10 s).
@@ -93,11 +93,24 @@ def _reachable(url: str | None, path: str) -> bool:
         return False
 
 
+#: The Docker daemon the sandbox tests' provider reaches (``DOCKER_HOST``, the docker context,
+#: else the local socket), and the Engine API's root on it.
+DOCKER_HOST: Final = docker_host()
+DOCKER_UDS: Final = (
+    DOCKER_HOST.removeprefix("unix://") if DOCKER_HOST.startswith("unix://") else None
+)
+DOCKER_URL: Final = "http://docker" if DOCKER_UDS else f"http://{DOCKER_HOST.split('://', 1)[-1]}"
+
+
+def docker_transport() -> httpx.HTTPTransport:
+    return httpx.HTTPTransport(uds=DOCKER_UDS)
+
+
 def _docker_up() -> bool:
-    """Whether the Docker daemon answers on its socket (the sandbox tests' provider)."""
+    """Whether the Docker daemon answers (the sandbox tests' provider)."""
     try:
-        with httpx.Client(transport=httpx.HTTPTransport(uds=DOCKER_SOCKET)) as client:
-            return client.get("http://docker/_ping", timeout=3.0).status_code == 200
+        with httpx.Client(transport=docker_transport()) as client:
+            return client.get(f"{DOCKER_URL}/_ping", timeout=3.0).status_code == 200
     except httpx.HTTPError:
         return False
 
@@ -119,9 +132,7 @@ needs_gateway = pytest.mark.skipif(
 )
 needs_memory = pytest.mark.skipif(not MEMORY_UP, reason="needs the memory service (MEMORY_URL)")
 needs_runs = pytest.mark.skipif(not RUNS_UP, reason="needs agent-runs (RUNS_URL)")
-needs_docker = pytest.mark.skipif(
-    not _docker_up(), reason=f"needs a Docker daemon ({DOCKER_SOCKET})"
-)
+needs_docker = pytest.mark.skipif(not _docker_up(), reason=f"needs a Docker daemon ({DOCKER_HOST})")
 
 
 def settings(**changes: object) -> Settings:

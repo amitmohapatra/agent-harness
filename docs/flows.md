@@ -550,9 +550,9 @@ sequenceDiagram
   HT->>SG: tools = the run's offered tools (hints, memory, used), sorted
   SG->>SL: the last steps repeat a call max_repeats times, or 3 failed? → ModelError
   SL->>CE: before the model: call n of max_steps (past it: the run ends with LangChain's message)
-  CE->>SU: over half the window: older tool results cleared (placeholder → read_result)
+  CE->>SU: over half the window: older tool results cleared (placeholder → read_file by the call's id)
   SU->>RT: near the window's end: older turns summarized (one model call), history to a file
-  RT->>MH: read_file / read_result offered only once there is something to read
+  RT->>MH: read_file offered only once there is something to read
   MH->>MH: the pinned prompt, the task kept ahead of a summary
   MH->>M: the request (chat span, call_timeout and the run's time left)
   M-->>MH: AIMessage with tool_calls [lookup, refund]
