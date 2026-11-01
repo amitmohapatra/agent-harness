@@ -30,6 +30,14 @@ reported, at the model's listed price (``benchmark.cost.prices``), reaches it �
 started past it. ``--cases`` runs only the cases named, ``--rerun-failed`` only those whose
 strict score failed or whose turn did not end well.
 
+**Adversarial cases** (``benchmark.cost.adversarial``, categories ``adv_*``, ``--cases
+adversarial``): what tries to break the harness. Besides the answer's check, each turn carries the
+harness's own checks (``row["checks"]``, :func:`checked`): how its run must end (``Turn.ends``) and
+what the model must and must not have been sent (``Turn.sent``, :class:`Probe`) — what a scripted
+model cannot hide. A turn may be another person's (``Turn.user``) or sent while the one before it
+works (``Turn.mode``: queued, interrupting, steering); a ``grounded`` reason may cite only figures
+the model was sent (:func:`ungrounded`).
+
 **History** (``--history``): ``thread`` (default; offline) — ``create_agent`` with the
 harness's middleware and an in-process checkpointer, so the conversation is the framework's
 own thread, memory off; ``memory`` — ``ReAct`` with the memory service of ``MEMORY_URL`` (its
@@ -57,7 +65,7 @@ from langchain_core.messages import convert_to_openai_messages
 from benchmark.cost import prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
-from trellis import Harness, Hooks
+from trellis import Harness, Hooks, current
 from trellis.contracts import ToolCall, ToolOutcome
 
 Call = tuple[str, dict[str, Any]]
@@ -77,10 +85,22 @@ CATEGORIES: Final = (
     "edge",
     "planning",
     "cantdo",
+    # the adversarial cases (``benchmark.cost.adversarial``): ``--cases adversarial``
+    "adv_conversation",
+    "adv_data",
+    "adv_explain",
+    "adv_workflow",
+    "adv_resource",
+    "adv_scenario",
+    "adv_files",
+    "adv_pipeline",
+    "adv_domain",
 )
+ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
 STRICT_KINDS: Final = (
     "number", "record", "set", "abstain", "clarify", "flags", "tools", "steps", "cannot",
+    "grounded",
 )  # fmt: skip
 #: The reorder formula as every reorder question states it.
 FORMULA: Final = (
@@ -113,6 +133,38 @@ class Expect:
 
 
 @dataclass(frozen=True)
+class Probe:
+    """A check of what the harness sent the model during a turn (every request of it, as
+    sent): the context, which a scripted model cannot hide, not the answer. Kinds:
+
+    * ``has`` / ``lacks`` — some request holds ``pattern`` (a regular expression, any case) /
+      none does, in its messages (of ``role`` only, when given: ``user``, ``assistant``,
+      ``tool``, ``system``; an assistant's tool calls count as its text);
+    * ``nonblank`` — every user message of every request has text (a provider refuses an
+      empty or blank one: the thread could never be continued);
+    * ``repeats`` — the turn's last request holds ``pattern`` in at least ``limit`` messages;
+    * ``fits`` — every request holds at most ``limit`` tokens (counted approximately);
+    * ``calls`` — the turn made at most ``limit`` model calls;
+    * ``called`` — at least ``limit`` calls of the tool ``pattern`` ended ``ok``.
+    * ``uncalled`` — no call of the tool ``pattern`` (the wrong source for the question).
+
+    ``when``: the history it holds for (``memory``: what only the memory service can give,
+    such as another chat's turns); unset, every one."""
+
+    kind: str
+    pattern: str = ""
+    why: str = ""
+    role: str | None = None
+    limit: int | None = None
+    when: str | None = None
+
+
+#: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
+#: busy-conversation modes (``trellis.harness.conversation.Mode``).
+BUSY: Final = ("queue", "interrupt", "steer")
+
+
+@dataclass(frozen=True)
 class Turn:
     text: str
     calls: tuple[tuple[Call, ...], ...] = ()  # the gold rounds of tool calls
@@ -120,6 +172,15 @@ class Turn:
     thread: str = "a"
     ticks: int = 0  # the world's clock ticks this many times before the turn
     reply: str = ""  # the scripted model's answer of an unscored turn
+    #: who sends it (default: the benchmark's user, ``run.USER``)
+    user: str | None = None
+    #: what the harness must have sent the model during the turn (:class:`Probe`)
+    sent: tuple[Probe, ...] = ()
+    #: how its run may end (a run's status)
+    ends: tuple[str, ...] = ("SUCCESS",)
+    #: sent while the turn before it works (once that one's first tool call started), with
+    #: this busy-conversation mode (:data:`BUSY`); ``None``: after it ended
+    mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,14 +190,30 @@ class Case:
     tier: int
     turns: tuple[Turn, ...]
     edges: tuple[str, ...] = ()  # the edge cases it covers
+    #: tools offered beside the retailer's (``retail.TOOLS``)
+    tools: tuple[Any, ...] = ()
+    #: the adapters it applies to (empty: every one), and why not the others
+    adapters: tuple[str, ...] = ()
+    only_because: str = ""
+    #: the model's context window for this case (over ``--window``)
+    window: int | None = None
+    #: the scripted model answers each call by the message it answers (``KeyedChatModel``),
+    #: not in call order: for runs that interleave (a steer, an interrupt, helpers)
+    keyed: bool = False
+    #: the scripted rounds of the helpers it starts: each helper's task, as the gold call
+    #: words it, with its rounds (the answer last)
+    helpers: tuple[tuple[str, tuple[Any, ...]], ...] = ()
 
     def script(self) -> list[Any]:
         """What the scripted model answers, call by call: each turn's gold rounds, then its
-        reference answer."""
+        reference answer — none for a turn the next one interrupts or steers (its run is
+        cancelled, or the steered message's answer is its answer)."""
         out: list[Any] = []
-        for t in self.turns:
+        for n, t in enumerate(self.turns):
             out.extend(list(rnd) for rnd in t.calls)
-            out.append((t.expect.reference if t.expect else t.reply) or "Done.")
+            later = self.turns[n + 1] if n + 1 < len(self.turns) else None
+            if later is None or later.mode not in ("interrupt", "steer"):
+                out.append((t.expect.reference if t.expect else t.reply) or "Done.")
         return out
 
 
@@ -174,6 +251,7 @@ def record(fields: dict[str, Any], tol: dict[str, float] | None = None, **kw: An
         k: {"value": v, "tol": tol.get(k, max(0.5, abs(v) * 0.005))} if _num(v) else {"value": v}
         for k, v in fields.items()
     }
+    ref = kw.pop("reference", ref)
     return Expect("record", value, reference=ref, **kw)
 
 
@@ -185,7 +263,8 @@ def idset(
 ) -> Expect:
     names = names or {}
     value = [[i, names[i]] if i in names else [i] for i in ids]
-    return Expect("set", value, forbidden=tuple(forbidden), reference=", ".join(ids), **kw)
+    ref = kw.pop("reference", ", ".join(ids))
+    return Expect("set", value, forbidden=tuple(forbidden), reference=ref, **kw)
 
 
 def abstain(why: str, **kw: Any) -> Expect:
@@ -207,6 +286,14 @@ def cannot(fake: str, offer: str, reference: str, **kw: Any) -> Expect:
     it can do instead (``offer``, a pattern), with no made-up output (``fake``, a pattern, nor
     :data:`_FAKE`)."""
     return Expect("cannot", {"fake": fake, "offer": offer}, reference=reference, **kw)
+
+
+def grounded(says: str, rubric: str, reference: str, cites: int = 2, **kw: Any) -> Expect:
+    """A free-text reason (why, how sure, what would change it, the risks): strict on what can
+    be checked — it says ``says`` (a pattern), cites at least ``cites`` figures, and every
+    figure it gives is one the model was sent (:func:`ungrounded`: none made up) — and the
+    judge rules on the ``rubric``."""
+    return Expect("grounded", cites, truth=says, rubric=rubric, reference=reference, **kw)
 
 
 def judge(rubric: str, reference: str, **kw: Any) -> Expect:
@@ -2484,6 +2571,9 @@ def cases() -> tuple[Case, ...]:
                 ("can't do here", *edges),
             )
         )  # fmt: skip
+    from benchmark.cost import adversarial
+
+    out.extend(adversarial.cases())
     return tuple(out)
 
 
@@ -2552,17 +2642,61 @@ def _forbidden_in(answer: str, item: str) -> bool:
     return any(abs(n - value) < 1e-9 for n in numbers(answer))
 
 
+def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
+    """The figures of an answer that nothing the model was given holds (``context``: every
+    message of the turn's requests): a figure counts as held when it is one of the context's
+    (or the question's) within its rounding — 0.5%, or shown in thousands, millions or as a
+    percentage of a share. Whole numbers up to 100 (counts, percentages the question names,
+    list numbering) are not checked."""
+    # a CSV's commas are separators, not thousands: its figures read both ways
+    held = numbers(context) + numbers(context.replace(",", " ")) + numbers(question)
+
+    def near(n: float) -> bool:
+        return any(
+            abs(n - c) <= max(0.005 * abs(c), 0.006)
+            or abs(n - c / 1e3) <= 0.006
+            or abs(n - c / 1e6) <= 0.006
+            or abs(n - 100 * c) <= 0.06
+            for c in held
+        )
+
+    return [
+        f"{n:g}" for n in numbers(answer) if not (n == int(n) and abs(n) <= 100) and not near(n)
+    ]
+
+
 def score(
-    expect: Expect, answer: str, records: Sequence[dict[str, Any]], question: str = ""
+    expect: Expect,
+    answer: str,
+    records: Sequence[dict[str, Any]],
+    question: str = "",
+    context: str = "",
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
-    for ``tools`` and ``steps``). ``correct`` is ``None`` for a judge-only kind; ``missing``
-    names what the answer lacks; ``made_up`` the figures of an abstain or clarify answer that
-    neither the question nor the truth holds."""
+    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``).
+    ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
+    ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
+    truth holds, or of a ``grounded`` one that the context does not hold."""
     a = answer or ""
     missing: list[str] = []
     made_up: list[str] = []
     k = expect.kind
+    if k == "grounded":
+        cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)]
+        if len(cited) < int(expect.value or 0):
+            missing.append(f"cites at least {expect.value} figures")
+        if not re.search(expect.truth or ".", a, re.IGNORECASE | re.DOTALL):
+            missing.append(f"says {expect.truth}")
+        made_up = ungrounded(a, context, question)
+        hit = [f for f in expect.forbidden if f and _forbidden_in(a, f)]
+        correct = not missing and not made_up and not hit
+        return {
+            "kind": k,
+            "correct": correct,
+            "missing": missing,
+            "made_up": made_up,
+            "forbidden": hit,
+        }
     if k == "number":
         if not _has_number(a, float(expect.value), expect.tol):
             missing.append(f"value {expect.value}")
@@ -2620,6 +2754,102 @@ def score(
             made_up = []  # options may carry ids and prices
     correct = not missing and not hit and not (k in ("abstain", "cannot") and made_up)
     return {"kind": k, "correct": correct, "missing": missing, "made_up": made_up, "forbidden": hit}
+
+
+def _texts(message: dict[str, Any]) -> str:
+    """A request message's text as the model read it: its content (every text part) and, for
+    an assistant's, its tool calls."""
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "\n".join(
+            str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content
+        )
+    text = "" if content is None else str(content)
+    calls = message.get("tool_calls") or []
+    if calls:
+        text += "\n" + json.dumps(calls, default=str, ensure_ascii=False)
+    return text
+
+
+def _role(message: dict[str, Any]) -> str:
+    return str(message.get("role") or "")
+
+
+def checked(
+    turn: Turn,
+    status: str,
+    requests: Sequence[dict[str, Any]],
+    model_calls: int,
+    *,
+    calls: Sequence[dict[str, Any]] = (),
+    history: str = "thread",
+) -> list[dict[str, Any]]:
+    """A turn's harness checks: how its run ended (``Turn.ends``) and each :class:`Probe` on
+    what was sent — each ``{"check", "ok", "why", "found"}``."""
+    out = [
+        {
+            "check": "ends",
+            "ok": status in turn.ends,
+            "why": f"the run ends {' or '.join(turn.ends)}",
+            "found": status,
+        }
+    ]
+    for p in turn.sent:
+        if p.when is not None and p.when != history:
+            continue
+        found: Any = None
+        if p.kind in ("has", "lacks"):
+            pattern = re.compile(p.pattern, re.IGNORECASE)
+            hits = [
+                m.group(0)
+                for q in requests
+                for msg in q.get("messages") or []
+                if p.role is None or _role(msg) == p.role
+                for m in [pattern.search(_texts(msg))]
+                if m
+            ]
+            ok = bool(hits) if p.kind == "has" else not hits
+            found = hits[:3]
+        elif p.kind == "nonblank":
+            blank = [
+                repr(_texts(msg))
+                for q in requests
+                for msg in q.get("messages") or []
+                if _role(msg) == "user" and not _texts(msg).strip()
+            ]
+            ok, found = not blank, blank[:3]
+        elif p.kind == "fits":
+            from langchain_core.messages.utils import count_tokens_approximately
+
+            sizes = [
+                count_tokens_approximately(
+                    [{"role": "user", "content": _texts(m)} for m in q.get("messages") or []]
+                )
+                for q in requests
+            ]
+            ok, found = all(n <= (p.limit or 0) for n in sizes), max(sizes, default=0)
+        elif p.kind == "repeats":
+            pattern = re.compile(p.pattern, re.IGNORECASE)
+            last = requests[-1].get("messages") or [] if requests else []
+            n = sum(
+                bool(pattern.search(_texts(m)))
+                for m in last
+                if p.role is None or _role(m) == p.role
+            )
+            ok, found = n >= (p.limit or 0), n
+        elif p.kind == "calls":
+            ok, found = model_calls <= (p.limit or 0), model_calls
+        elif p.kind == "called":
+            n = sum(c["tool"] == p.pattern and c["status"] == "ok" for c in calls)
+            ok, found = n >= (p.limit or 0), n
+        elif p.kind == "uncalled":
+            n = sum(c["tool"] == p.pattern for c in calls)
+            ok, found = n == 0, n
+        else:
+            raise ValueError(f"no probe kind {p.kind!r}")
+        check = f"{p.kind} {p.pattern or p.limit or ''}".strip()
+        out.append({"check": check, "ok": ok, "why": p.why, "found": found})
+    return out
 
 
 # --------------------------------------------------------------------------- spend
@@ -2681,14 +2911,25 @@ class Captured(runner.Meter):
 
 
 class Trace(Hooks):
-    """Every tool call of the current turn: its name, arguments and status."""
+    """Every tool call of the current turn: its name, arguments, status and run; ``started``
+    is set once a call of the turn starts."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.started = asyncio.Event()
+
+    async def before_tool(self, call: ToolCall) -> None:
+        self.started.set()
 
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        runtime = current()
         self.calls.append(
-            {"tool": call.tool, "args": dict(call.args), "status": outcome.status.value}
+            {
+                "tool": call.tool,
+                "args": dict(call.args),
+                "status": outcome.status.value,
+                "run": runtime.run_id if runtime is not None else None,
+            }
         )
         return outcome
 
@@ -2718,6 +2959,7 @@ def target_of(
     *,
     adapter: str | None = None,
     wire: list[dict[str, Any]] | None = None,
+    tools: Sequence[Any] = r.TOOLS,
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
@@ -2733,7 +2975,7 @@ def target_of(
         from benchmark.cost.variants import VARIANTS, Setup
 
         setup = Setup(
-            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=r.TOOLS
+            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools)
         )
         return VARIANTS["main"].build(setup)
     if kind in ("langgraph", "deepagents"):
@@ -2758,7 +3000,7 @@ def target_of(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=InMemorySaver(), name="complex",
             )  # fmt: skip
-        setattr(graph, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        setattr(graph, TOOLS_ATTRIBUTE, list(tools))
         return graph, {}
     if kind == "openai":
         import httpx
@@ -2785,7 +3027,7 @@ def target_of(
             instructions=r.SYSTEM,
             model=OpenAIChatCompletionsModel(model=str(model), openai_client=client),
         )
-        setattr(agent, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        setattr(agent, TOOLS_ATTRIBUTE, list(tools))
         return agent, {"framework_options": {"max_turns": 2 * max_steps}}
     if kind == "claude":
         from claude_agent_sdk import ClaudeAgentOptions
@@ -2793,7 +3035,7 @@ def target_of(
         options = ClaudeAgentOptions(
             model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps
         )
-        setattr(options, TOOLS_ATTRIBUTE, list(r.TOOLS))
+        setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
 
@@ -2842,10 +3084,33 @@ def _accounting_hook() -> None:
 
 def scripted_model(case: Case) -> Any:
     """The existing scripted chat model (``tests.support.chat_model``), replaying the case's
-    gold calls and reference answers: proves the pipeline, not a model."""
-    from tests.support.chat_model import ScriptedChatModel
+    gold calls and reference answers: proves the pipeline, not a model. A ``keyed`` case's
+    answers each call by the message it answers (``KeyedChatModel``). Each reply reports the
+    request it was sent as its input tokens, counted as the harness counts one, and 50 out."""
+    from tests.support.chat_model import KeyedChatModel, ScriptedChatModel
 
-    return ScriptedChatModel(turns=case.script(), spends=(1000, 50))
+    if case.keyed:
+        script = [
+            (
+                t.text,
+                [
+                    *(list(rnd) for rnd in t.calls),
+                    (t.expect.reference if t.expect else t.reply) or "Done.",
+                ],
+            )
+            for t in case.turns
+        ] + [
+            (
+                task,
+                [
+                    list(x) if isinstance(x, tuple) and x and isinstance(x[0], tuple) else x
+                    for x in rounds
+                ],
+            )
+            for task, rounds in case.helpers
+        ]
+        return KeyedChatModel(turns=[], script=script, spends=(None, 50))
+    return ScriptedChatModel(turns=case.script(), spends=(None, 50))
 
 
 async def run_case(
@@ -2863,13 +3128,33 @@ async def run_case(
     agent_id: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One case's conversation: its row and every request it made (``agent_id``: the wrapped
-    agent's id, one per case unless given — a learning-over-time run gives one for all)."""
+    agent's id, one per case unless given — a learning-over-time run gives one for all). A
+    turn sent while the one before it works (``Turn.mode``) runs beside it: the two share
+    their requests (the model is one), and each keeps its own run's calls."""
     w = r.world()
     w.reset()
+    from benchmark.cost import adversarial
+
+    adversarial.FILES.clear()  # the suite's file store starts empty for each case
     trace = Trace()
     kind = adapter_of(history, adapter)
+    found: dict[str, Any] = {
+        "case": case.id,
+        "category": case.category,
+        "tier": case.tier,
+        "edges": list(case.edges),
+        "history": history,
+        "adapter": kind,
+        "stopped": None,
+        "turns": [],
+    }
+    if case.adapters and kind not in case.adapters:
+        return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
     wire: list[dict[str, Any]] = []
-    target, options = target_of(model, history, window, max_steps, adapter=kind, wire=wire)
+    target, options = target_of(
+        model, history, case.window or window, max_steps, adapter=kind, wire=wire,
+        tools=(*r.TOOLS, *case.tools),
+    )  # fmt: skip
     agent = h.wrap(
         target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
         run_timeout=run_seconds,
@@ -2878,13 +3163,28 @@ async def run_case(
     records: list[dict[str, Any]] = []
     requests: list[dict[str, Any]] = []
     stopped = None
-    for i, t in enumerate(case.turns):
+
+    async def asked(t: Turn) -> Any:
+        return await agent.run(
+            t.text,
+            user=t.user or runner.USER,
+            thread=f"cx-{tag}-{case.id}-{t.thread}",
+            mode=t.mode or "queue",
+        )
+
+    i = 0
+    while i < len(case.turns):
+        t = case.turns[i]
+        beside = case.turns[i + 1] if i + 1 < len(case.turns) else None
+        together = [t] if beside is None or beside.mode is None else [t, beside]
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
+        trace.started.clear()
         wire.clear()
         captured: Any = Captured(spend) if kind in LANGCHAIN_ADAPTERS else Accounted(spend)
         began = time.monotonic()
+        ended: list[tuple[str, str, str | None, str | None]] = []
         try:
             if spend.reached:
                 raise SpendCapReached(f"spend cap ${spend.cap} reached (${spend.usd:.4f})")
@@ -2893,58 +3193,79 @@ async def run_case(
                 _ACCOUNTED.append(captured)
             try:
                 with runner.metered(captured if isinstance(captured, Captured) else None):
-                    result = await agent.run(
-                        t.text, user=runner.USER, thread=f"cx-{tag}-{case.id}-{t.thread}"
-                    )
+                    first = asyncio.create_task(asked(t))
+                    tasks = [first]
+                    if len(together) == 2:
+                        # the second message once the first run works (its first tool call)
+                        waiting = asyncio.create_task(trace.started.wait())
+                        await asyncio.wait({first, waiting}, return_when=asyncio.FIRST_COMPLETED)
+                        waiting.cancel()
+                        tasks.append(asyncio.create_task(asked(together[1])))
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 if isinstance(captured, Accounted):
                     _ACCOUNTED.remove(captured)
                     captured.requests = list(wire)
-            answer = (
-                result.answer
-                if isinstance(result.answer, str)
-                else json.dumps(result.answer, default=str)
-            )
-            status = result.status.value
-            error = result.error.message[:300] if result.error is not None else None
+            for result in results:
+                if isinstance(result, SpendCapReached):
+                    raise result
+                if isinstance(result, BaseException):
+                    ended.append(("", "RAISED", f"{type(result).__name__}: {result}"[:300], None))
+                    continue
+                answer = (
+                    result.answer
+                    if isinstance(result.answer, str)
+                    else json.dumps(result.answer, default=str)
+                )
+                error = result.error.message[:300] if result.error is not None else None
+                ended.append((answer or "", result.status.value, error, result.run_id))
         except SpendCapReached as exc:
-            answer, status, error = "", "STOPPED", str(exc)
-        if spend.reached and (error or "").find("spend cap") >= 0:
-            stopped = error
-        row: dict[str, Any] = {
-            "turn": i,
-            "thread": t.thread,
-            "text": t.text,
-            "ticks": t.ticks,
-            "answer": answer or "",
-            "status": status,
-            "error": error,
-            "calls": list(trace.calls),
-            "input_tokens": captured.input_tokens,
-            "output_tokens": captured.output_tokens,
-            "model_calls": captured.calls,
-            "seconds": round(time.monotonic() - began, 3),
-        }
-        if t.expect is not None:
-            row["expect"] = _expect_row(t.expect)
-            row["score"] = score(t.expect, answer or "", records, t.text)
-        records.append(row)
-        requests += [
-            {"case": case.id, "turn": i, "call": n, **q} for n, q in enumerate(captured.requests)
-        ]
+            ended = [("", "STOPPED", str(exc), None) for _ in together]
+        if spend.reached and any((e[2] or "").find("spend cap") >= 0 for e in ended):
+            stopped = next(e[2] for e in ended if (e[2] or "").find("spend cap") >= 0)
+        seconds = round(time.monotonic() - began, 3)
+        for n, (turn, (answer, status, error, run_id)) in enumerate(
+            zip(together, ended, strict=True)
+        ):
+            calls = [
+                {k: v for k, v in c.items() if k != "run"}
+                for c in trace.calls
+                if len(together) == 1 or c.get("run") == run_id
+            ]
+            row: dict[str, Any] = {
+                "turn": i + n,
+                "thread": turn.thread,
+                "user": turn.user or runner.USER,
+                "mode": turn.mode,
+                "text": turn.text,
+                "ticks": turn.ticks,
+                "answer": answer,
+                "status": status,
+                "error": error,
+                "calls": calls,
+                "input_tokens": captured.input_tokens if n == 0 else 0,
+                "output_tokens": captured.output_tokens if n == 0 else 0,
+                "model_calls": captured.calls if n == 0 else 0,
+                "seconds": seconds,
+                "checks": checked(
+                    turn, status, captured.requests, captured.calls, calls=calls, history=history
+                ),
+            }
+            if turn.expect is not None:
+                row["expect"] = _expect_row(turn.expect)
+                said = "\n".join(
+                    _texts(m) for q in captured.requests for m in q.get("messages") or []
+                )
+                row["score"] = score(turn.expect, answer, records, turn.text, said)
+            records.append(row)
+            requests += [
+                {"case": case.id, "turn": i + n, "call": c, **q}
+                for c, q in enumerate(captured.requests)
+            ]
+        i += len(together)
         if stopped:
             break
-    found = {
-        "case": case.id,
-        "category": case.category,
-        "tier": case.tier,
-        "edges": list(case.edges),
-        "history": history,
-        "adapter": kind,
-        "stopped": stopped,
-        "turns": records,
-    }
-    return found, requests
+    return found | {"stopped": stopped, "turns": records}, requests
 
 
 def _expect_row(e: Expect) -> dict[str, Any]:
@@ -2959,9 +3280,13 @@ def failed(row: dict[str, Any]) -> bool:
     if row.get("stopped"):
         return True
     for t in row["turns"]:
-        if t["status"] != "SUCCESS":
+        if t["status"] != "SUCCESS" and not any(
+            c["check"] == "ends" and c["ok"] for c in t.get("checks", [])
+        ):
             return True
         if t.get("score") and t["score"]["correct"] is False:
+            return True
+        if any(not c["ok"] for c in t.get("checks", [])):
             return True
     return False
 
@@ -2979,6 +3304,12 @@ def summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "strict": stats.interval([float(t["score"]["correct"]) for t in strict]),
             "judge_only": len(scored) - len(strict),
             "not_success": sum(t["status"] != "SUCCESS" for c in sel for t in c["turns"]),
+            # the harness's own checks (how a run ended, what the model was sent)
+            "checks": sum(len(t.get("checks", [])) for c in sel for t in c["turns"]),
+            "checks_failed": sum(
+                not k["ok"] for c in sel for t in c["turns"] for k in t.get("checks", [])
+            ),
+            "not_applicable": sum(bool(c.get("not_applicable")) for c in sel),
         }
 
     every = [t for c in rows for t in c["turns"]]
@@ -3011,8 +3342,8 @@ def markdown(report: dict[str, Any]) -> str:
         + (f" (cap ${report['max_usd']})" if report["max_usd"] else "")
         + (f" — STOPPED: {report['stopped']}" if report.get("stopped") else ""),
         "",
-        "| group | cases | scored turns | strict correct | judge-only | not success |",
-        "|---|---|---|---|---|---|",
+        "| group | cases | scored turns | strict correct | judge-only | not success | harness checks failed |",
+        "|---|---|---|---|---|---|---|",
     ]
     groups = (
         [("all", s["all"])]
@@ -3022,7 +3353,7 @@ def markdown(report: dict[str, Any]) -> str:
     for name, c in groups:
         lines.append(
             f"| {name} | {c['cases']} | {c['scored_turns']} | {stats.shown(c['strict'], 2)} | {c['judge_only']} "
-            f"| {c['not_success']} |"
+            f"| {c['not_success']} | {c.get('checks_failed', 0)} of {c.get('checks', 0)} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -3038,18 +3369,22 @@ def _write(path: Path, rows: Sequence[dict[str, Any]], mode: str = "a") -> None:
         fh.writelines(json.dumps(x, default=str) + "\n" for x in rows)
 
 
+def _names(c: Case) -> set[str]:
+    """What ``--cases`` picks a case by: its id, its category, its tier, and ``adversarial``
+    for every ``adv_*`` category."""
+    return {c.id, c.category, f"tier:{c.tier}"} | (
+        {ADVERSARIAL} if c.category.startswith("adv_") else set()
+    )
+
+
 def picked(names: str, every: Sequence[Case]) -> list[Case]:
-    """``names``: case ids, categories or ``tier:N``, comma-separated (empty: every case)."""
+    """``names``: case ids, categories, ``tier:N`` or ``adversarial``, comma-separated (empty:
+    every case)."""
     wanted = [n.strip() for n in names.split(",") if n.strip()]
     if not wanted:
         return list(every)
-    out = [
-        c for c in every
-        if c.id in wanted or c.category in wanted or f"tier:{c.tier}" in wanted
-    ]  # fmt: skip
-    unknown = [
-        n for n in wanted if not any(n in (c.id, c.category, f"tier:{c.tier}") for c in every)
-    ]
+    out = [c for c in every if _names(c) & set(wanted)]
+    unknown = [n for n in wanted if not any(n in _names(c) for c in every)]
     if unknown:
         raise SystemExit(f"no case, category or tier {unknown}")
     return out

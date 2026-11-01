@@ -47,7 +47,8 @@ class PlannedChatModel(ScriptedChatModel):
 
     def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
         results = [_text(m.content) for m in messages if isinstance(m, ToolMessage)]
-        self.turns = [planned(self.plan, results, self.final)]
+        offered = kwargs.get("tool_choice") != "none"
+        self.turns = [planned(self.plan, results, self.final, tools=offered)]
         return super()._generate(messages, *args, **kwargs)
 
     def said(self) -> str:
@@ -65,7 +66,7 @@ class _Planned(Script):
         if messages and SUMMARIZE in str(messages[-1].get("content")):
             return "Summary: the work so far."  # a summarization middleware's own request
         results = [_text(m.get("content")) for m in messages if m.get("role") == "tool"]
-        return planned(self.plan, results, self.final)
+        return planned(self.plan, results, self.final, tools=body.get("tool_choice") != "none")
 
 
 class PlannedChat(ScriptedChat):

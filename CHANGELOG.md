@@ -56,6 +56,9 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
+  with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
+  with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
 - A Kimi run looping on one call ends with one answer (ADV-9): Kimi's own repeat breaker
   (`KIMI_CODE_REPEAT_BREAKER`: the same call 12 times in a row) ended the turn with no answer,
   the reason only in its log (`stopReason` `repeat_breaker`). When a turn ends with no answer
