@@ -100,9 +100,13 @@ class RunExecutor(AgentExecutor):
         await self.tasks.opened(task_id)
         payload = _payload(context.message)
         agent = self.agent
-        record = await agent._opened(
-            payload, user=user, thread=context_id, tenant=tenant, run_id=task_id
-        )
+        try:
+            record = await agent._opened(
+                payload, user=user, thread=context_id, tenant=tenant, run_id=task_id
+            )
+        except ConfigurationError as exc:  # a blank message: no run, the task rejected
+            await self._rejected(event_queue, task_id, context_id, str(exc))
+            return
         await self._stream(
             event_queue,
             task_id,
@@ -232,6 +236,15 @@ class RunExecutor(AgentExecutor):
                 TaskState.TASK_STATE_CANCELED,
                 message=updater.new_agent_message([new_text_part("the run was cancelled")]),
             )
+
+    async def _rejected(
+        self, event_queue: EventQueue, task_id: str, context_id: str, why: str
+    ) -> None:
+        """The task declined before a run opened (a blank message): A2A's own ``rejected``."""
+        if self._settle(task_id):
+            updater = TaskUpdater(event_queue, task_id, context_id)
+            message = updater.new_agent_message([new_text_part(why)])
+            await updater.update_status(TaskState.TASK_STATE_REJECTED, message=message)
 
     def _settle(self, task_id: str) -> bool:
         """Claim the right to send this task's terminal state; no ``await`` in between."""

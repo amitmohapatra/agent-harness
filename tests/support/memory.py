@@ -166,6 +166,9 @@ class FakeMemoryService:
     memories: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: each thread's messages, in order, as the service lists them
     threads: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: how an agent's ``memory_forget`` is refused whatever it names (a 403 whose ``reason`` is
+    #: this; ``plain``: one with no details); ``None``: as the service decides
+    forget_refusal: str | None = None
 
     def __post_init__(self) -> None:
         MADE.append(self)
@@ -318,13 +321,33 @@ class FakeMemoryService:
             out.append(message)
         return out
 
+    def _forget_refused(self, call: Call, args: dict[str, Any]) -> httpx.Response | None:
+        """An agent's ``memory_forget`` of what the user said, refused as the service refuses
+        it (``users_own_statement``, naming the memory), or as a test said."""
+        path = "/v1/agent-tools/memory_forget"
+        if self.forget_refusal is not None:
+            reason = self.forget_refusal
+            return problem(403, path, details=None if reason == "plain" else {"reason": reason})
+        kept = self.memories.get(str(args.get("id")))
+        if (
+            kept is None
+            or not call.scope.get("agent_id")
+            or kept["user"] != call.scope.get("user_id")
+        ):
+            return None
+        details = {"reason": "users_own_statement", "memory_id": args["id"]}
+        detail = f"memory {args['id']} is the user's own statement: an agent cannot forget it"
+        return problem(403, path, detail=detail, details=details)
+
     def _agent_tools(self, call: Call) -> dict[str, Any]:
         return {"tools": self.agent_tools}
 
-    def _call_agent_tool(self, call: Call) -> dict[str, Any]:
+    def _call_agent_tool(self, call: Call) -> dict[str, Any] | httpx.Response:
         """What each tool returns (the service's ``AgentTools`` handlers): search items with
         ids, a write's id, a profile block, ``tool_search``'s hints."""
         name, args = call.path["name"], call.body.get("args") or {}
+        if name == "memory_forget" and (refused := self._forget_refused(call, args)) is not None:
+            return refused
         results: dict[str, Any] = {
             "memory_search": [
                 {
@@ -644,6 +667,8 @@ class FakeMemoryService:
 
     def _forget(self, call: Call) -> None:
         kept = self.memories.get(call.path["memory_id"])
+        if kept is not None and kept["user"] != call.scope.get("user_id"):
+            return problem(403, call.path["memory_id"])  # type: ignore[return-value]
         if kept is not None:
             kept["current"] = False
 
@@ -788,7 +813,12 @@ PROBLEMS: Final[dict[int, tuple[str, bool]]] = {
 
 
 def problem(
-    status: int, instance: str, *, detail: str | None = None, retry_after: str = "0"
+    status: int,
+    instance: str,
+    *,
+    detail: str | None = None,
+    retry_after: str = "0",
+    details: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """An RFC 9457 problem document as the memory service writes it."""
     code, retryable = PROBLEMS.get(status, ("INTERNAL", False))
@@ -804,6 +834,8 @@ def problem(
     }
     if status == 422:
         body["details"] = {"errors": [{"loc": ["body"], "msg": "invalid"}]}
+    if details is not None:
+        body["details"] = details
     headers = {"content-type": "application/problem+json"}
     if retryable and status in (429, 503):
         headers["retry-after"] = retry_after

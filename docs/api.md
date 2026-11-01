@@ -188,6 +188,11 @@ approver is not past a `run_timeout` of an hour, and is past a `deadline` an hou
 `RUN_FINISHED`; closing it early cancels the run. `start` queues the run for a worker and
 returns a [RunHandle](#runhandle).
 
+A blank message — an empty input, or whitespace only — opens no run: `run`, `stream` and
+`start` raise `ConfigurationError` before anything is recorded or sent to a model (a provider
+refuses a blank user message, and kept in the thread it would fail every later turn). The AG-UI
+surface answers it `422`; over A2A the task ends `rejected`.
+
 ### agent.resume
 
 ```text

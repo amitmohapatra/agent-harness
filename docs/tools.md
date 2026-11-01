@@ -11,7 +11,7 @@ catalog.
 | Where from | Tools | Side effects |
 |---|---|---|
 | **MCP** — automatic, with a gateway | every tool the agent's Bifrost virtual key allows (the gateway's own MCP listing, asked with the key), named `<server>-<tool>`, executed through the gateway, each request waiting what is left of the run's time and saying who the run is for; a tool the gateway would run itself (`tools_to_auto_execute`) is left out ([gateway.md](gateway.md)); `without={"mcp"}` is no MCP tool at all | the server's annotations: `readOnlyHint` → read, `destructiveHint` → irreversible, anything else → write; `idempotentHint` makes it idempotent (retried like a read) |
-| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. Code Mode is for the gateway's servers | the server's annotations, as above |
+| `mcp(target, *, name=None, call_timeout=120, headers=None)` | an MCP server's tools, named `<server>-<tool>` (`name=`, else the name the server gives itself): `mcp("https://host/mcp")` a server over HTTP (`headers=` for its auth), `mcp(stdio("npx", "@mcp/files"))` a local server the harness starts (`stdio(command, *args, env=None, cwd=None)`). A server of your own is reached with the official MCP SDK (the `mcp` extra): one connection per server, kept, opened again after it breaks; a server reached both directly and through the gateway is an error (one path per server). Every call goes through the bridge like any other tool: governance, the journal, retries of reads, paging, the run's records. A server that asks the person in the middle of a call ([MCP elicitation](#a-server-that-asks-mcp-elicitation)) pauses the run as `ask` does. Code Mode is for the gateway's servers | the server's annotations, as above |
 | `tool(fn)`, `@tool(...)`, or a bare function in `tools=[...]` | one; schema from the signature (pydantic validates the model's arguments), each parameter described by the docstring's `Args:` (or `:param x:`) unless `Annotated[..., Field(description=...)]` says; description from the docstring without its sections (`Args:`, `Returns:`, `Raises:`...), every other paragraph kept — a "use it when / not when" paragraph reaches the model; `call_timeout=` seconds per call (none by default; a sync function runs in a worker thread); `idempotent=True` when a call repeated with its idempotency key has its effect once (retried like a read, run again after a crash); a result that comes from outside the run is an `ask` in the function ([interrupts.md](interrupts.md#results-from-outside-ask-in-the-tool)) | `side_effects=` (`"write"` by default) |
 | `a2a(url, *, name=None, call_timeout=120)` | one: the remote agent, `{"message": string}` in, its answer out; at most `call_timeout` seconds per exchange | `"write"` |
 | a wrapped agent, in a `ReAct`'s `subagents=[...]` | one, named after the agent's id: `{"message": string}` in, its answer out — each call a child run of it ([subagents.md](subagents.md)) | `"read"` when every tool it declares only reads (and none escapes the harness), else `"write"` |
@@ -33,6 +33,27 @@ servers') with their annotations, local, OpenAPI and A2A tools with their declar
 effects. An administrator sets `approve_when` on
 them there ([governance.md](governance.md)). Concurrent runs that find the toolbox stale share
 one listing.
+
+### A server that asks: MCP elicitation
+
+An `mcp(...)` server may ask the person in the middle of a call (MCP elicitation): the harness
+tells the server it can be asked (the SDK's client capability, so a server asks only then), and
+a question pauses the run as `trellis.current().ask` does ([interrupts.md](interrupts.md)):
+the run's user's to answer, in their inbox, on AG-UI's interrupt, over A2A. What they are shown
+follows from the server's form (`tools/elicit.py`):
+
+| The server asks | The person is shown | The server gets |
+|---|---|---|
+| one field that picks from values (`enum`, or `oneOf` of `const` with a `title`; an `array` of them picks several) | a choice (`options`, `multiple`): a dropdown | `{field: value}` |
+| any other form (strings, numbers, booleans, a `format: date` field) | a form with the server's schema as `expects` (a date picker where the surface renders JSON Schema) | the form's content |
+| a link to open (`mode: url`) | a choice: opened it, or declined | `accept` or `decline` |
+
+A rejection is the server's `decline`; a cancel ends the run (the server is told). The answer
+is journaled as any `ask`'s: the call is made again when the run resumes (on any worker), and
+the server is answered at once. On the MCP protocol of 2026-07-28 the question comes back in
+the call's result and the call is made again with the answer; before it, the server's question
+is a request of its own that names no call, so a question that comes while several calls to
+the same server are under way is refused, the server told why.
 
 ## Tool choice: what helps the model pick the right tool
 
@@ -148,21 +169,25 @@ has to. In order of preference:
    parameter with no description);
 2. **`query_result`**: offered with `read_file` whenever a result is kept, on every adapter
    (ReAct with or without a backend, `middleware()`, Deep Agents, OpenAI Agents, Claude, Kimi):
-   a read-only SQL `SELECT` over every row, in process (`tools/query.py`: Python's own SQLite,
-   no dependency, no sandbox). Every result the run saved is a table named by the tool that
-   returned it (`result` is the file asked about), so one query joins results of several tools;
-   a JSON array of objects (or the first one a JSON object holds), CSV with a header
-   (`,` tab `;` `|`), else one row per line, with whole-number, number and text columns. Besides
-   SQLite's arithmetic, `CASE`, math, date and window functions (a moving average, `lag` for
-   growth), it has `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `corr`,
-   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` (named as PostgreSQL and DuckDB
-   name them). Only reading runs (an authorizer: `SELECT` and functions; never a write,
-   `ATTACH`, a `PRAGMA` or an extension), on a database made for the query and closed after it
-   whatever happens, in a worker thread (4 at once in a process): a query runs at most 5 s
-   (a cancelled run interrupts it), loads at most 64 MB of its own run's results (never
-   another run's), holds at most 8 MB of sort memory (more spills to SQLite's temporary
-   files), and answers at most 200 rows and 20,000 characters — the model reads the small
-   answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
+   a read-only SQL `SELECT` over every row, in process, no sandbox (`tools/query.py`). It runs
+   on DuckDB when the `query` extra is installed, else on Python's own SQLite (no dependency):
+   chosen by what is installed, never by a setting
+   ([ADR 0007](adr/0007-query-engine.md)); the description names the engine, so the model
+   writes its SQL. Every result the run saved is a table named by the tool that returned it
+   (`result` is the file asked about), so one query joins results of several tools; a JSON
+   array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
+   `|`), else one row per line, with whole-number, number and text columns typed alike on
+   both engines (a code such as `007`, or an id past 64 bits, stays text). Besides arithmetic,
+   `CASE`, math, date and window functions (a moving average, `lag` for growth), it has
+   `stddev`, `variance`, `median`, `percentile_cont(x, p)`, `julianday(d)`, `corr`,
+   `covar_samp`, `regr_slope`, `regr_intercept`, `regr_r2` on both. Only reading runs (one
+   `SELECT`; never a write, another file, the network, an extension or a setting: SQLite's
+   authorizer, DuckDB locked after loading), on a database made for the query and closed
+   after it whatever happens, in a worker thread (4 at once in a process): a query runs at
+   most 5 s (a cancelled run interrupts it), loads at most 64 MB of its own run's results
+   (never another run's), holds at most 512 MB (DuckDB's `memory_limit`; SQLite's pages, and
+   8 MB of sort memory, more spilling to its temporary files), and answers at most 200 rows
+   and 20,000 characters — the model reads the small answer, never the rows. A tool declared `paged=True` (a cursor argument; `next_cursor` in
    its result) is fetched to its last page in one call (`tools/pages.py`, at most 200 pages),
    so its rows are queried whole too;
 3. **code, when configured** — `ReAct(..., backend=sandbox())` (Deep Agents saves the large
