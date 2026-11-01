@@ -176,6 +176,10 @@ class Runtime:
     #: the run's budget is spent (``budget.reached``: which limit): no new tool call starts,
     #: and the run ends ``PARTIAL``
     budget_spent: str | None = None
+    #: the latest harness tool call (its key) and how many times in a row it was made
+    #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
+    #: not run again)
+    repeating: tuple[str, int] = ("", 0)
     #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
     #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)

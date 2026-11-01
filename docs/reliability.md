@@ -339,6 +339,12 @@ one step: the reads at once, the writes one at a time in the model's order —
   Claude and Kimi run a step's calls themselves and call the harness's tools over MCP, whose
   calls carry no call id: a repeat there runs as any call does. The same call in the next
   step runs again (a stall is [`max_repeats`](frameworks/react.md)'s to stop).
+* A model looping on one call is stopped on every adapter: the same call (the same tool, the
+  same arguments) made a third time in a row is not run, and the model reads `<tool> was not
+  run: you called it with the same arguments 3 times in a row and it did not give you what you
+  need. Do not call it again: answer now with what you have, and say what went wrong.` (a
+  `stalled` warning on the run's stream, once). `ReAct` and a graph with `middleware()` stop
+  the loop a step earlier, in `StallGuard`.
 * Identical calls made at once that are not one step's repeats (a function's
   `asyncio.gather`, a framework's step the harness does not read) take their turn: one
   runs, then the next, in the order they were made, so each has its own occurrence in the
