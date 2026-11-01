@@ -148,6 +148,9 @@ class Journal(BaseModel):
     #: the large tool results the model read a preview of, whole, by the path it reads them at
     #: (``tools.results``: OpenAI Agents and Claude, which have no cut of their own)
     results: dict[str, str] = Field(default_factory=dict)
+    #: the files the run kept for its user (``Runtime.save_file``): name, size, media type and
+    #: what made each — their bytes are in the file store
+    files: list[dict[str, Any]] = Field(default_factory=list)
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

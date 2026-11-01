@@ -73,7 +73,9 @@ def triage(state: Ticket) -> dict[str, str]:
   `without={"tool_search"}` keeps the learned skills and offers every tool.
 
 A failed context call is a `warning` event (`memory_unavailable`); the run continues without
-it. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
+it. Where memory replays the conversation (its window), the conversation's earlier turns then
+come from the run store, each one's question and answer, as with memory off: an outage mid-chat
+does not lose the chat. A `CONTEXT_LOADED` event reports its size; the call is a `retrieve memory` span.
 
 ## Pull
 
