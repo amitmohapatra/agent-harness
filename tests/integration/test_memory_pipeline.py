@@ -35,6 +35,7 @@ from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.identity import Identity, conversation_key
+from trellis.harness.middleware import ASKED_WITH
 from trellis.memory.models import ToolHints
 
 
@@ -128,7 +129,7 @@ async def test_push_sends_the_context_with_the_question(
     assert question == {
         "role": "user",
         "content": [
-            {"type": "text", "text": memory_service.context_text},
+            {"type": "text", "text": ASKED_WITH.format(context=memory_service.context_text)},
             {"type": "text", "text": "how many a?"},
         ],
     }
@@ -967,7 +968,7 @@ async def test_the_model_is_told_when_memory_has_nothing_to_go_on(
     agent = memory_harness.wrap(ReAct(system_prompt="You help.", model=model), id="s")
     events = [e async for e in agent.stream("What is my sister's name?", user="u1")]
     system = pushed(model.requests[0])
-    assert system.startswith(memory_service.context_text)
+    assert system.startswith(ASKED_WITH.split("{context}")[0] + memory_service.context_text)
     if note is None:
         assert "## Memory" not in system
     else:
