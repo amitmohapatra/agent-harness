@@ -43,6 +43,12 @@ class Kept(FakeSandboxes):
         await super().delete(ref)
 
 
+def run_boxes(provider: Kept) -> list[Any]:
+    """The run's sandboxes, not the one the environment card's probe made
+    (``SandboxProvider.card``)."""
+    return [b for ref, b in provider.gone.items() if not ref.startswith("trellis-probe-")]
+
+
 @pytest.fixture
 def kept_by_harness(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """The results the harness keeps in the run's journal (``tools.results.keep``)."""
@@ -75,7 +81,7 @@ async def test_a_sandbox_backend_offers_each_tool_once_and_stores_a_large_result
         # the evicted file is the sandbox's: code reads it there, no SQL tool beside execute
         assert "query_result" not in names
     # Deep Agents evicted the result to the sandbox: there once, by its call's id ...
-    [box] = provider.gone.values()
+    [box] = run_boxes(provider)
     saved = [p for p in box.files if p.startswith(results.PREFIX)]
     assert len(saved) == 1, saved
     told = [m for m in model.seen[1] if getattr(m, "type", "") == "tool"][-1].text
@@ -127,7 +133,7 @@ async def test_a_result_over_the_window_is_offloaded_once_where_code_reads_it(
     result = await agent.run("how many units?", user="u")
     assert result.answer == "2", result.error
     assert kept_by_harness == []  # no harness copy
-    [box] = provider.gone.values()
+    [box] = run_boxes(provider)
     saved = {p: v for p, v in box.files.items() if p.startswith(results.PREFIX)}
     assert list(saved) == [f"{results.PREFIX}/call_1_0"]  # once, by its call's id
     assert saved[f"{results.PREFIX}/call_1_0"].decode() == rows  # whole
