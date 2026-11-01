@@ -384,11 +384,13 @@ async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error
         """Fails."""
         raise ValueError("down")
 
-    model = ScriptedChat([[("broken", {"n": n}), ("broken", {"n": n})] for n in range(3)])
+    turns: list[Any] = [[("broken", {"n": n}), ("broken", {"n": n})] for n in range(3)]
+    model = ScriptedChat([*turns, "the tool is down"])
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="broken"), [broken])
     result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message == "stopped: every tool call failed in 3 consecutive steps"
+    # three failing steps: the model is told so and answers with no tool (StallGuard)
+    assert result.status is RunStatus.SUCCESS and result.answer == "the tool is down"
+    assert model.requests[-1]["tool_choice"] == "none"
 
 
 async def test_different_failures_in_a_row_are_a_model_correcting_itself_not_a_stall(
@@ -438,7 +440,9 @@ async def test_at_the_step_limit_the_run_ends_with_langchains_message(harness: H
     assert len(model.requests) == 2
 
 
-async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -> None:
+async def test_steps_in_which_every_call_failed_and_no_answer_stop_the_run(
+    harness: Harness,
+) -> None:
     @tool(side_effects="read")
     def flaky(n: int) -> str:
         """Fails for odd numbers."""
@@ -453,6 +457,7 @@ async def test_steps_in_which_every_call_failed_stop_the_run(harness: Harness) -
             [("flaky", {"n": 3}), ("nope", {})],
             ("flaky", {"n": 5}),
             ("flaky", {"x": "bad"}),
+            ("flaky", {"n": 7}),  # told every call failed, it calls again: no answer
         ]
     )
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="flaky"), [flaky])

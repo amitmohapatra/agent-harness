@@ -36,10 +36,10 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   journal and the next attempt resumes it, told to call the tool again, which the journal
   answers. The agent keeps its sessions on its machine (Kimi: ``KIMI_CODE_HOME``): a resume
   elsewhere says so and runs the prompt again in a new session, against the journal;
-* spending: ACP's own ``usage`` on the prompt's answer when the agent gives it; Kimi gives none,
-  and its own usage log (``usage.record``, every model request of every agent, sub-agents
-  included) is read as the turn runs — tokens only (dollars need the gateway's log: not yet);
-  past the budget the turn is cancelled;
+* spending: ACP's own ``usage`` on the prompt's answer when the agent gives it and the harness
+  keeps no usage log of it; Kimi gives none, and its own usage log (``usage.record``, every
+  model request of every agent, sub-agents included) is read as the turn runs — tokens only
+  (dollars need the gateway's log: not yet); past the budget the turn is cancelled;
 * models: with a route that attributes calls (``Capability.ATTRIBUTION``: Bifrost) serving the
   harness and a ``model`` named, Kimi's model calls go through
   Bifrost's OpenAI route with the virtual key, carrying the deny-all MCP scope, the run's
@@ -108,6 +108,8 @@ SERVER: Final = "trellis"
 HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 #: The key a turn's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "acp"
+#: The model name an ACP agent's own usage is counted under when the target names none.
+ACP_MODEL: Final = "acp"
 #: How often the agent's usage log is read while a turn runs (and the budget checked).
 USAGE_SECONDS: Final = 0.5
 #: How long, after a turn, the agent's usage log is read until it stops growing (at most), and
@@ -818,6 +820,7 @@ class Attempt:
                     await self._settled()
                     if item.error is not None:
                         raise await self._failed(item.error)
+                    self._answered_usage(item.answer)
                     yield item.answer
                     return
                 if await self._seen(item):
@@ -880,6 +883,21 @@ class Attempt:
         if spent is not None and runtime.budget_spent is None:
             budget.stopped(runtime, spent)
             await self.cancel()
+
+    def _answered_usage(self, answer: Any) -> None:
+        """ACP's own usage on the prompt's answer, on the run's budget — for an agent the
+        harness keeps no usage log of (its profile's ``usage``: Kimi's log counts every request,
+        and is its count)."""
+        usage = getattr(answer, "usage", None)
+        if usage is None or self.usage is not None:
+            return
+        budget.account(
+            self.runtime,
+            model=self.target.model or ACP_MODEL,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cached=usage.cached_read_tokens or 0,
+        )
 
     def _accounted(self) -> int:
         """The usage records the agent logged since the last read, on the run's budget: how

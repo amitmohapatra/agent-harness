@@ -41,9 +41,18 @@ own model work follows the harness's configuration.
   still says which tools fit. Narrowing a set of 20 hid a tool the question needed (a name
   looked up before its id) in 22-26% of turns. Those turns were wrong 2-3 times as often, on
   every adapter.
+- A stall no longer ends the run with no answer. A stall is the same call with the same
+  arguments in `max_repeats` steps, or every call failing in 3 steps in a row. The model is
+  now told so and called once more with no tool, as `StepLimit`'s last step is. The user
+  gets an answer that says what went wrong, for example that the tool timed out. The run
+  still stops (`ModelError`) when that call gives no answer.
 
 ### Fixed
 
+- An ACP agent's own usage counts toward the run's budget. The adapter said it read ACP's
+  `usage` on a prompt's answer, and its test asserted nothing: it was never read, so an ACP
+  agent other than Kimi (whose usage log is read as the turn runs) spent with no count and no
+  cap. It is counted now when the harness keeps no usage log of the agent.
 - An ACP agent (Kimi Code) gets the memory context marked off from the question, as `ReAct`'s
   is (`history.ASKED_WITH`, moved there from `middleware` so an adapter without LangChain uses
   it). ACP's prompt has no other place for it: the context went as a bare first block, and Kimi
