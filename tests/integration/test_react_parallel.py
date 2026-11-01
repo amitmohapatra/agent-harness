@@ -393,6 +393,35 @@ async def test_a_failing_call_repeated_in_one_step_still_counts_toward_the_error
     assert model.requests[-1]["tool_choice"] == "none"
 
 
+async def test_different_failures_in_a_row_are_a_model_correcting_itself_not_a_stall(
+    harness: Harness,
+) -> None:
+    """A wrong type, then a missing argument, then a made-up tool, then the right call: three
+    failing steps, but no failure repeated — the model reads each error and corrects itself,
+    so the run goes on to its answer (ADV-5; the step limit still bounds it)."""
+    asked: list[str] = []
+
+    @tool(side_effects="read")
+    def stock(sku: str) -> int:
+        """Units of a SKU on hand."""
+        asked.append(sku)
+        return 7
+
+    model = ScriptedChat(
+        [
+            ("stock", {"sku": 42}),
+            ("stock", {"region": "north"}),
+            ("stock_levels", {"sku": "NV-1"}),
+            ("stock", {"sku": "NV-1"}),
+            "7 on hand",
+        ]
+    )
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="fixing"), [stock])
+    result = await agent.run("how many NV-1?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "7 on hand" and asked == ["NV-1"]
+
+
 # --------------------------------------------------------------------------- stopping
 async def test_at_the_step_limit_the_run_ends_with_langchains_message(harness: Harness) -> None:
     @tool(side_effects="read")
