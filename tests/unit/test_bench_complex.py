@@ -669,7 +669,14 @@ def test_a_store_named_as_above_the_line_is_not_listed_under_it() -> None:
 def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead() -> None:
     """bfh-mixed-02 (ReAct and create_agent, main): "I have no tool that produces image or file
     exports. Here is the August 2026 data so you can chart it yourself" was scored as offering
-    nothing instead. A refusal that offers nothing still fails."""
+    nothing instead; bf1-mixed-05 the same ("Here is the data for a chart"). A refusal that
+    offers nothing still fails."""
+    weekly = next(c for c in breakfix.cases() if c.id == "bf1-mixed-05").turns[2]
+    said = (
+        "I can't produce an image file. I have no charting tool, so I can't give you a picture "
+        "to paste. Here is the data for a chart you can build in your slide software."
+    )
+    assert cx.score(weekly.expect, said, [], weekly.text)["correct"]
     turn = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02").turns[-1]
     gave = (
         "I can't create a downloadable chart. I have no tool that produces image or file "

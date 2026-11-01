@@ -364,7 +364,7 @@ def cases() -> list[Any]:
                  expect=cx.record(nq3, tol={"units": 0})),
             Turn("Plot its weekly units as a chart image I can paste into a slide.",
                  expect=cx.cannot(FAKE_CHART,
-                                  r"table|weekly|figures|numbers|instead|list",
+                                  r"table|weekly|figures|numbers|instead|list|here(?: is|'s) the",
                                   "I can't make an image here: there is no code execution, files or images in this setup. "
                                   "I can give the weekly figures as a table instead.")),
             Turn("Fine — then its best month of Q3 by units, and that month's units.",
