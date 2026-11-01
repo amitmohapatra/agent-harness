@@ -87,6 +87,7 @@ from trellis.harness.adapters.base import (
     Narrowing,
     Output,
     ToolFormat,
+    builtin,
     helper,
     unique,
 )
@@ -673,12 +674,13 @@ async def _harness_server(server: Any) -> AsyncIterator[Any]:
 
 def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     """A tool the agent runs itself, as the harness records and publishes it: a built-in by its
-    risk (its profile's), an MCP server's tool (``mcp__<server>__<tool>``) by its server."""
+    risk (its profile's) and tagged ``BUILTIN``, an MCP server's tool (``mcp__<server>__<tool>``)
+    by its server."""
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
     builtins = profile.builtins if profile is not None else {}
-    spec = ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS))
+    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 
