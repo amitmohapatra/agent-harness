@@ -36,6 +36,7 @@ from trellis.harness.middleware import (
 )
 from trellis.harness.prompts import ResolvedPrompt, stored
 from trellis.harness.tools.bridge import STALLED
+from trellis.harness.tools.query import GONE
 from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 
@@ -598,7 +599,7 @@ async def test_read_file_pages_a_result_of_the_conversation_by_its_calls_id(
         "offset=13)]"
     )
     assert tool_messages(model, 3)[-1][1] == " 99  row 98\n100  row 99"  # what is left
-    assert tool_messages(model, 4)[-1][1] == f"Error: File '{READ_PREFIX}/nope' not found"
+    assert tool_messages(model, 4)[-1][1] == GONE.format(path=f"{READ_PREFIX}/nope")
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
