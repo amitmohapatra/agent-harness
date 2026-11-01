@@ -192,6 +192,10 @@ own model work follows the harness's configuration.
 
 ### Added
 
+- `query_result(save_as="csv" | "xlsx", file_name=)`: a query's every row kept as a file for the
+  user (`Runtime.save_file`), in a run with no tool that runs code (`tools.export.runs_code`);
+  each adapter offers the run's own variant (about 50 tokens more, and none where
+  `query_result` is not offered). Excel needs the new `xlsx` extra (openpyxl).
 - A failed sandbox command says why when the sandbox knows (`sandbox.base.hint`): a command
   killed (exit 137) or out of memory names the memory limit it went past; a missing Python module
   says whether the sandbox can install it (no network: use the standard library). In

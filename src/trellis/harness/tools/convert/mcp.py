@@ -67,18 +67,19 @@ class Tools(Server[Any]):
 def convert(tools: Sequence[Tool]) -> Tools:
     by_name = {t.name: t for t in tools}
     calls: set[asyncio.Task[Any]] = set()
+    readers = results.readers()  # the run's: converted in it
 
     async def list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
         listed = [_listed(t) for t in tools]
         listed.extend(
             types.Tool(name=name, description=description, input_schema=schema)
-            for name, description, schema, _ in results.READERS
+            for name, description, schema, _ in readers
         )
         return types.ListToolsResult(tools=listed)
 
     async def call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         args = dict(params.arguments or {})
-        reader = next((r for r in results.READERS if r[0] == params.name), None)
+        reader = next((r for r in readers if r[0] == params.name), None)
         if reader is not None:
             return _result(await reader[3](args), error=False)
         tool = by_name.get(params.name)
