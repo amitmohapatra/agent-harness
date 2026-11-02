@@ -211,6 +211,8 @@ asked when governance asks, journaled (a resume does not run it again), timed an
 graph's state tools (`write_todos`, Deep Agents' file tools on its default
 `StateBackend`) are let through: they change only the run's own state. Deep Agents' file tools
 on a backend that writes to a real disk are not seen: give the graph governed tools instead.
-Claude Code's built-ins go through the CLI's permission callback, where the harness decides them
-by risk (`Bash` asks, `Write` is announced, `Read` runs)
+Claude Code's built-ins go through the CLI's `PreToolUse` hook, where the harness decides them
+by risk (`Read` runs; `Write` and `Bash` are announced), then Claude Code's own permission check;
+what it would ask its user, a person is asked, unless the call only reads (a `Bash` command the
+harness reads as read-only runs)
 ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md#claude-codes-built-in-tools)).

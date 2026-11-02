@@ -39,7 +39,7 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 | Code the model writes and runs, away from the host | a `ReAct`'s `backend=sandbox()` (Deep Agents' `execute` and file tools; your own Deep Agent's `**sandbox().deep_agent()`); a function's `agent.tools.use(sandbox().tools())` (`sandbox_exec`, `sandbox_read`, `sandbox_write`); Docker by default ([sandbox.md](sandbox.md)) | `execute`, `sandbox_exec` and the writes write, the reads read; and the catalog. |
 | The agent's own memory | nothing: the memory tools are added when `MEMORY_URL` is set | `memory_search`/`tool_search` read, the rest write. |
 | A framework's own tool (`function_tool`, Deep Agents' file tools) | as the framework does | The framework's permissions, not the harness's. |
-| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | Governance by risk (`Bash` asks, writes announced, reads run) and your hooks, through the SDK's permission callback; then your own `can_use_tool`. |
+| Claude Code's built-in tools (`Bash`, `Write`, `Read`...) | as the CLI does | Your hooks and governance by risk (reads run, writes and `Bash` announced), then Claude Code's own permission check (its mode, `allowed_tools`, settings); what it would ask, your own `can_use_tool` answers, else a person — a `Bash` command that only reads runs without asking. |
 | A framework's own tools (a graph's, an OpenAI Agents agent's, Claude's) | nothing: the agent as you built it | Every call governed as the framework makes it; the harness's tools added per run (`HarnessTools()` for a graph). |
 
 Approvals by tool: make the tool `irreversible` (or let its MCP server say `destructiveHint`).

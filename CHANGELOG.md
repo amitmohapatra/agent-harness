@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Claude Code and Kimi Code ask as they do natively
+
+- A `Bash` command that only reads (`ls`, `cat`, `wc`, `which`, Python that opens files to
+  read) runs without a pause, as their `Read`, `Glob` and `Grep` do: the read-only check moved
+  from the benchmark into `trellis.harness.governance.shell` (one implementation).
+- Any other call follows the framework's own permission check, then a person: Claude Code's
+  `PreToolUse` hook applies your hooks and governance, then leaves the call to Claude Code's
+  mode and rules (`allowed_tools`, its settings: your allowlist, as it is); what it would ask
+  its user, its `can_use_tool` asks the harness (your own callback, else a person). Kimi
+  asks over ACP: after hooks and governance, a person is asked, as Kimi asked (`Write` and
+  `Edit` outside a git working tree included, where they ran announced before).
+- `Bash`'s risk is `write` for both (it was `irreversible`: every command asked): a team that
+  wants every shell command approved gives it the risk `irreversible`, or an `approve_when`,
+  in the tool catalog. `bridge.asked` asks a person about a call its framework asks about.
+
 Model access is provider-neutral ([ADR 0004](docs/adr/0004-provider-neutral-models.md)): a
 model name goes to any OpenAI-compatible endpoint, to Bifrost, or to the provider's own SDK,
 chosen by name from one registry, and the memory service is told the agent's endpoint so its

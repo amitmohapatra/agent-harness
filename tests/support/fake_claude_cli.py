@@ -18,7 +18,8 @@ Hooks: the ``UserPromptSubmit`` hooks the SDK registered (its ``initialize`` req
 before a turn, as the real CLI calls them, and the ``additionalContext`` they answer is recorded
 (``context``) and is what ``{context}`` in a scripted text stands for. The ``PreToolUse`` hooks
 are called before every tool call, before any permission rule: ``allow`` runs it (with their
-``updatedInput``), ``deny`` refuses it, ``continue: false`` stops the turn; with no decision the
+``updatedInput``), ``deny`` refuses it, ``continue: false`` stops the turn, ``ask`` asks
+``can_use_tool`` whatever the rules (with their ``updatedInput``); with no decision the
 permission rules go on (``--allowedTools``, then ``can_use_tool``). After a call that ran, the
 ``PostToolUse`` hooks are called with its result, or the ``PostToolUseFailure`` hooks with its
 error (``{"builtin": ..., "fails": "why"}`` scripts a built-in that fails). ``{"stall":
@@ -261,17 +262,21 @@ class Cli:
             )
             self.mcp_ready.add(server)
 
-    def permission(self, name: str, args: dict[str, Any], tool_id: str) -> dict[str, Any]:
+    def permission(
+        self, name: str, args: dict[str, Any], tool_id: str, *, ask: bool = False
+    ) -> dict[str, Any]:
         """What the SDK's ``can_use_tool`` says about a call — not asked, as the real CLI does
         not ask it, for a tool in ``--allowedTools``, any tool under ``bypassPermissions`` and
-        an edit under ``acceptEdits`` (allowed then)."""
+        an edit under ``acceptEdits`` (allowed then), unless a hook said ``ask``."""
         allowed = (argument("--allowedTools") or "").split(",")
         mode = argument("--permission-mode")
-        if (
-            argument("--permission-prompt-tool") != "stdio"
-            or name in allowed
-            or mode == "bypassPermissions"
-            or (mode == "acceptEdits" and name in EDITS)
+        if argument("--permission-prompt-tool") != "stdio" or (
+            not ask
+            and (
+                name in allowed
+                or mode == "bypassPermissions"
+                or (mode == "acceptEdits" and name in EDITS)
+            )
         ):
             return {"behavior": "allow"}
         return self.control(
@@ -459,7 +464,11 @@ class Cli:
             }
         if decided.get("permissionDecision") == "allow":
             return {"behavior": "allow", "updatedInput": decided.get("updatedInput", args)}
-        return self.permission(name, args, tool_id)
+        given = decided.get("updatedInput", args)
+        asked = self.permission(
+            name, given, tool_id, ask=decided.get("permissionDecision") == "ask"
+        )
+        return {"updatedInput": given, **asked}
 
     @staticmethod
     def result(

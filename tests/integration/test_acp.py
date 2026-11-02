@@ -214,11 +214,13 @@ async def test_a_harness_tool_error_reaches_the_agent(harness: Harness, tmp_path
 async def test_its_own_tools_are_governed_and_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    """``Bash`` asks a person (irreversible); approved, it runs once, after a pause — the reads
-    run without asking; each call it ran is recorded with its result."""
+    """A ``Bash`` command the agent asks about asks a person; approved, it runs once, after a
+    pause. A command that only reads runs without asking, as the reads do; each call it ran is
+    recorded with its result."""
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done: {last}"},
     ]
@@ -226,8 +228,8 @@ async def test_its_own_tools_are_governed_and_recorded(
     asked = await agent.run("tidy up", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Bash"
-    assert asked.interrupt.tool_call.args == {"command": "ls"}
-    assert asked.interrupt.question == "Approve Bash? Bash is irreversible."
+    assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
+    assert asked.interrupt.question == "Approve Bash? Kimi Code asks before it runs this call."
     done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: bad pattern"
     assert recorded(tmp_path)["prompts"][-1] == RESUMED_CALL.format(tool="Bash")
@@ -235,7 +237,7 @@ async def test_its_own_tools_are_governed_and_recorded(
     records = [
         (c.body["tool"], c.body["status"]) for c in memory_service.calls if c.name == "record_tool"
     ]
-    assert records == [("Read", "ok"), ("Bash", "ok"), ("Grep", "error")]  # each once
+    assert records == [("Read", "ok"), ("Bash", "ok"), ("Bash", "ok"), ("Grep", "error")]
 
 
 async def test_a_rejected_call_ends_the_turn_and_the_agent_reads_why(
@@ -767,7 +769,7 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
         {"builtin": "Write", "args": {"path": "/w/notes.txt", "content": "a\nb\nc\n"}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt", "line": 2, "limit": 1}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt"}},
-        {"builtin": "Bash", "args": {"command": "echo hello"}, "ask": True, "limit": 3},
+        {"builtin": "Bash", "args": {"command": "touch hello"}, "ask": True, "limit": 3},
         {"builtin": "Bash", "args": {"command": "sleep 9"}, "kill": True},
         {"text": "{last}"},
     ]
@@ -782,7 +784,7 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     [made] = sandboxes.made()
     assert made not in sandboxes.boxes  # deleted with its run
     assert any(c.startswith("mkdir -p ") for c in sandboxes.commands)
-    assert "echo hello" in sandboxes.commands and "sleep 9" in sandboxes.killed
+    assert "touch hello" in sandboxes.commands and "sleep 9" in sandboxes.killed
     record = recorded(tmp_path)
     assert record["initialize"][0]["terminal"] is True
     started = record["started"][0]
