@@ -12,7 +12,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 
-from tests.integration.test_background import WAIT, Gate, entered, researcher
+from tests.integration.test_background import WAIT, Gate, ended, entered, researcher
 from tests.integration.test_inbox import status, stepper, working
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, background
@@ -77,9 +77,7 @@ async def test_the_user_pauses_instructs_and_resumes_their_task(deployed: Deploy
         assert again.status_code == 409  # it already waits
         resumed = await client.post(f"{PATH}/runs/{task}/resume")
         assert resumed.status_code == 200, resumed.text
-        async with asyncio.timeout(WAIT):
-            while not (record := await d.harness.runs.get(task)).status.final:  # type: ignore[union-attr]
-                await asyncio.sleep(0.02)
+        record = await ended(d.harness, task)
     assert record.status is RunStatus.SUCCESS
     assert "and the north" in str(d.work.requests[-2]["messages"])
 
@@ -102,7 +100,7 @@ async def test_nobody_else_reaches_a_users_task(deployed: Deployment) -> None:
 
 
 async def test_a_target_with_no_step_says_it_takes_no_instruction(deployed: Deployment) -> None:
-    d, client = deployed, deployed.client
+    d = deployed
     held = asyncio.Event()
 
     async def slow(input: Any, agent: Runtime) -> str:
@@ -113,7 +111,9 @@ async def test_a_target_with_no_step_says_it_takes_no_instruction(deployed: Depl
     run = asyncio.create_task(fn.run("x", user="u1"))
     try:
         async with asyncio.timeout(WAIT):
-            while not fn.running:
+            while True:
+                if fn.running:
+                    break
                 await asyncio.sleep(0.01)
         [run_id] = fn.running
         app = FastAPI()
