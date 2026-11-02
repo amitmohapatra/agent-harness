@@ -1197,3 +1197,39 @@ def test_a_difference_written_as_a_signed_change_is_the_difference() -> None:
     assert not cx.score(rec, "Now 40, then 52: a change of -13.", [])["correct"]
     signed = cx.record({"change": 12}, tol={"change": 0})  # any other field keeps its sign
     assert not cx.score(signed, "The change is -12.", [])["correct"]
+
+
+# --------------------------------------------------------------------------- a web search of its own
+WEATHER = (
+    "**Forecast:** Leeds on Tuesday looks chilly and mostly dry, highs around 10-11°C. I can't "
+    "say how it moves footfall: my tools have no footfall counts.\n\nSources:\n"
+    "- [Leeds forecast, timeanddate.com](https://www.timeanddate.com/weather/uk/leeds/ext)"
+)
+
+
+def test_the_weather_is_answered_from_a_web_search_the_run_made() -> None:
+    """Claude's own WebSearch (frameworks first): a run that searched the web and answers from
+    it, with its source, is right; with no search it must still decline (the re-measure's
+    ``bf3-cantdo-02`` t0)."""
+    [case] = [c for c in breakfix.cases() if c.id == "bf3-cantdo-02"]
+    weather = case.turns[0].expect
+    assert cx.score(weather, WEATHER, [], case.turns[0].text, searched=True)["correct"]
+    assert not cx.score(weather, WEATHER, [], case.turns[0].text)["correct"]  # no search ran
+    unsourced = WEATHER.split("\n\nSources", maxsplit=1)[0]
+    assert not cx.score(weather, unsourced, [], case.turns[0].text, searched=True)["correct"]
+    declined = "I don't have weather or footfall data, so I can't forecast that."
+    assert cx.score(weather, declined, [], case.turns[0].text)["correct"]
+    # any other abstain still declines, searched or not
+    other = cx.abstain("no data before 2026")
+    assert not cx.score(other, WEATHER, [], "December 2025?", searched=True)["correct"]
+
+
+async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
+    """A framework's own tools (Claude's WebSearch, Kimi's Bash) run outside the harness's
+    tool hooks (``bridge.observed``): the run's ``used`` names them."""
+    from types import SimpleNamespace
+
+    trace = cx.Trace()
+    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}), None)
+    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"Bash"}), None)  # a resume
+    assert trace.used == {"r1": {"WebSearch", "store_list", "Bash"}}

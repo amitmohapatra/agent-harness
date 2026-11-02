@@ -490,7 +490,11 @@ nothing; `benchmark/cost/approvals.py`) is resumed approved, as a user reading i
 row says which commands (`approved`); a pause on anything else (a write, a delete, an install,
 the network, a script it cannot read) stays a pause. A `cannot` turn whose run ran such a
 command is scored on what it did: the result is its answer, and only output the user cannot
-reach (a file link, a file it says it saved) is made up; a refusal is still right.
+reach (a file link, a file it says it saved) is made up; a refusal is still right. A question
+the data cannot answer that a framework's own web search can (the weather, `abstain(web=True)`)
+is right when the run used its web tool (`WebSearch`, `WebFetch`, Kimi's `FetchURL`: the row's
+`native`, the tools the framework ran itself) and the answer cites a source; with no search it
+must still say the data is not there.
 
 ## Load benchmark
 
