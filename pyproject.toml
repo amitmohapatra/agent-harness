@@ -55,6 +55,9 @@ react = [
   "deepagents>=0.7.19,<0.8",
 ]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
+# An OpenAI Agents model of another provider: the SDK's LiteLLM extension (``LitellmModel``);
+# for an Anthropic model the harness asks for Anthropic's prompt cache through it.
+litellm = ["openai-agents[litellm]>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 # ``kimi()``: Kimi Code over the Agent Client Protocol (``adapters.acp``): the ACP SDK, and the MCP
 # SDK that serves the harness's tools to it. The agent itself is the ``kimi`` program
@@ -79,7 +82,7 @@ gemini = ["langchain-google-genai>=4.4,<5"]
 vertex = ["langchain-google-vertexai>=3.2,<4", "bifrost-sdk[google]>=0.4"]
 bedrock = ["langchain-aws>=1.9,<2", "bifrost-sdk[aws]>=0.4"]
 all = [
-  "trellis-harness[langgraph,deepagents,react,openai-agents,claude-agent-sdk,kimi,agui,query,a2a,otel,mcp,anthropic,gemini,vertex,bedrock,xlsx]",
+  "trellis-harness[langgraph,deepagents,react,openai-agents,litellm,claude-agent-sdk,kimi,agui,query,a2a,otel,mcp,anthropic,gemini,vertex,bedrock,xlsx]",
 ]
 
 [dependency-groups]

@@ -3068,7 +3068,8 @@ class Trace(Hooks):
 # --------------------------------------------------------------------------- running
 #: The adapters a run can wrap: ``react`` (``ReAct``), ``langgraph`` (LangChain's
 #: ``create_agent``), ``deepagents`` (``create_deep_agent``), ``openai`` (the OpenAI Agents
-#: SDK on the ``LLM_*`` endpoint's chat completions), ``claude`` (the Claude Agent SDK, its
+#: SDK on the ``LLM_*`` endpoint's chat completions; on Anthropic's API, its LiteLLM extension),
+#: ``claude`` (the Claude Agent SDK, its
 #: CLI on the provider's own API) and ``kimi`` (Kimi Code over ACP, on the endpoint's model).
 ADAPTERS: Final = ("react", "langgraph", "deepagents", "openai", "claude", "kimi")
 #: Where a ``kimi`` run keeps its working directory and Kimi's home (``KIMI_RUN_ROOT``), and the
@@ -3103,8 +3104,9 @@ def target_of(
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
     ``langgraph`` / ``deepagents`` — ``create_agent`` / ``create_deep_agent`` with the
     harness's middleware and an in-process checkpointer (the framework keeps the conversation);
-    ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
-    collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
+    ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions, on Anthropic's
+    own API through the SDK's LiteLLM extension (:func:`litellm_model`; ``wire`` collects
+    each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
@@ -3149,6 +3151,12 @@ def target_of(
 
         set_tracing_disabled(True)  # the SDK's own tracing goes to OpenAI
         env = Settings.from_env()
+        if anthropic_endpoint(env.llm_base_url):
+            agent = Agent(
+                name="complex", instructions=r.SYSTEM, model=litellm_model(str(model), env, wire)
+            )
+            setattr(agent, TOOLS_ATTRIBUTE, list(tools))
+            return agent, {"framework_options": {"max_turns": 2 * max_steps}}
 
         async def sent(request: httpx.Request) -> None:
             if wire is not None and request.url.path.endswith("/chat/completions"):
@@ -3182,12 +3190,37 @@ def target_of(
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
 
 
+def anthropic_endpoint(base_url: str | None) -> bool:
+    """Whether the ``LLM_*`` endpoint is Anthropic's own API (its OpenAI-compatible layer)."""
+    from urllib.parse import urlsplit
+
+    return urlsplit(base_url or "").hostname == "api.anthropic.com"
+
+
+def litellm_model(model: str, env: Any, wire: list[dict[str, Any]] | None) -> Any:
+    """An OpenAI Agents model on Anthropic's own API, as the SDK reaches a model of another
+    provider: its LiteLLM extension (``LitellmModel``) on Anthropic's Messages API, where the
+    prompt cache works — Anthropic's OpenAI-compatible endpoint drops it. ``wire`` collects
+    each request in the form the agent sends it (LiteLLM's own pre-call hook)."""
+    import litellm
+    from agents.extensions.models.litellm_model import LitellmModel
+    from litellm.integrations.custom_logger import CustomLogger
+
+    class Sent(CustomLogger):
+        def log_pre_api_call(self, model: Any, messages: Any, kwargs: Any) -> None:
+            if wire is not None:
+                tools = (kwargs.get("optional_params") or {}).get("tools")
+                wire.append({"messages": kwargs.get("messages"), "tools": tools})
+
+    litellm.callbacks = [Sent()]  # this run's (one target at a time)
+    return LitellmModel(model=f"anthropic/{model}", api_key=env.llm_api_key or "none")
+
+
 def kimi_target(model: str, tools: Sequence[Any]) -> Any:
     """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
     Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one. No system prompt
     crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own."""
     import os
-    from urllib.parse import urlsplit
 
     from trellis.harness.adapters.acp import kimi
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
@@ -3197,7 +3230,7 @@ def kimi_target(model: str, tools: Sequence[Any]) -> Any:
     cwd.mkdir(parents=True, exist_ok=True)
     (cwd / "AGENTS.md").write_text(r.SYSTEM)
     base = os.environ.get("LLM_BASE_URL", "")
-    anthropic = urlsplit(base).hostname == "api.anthropic.com"
+    anthropic = anthropic_endpoint(base)
     env = {
         "KIMI_MODEL_PROVIDER_TYPE": "anthropic" if anthropic else "openai",
         "KIMI_MODEL_BASE_URL": "https://api.anthropic.com" if anthropic else base,

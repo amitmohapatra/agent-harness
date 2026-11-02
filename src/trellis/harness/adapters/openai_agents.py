@@ -99,6 +99,16 @@ EDITED = (
 )
 
 
+#: Where LiteLLM marks a request for Anthropic's prompt cache (:func:`prompt_cached`): the
+#: instructions (the tools come before them, so they are kept too) and the request's last
+#: message, the end of what the agent's next model call repeats — 2 of Anthropic's 4
+#: breakpoints.
+CACHE_POINTS: Final = (
+    {"location": "message", "role": "system"},
+    {"location": "message", "index": -1},
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _Continue:
     """A resume from the SDK's serialised run state."""
@@ -369,6 +379,7 @@ def governed_agents(
         if found is not None:
             return found
         copy = copies[id(agent)] = agent.clone()
+        copy.model_settings = prompt_cached(agent)
         own = []
         for tool in agent.tools:
             inner = getattr(tool, AGENT_OF_TOOL, None)
@@ -395,6 +406,28 @@ def governed_agents(
         return copy
 
     return copied(target, added)
+
+
+def prompt_cached(agent: Any) -> Any:
+    """``agent``'s model settings, with Anthropic's prompt cache asked for when its model is an
+    Anthropic model the SDK's LiteLLM extension calls (``LitellmModel``): LiteLLM's own
+    ``cache_control_injection_points`` (:data:`CACHE_POINTS`), through the settings'
+    ``extra_args``, unless they name some already. Any other model's settings as they are: a
+    model of OpenAI's API caches by itself, and Anthropic's OpenAI-compatible endpoint drops
+    prompt caching (its chat completions carry no breakpoints)."""
+    settings = agent.model_settings
+    model = agent.model
+    if type(model).__name__ != "LitellmModel" or "cache_control_injection_points" in (
+        settings.extra_args or {}
+    ):
+        return settings
+    import litellm  # installed with the SDK's LiteLLM extension
+
+    _, provider, _, _ = litellm.get_llm_provider(model.model, api_base=model.base_url)
+    if provider != "anthropic":
+        return settings
+    asked = {"cache_control_injection_points": [dict(point) for point in CACHE_POINTS]}
+    return dataclasses.replace(settings, extra_args={**(settings.extra_args or {}), **asked})
 
 
 class GovernedServer:

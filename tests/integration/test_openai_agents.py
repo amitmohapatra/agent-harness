@@ -715,3 +715,60 @@ async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on
     assert result.answer == "shipped" and done == ["o1"]
     told = json.dumps(model.inputs[1], default=str)
     assert "Tool 'ship_all' not found" in told, told[-400:]
+
+
+async def litellm_kwargs(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, model: Any, settings: Any = None
+) -> list[dict[str, Any]]:
+    """What a run of an agent on a ``LitellmModel`` hands LiteLLM, each call answered by
+    LiteLLM's own mock (no network)."""
+    import litellm
+    from agents import ModelSettings
+
+    sent: list[dict[str, Any]] = []
+    original = litellm.acompletion
+
+    async def acompletion(**kwargs: Any) -> Any:
+        sent.append(kwargs)
+        return await original(**{**kwargs, "mock_response": "cached"})
+
+    monkeypatch.setattr(litellm, "acompletion", acompletion)
+    target = Agent(name="c", model=model, model_settings=settings or ModelSettings())
+    result = await harness.wrap(target, id=f"litellm-{model.model}-{settings}").run("hi", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "cached"
+    assert target.model_settings == (settings or ModelSettings())  # yours, unchanged
+    return sent
+
+
+async def test_an_anthropic_model_through_litellm_asks_for_anthropics_prompt_cache(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anthropic's prompt cache through the SDK's own LiteLLM extension: LiteLLM's
+    ``cache_control_injection_points`` mark the instructions and the request's last message."""
+    from agents.extensions.models.litellm_model import LitellmModel
+
+    sent = await litellm_kwargs(
+        harness, monkeypatch, LitellmModel(model="anthropic/claude-x", api_key="k")
+    )
+    assert sent[0]["cache_control_injection_points"] == [
+        {"location": "message", "role": "system"},
+        {"location": "message", "index": -1},
+    ]
+
+
+async def test_your_own_cache_points_and_another_providers_model_are_as_given(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents import ModelSettings
+    from agents.extensions.models.litellm_model import LitellmModel
+
+    own = [{"location": "message", "role": "user"}]
+    settings = ModelSettings(extra_args={"cache_control_injection_points": own})
+    sent = await litellm_kwargs(
+        harness, monkeypatch, LitellmModel(model="anthropic/claude-x", api_key="k"), settings
+    )
+    assert sent[0]["cache_control_injection_points"] == own
+    sent = await litellm_kwargs(
+        harness, monkeypatch, LitellmModel(model="openai/gpt-x", api_key="k")
+    )
+    assert "cache_control_injection_points" not in sent[0]

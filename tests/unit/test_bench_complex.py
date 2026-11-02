@@ -334,6 +334,37 @@ def test_the_claude_agent_reads_no_settings_of_the_checkout_it_runs_in() -> None
     assert options.setting_sources == [] and options.max_turns == 12
 
 
+async def test_openai_agents_on_anthropics_api_go_through_the_sdks_litellm_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic's OpenAI-compatible endpoint drops prompt caching: on Anthropic's own API the
+    OpenAI Agents target is the SDK's ``LitellmModel`` on Anthropic's Messages API (as Kimi's
+    ``anthropic`` provider, and LangChain's ``ChatAnthropic``), and the wire still holds each
+    request as the agent sends it. Any other endpoint stays on its chat completions."""
+    import litellm
+    from agents import OpenAIChatCompletionsModel
+    from agents.extensions.models.litellm_model import LitellmModel
+
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.anthropic.com/v1/")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.setattr(litellm, "callbacks", [])
+    wire: list[dict[str, Any]] = []
+    agent, options = cx.target_of(
+        "claude-haiku-5-5", "memory", None, 6, adapter="openai", wire=wire
+    )
+    assert isinstance(agent.model, LitellmModel) and options["framework_options"]["max_turns"] == 12
+    assert agent.model.model == "anthropic/claude-haiku-5-5"
+    await litellm.acompletion(
+        model="anthropic/claude-haiku-5-5",
+        messages=[{"role": "user", "content": "hi"}],
+        mock_response="ok",
+    )
+    assert wire[-1]["messages"] == [{"role": "user", "content": "hi"}]
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+    agent, _ = cx.target_of("granite", "memory", None, 6, adapter="openai", wire=wire)
+    assert isinstance(agent.model, OpenAIChatCompletionsModel)
+
+
 def test_kimi_is_an_adapter_with_its_instructions_in_its_own_agents_md(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
