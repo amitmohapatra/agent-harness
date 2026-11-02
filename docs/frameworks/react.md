@@ -226,6 +226,13 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, and the first user message kept ahead of a summary; a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
+**`ReAct`'s own**, before `HarnessTools` (not in `middleware()`: in-loop intelligence `ReAct`
+adds on top of the frameworks):
+
+| Middleware | What it does |
+|---|---|
+| `FigureCheck` | before an answer is given, its figures are traced to what the model was given, deterministically and with no model call (`trellis.harness.figures`): a figure held as given or rounded, a step or two of arithmetic from traced figures (the working an answer shows), a total of one result's rows or of a list the answer gives, a record's margin. A figure computed from many at once — a fitted line, a compound rate, an unshown sum of a table — is named to the model, once a turn, with `query_result` over this turn's results (each kept as a table, however small) or the run's code tool, and the model answers again. The draft and the note go to that one call only: the conversation keeps the answer. Replayed on the break-and-fix gate's `ReAct` runs, it asks again on 1 of 336 turns with memory on and 2 of 168 with it off |
+
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped.
 

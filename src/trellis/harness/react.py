@@ -173,14 +173,16 @@ def _middleware(
     summarization: Any = None,
     card: Any = None,
     scoped: bool = False,
+    checked: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
-    resume included — :func:`~.middleware.step_limit`)."""
+    sent; whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
+    resume included — :func:`~.middleware.step_limit`); and whether an answer's figures are
+    checked before it is given (``checked``: :class:`~.figures.FigureCheck`, ``ReAct``'s own)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -190,7 +192,7 @@ def _middleware(
     )
     from langchain.agents.middleware import ContextEditingMiddleware
 
-    from trellis.harness import automatic
+    from trellis.harness import automatic, figures
     from trellis.harness import middleware as ours
 
     window = context_window
@@ -220,6 +222,9 @@ def _middleware(
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
+        # before the run's tools are offered: asked again, the model is offered query_result
+        # over what the check kept
+        *([figures.FigureCheck()] if checked else []),
         ours.HarnessTools(),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
@@ -363,6 +368,7 @@ def ReAct(
                         context_window=window,
                         system_prompt=stored_prompt,
                         scoped=True,
+                        checked=True,
                     ),
                     middleware,
                 ),
@@ -399,6 +405,7 @@ def ReAct(
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
         card=_card(files_backend),
         scoped=True,
+        checked=True,
     )
     graph = create_deep_agent(
         profiled,
@@ -629,7 +636,7 @@ def defaults_off(*names: str) -> Iterator[None]:
     middleware of the same name) — a measurement of what each is worth (``benchmark.cost``'s
     ``main-<piece>`` variants). Not an option of ``ReAct``: a graph built for an agent has every
     default."""
-    token = _OFF.set(frozenset(names))
+    token = _OFF.set(_OFF.get() | frozenset(names))  # nested: both leave theirs out
     try:
         yield
     finally:

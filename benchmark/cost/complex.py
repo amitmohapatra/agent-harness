@@ -68,6 +68,7 @@ from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
 from trellis.contracts import RunStatus, ToolCall, ToolOutcome
+from trellis.harness.react import defaults_off
 
 Call = tuple[str, dict[str, Any]]
 
@@ -3439,11 +3440,14 @@ async def run_case(
     tag: str,
     adapter: str | None = None,
     agent_id: str | None = None,
+    scripted: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One case's conversation: its row and every request it made (``agent_id``: the wrapped
     agent's id, one per case unless given — a learning-over-time run gives one for all). A
     turn sent while the one before it works (``Turn.mode``) runs beside it: the two share
-    their requests (the model is one), and each keeps its own run's calls."""
+    their requests (the model is one), and each keeps its own run's calls. ``scripted``: the
+    model replays its reference answers, figures worked out where the case was written, and
+    cannot answer ``ReAct``'s figure check (``trellis.harness.figures``): it is left out."""
     w = r.world()
     w.reset()
     from benchmark.cost import adversarial
@@ -3464,11 +3468,12 @@ async def run_case(
     if case.adapters and kind not in case.adapters:
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
     wire: list[dict[str, Any]] = []
-    target, options = target_of(
-        model, history, case.window or window, max_steps, adapter=kind, wire=wire,
-        tools=(*r.TOOLS, *case.tools),
-        bound=await h.memory_tools() if kind == "graph" else (),
-    )  # fmt: skip
+    bound = await h.memory_tools() if kind == "graph" else ()
+    with defaults_off(*(["FigureCheck"] if scripted else [])):
+        target, options = target_of(
+            model, history, case.window or window, max_steps, adapter=kind, wire=wire,
+            tools=(*r.TOOLS, *case.tools), bound=bound,
+        )  # fmt: skip
     agent = h.wrap(
         target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
         run_timeout=run_seconds,
@@ -3799,6 +3804,7 @@ async def bench(
             found, requests = await run_case(
                 h, case, model=model, history=args.history, window=args.window, max_steps=args.max_steps,
                 run_seconds=args.timeout, spend=spend, tag=tag, adapter=args.adapter,
+                scripted=args.scripted,
             )  # fmt: skip
             found |= {"model": model_name, "usd": round(spend.usd - before, 6)}
             if found["stopped"]:

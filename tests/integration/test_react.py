@@ -483,3 +483,5 @@ def test_a_measurement_leaves_default_middleware_out_only_inside_defaults_off() 
     with defaults_off("SummarizationMiddleware", "ModelHooks"):  # the last is always kept
         assert [m.name for m in stacked(defaults, [])] == ["A", "ModelHooks"]
     assert [m.name for m in stacked(defaults, [])] == ["A", "SummarizationMiddleware", "ModelHooks"]
+    with defaults_off("A"), defaults_off("SummarizationMiddleware"):  # nested: both left out
+        assert [m.name for m in stacked(defaults, [])] == ["ModelHooks"]
