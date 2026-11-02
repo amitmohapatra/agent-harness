@@ -36,8 +36,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from tests.support.planned import FINAL, Call
-from trellis.harness.adapters.acp import KIMI_BUILTINS, ACPAgent, kimi
+from tests.support.planned import CUT, CUT_REPLY, FINAL, Call
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
+from trellis.harness.tools.bridge import TURN_STALLED
 
 #: The ``kimi`` program, when it is installed.
 KIMI_BIN: Final = shutil.which("kimi")
@@ -63,8 +64,9 @@ NOT_RUN: Final = (
 #: The harness's prompts after a rejection and an edit (``adapters.acp``) and a denied resume.
 _REJECTED = re.compile(r"^Your call to \S+ was not run: ")
 _DENIED = "the person denied it"
-#: The harness's prompt at a step limit (``budget.TURN_LIMIT``): a model told so answers.
-_LIMIT = "This turn has reached its limit"
+#: The harness's prompts at a step limit (``budget.TURN_LIMIT``) and after a loop
+#: (``bridge.TURN_STALLED``): a model told so answers.
+_TOLD_TO_ANSWER = ("This turn has reached its limit", TURN_STALLED)
 _EDITED = re.compile(
     r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$"
 )
@@ -85,7 +87,8 @@ def result_text(content: Any) -> str:
 
 def kimi_name(tool: str) -> str:
     """A tool as Kimi names it: its own by name, the harness's through the ``trellis`` server."""
-    return tool if tool in KIMI_BUILTINS or tool.startswith("mcp__") else f"mcp__trellis__{tool}"
+    own = tool in KIMI_BUILTINS or tool in KIMI_OUTLIVES_THE_TURN or tool.startswith("mcp__")
+    return tool if own else f"mcp__trellis__{tool}"
 
 
 class PlannedEndpoint:
@@ -108,6 +111,8 @@ class PlannedEndpoint:
         self.requests: list[dict[str, Any]] = []
         self.headers: list[dict[str, str]] = []
         self.url = ""
+        #: the :data:`CUT` steps already answered with a reply cut at the output limit
+        self.cut = 0
 
     def said(self) -> str:
         """Everything the model was sent, as one text."""
@@ -138,10 +143,21 @@ class PlannedEndpoint:
                     edited = (matched["tool"], json.loads(matched["args"]))
                 elif users > 1 and (_REJECTED.match(said) or _DENIED in said):
                     results.append(said)
-        if _told_limit(body):  # told its step limit is reached: it answers, calling nothing
+        if _told_to_answer(body):  # told its turn is stopped: it answers, calling nothing
             return self.final.replace("{last}", results[-1] if results else "")
-        done = 0
+        return self._planned(results, edited)
+
+    def _planned(self, results: list[str], edited: Call | None) -> Turn:
+        """The plan's next step after ``results``: its call (``edited``: as a reviewer changed
+        it), a reply cut at the output limit, or — every call made — the answer."""
+        done = cuts = 0
         for step in self.plan:  # a step is a call, or several made in one message
+            if step == CUT:  # cut at the output limit once: Kimi asks again itself
+                cuts += 1
+                if self.cut < cuts:
+                    self.cut += 1
+                    return CUT_REPLY
+                continue
             if len(results) <= done:
                 if edited is not None:
                     return edited
@@ -172,8 +188,10 @@ class PlannedEndpoint:
                 ],
             }
         else:
-            message = turn
-        finish = "tool_calls" if message.get("tool_calls") else "stop"
+            message = dict(turn)
+        finish = message.pop("finish_reason", None) or (
+            "tool_calls" if message.get("tool_calls") else "stop"
+        )
         return {
             "id": f"chatcmpl-{len(self.requests)}",
             "created": 0,
@@ -307,10 +325,12 @@ def kimi_env(endpoint: PlannedEndpoint, home: Path) -> dict[str, str]:
     }
 
 
-def _told_limit(body: dict[str, Any]) -> bool:
-    """Whether a later user message tells the model its step limit is reached."""
+def _told_to_answer(body: dict[str, Any]) -> bool:
+    """Whether a later user message tells the model to answer now (its step limit, a loop)."""
     users = [m for m in body["messages"] if m.get("role") == "user"]
-    return any(_system_reminders(text_of(m.get("content"))).startswith(_LIMIT) for m in users[1:])
+    return any(
+        _system_reminders(text_of(m.get("content"))).startswith(_TOLD_TO_ANSWER) for m in users[1:]
+    )
 
 
 def kimi_target(endpoint: PlannedEndpoint, tmp: Path, **fields: Any) -> ACPAgent:

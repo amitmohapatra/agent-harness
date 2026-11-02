@@ -26,7 +26,10 @@ seconds}`` is a step on which the "model" sends nothing for that long (then goes
 
 Spending: every result carries usage (:data:`STEP_TOKENS` a step) and a cost
 (``FAKE_CLAUDE_COST`` a step); past ``--max-budget-usd`` the query stops with the real CLI's
-``error_max_budget_usd`` result. ``--include-partial-messages`` sends each text as word deltas
+``error_max_budget_usd`` result. ``{"cut": true}`` is a step whose reply reached the model's
+output limit with no answer: the query ends with the result the real CLI gives once its own
+recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
+``--include-partial-messages`` sends each text as word deltas
 (``stream_event``) before its message.
 
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
@@ -300,6 +303,7 @@ class Cli:
                         "resume": resumed,
                         "prompt": prompt,
                         "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
+                        "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
                         "context": context,
                         "materialised": mirrored(session) is not None,
                         "earlier": prompts(session),
@@ -348,6 +352,9 @@ class Cli:
                     sys.exit(1)
                 return
             steps += 1
+            if "cut" in item:
+                send(result(session, turns=turns + 1, steps=steps, stop_reason="max_tokens"))
+                return
             said, read, completed, interrupted, inner = self.step(
                 session, step, item, read, context
             )
@@ -625,6 +632,7 @@ def result(
     turns: int = 0,
     subtype: str = "error_during_execution",
     steps: int = 0,
+    stop_reason: str = "end_turn",
 ) -> dict[str, Any]:
     """The query's end: its answer, or — ``error`` — what the real CLI says when it cannot run
     it (``num_turns`` 0), or stops it (``subtype``: ``error_max_turns`` past ``--max-turns``)."""
@@ -637,6 +645,7 @@ def result(
         "num_turns": turns,
         "session_id": session,
         "result": last,
+        "stop_reason": stop_reason,
         "total_cost_usd": spent(steps),
         "usage": {"input_tokens": STEP_TOKENS[0] * steps, "output_tokens": STEP_TOKENS[1] * steps},
     }

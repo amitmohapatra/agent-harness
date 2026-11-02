@@ -56,9 +56,40 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A framework's built-in tools no longer count toward the tool hints' narrowing threshold
+  (`NARROW_FROM`, 30): only the run's own tools do (`Runtime.own_tools`). Claude Code's and
+  Kimi's built-ins, and Deep Agents' `task` and file tools, are tagged `builtin`. Counted with
+  them, a Claude or Kimi run of 14 tools of its own narrowed, and the tool a question needed
+  (`find_sku`) was never listed for the query: 4 missed turns in the break-and-fix gate.
+- A run never ends `SUCCESS` with no answer. A reply that reached the model's output limit
+  before it answered (no text, no tool call) ended LangChain's loop, and the run succeeded
+  with an empty answer: two LangGraph turns at 4,096 tokens in the break-and-fix gate. In
+  `ReAct`, `middleware()` and any `create_agent` or Deep Agents graph the model is now asked
+  once more, told so (`budget.CUT_OFF`) and offered no tool (an `output_limit` warning).
+  Claude Code and Kimi recover such a reply themselves. A run that still ends with no answer,
+  on any adapter but a function, ends `ERROR` `NO_ANSWER` saying why.
+- Kimi no longer schedules prompts that never fire. `kimi acp` runs for one attempt and ends
+  with it, so a `CronCreate` schedule could not run, yet Kimi scheduled it and answered as if
+  it would (found by #121; the break-and-fix gate paused on one). Kimi's own switch,
+  `KIMI_DISABLE_CRON=1`, is now set in its environment (`acp.KIMI_ENV`, whatever the agent's
+  own `env` says), as Claude's cron tools are disallowed: the call says scheduling is off. The
+  cron tools left the run's tool set (`KIMI_OUTLIVES_THE_TURN`). ACP cannot take a built-in off
+  Kimi's list, so Kimi still lists them.
+- A `create_agent` or Deep Agents graph wrapped without `middleware()` computes over large
+  results too: its harness tools' large results are kept, and the model is offered `read_file`
+  and `query_result` once the run keeps one, as with `middleware()`. Before, it was offered
+  neither, and summed rows by hand: 5 analytics turns in the break-and-fix gate, two of them
+  past the 4,096-token output limit. The harness's narrowing copy offers them as schemas, and
+  the graph's tool node answers them. A hand-built `StateGraph` still binds its own tools.
 - A helper's own time limit (`h.wrap(run_timeout=)`) holds when it runs as a child of a run
   with a longer limit: before, the parent's remaining time replaced it, so a helper wrapped
   with 0.2 s ran its full 2 s (found by the adversarial matrix row X09).
+- A Kimi run looping on one call ends with one answer (ADV-9): Kimi's own repeat breaker
+  (`KIMI_CODE_REPEAT_BREAKER`: the same call 12 times in a row) ended the turn with no answer,
+  the reason only in its log (`stopReason` `repeat_breaker`). When a turn ends with no answer
+  after a loop (the bridge's refusal, `bridge.stalled`, or Kimi's breaker on its own tools),
+  Kimi is asked once more in the same session, as at its step limit, told the turn stalled
+  (`bridge.TURN_STALLED`, for this turn only); a `stalled` warning says so.
 - A Claude Agent SDK run at its `max_turns`, and a Kimi run at its step limit, end with one
   answer, as `ReAct` and OpenAI Agents do (#117). Claude's query ended `error_max_turns` (and the
   SDK raised the CLI's exit after it): its session is resumed once (Claude's own `resume`), told
@@ -140,6 +171,9 @@ own model work follows the harness's configuration.
 - A model looping on one call is stopped on every adapter: the tool bridge does not run the
   same call a third time in a row and tells the model to answer with what it has (a `stalled`
   warning); a graph without `middleware()`, a Deep Agent and the Claude CLI ran all 30 (ADV-9).
+  OpenAI Agents offers no tool on the turn after (its `FunctionTool.is_enabled`), so the
+  model's reply is the run's answer: it looped on to the SDK's `max_turns` (10) and answered
+  about the limit, or ended `ERROR` when that last call made no answer.
 
 - A run at its step limit ends with one answer: `ReAct` at `max_steps` (LangChain's
   `ModelCallLimitMiddleware` counting) and OpenAI Agents at `max_turns` (the SDK's own error
