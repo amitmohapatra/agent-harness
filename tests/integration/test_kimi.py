@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from tests.support.arm import arm
+from tests.support.arm import arm, with_governance
+from tests.support.catalog import FakeCatalog
 from tests.support.kimi import (
     KIMI_BIN,
     PlannedEndpoint,
@@ -25,17 +26,21 @@ from tests.support.kimi import (
     text_of,
 )
 from tests.support.sandbox import FakeSandboxes
-from trellis import Harness, Settings, tool
+from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import compat
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
 from trellis.harness.adapters.claude import RESUMED_CALL
 from trellis.harness.budget import Budget
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import sandbox
 from trellis.harness.tools.bridge import TURN_STALLED
 
 pytestmark = needs_kimi
 lookups: list[str] = []
+#: A command that writes (a file in Kimi's working directory): Kimi asks, and so a person.
+WRITES = "touch made.txt && echo resumed"
 
 
 @tool(side_effects="read")
@@ -127,20 +132,99 @@ async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(
 async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
-    endpoint.plan = [("Bash", {"command": "echo resumed"})]
+    endpoint.plan = [("Bash", {"command": WRITES})]
     agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash")
     paused = await agent.run("say it", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
     assert paused.interrupt.tool_call.tool == "Bash"
-    assert paused.interrupt.tool_call.args == {"command": "echo resumed"}
+    assert paused.interrupt.tool_call.args == {"command": WRITES}
+    assert paused.interrupt.question == "Approve Bash? Kimi Code asks before it runs this call."
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer == "Done. resumed"
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
     # the same session, told to call again: what came before is in it
     last = endpoint.requests[-1]["messages"]
     assert any(RESUMED_CALL.format(tool="Bash") in text_of(m.get("content")) for m in last)
     assert any("say it" in text_of(m.get("content")) for m in last)
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["whole", "streamed"])
+async def test_a_command_that_only_reads_runs_without_asking_a_person(
+    harness: Harness, tmp_path: Path, streamed: bool
+) -> None:
+    """Kimi asks before every ``Bash`` command; one that only reads, the harness lets run as
+    Kimi's own read tools run: no pause."""
+    async with PlannedEndpoint(streamed=streamed).serving() as endpoint:
+        endpoint.plan = [("Bash", {"command": "echo resumed | wc -l; which kimi 2>&1"})]
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-reads")
+        done = await agent.run("count", user="u1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer is not None and done.answer.startswith("Done. 1")
+
+
+async def test_kimi_still_asks_about_a_command_its_config_allows_and_so_a_person_is_asked(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi Code 2.1.1 reads ``[permission]`` rules in its ``config.toml`` but, over ACP, its
+    agent never loads them into the rules its policy checks: a command a team's rule allows is
+    still asked about, so the harness asks a person. Pinned: a Kimi that applies them passes
+    the team's allowlist through, and this fails."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    (home / "config.toml").write_text(
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(touch *)"\n'
+    )
+    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    paused = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed").run(
+        "make it", user="u1"
+    )
+    assert paused.status is RunStatus.PAUSED
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "rule", [Rule(risk="irreversible"), Rule(risk="write", approve_when="true")], ids=str
+)
+async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_catalog(
+    endpoint: PlannedEndpoint, tmp_path: Path, rule: Rule
+) -> None:
+    endpoint.plan = [("Bash", {"command": "ls"})]
+    async with with_governance(Harness(), Governance(FakeCatalog({"Bash": rule}))) as h:
+        paused = await h.wrap(kimi_target(endpoint, tmp_path), id="kimi-strict").run(
+            "look", user="u1"
+        )
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        call = paused.interrupt.tool_call
+        assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
+
+
+async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
+    endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi is told that ``outputs/`` of its working folder is the user's; a file it writes
+    there (its own ``Bash``, asked about and approved) moves to the file store on success."""
+    from trellis.harness.sandbox import DELIVERS_HERE
+
+    save = "mkdir -p outputs && printf 'a,b\\n1,2\\n' > outputs/sales.csv"
+    endpoint.plan = [("Bash", {"command": save})]
+    folders: list[str] = []
+
+    class Ended(Hooks):
+        async def on_run_end(self, run: Any, result: Any) -> None:
+            folders.append(run.files_folder())
+
+    h = Harness(config=Settings(files_url=f"memory://kimi-out-{id(tmp_path)}"))
+    agent = h.wrap(kimi_target(endpoint, tmp_path), id="kimi-saver", hooks=[Ended()])
+    paused = await agent.run("save the sales", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert await h.files.read(folders[-1], "sales.csv") == b"a,b\n1,2\n"
+    assert not (tmp_path / "kimi-work" / "outputs" / "sales.csv").exists()
+    assert DELIVERS_HERE in endpoint.said()
+    await h.aclose()
 
 
 async def test_a_bash_call_whose_arguments_stream_pauses_with_its_command(
@@ -149,13 +233,13 @@ async def test_a_bash_call_whose_arguments_stream_pauses_with_its_command(
     """A provider streams a call's arguments after its name (Anthropic's, OpenAI's): Kimi asks
     permission before it starts the call, so the arguments are only in the call's updates."""
     async with PlannedEndpoint(streamed=True).serving() as endpoint:
-        endpoint.plan = [("Bash", {"command": "echo resumed"})]
+        endpoint.plan = [("Bash", {"command": WRITES})]
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-streamed")
         paused = await agent.run("say it", user="u1")
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.tool_call is not None
         assert paused.interrupt.tool_call.tool == "Bash"
-        assert paused.interrupt.tool_call.args == {"command": "echo resumed"}
+        assert paused.interrupt.tool_call.args == {"command": WRITES}
         done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == "Done. resumed"
@@ -401,6 +485,14 @@ async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_k
     assert native.status is RunStatus.SUCCESS, native.error
     read = text_of(endpoint.requests[-1]["messages"][-1].get("content"))
     assert len(read) >= 4 * results.PAGE_CHARS  # one call: over four of the harness's pages
+    # re-checked (#92): Kimi's own Read on the kept result's path finds nothing there — the
+    # journal holds it, not the disk — so read_file stays its reader
+    endpoint.plan = [("Read", {"path": path})]
+    native = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-kept").run(
+        "read the kept rows", user="u1"
+    )
+    told = text_of(endpoint.requests[-1]["messages"][-1].get("content"))
+    assert "sku,units" not in told and told.startswith("<system>ERROR")
 
 
 async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(

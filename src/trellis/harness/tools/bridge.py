@@ -83,6 +83,8 @@ from trellis.harness.tools.base import (
 
 log = logging.getLogger("trellis.run")
 
+#: Why a person is asked about a call its framework asks about (:func:`asked`).
+FRAMEWORK_ASKS: Final = "{framework} asks before it runs this call."
 #: The ``error_class`` of a call whose arguments did not fit the tool's schema.
 INVALID_ARGUMENTS: Final = "InvalidArguments"
 #: The ``TOOL_CALL_RESULT`` ``status`` of a call that asked a person, and ended with its
@@ -180,6 +182,22 @@ async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutc
     if isinstance(verdict, Deny):
         return denied(call, verdict)
     _, call, rejected = await _decided(runtime, spec, call, verdict)
+    return call if rejected is None else rejected
+
+
+async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCall | ToolOutcome:
+    """A call ``framework`` asks its user about before it runs it (its own permission check:
+    Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
+    :func:`permitted` let it through: a person is asked, as governance asks — answered from the
+    journal when the run resumes, not asked again when the tool was approved for the rest of the
+    run — and the call to let through (perhaps edited), or the outcome of one rejected. A pause
+    propagates."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    key = content_key("call", spec.name, args)
+    call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
+    why = FRAMEWORK_ASKS.format(framework=framework)
+    _, call, rejected = await _decided(runtime, spec, call, Ask(why))
     return call if rejected is None else rejected
 
 

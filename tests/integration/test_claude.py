@@ -12,7 +12,8 @@ from typing import Any
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 
-from tests.support.arm import arm
+from tests.support.arm import arm, with_governance
+from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
@@ -24,7 +25,10 @@ from trellis.harness.adapters.claude import (
     native_spec,
 )
 from trellis.harness.agent import NARROW_FROM
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
+from trellis.harness.sandbox import DELIVERS_HERE
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
 
@@ -76,8 +80,10 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     cli = started_with(tmp_path)
     # read_file is listed from the start: the CLI lists a server's tools once
     assert cli["tools"] == ["refund", "read_file", "query_result"] and cli["allowed_tools"] is None
-    assert cli["permission_prompt_tool"] is None  # the harness's PreToolUse hook decides
-    assert cli["system_prompt"] == "You refund."
+    # what Claude Code would ask its user, it asks the harness (its can_use_tool)
+    assert cli["permission_prompt_tool"] == "stdio"
+    # the team's, then what Claude is told of its folder's outputs/ (the user's)
+    assert cli["system_prompt"] == f"You refund.\n\n{DELIVERS_HERE}"
     assert target.mcp_servers == {}  # the team's options are untouched
 
 
@@ -206,30 +212,131 @@ async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call
 async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """``Bash`` asks a person (governance: irreversible); approved, it runs once — the resumed
-    session does not run it again when the run pauses later, on a harness tool."""
+    """A ``Bash`` command Claude Code asks about asks a person; approved, it runs once — the
+    resumed session does not run it again when the run pauses later, on a harness tool. A
+    command that only reads runs without asking."""
     refunds.clear()
     script = [
         {"builtin": "Read", "args": {"file_path": "orders.csv"}},
         {"builtin": "Bash", "args": {"command": "ls"}},
+        {"builtin": "Bash", "args": {"command": "rm -rf build"}},
         {"tool": "refund", "args": {"order": "o3"}},
         {"text": "done: {last}"},
     ]
     agent = arm(harness.wrap(options(tmp_path, script), id="ops"), [refund])
     asked = await agent.run("tidy up, then refund o3", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "Bash" and asked.interrupt.question == (
-        "Approve Bash? Bash is irreversible."
-    )
-    assert built_ins(tmp_path) == [{"tool": "Read", "args": {"file_path": "orders.csv"}}]
+    assert asked.interrupt.tool_call.args == {"command": "rm -rf build"}
+    assert asked.interrupt.question == "Approve Bash? Claude Code asks before it runs this call."
+    assert [b["tool"] for b in built_ins(tmp_path)] == ["Read", "Bash"]  # ls: not asked
     again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert started_with(tmp_path)["prompt"] == RESUMED_CALL.format(tool="Bash")  # a built-in
     assert again.interrupt is not None and again.interrupt.tool_call is not None
     assert again.interrupt.tool_call.tool == "refund"
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: refunded o3"
-    assert [b["tool"] for b in built_ins(tmp_path)] == ["Read", "Bash"]  # each once
+    assert [b["args"] for b in built_ins(tmp_path)][1:] == [
+        {"command": "ls"},
+        {"command": "rm -rf build"},
+    ]  # each once
     assert refunds == ["o3"]
+
+
+async def test_a_command_claudes_own_rules_allow_runs_without_asking_a_person(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A team's allowlist is Claude Code's own (``allowed_tools``, its settings): a command it
+    lets run is not asked about by the harness either."""
+    script = [{"builtin": "Bash", "args": {"command": "touch a.txt"}}, {"text": "said: {last}"}]
+    agent = harness.wrap(options(tmp_path, script, allowed_tools=["Bash"]), id="allowed")
+    result = await agent.run("make a.txt", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "said: Bash ran"
+    assert built_ins(tmp_path) == [{"tool": "Bash", "args": {"command": "touch a.txt"}}]
+
+
+async def test_a_command_a_person_rejected_is_not_run_and_claude_reads_why(
+    harness: Harness, tmp_path: Path
+) -> None:
+    script = [{"builtin": "Bash", "args": {"command": "rm -rf build"}}, {"text": "said: {last}"}]
+    agent = harness.wrap(options(tmp_path, script), id="careful")
+    asked = await agent.run("clean", user="u1")
+    assert asked.interrupt is not None
+    done = await agent.resume(asked.interrupt.interrupt_id, "reject", reviewer="u1")
+    assert done.answer == "said: Bash was not run: the approver rejected it"
+    assert built_ins(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "rule", [Rule(risk="irreversible"), Rule(risk="write", approve_when="true")], ids=str
+)
+async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_catalog(
+    tmp_path: Path, rule: Rule
+) -> None:
+    """The tool catalog's word on ``Bash`` (its risk, or an ``approve_when``) is the team's:
+    then a command that only reads asks a person too, before Claude Code is asked."""
+    script = [{"builtin": "Bash", "args": {"command": "ls"}}, {"text": "said: {last}"}]
+    async with with_governance(Harness(), Governance(FakeCatalog({"Bash": rule}))) as h:
+        asked = await h.wrap(options(tmp_path, script), id="strict").run("look", user="u1")
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+        call = asked.interrupt.tool_call
+        assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
+        assert built_ins(tmp_path) == []
+
+
+async def test_the_teams_own_callback_is_asked_only_what_claude_code_asks(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``can_use_tool`` is Claude Code's question to its user: a call its rules let run (here
+    ``allowed_tools``) never reaches the team's callback, as without the harness."""
+    asked: list[str] = []
+
+    async def own(name: str, args: dict[str, Any], context: Any) -> Any:
+        asked.append(name)
+        return PermissionResultAllow()
+
+    script = [
+        {"builtin": "Write", "args": {"file_path": "a.txt"}},
+        {"builtin": "Bash", "args": {"command": "touch b.txt"}},
+        {"text": "said: {last}"},
+    ]
+    target = options(tmp_path, script, can_use_tool=own, allowed_tools=["Write"])
+    result = await harness.wrap(target, id="own").run("work", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "said: Bash ran"
+    assert asked == ["Bash"]
+    assert [b["tool"] for b in built_ins(tmp_path)] == ["Write", "Bash"]
+
+
+async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file Claude writes in ``outputs/`` of its working folder is the user's, as a
+    sandbox's ``outputs/`` is (``sandbox.delivered``): on success it moves to the file store,
+    named in the journal and announced; the rest of the folder stays; Claude is told so."""
+    import trellis.harness.sandbox as boxes
+    from trellis import Settings
+
+    monkeypatch.setattr(boxes, "OUTPUT_MAX_BYTES", 8)
+    work = tmp_path / "work"
+    (work / "outputs" / "sub").mkdir(parents=True)
+    for name, text in (("report.csv", "n\n1\n"), ("big.csv", "x" * 9), ("sub/x.txt", "x")):
+        (work / "outputs" / name).write_text(text)
+    (work / "notes.txt").write_text("scratch")
+    script = [{"text": "saved"}]
+    harness = Harness(config=Settings(files_url=f"memory://claude-out-{id(tmp_path)}"))
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="saver")
+    events = [e async for e in agent.stream("save it", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    files = [e.data for e in events if e.data.get("name") == "file"]
+    assert [(f["file"], f["size"], f["source"]) for f in files] == [
+        ("report.csv", 4, "claude_agent_sdk")
+    ]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "sandbox"]
+    assert warned == ["the output big.csv was not kept: 9 bytes, past the 8 kept"]
+    assert not (work / "outputs" / "report.csv").exists()  # moved to the file store
+    assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
+    assert (work / "outputs" / "sub" / "x.txt").exists()
+    assert started_with(tmp_path)["system_prompt"] == boxes.DELIVERS_HERE  # none of its own
+    await harness.aclose()
 
 
 async def test_a_built_in_tool_goes_through_the_hooks_then_the_teams_own_callback(
@@ -312,7 +419,7 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     target = options(tmp_path, [{"text": "told: {context}"}], system_prompt="You help.")
     await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
     started = started_with(tmp_path)
-    assert started["system_prompt"] == "You help."  # the team's, as it wrote it
+    assert started["system_prompt"] == f"You help.\n\n{DELIVERS_HERE}"  # the team's first
     # Claude's built-in tools are the agent's tools too, sorted: the context carries their hints
     rendered = memory_service.context_text + "\n\n## Tools\n- Agent (confidence 0.90)"
     assert started["context"] == rendered
@@ -611,4 +718,4 @@ async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_durat
     results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
     assert [r["tool"] for r in results] == ["Read", "Grep", "lookup"]
     assert native_spec("mcp__crm__find").server == "crm"
-    assert native_spec("Bash").side_effects == "irreversible"
+    assert native_spec("Bash").side_effects == "write"  # Claude Code's own check asks first

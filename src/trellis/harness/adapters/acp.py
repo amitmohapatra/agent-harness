@@ -16,14 +16,17 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
 * tools: the harness's tools reach the agent as one more MCP server (``trellis``, so
   ``mcp__trellis__<tool>``), served for the attempt on the loopback interface
   (``tools.convert.mcp``) and handed over in ``session/new``, beside the agent's own servers;
-* permissions: the agent asks before the calls its own policy asks about
-  (``session/request_permission``): a harness tool is let through (the bridge is its check); any
-  other is decided as a harness call is — the run's hooks, governance by its risk
-  (:data:`KIMI_BUILTINS`), a person when it asks (a durable pause). A rejection, and an edit,
-  end the turn there and the agent is told in a prompt of its own (ACP's answer carries no
-  reason and no arguments): why, or to call the tool again with the edited arguments — that
-  call is approved when it comes. The agent's own questions (Kimi's ``AskUserQuestion``) are the
-  run's questions (``Runtime.ask``);
+* permissions: the agent's own, then a person when it asks. It asks before the calls its own
+  policy asks about (``session/request_permission``; one its rules allow, in its own
+  configuration, it runs): a harness tool is let through (the bridge is its check); any other
+  is decided as a harness call is — the run's hooks, governance by its risk
+  (:data:`KIMI_BUILTINS`) and the tool catalog's rules — and then, as the agent asked, a
+  person is asked (``bridge.asked``: a durable pause), unless the call only reads (a read
+  tool, or a shell command ``governance.shell.read_only`` reads as read-only). A rejection,
+  and an edit, end the turn there and the agent is told in a prompt of its own (ACP's answer
+  carries no reason and no arguments): why, or to call the tool again with the edited
+  arguments — that call is approved when it comes. The agent's own questions (Kimi's
+  ``AskUserQuestion``) are the run's questions (``Runtime.ask``);
 * records: every call the main agent runs itself is recorded as the run's once it ends
   (``tool_call`` / ``tool_call_update``: ``tools.bridge.observed``); a sub-agent's own calls are
   not shown over ACP — only those it asks permission for, which are governed;
@@ -162,7 +165,10 @@ SWARM_MEMBER: Final = re.compile(
 
 # --------------------------------------------------------------------------- Kimi Code
 #: Kimi Code's built-in tools, and what each does as governance sees it (the tool catalog's
-#: word overrides it): reads run, writes run and are announced, ``Bash`` asks; a sub-agent's
+#: word overrides it): reads run; writes, ``Bash`` among them, run and are announced, Kimi's
+#: own policy asking first where it would (a team that wants every shell command approved
+#: gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the tool catalog); a
+#: sub-agent's
 #: call (``Agent``, ``AgentSwarm``) only hands work on — each of its calls Kimi asks about is
 #: governed on its own. Any other tool Kimi asks about is a write.
 KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
@@ -189,8 +195,10 @@ KIMI_BUILTINS: Final[dict[str, SideEffects]] = {
     "CreateGoal": "write",
     "UpdateGoal": "write",
     "SetGoalBudget": "write",
-    "Bash": "irreversible",
+    "Bash": "write",
 }
+#: What Kimi Code is called when a person is asked about a call it asks about.
+KIMI_CODE: Final = "Kimi Code"
 #: Kimi Code's built-in tools whose work needs Kimi to go on running after the turn: a scheduled
 #: prompt (``CronCreate``) fires only in a session that is running then, and its list and delete
 #: go with it. The harness runs ``kimi acp`` for one attempt and ends it, so a schedule would
@@ -566,6 +574,12 @@ class ACPAdapter:
         _check_mode(options.get("mode"))
         _check_servers(options.get("mcp_servers") or ())
 
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        """Where the agent works on this machine (its ``cwd``, else this process's); ``None``
+        for a sandboxed run, whose writes go to the sandbox."""
+        ran = given(target, options)
+        return None if ran.sandbox is not None else Path(ran.cwd or os.getcwd())
+
     async def native(self, target: Any) -> list[ToolSpec]:
         """The agent's built-in tools (its profile's) and the MCP tools it was seen calling
         (its own servers', listed by the agent only)."""
@@ -901,9 +915,13 @@ class Attempt:
 
         if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
+        from trellis.harness.sandbox import DELIVERS_HERE
+
         blocks = [text_block(native_input.prompt)]
         if native_input.context:  # marked off: the question is the block after it
             blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
+        if self.target.sandbox is None:  # its own folder's outputs/ are the user's (workdir)
+            blocks.insert(0, text_block(DELIVERS_HERE))
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:
@@ -1207,7 +1225,7 @@ class Attempt:
         spec = found or ToolSpec(name=name, side_effects=side_effects or DEFAULT_SIDE_EFFECTS)
         runtime.model_ended(STEP)
         try:
-            decided = await bridge.permitted(spec, args)
+            decided = await _permitted(spec, args)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
@@ -1522,6 +1540,23 @@ def _ran(task: asyncio.Task[Any]) -> tuple[str, int | None, str | None]:
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
 def _said_reads(agent_id: str) -> None:
     log.warning("%s: %s", agent_id, READS_NOT_ISOLATED, extra={"agent_id": agent_id})
+
+
+async def _permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+    """A call the agent asked permission for: decided as the run decides a call
+    (``bridge.permitted``: hooks, governance), then — since the agent asks — a person asked
+    (``bridge.asked``), unless it only reads (a read tool, or a shell command
+    ``governance.shell.read_only`` reads as read-only) or the run changed its arguments (the
+    agent is told to call it again so: that call is the one let through). A pause
+    propagates."""
+    from trellis.harness.governance.shell import read_only
+
+    decided = await bridge.permitted(spec, args)
+    if isinstance(decided, ToolOutcome) or decided.args != args or spec.side_effects == "read":
+        return decided
+    if read_only(spec.name, args):
+        return decided
+    return await bridge.asked(spec, args, KIMI_CODE)
 
 
 def _chosen(options: list[Any], kind: str) -> Any:

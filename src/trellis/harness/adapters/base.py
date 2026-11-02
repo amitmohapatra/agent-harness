@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar, Final, Literal, Protocol
 
 from trellis.contracts import ConfigurationError, InterruptResolution, ToolSpec
@@ -165,6 +166,12 @@ class Adapter(Protocol):
     def check_options(self, options: Mapping[str, Any]) -> None: ...
 
     async def native(self, target: Any) -> list[ToolSpec]: ...
+
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        """The folder on this machine the framework works and writes in (``options``: the run's
+        framework options), whose ``outputs/`` is the user's (``sandbox.delivered``); ``None``
+        for a framework with no such folder."""
+        ...
 
 
 #: The tag of a framework's own tool that hands the work to another agent — Deep Agents'

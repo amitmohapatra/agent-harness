@@ -35,7 +35,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
-from trellis.harness.sandbox import sandbox
+from trellis.harness.sandbox import DELIVERS_HERE, sandbox
 
 #: What Kimi reads its swarm's concurrency from.
 SWARM_LIMIT = "KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"
@@ -101,7 +101,8 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert server["headers"][0]["name"] == "Authorization"
     # the harness tool needs no person: Kimi asks, the harness lets it through
     assert record["permissions"] == [{"title": "mcp__trellis__lookup", "answer": "approve_once"}]
-    assert record["prompts"] == ["tell me about tea"]
+    # what Kimi is told of its folder's outputs/ (the user's), then the user's message
+    assert record["prompts"] == [f"{DELIVERS_HERE}\ntell me about tea"]
     assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
 
 
@@ -214,11 +215,13 @@ async def test_a_harness_tool_error_reaches_the_agent(harness: Harness, tmp_path
 async def test_its_own_tools_are_governed_and_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    """``Bash`` asks a person (irreversible); approved, it runs once, after a pause — the reads
-    run without asking; each call it ran is recorded with its result."""
+    """A ``Bash`` command the agent asks about asks a person; approved, it runs once, after a
+    pause. A command that only reads runs without asking, as the reads do; each call it ran is
+    recorded with its result."""
     script = [
         {"builtin": "Read", "args": {"path": "orders.csv"}, "output": "o1,o2"},
         {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": ""},
         {"builtin": "Grep", "args": {"pattern": "x"}, "fails": "bad pattern"},
         {"text": "done: {last}"},
     ]
@@ -226,8 +229,8 @@ async def test_its_own_tools_are_governed_and_recorded(
     asked = await agent.run("tidy up", user="u1")
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Bash"
-    assert asked.interrupt.tool_call.args == {"command": "ls"}
-    assert asked.interrupt.question == "Approve Bash? Bash is irreversible."
+    assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
+    assert asked.interrupt.question == "Approve Bash? Kimi Code asks before it runs this call."
     done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: bad pattern"
     assert recorded(tmp_path)["prompts"][-1] == RESUMED_CALL.format(tool="Bash")
@@ -235,7 +238,7 @@ async def test_its_own_tools_are_governed_and_recorded(
     records = [
         (c.body["tool"], c.body["status"]) for c in memory_service.calls if c.name == "record_tool"
     ]
-    assert records == [("Read", "ok"), ("Bash", "ok"), ("Grep", "error")]  # each once
+    assert records == [("Read", "ok"), ("Bash", "ok"), ("Bash", "ok"), ("Grep", "error")]
 
 
 async def test_a_rejected_call_ends_the_turn_and_the_agent_reads_why(
@@ -423,7 +426,8 @@ async def test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt(
     assert done.status is RunStatus.SUCCESS and refunds == ["o4"]
     [warning] = [e for e in events if e.data.get("code") == "acp_session"]
     assert "was not resumed" in warning.data["message"]
-    assert recorded(tmp_path)["prompts"][-1] == "refund o4"  # from the prompt, the journal's
+    # from the prompt, the journal's
+    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\nrefund o4"
 
 
 async def test_an_agent_without_session_resume_loads_the_session(
@@ -493,7 +497,7 @@ async def test_the_context_goes_before_the_prompt_marked_off_from_it(
     )
     [prompt] = recorded(tmp_path)["prompts"]
     opened, closed = ASKED_WITH.split("{context}")
-    assert prompt.startswith(opened + memory_service.context_text)
+    assert prompt.startswith(f"{DELIVERS_HERE}\n{opened}{memory_service.context_text}")
     assert prompt.endswith(f"{closed}\nreach me?")
     [request] = memory_service.named("context")
     available = request.body["tools"]["available"]
@@ -767,7 +771,7 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
         {"builtin": "Write", "args": {"path": "/w/notes.txt", "content": "a\nb\nc\n"}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt", "line": 2, "limit": 1}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt"}},
-        {"builtin": "Bash", "args": {"command": "echo hello"}, "ask": True, "limit": 3},
+        {"builtin": "Bash", "args": {"command": "touch hello"}, "ask": True, "limit": 3},
         {"builtin": "Bash", "args": {"command": "sleep 9"}, "kill": True},
         {"text": "{last}"},
     ]
@@ -782,7 +786,7 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     [made] = sandboxes.made()
     assert made not in sandboxes.boxes  # deleted with its run
     assert any(c.startswith("mkdir -p ") for c in sandboxes.commands)
-    assert "echo hello" in sandboxes.commands and "sleep 9" in sandboxes.killed
+    assert "touch hello" in sandboxes.commands and "sleep 9" in sandboxes.killed
     record = recorded(tmp_path)
     assert record["initialize"][0]["terminal"] is True
     started = record["started"][0]

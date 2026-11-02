@@ -7,12 +7,16 @@
   tools as one in-process MCP server (``mcp__trellis__*``) beside the team's own servers — a
   ``mcp_servers`` given as a config file or JSON text is read, since the SDK serves an
   in-process server only from a dict;
-* permissions: the SDK's own ``PreToolUse`` hook, which the CLI runs before every tool call
-  whatever its ``permission_mode`` or ``allowed_tools`` (where ``can_use_tool`` is skipped) — a
-  harness tool is let through (the bridge is its check); any other (Claude Code's built-ins:
-  ``Bash``, ``Write``...; a team's own MCP server's) is decided as a harness call is — the run's
-  hooks, governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`), a person when it asks — then by
-  the team's own ``can_use_tool``, when it has one, asked by the hook;
+* permissions: Claude Code's own, then a person when it asks. The SDK's ``PreToolUse`` hook,
+  which the CLI runs before every tool call whatever its ``permission_mode`` or
+  ``allowed_tools``, lets a harness tool through (the bridge is its check) and decides any
+  other (Claude Code's built-ins: ``Bash``, ``Write``...; a team's own MCP server's) as a
+  harness call is — the run's hooks, then governance by its risk (:data:`BUILTIN_SIDE_EFFECTS`)
+  and the tool catalog's rules — and leaves the rest to Claude Code: its permission mode, its
+  rules (``allowed_tools``, its settings), and when it would ask its user, ``can_use_tool``.
+  That callback answers as the harness's: the team's own ``can_use_tool`` when it has one;
+  else a call that only reads (a read tool, or a shell command ``governance.shell.read_only``
+  reads as read-only) runs, and any other asks a person (``bridge.asked``);
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
   it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
@@ -40,11 +44,10 @@
   per attempt;
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
-  hooks go after theirs), ``can_use_tool`` (the
-  harness's hook asks it after governance, as the target's)
-  and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a server of that name
-  is refused). Refused: the fields that choose the session a query continues, and the
-  permission prompt tool (:data:`OWNED`).
+  hooks go after theirs), ``can_use_tool`` (asked when Claude Code would ask, after the hooks
+  and governance) and ``mcp_servers`` (the harness's ``trellis`` server goes beside them; a
+  server of that name is refused). Refused: the fields that choose the session a query
+  continues, and the permission prompt tool (:data:`OWNED`).
 """
 
 from __future__ import annotations
@@ -100,7 +103,10 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
 #: Claude Code's built-in tools, and what each does as governance sees it (the tool catalog's
-#: word overrides it): reads run, writes run and are announced, ``Bash`` asks; a subagent's
+#: word overrides it): reads run; writes, ``Bash`` among them, run and are announced, Claude
+#: Code's own permission check asking first where it would (a team that wants every shell
+#: command approved gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the
+#: tool catalog); a subagent's
 #: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
 #: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
 #: may do anything its command does: a write. Any other tool the CLI asks about is a write.
@@ -125,8 +131,10 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "NotebookEdit": "write",
     "KillShell": "write",
     "SlashCommand": "write",
-    "Bash": "irreversible",
+    "Bash": "write",
 }
+#: What Claude Code is called when a person is asked about a call it asks about.
+CLAUDE_CODE: Final = "Claude Code"
 #: Claude Code's built-in tools whose work needs the CLI to go on running after the query: a
 #: scheduled prompt (``CronCreate``, durable or not, fires only in a session that is running
 #: then) and a wake-up (``ScheduleWakeup``). The CLI here runs for one attempt and ends with it,
@@ -315,6 +323,11 @@ class ClaudeAdapter:
                 "(its tools) has that name"
             )
 
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        """Where the CLI works: the options' ``cwd`` (the run's own over the agent's), else
+        this process's working directory."""
+        return Path(options.get("cwd") or target.cwd or os.getcwd())
+
     async def native(self, target: Any) -> list[ToolSpec]:
         """Claude Code's built-in tools the options leave it (``tools``, else the ones
         :data:`BUILTIN_SIDE_EFFECTS` knows, less ``disallowed_tools``) and the MCP tools of its
@@ -494,12 +507,10 @@ def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:
 async def _briefed(
     runtime: Runtime, call_id: str, name: str, args: dict[str, Any]
 ) -> dict[str, Any]:
-    """A call as it runs: a subagent's (:data:`SUBAGENT_TOOLS`) started as a helper of the run
-    (``bridges.helpers``) and its ``prompt`` given the memory context for its task before it;
-    any other as it was decided."""
+    """A subagent's call (:data:`SUBAGENT_TOOLS`) as it runs: started as a helper of the run
+    (``bridges.helpers``), its ``prompt`` given the memory context for its task before it."""
     helpers = runtime.helpers
-    if helpers is None or name not in SUBAGENT_TOOLS:
-        return args
+    assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
     task = str(args.get("prompt") or args.get("description") or "")
     kind, called = Kind.SUBAGENT, str(args.get("subagent_type") or GENERAL_PURPOSE)
     helper = await helpers.start(call_id, kind=kind, name=called, task=task)
@@ -613,11 +624,12 @@ def _options(
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
-    hooks = _with_governance(options.hooks, options.can_use_tool, steps)
+    hooks = _with_governance(options.hooks, steps)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context) if context else hooks,
-        # the hook asks the team's callback itself: the CLI has no permission prompt to make
-        "can_use_tool": None,
+        "system_prompt": _told(options.system_prompt),
+        # what Claude Code asks its user about, the harness answers (the team's own first)
+        "can_use_tool": _asked(options.can_use_tool, steps),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
     }
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
@@ -636,6 +648,26 @@ def _options(
         env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
     changes["env"] = env
     return dataclasses.replace(options, **changes)
+
+
+def _told(given: Any) -> Any:
+    """The options' system prompt with what Claude is told of its folder's ``outputs/``
+    (``sandbox.DELIVERS_HERE``: the user's), after it — appended to a preset (``append``), to
+    a custom prompt or text, or as the prompt when there is none (the SDK's empty one). A
+    prompt read from a file is left as it is: the CLI takes no text beside it."""
+    from trellis.harness.sandbox import DELIVERS_HERE
+
+    def after(text: str | None) -> str:
+        return f"{text}\n\n{DELIVERS_HERE}" if text else DELIVERS_HERE
+
+    if given is None or isinstance(given, str):
+        return after(given)
+    kind = given.get("type")
+    if kind == "preset":
+        return {**given, "append": after(given.get("append"))}
+    if kind == "custom":
+        return {**given, "prompt": after(given.get("prompt"))}
+    return given
 
 
 def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
@@ -676,11 +708,11 @@ def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     return [*given, *dict.fromkeys(hidden)]
 
 
-def _with_governance(hooks: Mapping[str, Any] | None, own: Any, steps: Steps) -> dict[str, Any]:
+def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps) -> dict[str, Any]:
     """The options' hooks with the governance hook (:func:`_governance`) and the record hooks
     (:func:`_recorded`) after theirs."""
     given = dict(hooks or {})
-    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(own, steps)]
+    given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
     recorded = _recorded(steps)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
@@ -711,14 +743,16 @@ def _steering() -> Any:
     return HookMatcher(hooks=[steered])
 
 
-def _governance(own: Any, steps: Steps) -> Any:
+def _governance(steps: Steps) -> Any:
     """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
     harness tool runs (the bridge decides about it); any other is the run's decision
-    (``bridge.permitted``: hooks, governance, a person), then ``own``'s — the team's
-    ``can_use_tool`` — with the arguments as they were decided. Before Claude takes a step, the
-    run's progress is saved — its session as mirrored so far among it — so a worker that dies
-    during the step continues the session from there, not from an earlier step."""
-    from claude_agent_sdk import HookMatcher, PermissionResultAllow, ToolPermissionContext
+    (``bridge.permitted``: hooks, governance), then Claude Code's own — its permission mode and
+    rules, and :func:`_asked` when it would ask — with the arguments as they were decided (a
+    call a hook rewrote is asked about as rewritten). A subagent's call is let through with
+    its prompt briefed (:func:`_briefed`). Before Claude takes a step, the run's progress is
+    saved — its session as mirrored so far among it — so a worker that dies during the step
+    continues the session from there, not from an earlier step."""
+    from claude_agent_sdk import HookMatcher
 
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
@@ -731,32 +765,67 @@ def _governance(own: Any, steps: Steps) -> Any:
         if name.startswith(f"mcp__{SERVER}__"):
             steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
-        # its risk as the run's tool set has it (an in-process server's tool: its annotations)
-        known = runtime.native.get(name)
-        side_effects = (
-            known.side_effects
-            if known is not None
-            else BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
-        )
         try:
-            decided = await bridge.permitted(ToolSpec(name=name, side_effects=side_effects), args)
+            decided = await bridge.permitted(_spec(runtime, name), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         if isinstance(decided, ToolOutcome):
             return _decided("deny", str(decided.output))
-        if own is None:
+        if name in SUBAGENT_TOOLS:
             ran = await _briefed(runtime, call_id, name, decided.args)
             steps.started(call_id, name, ran)
             return _decided("allow", updated=ran)
-        verdict = await own(name, decided.args, ToolPermissionContext(tool_use_id=tool_use_id))
-        if isinstance(verdict, PermissionResultAllow):
-            ran = await _briefed(runtime, call_id, name, verdict.updated_input or decided.args)
-            steps.started(call_id, name, ran)
-            return _decided("allow", updated=ran)
-        refused = _decided("deny", verdict.message)
-        return {**refused, "continue_": False} if verdict.interrupt else refused
+        steps.started(call_id, name, decided.args)
+        if decided.args != args:
+            return _decided("ask", updated=decided.args)
+        return {}  # Claude Code's own permission check decides
 
     return HookMatcher(hooks=[pre_tool_use])
+
+
+def _asked(own: Any, steps: Steps) -> Any:
+    """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
+    permission mode and rules let it through without asking otherwise): the team's own
+    callback, when it has one; else a call that only reads runs — a read tool, or a shell
+    command :func:`~trellis.harness.governance.shell.read_only` reads as read-only — and any
+    other asks a person (``bridge.asked``). A call not let through ends its step."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    from trellis.harness.governance.shell import read_only
+    from trellis.harness.tools.convert.claude import WAITING
+
+    async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+        runtime = current()
+        assert runtime is not None  # the CLI asks inside the run it works for
+        spec = _spec(runtime, name)
+        if own is not None:
+            verdict = await own(name, args, context)
+        elif spec.side_effects == "read" or read_only(name, args):
+            verdict = PermissionResultAllow()
+        else:
+            try:
+                decided = await bridge.asked(spec, args, CLAUDE_CODE)
+            except Paused:  # the run pauses: Claude stops here, and the resume goes on
+                decided = None
+            if decided is None:
+                verdict = PermissionResultDeny(message=WAITING, interrupt=True)
+            elif isinstance(decided, ToolOutcome):
+                verdict = PermissionResultDeny(message=str(decided.output))
+            else:
+                verdict = PermissionResultAllow(updated_input=decided.args)
+        if not isinstance(verdict, PermissionResultAllow):
+            steps.ended(str(getattr(context, "tool_use_id", None) or name))
+        return verdict
+
+    return can_use_tool
+
+
+def _spec(runtime: Runtime, name: str) -> ToolSpec:
+    """A call's tool as governance decides it: its risk as the run's tool set has it (an
+    in-process server's tool: its annotations), else a built-in's
+    (:data:`BUILTIN_SIDE_EFFECTS`)."""
+    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
 
 
 def _recorded(steps: Steps) -> Any:
@@ -862,7 +931,7 @@ def native_spec(name: str) -> ToolSpec:
 
 
 def _decided(
-    decision: Literal["allow", "deny"],
+    decision: Literal["allow", "deny", "ask"],
     reason: str | None = None,
     *,
     updated: dict[str, Any] | None = None,
