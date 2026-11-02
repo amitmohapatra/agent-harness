@@ -8,20 +8,26 @@ this deployment cannot do.
 Each round adds cases no earlier round used (ids ``bf<round>-…``, tag ``round:<n>``); the
 held-out cases (ids ``bfh-…``, tag ``heldout``) are run every round and never fixed against, so
 their score stays honest. Categories: ``bf_past``, ``bf_analytics``, ``bf_explain``,
-``bf_mixed``, ``bf_cantdo``, ``bf_clarify``. Every figure's truth is computed from the world
-(:mod:`benchmark.cost.retail`), as the rest of the suite's is.
+``bf_mixed``, ``bf_cantdo``, ``bf_clarify``, and round 4's ``bf_derive``: derive a model from the
+data (a trend, a fitted formula, a growth rate, a break-even point, a correlation and its line),
+then apply it — figures a model must compute with a tool, never by hand. Every figure's truth is
+computed from the world (:mod:`benchmark.cost.retail`), as the rest of the suite's is.
 """
 
 from __future__ import annotations
 
 import functools
 import itertools
+import math
 from collections.abc import Callable
+from datetime import date, timedelta
 from typing import Any, Final
 
 from benchmark.cost import retail as r
 
-CATEGORIES: Final = ("bf_past", "bf_analytics", "bf_explain", "bf_mixed", "bf_cantdo", "bf_clarify")
+CATEGORIES: Final = (
+    "bf_past", "bf_analytics", "bf_explain", "bf_mixed", "bf_cantdo", "bf_clarify", "bf_derive",
+)  # fmt: skip
 #: Another person of the same tenant: what they said is never this user's.
 OTHER_USER: Final = "trellis-bench-colleague"
 #: The memory of bf3-past-02's approval as the scripted model names it (a model reads the id
@@ -1104,6 +1110,10 @@ def cases() -> list[Any]:
         ("which two, then the comparison",),
     ))  # fmt: skip
 
+    # ================================================================== round 4
+    # ---------------------------------------------------------------- derive, then apply
+    out.extend(derived(w))
+
     # ================================================================== held out
     h1 = first(lambda k: k.category == "shirts" and avg28(k.sku, "north") > 0.5, 2)
     out.append(Case(
@@ -1172,6 +1182,118 @@ def cases() -> list[Any]:
                                     "Wool-Blend Hoodie", "Chunky Hoodie"])),
         ),
         ("heldout",),
+    ))  # fmt: skip
+    return out
+
+
+def derived(w: r.World) -> list[Any]:
+    """Round 4: derive a model from the data, then apply it. Each truth is exact (the standard
+    library's least squares and correlation over the world's own rows), and each derivation
+    needs a dozen to a few hundred figures — what a model gets wrong by hand."""
+    from benchmark.cost import complex as cx
+
+    Case, Turn = cx.Case, cx.Turn
+    out: list[Any] = []
+
+    # trend -> forecast: a least-squares line through nine monthly totals, extended three months
+    months = [v for _, v in r.truth_monthly(w, "units", category="outerwear", **YTD)]
+    slope, icept = r.regression(range(1, 10), months)
+    q4 = sum(slope * m + icept for m in (10, 11, 12))
+    out.append(Case(
+        "bf4-derive-01", "bf_derive", 3,
+        (
+            Turn("Fit a least-squares linear trend to outerwear's monthly units sold in 2026 "
+                 "(January = 1 ... September = 9). What is the slope in units per month, and the "
+                 "trend's total forecast for Q4 (months 10 to 12)?",
+                 expect=cx.record({"slope": slope, "q4": q4},
+                                  tol={"slope": 0.05, "q4": abs(q4) * 0.001})),
+            Turn("If Q4 comes in 8% below that forecast, how many units short of it is that?",
+                 expect=cx.record({"short": q4 * 0.08}, tol={"short": abs(q4) * 0.0005})),
+        ),
+        ("a trend fitted, then extended", "a what-if on the forecast"),
+    ))  # fmt: skip
+
+    # formula fitting: units = a + b x price across a category's SKUs (a join of two tools)
+    sold = r.grouped(r.selected(w, category="denim", **Q3), w, "sku", "units")
+    xs = [w.skus[k].price for k in sorted(sold)]
+    ys = [sold[k] for k in sorted(sold)]
+    b, a = r.regression(xs, ys)
+    out.append(Case(
+        "bf4-derive-02", "bf_derive", 3,
+        (
+            Turn("Across the denim SKUs that sold in Q3 2026, fit Q3 units sold = a + b x current "
+                 "price by least squares. What are a and b, and how many Q3 units does the fit "
+                 "predict for a denim SKU priced £95?",
+                 expect=cx.record({"a": a, "b": b, "at_95": a + b * 95},
+                                  tol={"a": abs(a) * 0.002, "b": max(abs(b) * 0.005, 0.0005),
+                                       "at_95": max(abs(a + b * 95) * 0.002, 0.05)})),
+        ),
+        ("a formula fitted over a join of 2 tools", "applied to a new value"),
+    ))  # fmt: skip
+
+    # compounding: the compound monthly growth rate, then carried forward
+    revenue = [v for _, v in r.truth_monthly(w, **YTD)]
+    g = (revenue[-1] / revenue[0]) ** (1 / 8) - 1
+    ahead = [revenue[-1] * (1 + g) ** n for n in (1, 2, 3)]
+    out.append(Case(
+        "bf4-derive-03", "bf_derive", 2,
+        (
+            Turn("What was the compound monthly growth rate of total revenue from January to "
+                 "September 2026 (eight monthly steps), in %? If revenue kept growing at that "
+                 "rate, what would December 2026's revenue be?",
+                 expect=cx.record({"rate": g * 100, "december": ahead[-1]},
+                                  tol={"rate": 0.006, "december": ahead[-1] * 0.001})),
+            Turn("And Q4 2026's total revenue at that rate?",
+                 expect=cx.record({"q4": sum(ahead)}, tol={"q4": sum(ahead) * 0.001})),
+        ),
+        ("a growth rate derived, then compounded forward",),
+    ))  # fmt: skip
+
+    # break-even: a fixed fee over the unit margin, then the days the sales rate takes
+    def daily_units(sku: str) -> float:
+        return r.truth_total(w, "units", sku=sku, **Q3) / 92
+
+    pick = next(k for k in sorted(w.skus.values(), key=lambda k: k.sku)
+                if k.category == "footwear" and k.price - k.unit_cost > 5
+                and daily_units(k.sku) > 0.5)  # fmt: skip
+    fee = 6000
+    need = math.ceil(fee / (pick.price - pick.unit_cost))
+    cut = math.ceil(fee / (pick.price * 0.9 - pick.unit_cost))
+    out.append(Case(
+        "bf4-derive-04", "bf_derive", 3,
+        (
+            Turn(f"A promotion of the {pick.name} costs us a fixed £{fee:,}. At its current price "
+                 "and unit cost, how many units must it sell to cover that (round up)? And at its "
+                 "Q3 2026 average daily units sold (all regions, 92 days), how many days would "
+                 "that take (round up)?",
+                 expect=cx.record({"units": need, "days": math.ceil(need / daily_units(pick.sku))},
+                                  tol={"units": 0, "days": 0})),
+            Turn("And if we also cut its price by 10% (same unit cost), how many units then?",
+                 expect=cx.record({"units": cut}, tol={"units": 0})),
+        ),
+        ("a break-even point from 3 tools", "the same point under a what-if"),
+    ))  # fmt: skip
+
+    # correlation -> prediction: two daily series, their correlation and the line between them
+    def units_by_day(category: str) -> list[float]:
+        per = r.grouped(r.selected(w, category=category, **Q3), w, "date", "units")
+        first = date.fromisoformat(Q3["start"])
+        return [per.get((first + timedelta(days=n)).isoformat(), 0.0) for n in range(92)]
+
+    kn, ou = units_by_day("knitwear"), units_by_day("outerwear")
+    rho = r.truth_correlation(kn, ou)
+    lb, la = r.regression(kn, ou)
+    out.append(Case(
+        "bf4-derive-05", "bf_derive", 3,
+        (
+            Turn("Daily units sold in Q3 2026 (92 days, 0 on a day with none) for knitwear and "
+                 "for outerwear: what is their Pearson correlation? Then fit outerwear's daily "
+                 "units on knitwear's by least squares, and predict outerwear's units on a day "
+                 "knitwear sells 60.",
+                 expect=cx.record({"r": rho, "predicted": la + lb * 60},
+                                  tol={"r": 0.006, "predicted": 0.06})),
+        ),
+        ("a correlation over two daily series", "a fitted line used to predict"),
     ))  # fmt: skip
     return out
 
