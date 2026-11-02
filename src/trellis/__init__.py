@@ -23,6 +23,7 @@ __path__ = __import__("pkgutil").extend_path(__path__, __name__)
 if TYPE_CHECKING:
     from trellis.harness.adapters.acp import kimi
     from trellis.harness.agent import Agent, RunHandle
+    from trellis.harness.background import background
     from trellis.harness.budget import Budget
     from trellis.harness.evals import llm_judge
     from trellis.harness.harness import Harness
@@ -68,6 +69,7 @@ _EXPORTS = {
     "Settings": "trellis.harness.settings",
     "Budget": "trellis.harness.budget",
     "deep_agent": "trellis.harness.skills",
+    "background": "trellis.harness.background",
 }
 
 #: Names ``trellis`` no longer has, and what to use instead (said when one is read).
@@ -96,6 +98,7 @@ __all__ = [
     "Settings",
     "a2a",
     "ask_user",
+    "background",
     "current",
     "deep_agent",
     "kimi",

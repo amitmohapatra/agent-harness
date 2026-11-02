@@ -176,6 +176,52 @@ recorded under their own run (Claude's built-ins and its MCP servers' tools by t
 CLI names; the harness's own tools that a Claude subagent calls are recorded under the run),
 their turns and their outcome in memory, their tokens on the run's budget.
 
+## In the background
+
+`background(*agents)` lets the model start a sub-agent that works while the conversation goes
+on — Claude Code's background agents, with Deep Agents' own async sub-agent tools
+([ADR 0008](adr/0008-background-subagents.md)):
+
+```python
+research = h.wrap(ReAct(system_prompt="You research.", model=model, tools=[search]), id="research")
+lead = h.wrap(
+    ReAct(system_prompt="You lead.", model=model, tools=[background(research)]), id="lead"
+)
+worker = h.worker([research])  # the tasks are queued runs: run it beside the chat
+```
+
+| Tool | What it does | Backed by |
+|---|---|---|
+| `start_async_task(description, subagent_type)` | starts a task and returns its `task_id` at once: the turn answers without waiting | a queued child run of the turn (`agent.start` inside a run), worked by a worker; after a crash another worker continues it |
+| `check_async_task(task_id)` | its status, and its result, error or question | the run store |
+| `update_async_task(task_id, message)` | a new instruction, read at the task's next step | the step hook `mode="steer"` uses (`Adapter.steers`) |
+| `cancel_async_task(task_id)` | stops it | `agent.cancel` |
+| `list_async_tasks(status_filter)` | the conversation's tasks | the run store |
+
+**Its user's only.** A task is its user's, in their tenant: given its id, a tool finds it from
+any of the user's chats; another user's or another tenant's task is "no task". The list and the
+turns' note are of the chat that started it. Cancelling the turn that started it leaves it
+working.
+
+**Its events.** Each state of a task is a `CUSTOM` event named `background_task`
+(`{"task_id", "subagent_type", "status", ...}`; on AG-UI a `CUSTOM` event, on A2A a working
+update's data part): `queued` on the turn that starts it; `running` as it starts and after each
+step it finishes (`progress`); then `success` (with its `result`), `error`, `timeout`,
+`cancelled` or `paused` (asking a person) — on the stream of the turn working in its
+conversation in this process. Every later turn's stream starts with one per task, as it stands,
+so an idle chat sees them at its next message.
+
+**Its result.** A turn working in the conversation when the task ends reads
+`[background task <id> (<agent>) ended SUCCESS]` and the answer at its next step; every later
+turn is told, as it starts, of the conversation's tasks — each one's status and each ended one's
+answer. A task that asks a person waits in `h.inbox` on its own run: answer it there
+(`research.resume(task_id, ...)`).
+
+**Limits.** An instruction reaches a task working, or queued, in this process; one held by
+another process's worker is refused, said (cancel it and start it again). A sub-agent with no
+step the harness reaches (a function, a graph without the harness's middleware) takes none,
+said. An idle chat is told a result at its next message: AG-UI streams runs, not threads.
+
 ## On failure
 
 * A child that fails (an error, its time out) is an error the parent's model reads
@@ -206,4 +252,5 @@ their turns and their outcome in memory, their tokens on the run's budget.
   agents at once, one of which asks a person.
 * Tests: `tests/integration/test_subagents.py` (every adapter as a child, two at once, a child
   that asks, a worker killed inside a child, cancel, time), and against the real services
-  `tests/live/test_live_subagents.py`.
+  `tests/live/test_live_subagents.py`; in the background `tests/integration/test_background.py`
+  and the matrix rows `B01`–`B06` (`tests/matrix/background.py`).

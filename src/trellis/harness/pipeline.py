@@ -48,7 +48,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox, snapshots
+from trellis.harness import background, budget, conversation, sandbox, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -61,6 +61,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.background import BACKGROUND
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
@@ -212,7 +213,9 @@ async def attempt(
         )
         if live is not None:
             live.result = result
-        return result
+    if BACKGROUND in record.metadata:  # a background task: its answer reaches its conversation
+        background.ended(agent, record, result)
+    return result
 
 
 #: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
@@ -302,7 +305,7 @@ async def _attempt(
     continued = _continued_session(agent, identity, journal, record.attempt, parent)
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
-    events = _emitter(agent, identity, record.attempt, listener, job)
+    events = _emitter(agent, identity, record.attempt, listener, job, record=record)
     runtime = Runtime(
         identity=identity,
         agent=agent,
@@ -459,10 +462,14 @@ async def _worked(
     tools = await agent.tools_for(runtime)
     runtime.toolbox = {t.name: t for t in tools}
     runtime.native = await agent.native_tools(runtime)
-    if stored.looks(runtime):
-        # the memory context, and — read meanwhile — the files kept for the run's user
-        pushed, files = await asyncio.gather(agent.push(runtime), stored.note(runtime))
-        stored.told(runtime, files)
+    # the memory context, and — read meanwhile — what the run is told as it starts
+    notes = [(note, told) for looks, note, told in NOTES if looks(runtime)]
+    if notes:
+        pushed, said = await asyncio.gather(
+            agent.push(runtime), asyncio.gather(*(note(runtime) for note, _ in notes))
+        )
+        for (_, told), what in zip(notes, said, strict=True):
+            told(runtime, what)
     else:
         pushed = await agent.push(runtime)
     if observe is not None:
@@ -480,6 +487,23 @@ async def _worked(
         streaming=streaming,
     )
     return extracted, pushed
+
+
+#: What a run is told as it starts, beside its memory context, when it ``looks``: the files
+#: kept for its user, and its conversation's background tasks.
+NOTES: Final[
+    tuple[
+        tuple[
+            Callable[[Runtime], bool],
+            Callable[[Runtime], Awaitable[str | None]],
+            Callable[[Runtime, str | None], None],
+        ],
+        ...,
+    ]
+] = (
+    (stored.looks, stored.note, stored.told),
+    (background.looks, background.note, background.told),
+)
 
 
 async def _cancelled(
@@ -669,12 +693,17 @@ def _emitter(
     attempt: int,
     listener: Callable[[RunEvent], None] | None,
     job: Job | None,
+    *,
+    record: RunRecord | None = None,
 ) -> RunEvents:
-    """The attempt's events: to ``listener``, and — agent-runs keeping runs' events — to the
-    run's log, so any replica streams them (``runlog.py``)."""
+    """The attempt's events: to ``listener`` — a background task's ``record``'s also to the
+    conversation that started it (``background.relay``) — and, agent-runs keeping runs'
+    events, to the run's log, so any replica streams them (``runlog.py``)."""
     events = RunEvents(identity.context(), attempt)
     if listener is not None:
         events.listen(listener)
+    if record is not None and BACKGROUND in record.metadata:
+        events.listen(background.relay(agent, record))
     store = event_log(agent.harness.runs)
     if store is not None:
         worker = None if job is None else job.worker_id
