@@ -20,7 +20,9 @@
   governed copy of its agent; where the SDK's agent tool cannot be pointed at it, its own tools'
   calls are not governed, which is said once;
 * pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal;
-  the SDK's own ``needs_approval`` tools pause with the SDK's ``RunState``, and a resume
+  a call governance asks about is held at the SDK's own gate (:func:`_gated`: a
+  ``needs_approval`` policy asking governance, ``tools.convert.openai_agents.held``), as are
+  the SDK's own ``needs_approval`` tools: they pause with the SDK's ``RunState``, and a resume
   approves or rejects on that state and continues it (``RunState.approve``/``reject``). The SDK
   takes no edited arguments and no answer in place of a tool's result, so: a reject carries the
   reviewer's reason (``rejection_message``, the text the model reads); an answer is a reject
@@ -189,7 +191,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers), _hooks()
+        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
         options = _options(run.runtime, target)
         error: BaseException | None = None
         try:
@@ -209,7 +211,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers), _hooks()
+        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
         options = _options(run.runtime, target)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
@@ -309,7 +311,9 @@ class OpenAIAgentsAdapter:
 
     # ------------------------------------------------------------------ internals
     @staticmethod
-    def _agent(target: Any, run: Invocation, helpers: Helpers) -> Any:
+    def _agent(
+        target: Any, run: Invocation, helpers: Helpers, gated: Mapping[str, ToolSpec]
+    ) -> Any:
         # the memory tools (pull, tool_search) go to every agent the run can reach: an agent
         # it hands off to answers from memory as the one it started with
         memory = {t.spec.name for t in run.tools if t.feature in MEMORY_TOOLS}
@@ -320,6 +324,7 @@ class OpenAIAgentsAdapter:
             shared=shared,
             agent_id=run.runtime.agent_id,
             helpers=helpers,
+            gated=gated,
         )
 
     @staticmethod
@@ -346,6 +351,7 @@ def governed_agents(
     agent_id: str,
     shared: Sequence[Any] = (),
     helpers: Helpers | None = None,
+    gated: Mapping[str, ToolSpec] | None = None,
 ) -> Any:
     """``target`` and every agent reachable through its handoffs and its agent tools
     (``Agent.as_tool``), each a copy whose own tools are governed
@@ -357,10 +363,18 @@ def governed_agents(
     (the run's memory tools) on every other's. A tool an agent carries already (built with
     the harness) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
     its tools cannot be reached, which is said once. With ``helpers``, each agent tool's call is
-    a helper of the run. The agents you wrapped are not changed."""
+    a helper of the run. The function tools ``gated`` names (those governance may ask about,
+    :func:`_gated`) are held at the SDK's own approval gate when it asks
+    (``tools.convert.openai_agents.held``). The agents you wrapped are not changed."""
     from agents import Agent
 
-    from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed
+    from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed, held
+
+    gates = gated or {}
+
+    def gate(tool: Any) -> Any:
+        spec = gates.get(getattr(tool, "name", ""))
+        return tool if spec is None else held(tool, spec)
 
     copies: dict[int, Any] = {}
 
@@ -375,12 +389,12 @@ def governed_agents(
             ran = _running(tool, copied(inner, shared)) if isinstance(inner, Agent) else None
             if inner is not None and ran is None:
                 _ungoverned_inside(agent_id, tool)
-            own.append(governed(ran or tool, helpers))
+            own.append(gate(governed(ran or tool, helpers)))
         carried = {getattr(t, "name", None) for t in agent.tools}
         # in name order, as every other adapter offers them: a stable prefix for a prompt
         # cache, and no tool first only because it was declared first
         copy.tools = sorted(
-            [*own, *(t for t in extra if t.name not in carried)],
+            [*own, *(gate(t) for t in extra if t.name not in carried)],
             key=lambda t: str(getattr(t, "name", "")),
         )
         copy.mcp_servers = [GovernedServer.of(s) for s in agent.mcp_servers]
@@ -395,6 +409,22 @@ def governed_agents(
         return copy
 
     return copied(target, added)
+
+
+async def _gated(run: Invocation) -> dict[str, ToolSpec]:
+    """The run's tools — the harness's and the agents' own — whose calls governance may ask a
+    person about, as the catalog says now (``Governance.may_ask``), by name: these are held at
+    the SDK's own approval gate, so an approved call continues the paused run. Any other tool
+    the SDK runs as ever (a call it cannot read the arguments of is not held for a person); a
+    call the catalog starts asking about later in the run, and every call of a run with tool
+    hooks, pause as a harness pause does."""
+    runtime = run.runtime
+    if runtime.agent.hooks:  # a tool hook may rewrite the call, deny it or ask its own question
+        return {}  # first: its calls pause as the harness's do
+    specs = {s.name: s for s in [*runtime.native.values(), *(t.spec for t in run.tools)]}
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    asks = await governance.may_ask(list(specs.values()), agent_id=runtime.agent_id)
+    return {name: specs[name] for name in asks}
 
 
 class GovernedServer:

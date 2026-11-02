@@ -338,9 +338,7 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
     inner = ScriptedModel(["o1 is fine"], ids="checker_")
     checker = Agent(name="checker", model=inner)
     tool_ = checker.as_tool(tool_name="check", tool_description="Check an order.")
-    model = ScriptedModel(
-        [("check", {"input": "check o1"}), ("check", {"input": "check o1"}), "ok"]
-    )
+    model = ScriptedModel([("check", {"input": "check o1"}), "ok"])
     governance = Governance(FakeCatalog({"check": Rule(risk="irreversible")}))
     async with with_governance(
         Harness(config=Settings(), memory=memory_service.client()), governance
@@ -351,6 +349,7 @@ async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules
         assert paused.interrupt.question.startswith("Approve check?")  # the catalog's rule
         result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
         assert result.status is RunStatus.SUCCESS and result.answer == "ok"
+        assert len(model.inputs) == 2  # the approval continued the SDK's run state
         [child] = await children(h, result.run_id)
         record = await h.runs.get(child.run_id)
         await h.writes.drain()

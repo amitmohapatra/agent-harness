@@ -67,8 +67,8 @@ from trellis.harness.conversation import result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, content_key
-from trellis.harness.runtime import Runtime, current, reason_of
+from trellis.harness.journal import OUTCOME, content_key, reach
+from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
@@ -181,6 +181,38 @@ async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutc
         return denied(call, verdict)
     _, call, rejected = await _decided(runtime, spec, call, verdict)
     return call if rejected is None else rejected
+
+
+async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
+    """For a framework that holds a call at its own approval gate before it runs it (OpenAI
+    Agents' ``needs_approval``): whether governance asks a person about this call, as it would
+    when the call runs — and if so, asked now (the run's pause, governance's question), so the
+    framework keeps its run where it paused and its resume runs the call, instead of a new
+    attempt that asks the model again. Not for a call governance lets run, one approved for
+    the rest of the run, or one already approved or answered: the call decides those as ever."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
+        runtime.events.warning(decision.error.code, decision.error.message)
+    journal = runtime.replay.journal
+    if (
+        not decision.asks
+        or reach(spec.name, decision.assignee) in journal.remembered
+        or content_key("approved", spec.name, args) in journal.approved
+        or runtime.replay.answered(content_key("approve", spec.name, args))
+    ):
+        return False
+    key = content_key("call", spec.name, args)
+    call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
+    try:
+        await runtime.approve(call, decision)
+    except Paused:
+        return True
+    raise AssertionError("an approval not answered yet pauses")  # pragma: no cover
 
 
 async def observed(
@@ -447,8 +479,8 @@ async def _decided(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     remembered = runtime.replay.journal.remembered
-    reach = _reach(spec.name, decision.assignee)
-    if decision.asks and reach in remembered:
+    covers = reach(spec.name, decision.assignee)
+    if decision.asks and covers in remembered:
         decision = decision.approved(f"{spec.name} was approved for the rest of the run.")
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
     gated = content_key("approved", spec.name, call.args)
@@ -460,8 +492,8 @@ async def _decided(
     if decision.asks:
         resolution = await runtime.approve(call, decision)
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
-        if resolution.remember == "run" and reach not in remembered:
-            remembered.append(reach)  # in the journal: later calls of it are not asked
+        if resolution.remember == "run" and covers not in remembered:
+            remembered.append(covers)  # in the journal: later calls of it are not asked
         if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             rejected = ToolOutcome(
@@ -477,12 +509,6 @@ async def _decided(
     elif decision.announces:
         runtime.events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
-
-
-def _reach(tool: str, assignee: str | None) -> str:
-    """What an approval remembered for the run covers: the tool's later calls asked of the
-    same person or role (an ``Ask`` naming someone else still asks)."""
-    return tool if assignee is None else f"{tool} for {assignee}"
 
 
 async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> ToolOutcome:

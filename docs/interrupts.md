@@ -439,7 +439,10 @@ and only a run assigned to that person or to nobody; never a run assigned to a g
 * **LangChain `HumanInTheLoopMiddleware`, Deep Agents `interrupt_on`**: the middleware's own
   pause (below).
 * **OpenAI Agents `needs_approval` tools**: the SDK's own pause, continued from its `RunState`
-  (below).
+  (below). A call governance asks about (an `irreversible` tool, a catalog `approve_when`) is
+  held at the same gate: the harness gives each tool the catalog may ask about a
+  `needs_approval` policy that asks governance, so its approval continues the run too, with
+  governance's question.
 * **Everything else** re-runs from the input as the next attempt, with the **journal**:
   answers already given return where their question is asked, and tool calls already made
   return their recorded outputs instead of running again. Entries are keyed by content (the

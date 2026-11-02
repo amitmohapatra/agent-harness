@@ -85,6 +85,12 @@ def content_key(kind: str, *parts: Any) -> str:
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
 
 
+def reach(tool: str, assignee: str | None) -> str:
+    """What an approval remembered for the run covers: the tool's later calls asked of the
+    same person or role (an ``Ask`` naming someone else still asks)."""
+    return tool if assignee is None else f"{tool} for {assignee}"
+
+
 class Pending(BaseModel):
     """The interrupt the run is waiting on, and the key its answer is filed under."""
 
@@ -212,6 +218,14 @@ class Journal(BaseModel):
         if isinstance(edited, dict) and calls:
             calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
+        call = interrupt.tool_call
+        if (
+            call is not None
+            and self.pending.key == content_key("approve", call.tool, call.args)
+            and resolution.remember == "run"
+        ):  # governance's own question, which the framework's gate held the call for: the
+            # later calls of the tool it covers are not held (``bridge.asks_first``)
+            self.remembered.append(reach(call.tool, interrupt.assignee))
 
     def answered(self, resolution: InterruptResolution) -> None:
         """File the answer to the open pause, and close it."""
@@ -251,6 +265,11 @@ class Replay:
             self._mark("a", key, index, self._here())
             return InterruptResolution.model_validate(recorded[index])
         return None
+
+    def answered(self, key: str) -> bool:
+        """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""
+        given = len(self.journal.answers.get(key, ()))
+        return self._index("a", key, given) < given
 
     def occurrence(self, key: str) -> int:
         """Which occurrence of ``key`` the next call is (0 for the first)."""

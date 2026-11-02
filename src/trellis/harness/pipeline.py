@@ -821,7 +821,10 @@ def _pause(
         if native is not None:
             # the framework's handle of this pause (calls made at once may each have asked)
             ids = native.ids or {}
-            native_id = ids.get(runtime.pending.interrupt.interrupt_id, native.native_id)
+            native_id = ids.get(
+                runtime.pending.interrupt.interrupt_id,
+                runtime.pending.native_id or native.native_id,  # a handle it knows already
+            )
             return runtime.pending.model_copy(
                 update={"native_id": native_id, "native_state": native.state}
             )
