@@ -345,16 +345,18 @@ async def tasks_of(runtime: Runtime, agents: Any) -> list[RunRecord]:
 
 async def users_tasks(agent: Agent, user: str) -> list[RunRecord]:
     """The user's tasks of ``agent``'s background agents, from any of their chats, newest
-    first, at most :data:`LISTED` (the status view)."""
+    first, at most :data:`LISTED` (the status view): the user's runs of each agent (agent-runs
+    reads them by user, ``ix_runs_user``), each read whole at once."""
     runs, tenant = agent.harness.runs, await agent.harness._tenant()
     found = []
     for name in {n for s in sources(agent) for n in s.agents}:
-        async for summary in runs.iterate(agent_id=name, tenant=tenant, limit=LISTED, max_pages=1):
+        async for summary in runs.iterate(
+            agent_id=name, user_id=user, tenant=tenant, limit=LISTED, max_pages=1
+        ):
             found.append(summary)
     found.sort(key=lambda s: s.updated_at, reverse=True)
-    records = await asyncio.gather(*(runs.get(s.run_id, tenant=tenant) for s in found))
-    mine = [r for r in records if r is not None and r.user_id == user and BACKGROUND in r.metadata]
-    return mine[:LISTED]
+    records = await asyncio.gather(*(runs.get(s.run_id, tenant=tenant) for s in found[:LISTED]))
+    return [r for r in records if r is not None and BACKGROUND in r.metadata]
 
 
 def described(record: RunRecord, *, whole: bool = False) -> dict[str, Any]:
