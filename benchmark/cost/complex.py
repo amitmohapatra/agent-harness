@@ -2741,10 +2741,27 @@ def numbers(answer: str) -> list[float]:
     return out
 
 
+#: A scale said right after a figure ("£8.18 million", "£2.55m", "£36.3k"): its value is the
+#: figure times the scale. Read after each figure ``_NUMBER`` finds, so in linear time.
+_SCALE: Final = re.compile(r"\s?(billion|bn|million|mn|m|thousand|k)\b", re.IGNORECASE)
+_SCALES: Final = {"billion": 1e9, "bn": 1e9, "million": 1e6, "mn": 1e6, "m": 1e6,
+                  "thousand": 1e3, "k": 1e3}  # fmt: skip
+
+
+def _scaled(answer: str) -> list[float]:
+    """The figures an answer states with a scale, at their value."""
+    out = []
+    for m in _NUMBER.finditer(answer):
+        unit = _SCALE.match(answer, m.end())
+        if unit is not None:
+            out.append(float(m.group(0).replace(",", "")) * _SCALES[unit.group(1).lower()])
+    return out
+
+
 def _has_number(answer: str, value: float, tol: float) -> bool:
     """Whether the answer states ``value`` (within ``tol``): as a figure; a rate (under 1) as a
     percentage too ("73%" for 0.73); a small whole count as a word too ("one store")."""
-    found = numbers(answer)
+    found = numbers(answer) + _scaled(answer)
     if 0 < abs(value) < 1:
         found += [p / 100 for p in _percentages(answer)]
     if value == int(value) and 1 <= value <= len(_COUNTS):

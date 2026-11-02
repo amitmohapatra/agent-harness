@@ -1338,3 +1338,15 @@ def test_claude_and_kimi_work_in_a_folder_of_their_own(tmp_path, monkeypatch) ->
     assert cx.work_folder("react") is None and cx.work_folder("graph") is None
     options, _ = cx.target_of("m", "memory", None, 6, adapter="claude")
     assert options.cwd == str(tmp_path / "claude" / "cwd")
+
+
+def test_a_figure_said_in_millions_or_thousands_reads_as_its_value() -> None:
+    """bf4-derive-03 t1: "about £8.18 million" for £8,179,367 (within its 0.1%) was scored
+    wrong in 4 of 10 Haiku runs: the figure was read as 8.18. A scale word or letter after it
+    says its value; a figure off by more than the tolerance still fails."""
+    expect = cx.money(8_179_367.09)
+    assert cx.score(expect, "Q4 would be about **£8.18 million**.", [])["correct"]
+    assert cx.score(expect, "Q4: £8.18m.", [])["correct"]
+    assert cx.score(cx.money(36_255.0), "About £36.3k.", [])["correct"] is False  # 0.1% off: no
+    assert cx.score(cx.money(36_255.0), "About £36.255k.", [])["correct"]
+    assert not cx.score(expect, "Q4 would be about £8.3 million.", [])["correct"]
