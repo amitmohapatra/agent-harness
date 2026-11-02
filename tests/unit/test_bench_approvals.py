@@ -21,6 +21,12 @@ READS = [
     """python3 -c "import csv; print(sum(float(r['revenue']) for r in csv.DictReader(open('s.csv'))))\"""",
     "python3 - <<'EOF'\nimport pandas as pd\ndf = pd.read_csv('s.csv')\nprint(df.revenue.sum())\nEOF",
     "python3 <<EOF\nwith open('s.csv', 'rb') as f:\n    print(len(f.read()))\nEOF",
+    # Kimi's, in the re-measure on Haiku: a newline inside the quoted code, an error output
+    # joined to the output (``2>&1``), ``which``
+    'python3 -c "\nr=25333.51\nn=r*0.9*1.15\nprint(round(n,2), round(n-r,2))"',
+    'python3 -c "import matplotlib, sys; print(matplotlib.__version__, sys.version)" 2>&1; which python3',
+    'python3 -c "import matplotlib; print(matplotlib.__version__)" 2>&1; which python3; pwd; ls -la',
+    "ls -la 2>&1 | head -5",
 ]
 NOT = [
     "rm -rf /tmp/x",
@@ -47,6 +53,10 @@ NOT = [
     "X=1 cat s.csv",
     "cat 's.csv",
     "",
+    "cat s.csv\nrm s.csv",  # a newline between commands: the second one is read too
+    "ls 2>&1 > out.txt",
+    "ls 2>errors.txt",
+    "which python3 > where.txt",
 ]
 
 

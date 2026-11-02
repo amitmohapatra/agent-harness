@@ -52,6 +52,7 @@ READERS: Final[Mapping[str, tuple[str, ...]]] = {
     "basename": (),
     "dirname": (),
     "realpath": (),
+    "which": (),
     "true": (),
     "sort": ("-o", "--output"),
     "sed": ("-i", "--in-place"),
@@ -144,7 +145,8 @@ async def approved_reads(agent: Any, result: Any, reviewer: str) -> tuple[Any, l
 def read_only(tool: str, args: Mapping[str, Any]) -> bool:
     """Whether a paused call is a shell command (:data:`SHELLS`) that only reads: each of its
     commands a program of :data:`READERS` with none of its writing arguments, or Python whose
-    code writes nothing (:func:`python_reads`), joined by pipes and sequences only."""
+    code writes nothing (:func:`python_reads`), joined by pipes and sequences only (an output
+    may be joined to another, ``2>&1``)."""
     command = args.get("command")
     if tool not in SHELLS or not isinstance(command, str) or not command.strip():
         return False
@@ -152,13 +154,13 @@ def read_only(tool: str, args: Mapping[str, Any]) -> bool:
     if heredoc is not None:
         head = _words(heredoc["head"])
         return head is not None and _python(head, stdin=heredoc["body"])
-    if "\n" in command.strip() or "`" in command or "$(" in command:
+    if "`" in command or "$(" in command:
         return False
     words = _words(command)
-    if not words:
-        return False
+    if not words or command.strip().count("\n") != sum(w.count("\n") for w in words):
+        return False  # a newline between commands (one inside a quoted argument is read)
     commands: list[list[str]] = [[]]
-    for word in words:
+    for word in _joined(words):
         if word in JOINS:
             commands.append([])
         elif set(word) <= set("<>&|;()"):
@@ -166,6 +168,20 @@ def read_only(tool: str, args: Mapping[str, Any]) -> bool:
         else:
             commands[-1].append(word)
     return all(_reads(c) for c in commands)
+
+
+def _joined(words: list[str]) -> list[str]:
+    """``words`` less each ``N>&M``: one output sent where another goes, nothing written."""
+    kept: list[str] = []
+    rest = iter(enumerate(words))
+    for n, word in rest:
+        if word == ">&" and n + 1 < len(words) and words[n + 1].isdigit():
+            if kept and kept[-1].isdigit():
+                kept.pop()
+            next(rest)
+            continue
+        kept.append(word)
+    return kept
 
 
 def python_reads(code: str) -> bool:
