@@ -12,6 +12,7 @@ there)."""
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Sequence
 from typing import Any, Final
 
@@ -91,7 +92,9 @@ class PlannedModel(ScriptedModel):
     """An OpenAI Agents SDK ``Model``: a call offered no tool and no handoff answers."""
 
     def __init__(self, plan: Sequence[Call], final: str = FINAL, *, stall: float = 0.0) -> None:
-        super().__init__([], stall=stall)
+        # call ids of its own, as a model's are: a run resumed in another process (its own
+        # model) continues the SDK's run state, which refuses a call id it already ran
+        super().__init__([], stall=stall, ids=f"{uuid.uuid4().hex[:8]}_")
         self.plan, self.final = list(plan), final
 
     def _next(self, input: Any, system: str | None) -> list[Any]:

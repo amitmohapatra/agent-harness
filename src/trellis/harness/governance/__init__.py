@@ -44,7 +44,13 @@ from trellis.harness.governance.catalog import (
     digest,
     entry,
 )
-from trellis.harness.governance.decision import Action, ApprovalRuleError, Decision, decide
+from trellis.harness.governance.decision import (
+    ACTIONS,
+    Action,
+    ApprovalRuleError,
+    Decision,
+    decide,
+)
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
@@ -155,6 +161,16 @@ class Governance:
         agent = agent_id or self.agent_id
         found = await rules.get(names, agent_id=agent) if rules is not None else None
         return {name: (found or {}).get(name) for name in names}
+
+    async def may_ask(
+        self, specs: Sequence[ToolSpec], *, agent_id: str | None = None
+    ) -> frozenset[str]:
+        """The tools of ``specs`` whose calls :meth:`check` may ask a person about, as the
+        catalog says now: an approval rule, or a risk that asks (the catalog's, else the tool's
+        own side effects). A framework that holds a call before it runs (OpenAI Agents'
+        ``needs_approval``) is told to hold only these: the rest it runs as ever."""
+        rules = await self.rules([s.name for s in specs], agent_id=agent_id)
+        return frozenset(s.name for s in specs if _may_ask(rules[s.name], s.side_effects))
 
     async def indexed(self, names: Sequence[str]) -> bool:
         """Whether tool search finds ``names`` as published: nothing is still being sent, and
@@ -339,3 +355,10 @@ __all__ = [
     "Rejected",
     "governed",
 ]
+
+
+def _may_ask(rule: Rule | None, side_effects: str) -> bool:
+    """Whether a tool with the catalog's ``rule`` (none: its own ``side_effects``) may ask."""
+    if rule is None:
+        return ACTIONS.get(side_effects) is Action.ASK
+    return rule.approve_when is not None or ACTIONS.get(rule.risk) is Action.ASK

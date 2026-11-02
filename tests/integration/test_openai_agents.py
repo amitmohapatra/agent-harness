@@ -62,14 +62,113 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
     assert [t.name for t in target.tools] == ["eta"]  # the team's agent is untouched
 
 
-async def test_an_approval_pauses_and_a_resume_reruns_against_the_journal(harness: Harness) -> None:
-    model = ScriptedModel([("ship", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped"])
+async def test_a_governance_approval_continues_the_sdks_run_state(harness: Harness) -> None:
+    """Governance asks about an irreversible call before the SDK runs it (the SDK's own
+    ``needs_approval`` gate, the question governance's): the resume continues the SDK's
+    ``RunState`` where it paused — the call runs, the model is not asked again."""
+    model = ScriptedModel([("ship", {"order": "o1"}), "shipped"])
     agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
     paused = await agent.run("ship o1", user="u1")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.reason is InterruptReason.APPROVAL and done == []
+    assert paused.interrupt.question.startswith("Approve ship?")  # governance's question
+    assert paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.args == {"order": "o1"}
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
-    assert finished.status is RunStatus.SUCCESS and done == ["o1"]
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "shipped"
+    assert done == ["o1"]
+    assert len(model.inputs) == 2  # continued from the SDK's state: no model call again
+
+
+async def test_a_governance_approval_streams_the_continued_run(harness: Harness) -> None:
+    model = ScriptedModel([("ship", {"order": "o1"}), "shipped"])
+    agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
+    events = [e async for e in agent.stream("ship o1", user="u1")]
+    asked = next(e for e in events if e.type is RunEventType.INTERRUPT)
+    finished = await agent.resume(asked.data["interrupt_id"], "approve", reviewer="u1")
+    assert finished.answer == "shipped" and done == ["o1"] and len(model.inputs) == 2
+
+
+async def test_a_rejected_governance_approval_tells_the_model_and_does_not_run(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel([("ship", {"order": "o1"}), "not shipped"])
+    agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
+    paused = await agent.run("ship o1", user="u1")
+    assert paused.interrupt is not None
+    finished = await agent.resume(
+        paused.interrupt.interrupt_id, "reject", answer="too costly", reviewer="u1"
+    )
+    assert finished.answer == "not shipped" and done == []
+    told = model.inputs[-1][-1]
+    assert told["type"] == "function_call_output" and "too costly" in told["output"]
+    assert len(model.inputs) == 2
+
+
+async def test_a_governance_approval_for_the_run_covers_the_tools_later_calls(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel([("ship", {"order": "o1"}), ("ship", {"order": "o2"}), "both"])
+    agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
+    paused = await agent.run("ship o1 and o2", user="u1")
+    assert paused.interrupt is not None
+    finished = await agent.resume(
+        paused.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
+    )
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "both"
+    assert done == ["o1", "o2"] and len(model.inputs) == 3
+
+
+async def test_two_governance_approvals_in_one_reply_are_asked_one_at_a_time(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel([[("ship", {"order": "o1"}), ("ship", {"order": "o2"})], "both"])
+    agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
+    first = await agent.run("ship o1 and o2", user="u1")
+    assert first.interrupt is not None and first.interrupt.tool_call is not None
+    assert first.interrupt.tool_call.args == {"order": "o1"}
+    second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert second.interrupt is not None and second.interrupt.tool_call is not None
+    assert second.interrupt.tool_call.args == {"order": "o2"}
+    assert second.interrupt.question.startswith("Approve ship?")
+    done_ = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done_.answer == "both" and sorted(done) == ["o1", "o2"] and len(model.inputs) == 2
+
+
+async def test_your_own_gate_on_a_tool_the_catalog_asks_about_is_the_one_asked() -> None:
+    """A ``needs_approval`` tool of yours keeps its own gate: one approval, governance's
+    counted in it (the framework's gate approved the call)."""
+
+    @function_tool(needs_approval=True)
+    def refund(order: str) -> str:
+        done.append(order)
+        return "refunded"
+
+    model = ScriptedModel([("refund", {"order": "o1"}), "refunded"])
+    governance = Governance(FakeCatalog({"refund": Rule(risk="irreversible")}))
+    async with with_governance(Harness(config=Settings()), governance) as h:
+        agent = h.wrap(Agent(name="r", model=model, tools=[refund]), id="own-gate")
+        paused = await agent.run("refund o1", user="u1")
+        assert paused.interrupt is not None
+        assert paused.interrupt.question == "Approve refund?"  # the SDK's gate's
+        finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert finished.answer == "refunded" and done == ["o1"] and len(model.inputs) == 2
+
+
+async def test_a_tool_governance_never_asks_about_is_not_held(harness: Harness) -> None:
+    """Only a tool governance may ask about gets the SDK's gate: a read's call with arguments
+    that are not an object runs as ever (the model reads what to fix), never held for a
+    person (the SDK holds a gated call whose arguments it cannot read)."""
+
+    @tool(side_effects="read")
+    def eta(order: str) -> str:
+        """When an order arrives."""
+        return "tomorrow"
+
+    model = ScriptedModel([("eta", "not json"), "fixed"])
+    agent = arm(harness.wrap(Agent(name="e", model=model), id="eta"), [eta])
+    result = await agent.run("eta o1", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "fixed"
 
 
 async def test_ask_inside_a_tool_returns_the_answer_on_resume(harness: Harness) -> None:
@@ -414,7 +513,7 @@ async def test_a_deny_all_rule_blocks_the_tool_of_an_agent_handed_off_to(
 
 
 async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
-    model = ScriptedModel([*[("transfer_to_billing", {}), ("refund", {"order": "o1"})] * 2, "ok"])
+    model = ScriptedModel([("transfer_to_billing", {}), ("refund", {"order": "o1"}), "ok"])
     triage, _, _ = _desk(model)
     governance = Governance(FakeCatalog({"refund": Rule(risk="irreversible")}))
     async with with_governance(Harness(config=Settings()), governance) as h:
@@ -423,7 +522,8 @@ async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog(
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.question.startswith("Approve refund?") and done == []
         finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
-    assert finished.answer == "ok" and done == ["refund o1"]  # once: the journal kept it
+    assert finished.answer == "ok" and done == ["refund o1"]
+    assert len(model.inputs) == 3  # the specialist's run continued: no model call again
 
 
 async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
@@ -523,10 +623,12 @@ async def test_a_rule_that_cannot_be_evaluated_asks_and_is_recorded_on_the_run()
     async with with_governance(Harness(config=Settings()), governance) as h:
         agent = arm(h.wrap(Agent(name="s", model=model), id="rule"), [track])
         events = [e async for e in agent.stream("track o1", user="u1")]
-    assert done == []  # it asked a person instead of running
-    assert any(e.type is RunEventType.INTERRUPT for e in events)
-    codes = [e.data.get("code") for e in events if e.data.get("name") == WARNING]
-    assert codes == [ApprovalRuleError.code]
+        assert done == []  # it asked a person instead of running
+        asked = next(e for e in events if e.type is RunEventType.INTERRUPT)
+        codes = [e.data.get("code") for e in events if e.data.get("name") == WARNING]
+        assert codes == [ApprovalRuleError.code]
+        resumed = await agent.resume(asked.data["interrupt_id"], "approve", reviewer="u1")
+    assert resumed.answer == "done" and done == ["track o1"]  # approved: it ran, once
 
 
 async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_duration(

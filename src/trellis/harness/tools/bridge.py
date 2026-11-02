@@ -68,7 +68,7 @@ from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, content_key
-from trellis.harness.runtime import Runtime, current, reason_of
+from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools.base import (
@@ -181,6 +181,38 @@ async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutc
         return denied(call, verdict)
     _, call, rejected = await _decided(runtime, spec, call, verdict)
     return call if rejected is None else rejected
+
+
+async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
+    """For a framework that holds a call at its own approval gate before it runs it (OpenAI
+    Agents' ``needs_approval``): whether governance asks a person about this call, as it would
+    when the call runs — and if so, asked now (the run's pause, governance's question), so the
+    framework keeps its run where it paused and its resume runs the call, instead of a new
+    attempt that asks the model again. Not for a call governance lets run, one approved for
+    the rest of the run, or one already approved or answered: the call decides those as ever."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
+        runtime.events.warning(decision.error.code, decision.error.message)
+    journal = runtime.replay.journal
+    if (
+        not decision.asks
+        or _reach(spec.name, decision.assignee) in journal.remembered
+        or content_key("approved", spec.name, args) in journal.approved
+        or runtime.replay.answered(content_key("approve", spec.name, args))
+    ):
+        return False
+    key = content_key("call", spec.name, args)
+    call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
+    try:
+        await runtime.approve(call, decision)
+    except Paused:
+        return True
+    raise AssertionError("an approval not answered yet pauses")  # pragma: no cover
 
 
 async def observed(

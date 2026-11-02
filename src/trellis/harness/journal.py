@@ -99,6 +99,18 @@ class Pending(BaseModel):
     native_state: dict[str, Any] | None = None
 
 
+def governance_held(pending: Pending) -> bool:
+    """Whether ``pending`` is governance's own approval of a call that a framework's gate held
+    (OpenAI Agents' ``needs_approval``, ``bridge.asks_first``): its answer is filed as a harness
+    pause's, read where the call asks again when the framework runs it."""
+    call = pending.interrupt.tool_call
+    return (
+        pending.native_state is not None
+        and call is not None
+        and pending.key == content_key("approve", call.tool, call.args)
+    )
+
+
 class Journal(BaseModel):
     """Answers and tool outputs recorded so far, plus the pause currently open."""
 
@@ -205,6 +217,8 @@ class Journal(BaseModel):
         if isinstance(actions, list) and payload.get("review_configs") is not None:
             calls = [(a.get("name"), a.get("args") or {}) for a in actions]
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
+            if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
+                return  # governance's own question: its answer is read where the call asks
             calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
         else:
             return  # the harness's own question: governance asked it
@@ -251,6 +265,11 @@ class Replay:
             self._mark("a", key, index, self._here())
             return InterruptResolution.model_validate(recorded[index])
         return None
+
+    def answered(self, key: str) -> bool:
+        """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""
+        given = len(self.journal.answers.get(key, ()))
+        return self._index("a", key, given) < given
 
     def occurrence(self, key: str) -> int:
         """Which occurrence of ``key`` the next call is (0 for the first)."""
