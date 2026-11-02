@@ -2840,6 +2840,11 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
     ]
 
 
+#: A record's field that is a magnitude (the cases' ``abs(...)``): said as a signed change
+#: ("-12", "down 12") it is still the difference.
+DIFFERENCE: Final = "difference"
+
+
 def score(
     expect: Expect,
     answer: str,
@@ -2885,6 +2890,8 @@ def score(
         for name, spec in expect.value.items():
             v = spec["value"]
             ok = _has_number(a, float(v), spec["tol"]) if _num(v) else _has_text(a, v)
+            if not ok and name == DIFFERENCE and _num(v):  # a magnitude: "-12" says it too
+                ok = _has_number(a, -float(v), spec["tol"])
             if not ok:
                 missing.append(name)
     elif k == "set":

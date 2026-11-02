@@ -1162,3 +1162,16 @@ def test_a_record_date_said_in_words_names_it() -> None:
         assert cx.score(rec, said.format(day), [])["correct"], day
     for day in ("12 March", "2 May", "March 20", "2 March 2025"):
         assert not cx.score(rec, said.format(day), [])["correct"], day
+
+
+def test_a_difference_written_as_a_signed_change_is_the_difference() -> None:
+    """bf3-explain-02 t1 on Kimi (the Haiku re-measure): "40 units, down from 52 ... -12" is a
+    difference of 12; a difference is a magnitude, so its sign does not make it wrong."""
+    rec = cx.record(
+        {"then": 52, "now": 40, "difference": 12}, tol={"then": 0, "now": 0, "difference": 0}
+    )
+    assert cx.score(rec, "Now 40 units, down from 52: a change of -12 (about -23%).", [])["correct"]
+    assert cx.score(rec, "Now 40, then 52: 12 fewer.", [])["correct"]
+    assert not cx.score(rec, "Now 40, then 52: a change of -13.", [])["correct"]
+    signed = cx.record({"change": 12}, tol={"change": 0})  # any other field keeps its sign
+    assert not cx.score(signed, "The change is -12.", [])["correct"]
