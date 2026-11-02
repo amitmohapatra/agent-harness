@@ -224,11 +224,14 @@ class Live:
 class Turns:
     """One run of a conversation at a time in this process: the others wait their turn, in
     order (``pipeline.attempt``). The run holding each turn is :class:`Live`, which a message
-    sent with ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches."""
+    sent with ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches. A run
+    is also reached by its id (:meth:`give`: a background task's instruction)."""
 
     def __init__(self) -> None:
         self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
+        #: the messages given to a run by its id, until its framework takes them
+        self.given: dict[str, list[Steer]] = {}
 
     @contextlib.asynccontextmanager
     async def taken(
@@ -258,12 +261,22 @@ class Turns:
         """The run holding ``key``'s turn in this process, if one does."""
         return self._live.get(key)
 
+    def give(self, run_id: str, steer: Steer) -> None:
+        """``steer`` given to run ``run_id`` (wherever it works in this process, whatever its
+        conversation), taken at its framework's next step — its first, when it has not
+        started."""
+        self.given.setdefault(run_id, []).append(steer)
+
     def steered(self, key: str, run_id: str) -> list[Steer]:
-        """The messages given to run ``run_id`` since it last looked, now taken."""
+        """The messages given to run ``run_id`` since it last looked, now taken: those sent
+        to its conversation's turn, then those given to it by its id."""
         live = self._live.get(key)
-        if live is None or live.run_id != run_id:
-            return []
-        fresh = [s for s in live.inbox if not s.taken]
+        fresh = (
+            [s for s in live.inbox if not s.taken]
+            if live is not None and live.run_id == run_id
+            else []
+        )
+        fresh.extend(self.given.pop(run_id, ()))
         for s in fresh:
             s.taken = True
         return fresh
