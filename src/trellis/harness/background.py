@@ -12,9 +12,9 @@ backed by what the harness already has, so every adapter gets them the same way:
   run naming its parent, in its tenant, user and thread), and its id returned at once: the
   parent's answer does not wait for it, and a worker works it (a crash continues it there);
 * ``check_async_task`` / ``list_async_tasks`` — where it is, from its record in the run store;
-* ``update_async_task`` — an instruction put in its inbox in the run store, read at its
-  framework's next step on whichever worker it works: the hook ``mode="steer"`` uses
-  (``Adapter.steers``, ``Runtime.step``);
+* ``update_async_task`` — an instruction given to it at its framework's next step: the hook
+  ``mode="steer"`` uses (``Adapter.steers``, ``Runtime.steered``), reached by its run id
+  (``Turns.give``);
 * ``cancel_async_task`` — ``agent.cancel``, its own children with it.
 
 A task is its user's, in their tenant: a tool given its id finds it from any of the user's
@@ -30,18 +30,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
     ConfigurationError,
     RunEvent,
     RunEventType,
-    RunMessageKind,
     RunOutcome,
     RunRecord,
     RunStatus,
-    RunUsage,
     ToolSpec,
     stable_id,
 )
@@ -232,9 +229,8 @@ class Background:
         return json.dumps(described(found, whole=True), default=str)
 
     async def _update(self, args: dict[str, Any]) -> str:
-        """The instruction put in the task's inbox in the run store, which the task reads at
-        its framework's next step (``Runtime.step``), on whichever worker it works: now, when
-        it works; when it starts, while it is queued; when it goes on, while it is paused."""
+        """The instruction given to the task at its framework's next step (``Turns.give``):
+        now, when it works in this process; when it starts, while it is queued."""
         runtime = _runtime()
         found = await self._owned(runtime, args["task_id"])
         if isinstance(found, str):
@@ -248,17 +244,14 @@ class Background:
                 "no step the harness reaches): cancel the task and start it again with the "
                 "new instructions."
             )
-        # sent as this call: a re-run after a crash sends the same message, kept once (a task
-        # that ended since it was read refuses it: the call's error says so)
+        if found.status is RunStatus.RUNNING and found.run_id not in agent.running:
+            return (
+                f"Task {found.run_id} works on another worker, which this instruction cannot "
+                "reach: cancel the task and start it again with the new instructions."
+            )
+        # sent as this call (its message's id is its own: ``conversation.question_id``)
         sent_as = runtime.idempotency_key or runtime.run_id
-        await agent.harness.runs.send_message(
-            found.run_id,
-            RunMessageKind.INSTRUCTION,
-            message_id=sent_as,
-            text=args["message"],
-            sender=runtime.user,
-            tenant=runtime.tenant,
-        )
+        agent.turns.give(found.run_id, Steer(args["message"], sent_as))
         return f"Updated async subagent. task_id: {found.run_id}"
 
     async def _cancel(self, args: dict[str, Any]) -> str:
@@ -343,35 +336,15 @@ async def tasks_of(runtime: Runtime, agents: Any) -> list[RunRecord]:
     return [r for r in records if r is not None and _of(r, runtime.conversation, agents)]
 
 
-async def users_tasks(agent: Agent, user: str) -> list[RunRecord]:
-    """The user's tasks of ``agent``'s background agents, from any of their chats, newest
-    first, at most :data:`LISTED` (the status view)."""
-    runs, tenant = agent.harness.runs, await agent.harness._tenant()
-    found = []
-    for name in {n for s in sources(agent) for n in s.agents}:
-        async for summary in runs.iterate(agent_id=name, tenant=tenant, limit=LISTED, max_pages=1):
-            found.append(summary)
-    found.sort(key=lambda s: s.updated_at, reverse=True)
-    records = await asyncio.gather(*(runs.get(s.run_id, tenant=tenant) for s in found))
-    mine = [r for r in records if r is not None and r.user_id == user and BACKGROUND in r.metadata]
-    return mine[:LISTED]
-
-
 def described(record: RunRecord, *, whole: bool = False) -> dict[str, Any]:
-    """A task as the model reads it, and as a UI shows it (one source: the chat's tools, the
-    turn's note, the ``background_task`` events and AG-UI's ``GET {path}/tasks``): its id,
-    agent and status, what it has used (``RunRecord.usage``: model and tool calls, commands,
-    tokens, cost, as last saved), how long it has been going, and — as it stands — its answer
-    (cut to :data:`ANSWER_CHARS` unless ``whole``), why it failed, or its question."""
-    until = record.updated_at if record.status.final else datetime.now(UTC)
+    """A task as the model reads it: its id, agent and status, and — as it stands — its
+    answer (cut to :data:`ANSWER_CHARS` unless ``whole``), why it failed, or its question."""
     said: dict[str, Any] = {
         "task_id": record.run_id,
         "subagent_type": record.agent_id,
         "status": record.status.value.lower(),
         "started_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
-        "elapsed_seconds": round(max(0.0, (until - record.created_at).total_seconds()), 1),
-        "usage": (record.usage or RunUsage()).model_dump(),
     }
     if record.status in FILTERS["success"]:
         answer = record.output if isinstance(record.output, str) else json.dumps(record.output)
@@ -501,5 +474,4 @@ __all__ = [
     "sources",
     "tasks_of",
     "told",
-    "users_tasks",
 ]

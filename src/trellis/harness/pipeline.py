@@ -314,7 +314,6 @@ async def _attempt(
         attempt=record.attempt,
         worker_id=None if job is None else job.worker_id,
         lease_seconds=None if job is None else job.lease_seconds,
-        job=job,
         run_memory=await agent.run_memory(identity, without),
         without=without,
         framework_options=merged(
@@ -954,10 +953,7 @@ async def _paused(
             runtime.run_id,
             runtime.tenant,
             lambda: agent.harness.runs.pause(
-                interrupt,
-                checkpoint=checkpoint,
-                worker_id=runtime.worker_id,
-                usage=budget.used(runtime),
+                interrupt, checkpoint=checkpoint, worker_id=runtime.worker_id
             ),
             lambda r: r.awaiting is not None and r.awaiting.interrupt_id == interrupt.interrupt_id,
         ),
@@ -1044,12 +1040,7 @@ async def _ended(agent: Agent, runtime: Runtime, status: RunStatus, **fields: An
         runtime.run_id,
         runtime.tenant,
         lambda: agent.harness.runs.finish(
-            runtime.run_id,
-            status,
-            worker_id=runtime.worker_id,
-            tenant=runtime.tenant,
-            usage=budget.used(runtime),
-            **fields,
+            runtime.run_id, status, worker_id=runtime.worker_id, tenant=runtime.tenant, **fields
         ),
         lambda r: r.status is status,
     )

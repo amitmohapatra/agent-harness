@@ -3,8 +3,7 @@ agent under test starts a task that a worker works while the conversation goes o
 how it is going (B02), stops it (B04), is told its answer at a later turn (B05) and finds no
 task of another user (B06); and, as the sub-agent, takes a new instruction at its next
 step where its framework has a step the harness reaches — else the instruction is refused,
-said (B03); and is paused by a person at its next step, given an instruction while it waits,
-and resumed, going on from where it was with the instruction (B07).
+said (B03).
 
 Each turn is a run of its own (a planned model makes one turn's calls), the task's id read
 from the turn that started it. The rows drive the runs themselves: ``run``
@@ -22,7 +21,7 @@ from tests.matrix.model import NA, Feature
 from tests.matrix.world import USER, World
 from tests.support.arm import arm
 from trellis import Runtime, background, tool
-from trellis.contracts import InterruptReason, RunMessageKind, RunRecord, RunStatus
+from trellis.contracts import RunRecord, RunStatus
 
 #: How long a scenario waits for what a worker does, at most (a guard, not a measure).
 WAIT: Final = 30.0
@@ -30,12 +29,6 @@ WAIT: Final = 30.0
 REPEATS: Final = 4
 #: What the task answers: told to the conversation's later turn (B05).
 ANSWER: Final = "the tides peak at 06:12"
-#: Why a graph without the harness's middleware is not paused by a person (B07): no node of
-#: the harness's runs in it; between its supersteps is a follow-up (ADR 0009).
-PLAIN_GRAPH: Final = (
-    "a graph without the harness's middleware (no middleware()) has no node the harness runs: "
-    "a pause between its supersteps is a follow-up"
-)
 DIRECT: Final = "the scenario drives several turns and a worker itself (agent.run): the modes are the other rows'"
 
 
@@ -190,61 +183,6 @@ async def takes_an_instruction(w: World) -> None:
         assert "takes no instruction while it works" in answer, "the refusal was not said"
 
 
-async def pauses_and_resumes(w: World) -> None:
-    """The agent under test is the task: a person pauses it (its inbox, read at its next
-    step: LangGraph's own ``interrupt``, Claude's and Kimi's session stopped), sends it an
-    instruction while it waits, and resumes it, on the worker: it goes on from where it was
-    (no step before the pause made again) and reads the instruction."""
-    from tests.matrix.kit import Desk
-
-    d = Desk()
-    gate = asyncio.Event()
-    looked: list[str] = []
-
-    @tool(side_effects="read")
-    async def hold(topic: str) -> str:
-        """Look a topic up slowly.
-
-        Args:
-            topic: what to look up
-        """
-        looked.append(topic)
-        d.started.set()
-        await gate.wait()
-        return f"facts about {topic}"
-
-    child = await w.agent(
-        [hold], [("hold", {"topic": "first"}), ("hold", {"topic": "second"})], name="research"
-    )
-    runs = w.harness(0).runs
-    async with worked(w, child, gate):
-        start = ("start_async_task", {"description": "the tides", "subagent_type": "research"})
-        lead = await w.agent([background(child)], [start], parent="function")
-        answer = str((await lead.run("about the tides", user=USER, thread="t")).answer)
-        run_id = answer.rsplit("task_id: ", 1)[1].strip()
-        await asyncio.wait_for(d.started.wait(), WAIT)
-        await runs.send_message(run_id, RunMessageKind.PAUSE, message_id="p", sender=USER)
-        gate.set()  # the step under way ends; the next one pauses
-        async with asyncio.timeout(WAIT):
-            while (paused := await _record(w, run_id)).status is not RunStatus.PAUSED:
-                assert not paused.status.final, (paused.status, paused.error)
-                await asyncio.sleep(0.02)
-        assert paused.awaiting is not None and paused.awaiting.reason is InterruptReason.PAUSE
-        await runs.send_message(
-            run_id,
-            RunMessageKind.INSTRUCTION,
-            message_id="i",
-            text="mind the north too",
-            sender=USER,
-        )
-        await child.resume(run_id, "approve", reviewer=USER)
-        record = await _ended(w, run_id)
-    assert record.status is RunStatus.SUCCESS, (record.status, record.error)
-    assert looked.count("first") == 1, f"a step before the pause was made again: {looked}"
-    added = "".join(p.read_text() for p in w.tmp.glob("cli-*.added"))  # Claude's hooks'
-    assert "mind the north too" in w.said() + added, "the instruction never reached the model"
-
-
 async def stops(w: World) -> None:
     task = _Task(w)
     async with task.worked():
@@ -305,21 +243,6 @@ BACKGROUND_ROWS: Final = [
         "BG (task 8)",
         "background(agent): update_async_task (the framework's step hook, Adapter.steers)",
         takes_an_instruction,
-        modes=_only_run(),
-        way2=NA("the background tasks are the Harness's"),
-    ),
-    Feature(
-        "B07",
-        "a background sub-agent paused by a person and resumed, an instruction sent meanwhile",
-        "BG (task 13)",
-        "the run's inbox (Runtime.step) at the framework's step: LangGraph interrupt, a "
-        "Claude or Kimi session stopped and continued",
-        pauses_and_resumes,
-        adapters={
-            "function": NA("a function has no step the harness reaches: none to pause at"),
-            "langgraph": NA(PLAIN_GRAPH),
-            "deepagents": NA(PLAIN_GRAPH),
-        },
         modes=_only_run(),
         way2=NA("the background tasks are the Harness's"),
     ),

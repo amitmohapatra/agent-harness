@@ -54,9 +54,6 @@ ASKED: Final = ANSWERED | {RunStatus.CANCELLED}
 #: The ``RunStart.metadata`` key a run sent with ``mode="steer"`` keeps the run it was given
 #: to under (its answer is that run's: :func:`earlier` keeps it once).
 STEERED_INTO: Final = "steered_into"
-#: How a message steered into a run reads to an agent that is told it as text (Claude after a
-#: tool call's result, an ACP agent as its turn goes on).
-STEERED_SAYS: Final = "The user adds, while you work: "
 
 
 class Mode(StrEnum):
@@ -307,7 +304,6 @@ __all__ = [
     "ASKED",
     "EARLIER_RUNS",
     "STEERED_INTO",
-    "STEERED_SAYS",
     "Live",
     "Mode",
     "Steer",
