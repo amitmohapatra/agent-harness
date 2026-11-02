@@ -244,6 +244,26 @@ async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> Non
     assert len(kept) < 7 and all(not json.loads(x)["stopped"] for x in kept)
 
 
+async def test_each_turn_keeps_the_cached_input_tokens_it_read(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn's row says how many of its input tokens the provider read from its prompt cache,
+    beside its input tokens: the cached share of a run is measured from the rows."""
+    ended = run.Meter.on_llm_end
+
+    def cached(self: run.Meter, response: Any, **kwargs: Any) -> None:
+        ended(self, response, **kwargs)
+        self.cached_tokens += 7  # what a provider's cache_read would add, per call
+
+    monkeypatch.setattr(run.Meter, "on_llm_end", cached)
+    out = tmp_path / "cached"
+    await cx.bench(_args(out, cases="multihop-01,conversation-01"), progress=lambda _: None)
+    rows = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+    turns = [t for row in rows for t in row["turns"]]
+    assert turns and all(t["cached_tokens"] == 7 * t["model_calls"] for t in turns)
+    assert sum(t["cached_tokens"] for t in turns) > 0
+
+
 def test_max_usd_without_a_price_is_refused(tmp_path: Path) -> None:
     args = cx.arguments(
         ["--model", "some-unpriced-model", "--max-usd", "1", "--out", str(tmp_path / "x")]

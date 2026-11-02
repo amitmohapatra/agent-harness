@@ -3634,6 +3634,7 @@ async def run_case(
                 "native": sorted(trace.used.get(run_id or "", set()) - {c["tool"] for c in calls}),
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
+                "cached_tokens": captured.cached_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
                 "seconds": seconds,
                 "checks": checked(
