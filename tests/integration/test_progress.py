@@ -22,7 +22,13 @@ from trellis.harness import runtime as runtime_module
 from trellis.harness.events import PREVIEW_CHARS
 from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
 from trellis.harness.runs import LocalRuns
-from trellis.runs import Job, Lease, LeaseLostError, PayloadTooLargeError
+from trellis.runs import (
+    DependencyUnavailableError,
+    Job,
+    Lease,
+    LeaseLostError,
+    PayloadTooLargeError,
+)
 
 paid: list[int] = []
 looked: list[str] = []
@@ -218,6 +224,80 @@ async def test_a_refused_progress_save_is_a_warning(
         assert await h.worker([agent]).run_once()
         assert (await handle.result(wait=5)).answer == "paid 2"
     assert "progress of run" in caplog.text and "413" in caplog.text
+
+
+def unreachable() -> DependencyUnavailableError:
+    return DependencyUnavailableError(
+        "agent-runs POST /v1/runs/run_1/heartbeat unreachable: ConnectError",
+        code="DEPENDENCY_UNAVAILABLE",
+        status=0,
+        retryable=True,
+    )
+
+
+async def test_a_write_whose_start_cannot_be_saved_is_not_run(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """agent-runs cannot be reached: the start of a write is not saved, so after the lease
+    lapsed another worker would find no start and run it again. The write is not run: the model
+    reads why (and may try again), and a read goes on as before."""
+    waited: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(runtime_module, "_pause", pause)
+
+    async def billing(input: str, agent: Runtime) -> str:
+        said = await agent.tools.call("pay", amount=1)
+        return f"{said} | {await agent.tools.call('balance', account='a')}"
+
+    async with Harness(config=Settings()) as h:
+
+        async def down(*args: Any, **kwargs: Any) -> None:
+            if "checkpoint" in kwargs:
+                raise unreachable()
+
+        monkeypatch.setattr(h.runs, "heartbeat", down)
+        agent = arm(h.wrap(billing, id="billing"), [pay, balance])
+        handle = await agent.start("x", user="u")
+        assert await h.worker([agent]).run_once()
+        answer = (await handle.result(wait=5)).answer
+    assert paid == [] and looked == ["a"]
+    assert "pay was not run" in answer and "could not be saved" in answer
+    assert waited and sum(waited) <= 30  # within half of the 60 s lease
+    assert "progress of run" in caplog.text
+
+
+async def test_a_write_waits_out_a_brief_outage_and_runs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waited: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(runtime_module, "_pause", pause)
+
+    async def billing(input: str, agent: Runtime) -> str:
+        return await agent.tools.call("pay", amount=3)
+
+    async with Harness(config=Settings()) as h:
+        failures = [unreachable(), unreachable()]
+        original = h.runs.heartbeat
+
+        async def blip(*args: Any, **kwargs: Any) -> Lease:
+            if "checkpoint" in kwargs and failures:
+                raise failures.pop()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(h.runs, "heartbeat", blip)
+        agent = arm(h.wrap(billing, id="billing"), [pay])
+        handle = await agent.start("x", user="u")
+        assert await h.worker([agent]).run_once()
+        done = await handle.result(wait=5)
+    assert done.status is RunStatus.SUCCESS and done.answer == "paid 3"
+    assert paid == [3] and waited == [1.0, 2.0]
 
 
 async def test_a_lease_lost_while_saving_progress_stops_the_run(
