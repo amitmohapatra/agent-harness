@@ -37,8 +37,8 @@ YTD: Final = {"start": "2026-01-01", "end": "2026-09-30"}
 FAKE_CHART: Final = (
     r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have)? ?(?:attached|created|made|generated|saved|"
     r"drew))(?: (?:the|your|a|an))?(?: [\w-]+)? (?:chart|image|png|graph|svg)"
-    # a chart given as its SVG source, in the answer itself, is no claimed image
-    r"(?!\s+(?:as\s+)?(?:svg\s+)?(?:source|code|markup)\b)"
+    # a chart given as its SVG source, or drawn as text, in the answer itself, is no claimed image
+    r"(?!\s+(?:as\s+)?(?:svg\s+)?(?:source|code|markup)\b|\s+(?:as|in)\s+(?:plain\s+)?(?:text|ascii)\b)"
 )
 MONTHS: Final = {
     f"2026-{n:02d}": name

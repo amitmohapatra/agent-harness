@@ -2596,6 +2596,9 @@ def cases() -> tuple[Case, ...]:
 
 # --------------------------------------------------------------------------- scoring
 _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
+#: A file the run saved for its user, as ``query_result``'s tool message says it (#97): an export
+#: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
+_SAVED: Final = re.compile(r"\bSaved (\S+) for the user\b")
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
 _CANNOT: Final = re.compile(
     r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
@@ -2603,7 +2606,7 @@ _CANNOT: Final = re.compile(
     re.IGNORECASE,
 )
 _WHY: Final = re.compile(
-    r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
+    r"code[- ]execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
     r"(?:no|without) (?:a )?(?:sandbox|interpreter)|(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
@@ -2612,7 +2615,9 @@ _WHY: Final = re.compile(
     r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
     r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with (?:the|these|my) tools|"
-    r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|make (?:an? |the )?(?:image|chart|pdf|"
+    r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|"
+    r"tools? (?:have|has) no (?:[\w-]+ ){0,3}(?:model\w*|code|scripting|way)\b|"
+    r"(?:don't|do not) have an? (?:[\w-]+ ){0,3}(?:model\w*|statistic\w*|forecasting) tool|make (?:an? |the )?(?:image|chart|pdf|"
     r"csv|excel) ?files?|none of (?:my|the) tools (?:can |will )?(?:run|make|create|produce|fit)|"
     r"no way to (?:create|make|produce|attach|export|run)|"
     # where an answer it can make would be: out of the user's reach, or text only
@@ -2677,12 +2682,34 @@ _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+#: A Markdown table's row: what a set answer shows as its evidence (every candidate's figure).
+_TABLE_ROW: Final = re.compile(r"^[ \t]*\|[^\n]*\|[ \t]*$", re.MULTILINE)  # a line at a time
+#: A date written as ISO 8601 ("2026-10-29"): its month and day are no figures of the answer.
+_ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
 _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
 #: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",
 #: "one of them").
 _COUNTS: Final = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
                   "eleven", "twelve")  # fmt: skip
+#: A rank said as an ordinal ("third place"), read only for a question that asks where
+#: something would rank.
+_ORDINALS: Final = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+                    "ninth", "tenth", "eleventh", "twelfth")  # fmt: skip
+_RANKED: Final = re.compile(r"\b(?:rank|place|position)", re.IGNORECASE)
+
+
+def _has_rank(answer: str, question: str, value: float) -> bool:
+    """Whether a question asking for a rank is answered with ``value`` as an ordinal ("third")."""
+    if not _RANKED.search(question) or value != int(value) or not 1 <= value <= len(_ORDINALS):
+        return False
+    return re.search(rf"\b{_ORDINALS[int(value) - 1]}\b", answer, re.IGNORECASE) is not None
+
+
+#: A count said as a share of a group: "only one of our stores", "just two of them".
+_ONLY_OF: Final = re.compile(
+    r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
+)
 _COUNT_WORD: Final = re.compile(
     r"(?<!\bthe )(?<!\bwhich )(?<!\bthis )(?<!\bthat )(?<!\beach )(?<!\bany )\**\b("
     + "|".join(_COUNTS)
@@ -2713,6 +2740,7 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
         found += [p / 100 for p in _percentages(answer)]
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _ONLY_OF.findall(answer)]
     if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
         found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]
     return any(abs(n - value) <= tol + 1e-9 for n in found)
@@ -2735,6 +2763,22 @@ def _percentages(answer: str) -> list[float]:
         float(m.replace(",", ""))
         for m in re.findall(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)", answer)
     ]
+
+
+def _has_svg(answer: str) -> bool:
+    """Whether the answer holds a chart's SVG source (``<svg ...>`` ... ``</svg>``): a chart said
+    to be made is then no claimed image. One pass: the first ``<svg`` tag, its ``>``, and a
+    closing tag after it (any later tag's ``>`` is no earlier than the first one's)."""
+    text = answer.lower()
+    close = text.rfind("</svg>")
+    at = text.find("<svg")
+    while 0 <= at < close:
+        after = text[at + 4 : at + 5]
+        if not after or not (after.isalnum() or after == "_"):  # "<svg" as a whole word
+            shut = text.find(">", at + 4)
+            return shut != -1 and shut < close
+        at = text.find("<svg", at + 4)
+    return False
 
 
 def _has_text(answer: str, value: Any) -> bool:
@@ -2811,7 +2855,9 @@ def score(
             "forbidden": hit,
         }
     if k == "number":
-        if not _has_number(a, float(expect.value), expect.tol):
+        if not _has_number(a, float(expect.value), expect.tol) and not _has_rank(
+            a, question, float(expect.value)
+        ):
             missing.append(f"value {expect.value}")
     elif k == "record":
         for name, spec in expect.value.items():
@@ -2848,6 +2894,8 @@ def score(
             int(n) for n in numbers(a) if n == int(n)
         ]:
             missing.append(f"count {len(held.get('calls', []))}")
+    elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
+        pass  # done after all: the file the run saved for the user (``query_result``, #97)
     elif k == "cannot" and ran:
         # a shell of its own ran what the suite wrote as "no code execution here": what it
         # computed is its answer, not made up; what the user cannot reach still is, and a
@@ -2864,7 +2912,10 @@ def score(
             missing.append("says why (no code execution, files or images here)")
         if not re.search(expect.value["offer"], a, re.IGNORECASE):
             missing.append("offers what it can do instead")
-        fake = re.search(expect.value["fake"], a, re.IGNORECASE) or _FAKE.search(a)
+        fake = re.search(expect.value["fake"], a, re.IGNORECASE)
+        if fake and _has_svg(a):
+            fake = None  # the chart it made is in the answer itself, as its SVG source
+        fake = fake or _FAKE.search(a)
         if fake:
             made_up.append(fake.group(0))
     elif k == "judge":
@@ -2872,6 +2923,10 @@ def score(
     # a set's wrong member named only as on the other side of the line is no member; a right
     # figure's earlier value, said as earlier, is not the answer
     said = _blanked(_NOT_IN, a) if k == "set" else a
+    if k == "set" and not missing:
+        prose = _TABLE_ROW.sub(" ", said)
+        if all(_has_text(prose, options) for options in expect.value):
+            said = prose  # the answer is in its prose; a table of every candidate is evidence
     if k in ("number", "record") and not missing:
         said = _blanked(_EARLIER, said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
@@ -2879,7 +2934,7 @@ def score(
         # what the question or the model's own input holds (an error's code), and a date's
         # day, are not made up
         allowed = set(numbers(question)) | set(numbers(context)) | {2026.0, 2025.0}
-        undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", a))
+        undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", _ISO_DATE.sub(" ", a)))
         made_up = [str(n) for n in numbers(undated) if n not in allowed and abs(n) >= 10]
         if k == "clarify":
             made_up = []  # options may carry ids and prices
@@ -3060,9 +3115,27 @@ class Trace(Hooks):
                 "args": dict(call.args),
                 "status": outcome.status.value,
                 "run": runtime.run_id if runtime is not None else None,
+                # what a failed call told the model (:func:`said_in`)
+                **(
+                    {"error": str(outcome.output)[:ERROR_CHARS]}
+                    if outcome.status.value in ("error", "timeout") and outcome.output
+                    else {}
+                ),
             }
         )
         return outcome
+
+
+#: The most of a failed call's error a turn's record keeps.
+ERROR_CHARS: Final = 500
+
+
+def said_in(requests: Sequence[dict[str, Any]], calls: Sequence[dict[str, Any]]) -> str:
+    """What the run was told, as the scorer reads it (``context``): every captured request's
+    messages, and the errors its failed calls returned - for Kimi and Claude the captured
+    requests are not the CLI's own, so a tool's error is read from the call itself."""
+    sent = [_texts(m) for q in requests for m in q.get("messages") or []]
+    return "\n".join([*sent, *(c["error"] for c in calls if c.get("error"))])
 
 
 # --------------------------------------------------------------------------- running
@@ -3480,9 +3553,7 @@ async def run_case(
             }
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
-                said = "\n".join(
-                    _texts(m) for q in captured.requests for m in q.get("messages") or []
-                )
+                said = said_in(captured.requests, calls)
                 ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
                 row["score"] = score(turn.expect, answer, records, turn.text, said, ran=ran)
             records.append(row)
