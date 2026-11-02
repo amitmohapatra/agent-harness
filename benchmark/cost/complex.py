@@ -103,6 +103,7 @@ CATEGORIES: Final = (
     "bf_mixed",
     "bf_cantdo",
     "bf_clarify",
+    "bf_derive",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
