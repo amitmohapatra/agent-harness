@@ -41,7 +41,7 @@ from langchain.agents.middleware.todo import TodoListMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 
 from trellis.harness import budget
-from trellis.harness.middleware import _named
+from trellis.harness.middleware import _named, no_tool
 from trellis.harness.runtime import current
 
 #: The smallest context window the long-task tools are offered in, in tokens: together they
@@ -134,7 +134,7 @@ class Budgeted(AgentMiddleware):
                 messages=told, tools=[] if request.response_format is not None else request.tools
             )
             if request.tools:
-                request = request.override(tool_choice="none")
+                request = request.override(tool_choice=no_tool(request.model))
         return await handler(request)
 
 
