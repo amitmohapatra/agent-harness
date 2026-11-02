@@ -74,8 +74,10 @@ everything `ReAct` adds on top of
 Deep Agents: the run's tools per model call narrowed per turn (the memory and gateway MCP tools
 among them), the graph's own tools governed, `max_steps` (LangChain's model call limit), the stall guard,
 the hooks and spans, `call_timeout`, the budget's stop, planning on a long task, older results
-cleared and read back with a `context_window`, the request fitted to the window, and its
-checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a
+cleared and read back with a `context_window`, the request fitted to the window, Anthropic's
+prompt cache (`PromptCache`: LangChain's `AnthropicPromptCachingMiddleware` for an Anthropic
+model, a model name the harness routes too; on a Deep Agents graph, in its own caching
+middleware's place), and its checkpoint in the run: compiled without a checkpointer, it is run with `RunCheckpointer()`, so a
 resume after a pause or a crash continues where it stopped
 ([react.md](react.md#middleware-on-your-own-graph), [runs.md](../runs.md#continuing-where-a-run-stopped)). A `create_agent` graph wrapped without it
 is still narrowed and governed, said once at `h.wrap`.

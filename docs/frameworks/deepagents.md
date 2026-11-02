@@ -146,6 +146,14 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   from its journal without one — either way the call runs once.
 * A sub-agent is given the context for its task, not the main agent's tools: give it the
   memory tools (`memory_search`) when it should read memory itself.
+* Deep Agents' built-in tools are sent with every model call: `ls`, `read_file`, `write_file`,
+  `edit_file`, `delete`, `glob`, `grep` and `task` are 3,854 input tokens a call on Claude
+  (`count_tokens`; `grep` 1,107, `glob` 903, `task` 874, `read_file` 858 alone). None of them
+  duplicates a harness tool on a graph built with `middleware()`: `read_file` is Deep Agents'
+  only, planning is LangChain's `TodoListMiddleware` (`Planning` in its place, offered on a long
+  task), `task` is the only helper tool. They are the agent's own and stay offered; with
+  `middleware()`'s prompt cache they are in the cached prefix. To drop ones an agent never needs,
+  use Deep Agents' own `HarnessProfile(excluded_tools=...)` (`register_harness_profile`).
 
 ## Run it
 
