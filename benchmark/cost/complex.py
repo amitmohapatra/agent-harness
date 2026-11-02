@@ -63,7 +63,7 @@ from typing import Any, Final
 
 from langchain_core.messages import convert_to_openai_messages
 
-from benchmark.cost import prices, stats
+from benchmark.cost import approvals, prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
@@ -2606,23 +2606,32 @@ _WHY: Final = re.compile(
     r"code execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
-    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|no tools? (?:that|for|to) (?:writ|creat|mak|"
-    r"draw|render|run|generat|export)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
+    r"draw|render|run|generat|export|fit)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
     r"spreadsheet-writing|tools? (?:here )?(?:only|can't|cannot)|(?:can )?only (?:return|give|send|"
     r"reply with) (?:you )?text|only have (?:[\w-]+,? (?:and |or )?){0,4}tools|with (?:the|these|my) tools|"
     r"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){1,3}tools?\b|make (?:an? |the )?(?:image|chart|pdf|"
     r"csv|excel) ?files?|none of (?:my|the) tools (?:can |will )?(?:run|make|create|produce|fit)|"
-    r"no way to (?:create|make|produce|attach|export|run)",
+    r"no way to (?:create|make|produce|attach|export|run)|"
+    # where an answer it can make would be: out of the user's reach, or text only
+    r"(?:isn't|is not|aren't|are not) accessible to you|you can(?:'t|not) (?:access|open|reach)|"
+    r"only (?:return|give|send) (?:you )?data (?:as text )?in (?:this|the) (?:conversation|chat)|"
+    r"only (?:file )?tool (?:I have )?(?:writes|makes|saves) (?:plain )?text",
     re.IGNORECASE,
 )
-#: Output made up for a request that could not be met: a file or image link, a file it says it
-#: saved where the user cannot reach it, or a claim to have run what it cannot run.
-_FAKE: Final = re.compile(
+#: Output the user cannot reach: a file or image link, a file it says it saved (a command that
+#: writes is never approved, so none was).
+_UNREACHABLE: Final = (
     r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
-    r"\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)|"
-    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]",
+    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]"
+)
+#: Output made up for a request that could not be met: what the user cannot reach, or a claim
+#: to have run what it cannot run.
+_FAKE: Final = re.compile(
+    _UNREACHABLE
+    + r"|\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)",
     re.IGNORECASE,
 )
 _ABSTAIN: Final = re.compile(
@@ -2639,13 +2648,16 @@ _ABSTAIN: Final = re.compile(
 _ASKS: Final = re.compile(
     r"\b(?:confirm|tell me|let me know|say|specify|choose|pick)\b[^.?!\n]{0,30}\bwhich\b|"
     r"\bwhich (?:one|product|item|sku|of these)\b[^.?!\n]{0,30}\byou (?:mean|meant|want)|"
-    r"\b(?:need you to|please) (?:pick|choose) one\b",
+    r"\b(?:need you to|please) (?:pick|choose) one\b|"
+    r"\bneed to know which\b[^.?!\n]{0,30}\byou (?:mean|meant|want)",
     re.IGNORECASE,
 )
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
 #: above the line").
 _NOT_IN: Final = re.compile(
-    r"\b(?:above|highest|over the (?:line|threshold)|not (?:under|below))\b", re.IGNORECASE
+    r"\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
+    r"(?:times|more than) (?:any|every|all) other)\b",
+    re.IGNORECASE,
 )
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
 _EARLIER: Final = re.compile(r"\b(?:earlier|previously|before|down from|up from)\b", re.IGNORECASE)
@@ -2701,7 +2713,20 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
         found += [p / 100 for p in _percentages(answer)]
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
+    if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
+        found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]
     return any(abs(n - value) <= tol + 1e-9 for n in found)
+
+
+#: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917") or before
+#: one ("a 0.92% drop", "£1,917 lower").
+_FALL: Final = re.compile(
+    r"\b(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?[\s*_£$€]{0,6}"
+    r"(\d[\d,]*(?:\.\d+)?)|"
+    r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
+    r"(?:drop|decline|decrease|fall|lower|less)\b",
+    re.IGNORECASE,
+)
 
 
 def _percentages(answer: str) -> list[float]:
@@ -2755,9 +2780,13 @@ def score(
     records: Sequence[dict[str, Any]],
     question: str = "",
     context: str = "",
+    *,
+    ran: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
-    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``).
+    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
+    ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
+    scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -2819,6 +2848,15 @@ def score(
             int(n) for n in numbers(a) if n == int(n)
         ]:
             missing.append(f"count {len(held.get('calls', []))}")
+    elif k == "cannot" and ran:
+        # a shell of its own ran what the suite wrote as "no code execution here": what it
+        # computed is its answer, not made up; what the user cannot reach still is, and a
+        # refusal is still right
+        if not a.strip():
+            missing.append("an answer")
+        unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
+        if unreachable:
+            made_up.append(unreachable.group(0))
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
@@ -3327,6 +3365,8 @@ async def run_case(
         return f"{t.user or runner.USER}-{tag}-{case.id}"
 
     paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+    #: the read-only commands each turn (by id) was resumed past, approved
+    approved: dict[int, list[str]] = {}
 
     async def asked(t: Turn) -> Any:
         result = await agent.run(
@@ -3338,6 +3378,9 @@ async def run_case(
         if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
             paused.add(id(t))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+        # a shell command that only reads is approved, as a user reading it would; any other
+        # pause stays one
+        result, approved[id(t)] = await approvals.approved_reads(agent, result, REVIEWER)
         return result
 
     i = 0
@@ -3414,6 +3457,7 @@ async def run_case(
                 "status": status,
                 "error": error,
                 "calls": calls,
+                "approved": approved.get(id(turn), []),
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
@@ -3439,7 +3483,8 @@ async def run_case(
                 said = "\n".join(
                     _texts(m) for q in captured.requests for m in q.get("messages") or []
                 )
-                row["score"] = score(turn.expect, answer, records, turn.text, said)
+                ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
+                row["score"] = score(turn.expect, answer, records, turn.text, said, ran=ran)
             records.append(row)
             requests += [
                 {"case": case.id, "turn": i + n, "call": c, **q}

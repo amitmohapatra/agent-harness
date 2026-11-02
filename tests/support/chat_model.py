@@ -24,10 +24,11 @@ OFFERED: Final = "offered_tools"
 
 
 class ScriptedChatModel(BaseChatModel):
-    """Each call answers with the next turn: text, ``(tool, args)`` for a tool call, or a list
-    of them for several calls in one message."""
+    """Each call answers with the next turn: text, ``(tool, args)`` for a tool call, a list
+    of them for several calls in one message, or a message as it is."""
 
-    turns: list[Turn]
+    #: each a :data:`Turn`, or an ``AIMessage`` given as it is (``Any``: so pydantic leaves both)
+    turns: list[Any]
     seen: list[list[BaseMessage]] = Field(default_factory=list)
     #: what each call was bound with: the tools' names, ``tool_choice`` and the settings
     requests: list[dict[str, Any]] = Field(default_factory=list)
@@ -71,7 +72,9 @@ class ScriptedChatModel(BaseChatModel):
         self.seen.append(list(messages))
         self.requests.append(kwargs)
         turn = self.turns.pop(0)
-        if isinstance(turn, str):
+        if isinstance(turn, AIMessage):
+            message = turn.model_copy()
+        elif isinstance(turn, str):
             message = AIMessage(content=turn)
         else:
             calls = turn if isinstance(turn, list) else [turn]
