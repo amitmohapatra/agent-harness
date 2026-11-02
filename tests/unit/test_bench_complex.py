@@ -1149,3 +1149,16 @@ def test_an_export_the_run_saved_is_done_even_when_a_shell_of_its_own_ran() -> N
     assert cx.score(asked, answer, [], "export it", told, ran=True)["correct"]
     assert cx.score(asked, answer, [], "export it", told)["correct"]
     assert not cx.score(asked, "", [], "export it", "", ran=True)["correct"]  # no answer at all
+
+
+def test_a_record_date_said_in_words_names_it() -> None:
+    """bf2-explain-03 t1 on Claude (the Haiku re-measure): "the master record dates from
+    2 March" names the master's 2026-03-02; another day or month does not."""
+    rec = cx.record(
+        {"master": ("27 days", "27-day", "2026-03-02"), "portal": 34}, tol={"portal": 0}
+    )
+    said = "I'd plan on the 34-day portal quote; the master record dates from {}."
+    for day in ("2 March", "March 2", "2nd March", "Mar 2, 2026", "2 March 2026"):
+        assert cx.score(rec, said.format(day), [])["correct"], day
+    for day in ("12 March", "2 May", "March 20", "2 March 2025"):
+        assert not cx.score(rec, said.format(day), [])["correct"], day
