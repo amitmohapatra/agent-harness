@@ -2697,6 +2697,16 @@ _TABLE_ROW: Final = re.compile(r"^[ \t]*\|[^\n]*\|[ \t]*$", re.MULTILINE)  # a l
 _ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
 _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
+#: A count of the data's own things ("the 50 leggings SKUs", "14 matches"): in a refusal it says
+#: what the run could use instead, not a figure of what was asked (#162: a right refusal scored
+#: made up for its "50"). A figure with a currency, a decimal, or after a word such as "average"
+#: is no count and is still read.
+_COUNTED: Final = re.compile(
+    r"(?<![£$€.\d])\b\d{1,3}(?:,\d{3})*(?![.,]\d)\s+(?:[a-z][\w-]*\s+){0,2}"
+    r"(?:skus?|products?|items?|rows?|lines?|stores?|suppliers?|matches|results?|records?|"
+    r"styles?|colou?rs?|sources?|tools?)\b",
+    re.IGNORECASE,
+)
 #: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",
 #: "one of them").
 _COUNTS: Final = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
@@ -2996,6 +3006,8 @@ def score(
         # day, are not made up
         allowed = set(numbers(question)) | set(numbers(context)) | {2026.0, 2025.0}
         undated = _DAY_AFTER.sub(r"\1", _DAY_FIRST.sub("", _ISO_DATE.sub(" ", a)))
+        if k == "abstain":
+            undated = _COUNTED.sub(" ", undated)
         made_up = [str(n) for n in numbers(undated) if n not in allowed and abs(n) >= 10]
         if k == "clarify":
             made_up = []  # options may carry ids and prices

@@ -519,6 +519,33 @@ def test_an_iso_date_in_an_abstain_answer_is_no_made_up_figure() -> None:
     assert not cx.score(turn.expect, said + " Your target is 61%.", [], turn.text)["correct"]
 
 
+#: Claude's refusal in the natural-permissions re-measure (bf1-cantdo-02, #162): right, but
+#: scored made up for "50" - the count of our own leggings SKUs it offers to average instead.
+COMPETITOR_REFUSAL = """I can't give you a competitor average for leggings. None of the tools I have hold competitor prices. The catalogue, price history and sales data are all our own, and the memory search found nothing on competitor pricing. The margin feed is the finance team's own margin data, and its response was cut off, so I didn't use it.
+
+I can work out either of these from our own data:
+
+- **Our average leggings price.** I can take the 50 leggings SKUs in the catalogue, pull their current prices, and compute the average. I can also do a sales-weighted average for the period we have.
+- **The period.** Sales data runs only to 30 September 2026, so there are no sales figures yet for Q4 (October to December). If you mean Q3, I can use July to September.
+
+For a competitor comparison, you would need a competitor price feed or scrape, which would need to be connected before I could report on it. Do you want me to compute our own leggings averages for Q3?"""
+
+
+def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() -> None:
+    """A count of things ("the 50 leggings SKUs") is not a figure of what was asked; a figure
+    stated as the answer still is, counted or not."""
+    case = next(c for c in breakfix.cases() if c.id == "bf1-cantdo-02")
+    turn = case.turns[0]
+    assert turn.expect is not None and turn.expect.kind == "abstain"
+    assert cx.score(turn.expect, COMPETITOR_REFUSAL, [], turn.text)["correct"]
+    for answer in (
+        " Competitors average about £52.40 a pair.",
+        " Competitors average about 52 a pair.",
+        " Across 12 competitor SKUs the average is 48.",
+    ):
+        assert not cx.score(turn.expect, COMPETITOR_REFUSAL + answer, [], turn.text)["correct"]
+
+
 async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
     """Kimi and Claude: the captured requests do not hold the harness's tool results (the
     CLI's own requests are not seen), so the error a failed call returned ("503 Service
