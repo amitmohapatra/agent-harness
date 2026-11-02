@@ -736,6 +736,8 @@ class _Call:
     running: bool = False
     #: the run decided against it (or paused on it): it did not run, and is not recorded
     refused: bool = False
+    #: its arguments came as ``rawInput`` (final), not only as the text of its updates
+    given: bool = False
 
 
 class Attempt:
@@ -1135,11 +1137,18 @@ class Attempt:
             return
         if isinstance(update, ToolCallStart):
             args = _args(update.raw_input, update.content)
-            self.calls[update.tool_call_id] = _Call(name=update.title, args=args)
-        elif isinstance(update, ToolCallProgress) and update.raw_input is not None:
+            given = update.raw_input is not None
+            self.calls[update.tool_call_id] = _Call(name=update.title, args=args, given=given)
+        elif isinstance(update, ToolCallProgress):
             known = self.calls.get(update.tool_call_id)
-            if known is not None:
-                known.args = _args(update.raw_input, None)
+            if known is not None and update.raw_input is not None:
+                known.args, known.given = _args(update.raw_input, None), True
+            elif known is not None and not known.given and update.raw_output is None:
+                # the arguments as the model streams them (Kimi's ``tool.call.delta``: the
+                # text so far), before it asks permission for the call and only then starts it
+                streamed = _streamed(update.content)
+                if streamed is not None:
+                    known.args = streamed
         self.queue.put_nowait(update)
 
     async def stopped(self) -> None:
@@ -1525,6 +1534,16 @@ def _args(raw: Any, content: Any) -> dict[str, Any]:
     except ValueError:
         return {"request": text}
     return found if isinstance(found, dict) else {"request": text}
+
+
+def _streamed(content: Any) -> dict[str, Any] | None:
+    """A call's arguments as far as they streamed (its update's text), once they are a whole
+    JSON object; ``None`` while they are not."""
+    try:
+        found = json.loads(_text(content))
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
 
 
 def _text(content: Any) -> str:

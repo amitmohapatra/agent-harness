@@ -2783,7 +2783,29 @@ def _has_svg(answer: str) -> bool:
 
 def _has_text(answer: str, value: Any) -> bool:
     options = value if isinstance(value, (list, tuple)) else (value,)
-    return any(str(o).lower() in answer.lower() for o in options)
+    return any(str(o).lower() in answer.lower() or _has_date(answer, str(o)) for o in options)
+
+
+#: The months as a date says them in words, in order ("March", "Mar").
+_MONTH_NAMES: Final = ("january", "february", "march", "april", "may", "june", "july", "august",
+                       "september", "october", "november", "december")  # fmt: skip
+
+
+def _has_date(answer: str, option: str) -> bool:
+    """Whether ``option``, an ISO date ("2026-03-02"), is in ``answer`` in words: "2 March",
+    "March 2nd", "Mar 2, 2026" (a year said must be its year)."""
+    if not _ISO_DATE.fullmatch(option):
+        return False
+    year, month, day = (int(p) for p in option.split("-"))
+    full = _MONTH_NAMES[month - 1]
+    name = (
+        rf"(?:{full}|{full[:4]}\.?|{full[:3]}\.?)" if month == 9 else rf"(?:{full}|{full[:3]}\.?)"
+    )
+    num = rf"(?<!\d){day}(?:st|nd|rd|th)?(?!\d)"
+    said = re.compile(
+        rf"(?:{num}\s+{name}\b|\b{name}\s+{num})(?:,?\s+(?P<year>\d{{4}}))?", re.IGNORECASE
+    )
+    return any(m["year"] in (None, str(year)) for m in said.finditer(answer))
 
 
 def _forbidden_in(answer: str, item: str) -> bool:
@@ -2816,6 +2838,11 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
     return [
         f"{n:g}" for n in numbers(answer) if not (n == int(n) and abs(n) <= 100) and not near(n)
     ]
+
+
+#: A record's field that is a magnitude (the cases' ``abs(...)``): said as a signed change
+#: ("-12", "down 12") it is still the difference.
+DIFFERENCE: Final = "difference"
 
 
 def score(
@@ -2863,6 +2890,8 @@ def score(
         for name, spec in expect.value.items():
             v = spec["value"]
             ok = _has_number(a, float(v), spec["tol"]) if _num(v) else _has_text(a, v)
+            if not ok and name == DIFFERENCE and _num(v):  # a magnitude: "-12" says it too
+                ok = _has_number(a, -float(v), spec["tol"])
             if not ok:
                 missing.append(name)
     elif k == "set":
