@@ -1088,7 +1088,7 @@ def cases() -> list[Any]:
         "bf3-cantdo-02", "bf_cantdo", 2,
         (
             Turn("What's the weather forecast for Leeds tomorrow, and will it hurt footfall?",
-                 expect=cx.abstain("no weather or footfall data")),
+                 expect=cx.abstain("no weather or footfall data", web=True)),
             Turn("OK. How many of our stores are in Leeds?", expect=cx.count(1)),
         ),
         ("outside data it has not",),
