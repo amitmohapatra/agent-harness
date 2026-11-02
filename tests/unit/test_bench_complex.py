@@ -1197,3 +1197,15 @@ def test_a_difference_written_as_a_signed_change_is_the_difference() -> None:
     assert not cx.score(rec, "Now 40, then 52: a change of -13.", [])["correct"]
     signed = cx.record({"change": 12}, tol={"change": 0})  # any other field keeps its sign
     assert not cx.score(signed, "The change is -12.", [])["correct"]
+
+
+def test_claude_and_kimi_work_in_a_folder_of_their_own(tmp_path, monkeypatch) -> None:
+    """What a run saves for the user lands in its own working folder, which the suite's
+    approver writes may go to: Claude's too (it ran in this checkout before)."""
+    monkeypatch.setenv("CLAUDE_RUN_ROOT", str(tmp_path / "claude"))
+    monkeypatch.setenv("KIMI_RUN_ROOT", str(tmp_path / "kimi"))
+    assert cx.work_folder("claude") == (tmp_path / "claude" / "cwd").resolve()
+    assert cx.work_folder("kimi") == (tmp_path / "kimi" / "cwd").resolve()
+    assert cx.work_folder("react") is None and cx.work_folder("graph") is None
+    options, _ = cx.target_of("m", "memory", None, 6, adapter="claude")
+    assert options.cwd == str(tmp_path / "claude" / "cwd")
