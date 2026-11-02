@@ -109,12 +109,16 @@ class Desk:
 
         return slow
 
-    def wait(self) -> Any:
+    def wait(self, at_most: float = WAIT_SECONDS) -> Any:
+        """``wait``, waiting ``at_most`` seconds: a scenario that stops the run in it (a
+        cancel) gives it the cell's guard, so the stop always lands while it waits, however
+        long a loaded runner takes to deliver it."""
+
         @tool(side_effects="read")
         async def wait(seconds: int) -> str:
             """Wait a while."""
             self.started.set()
-            await asyncio.sleep(min(seconds, WAIT_SECONDS))
+            await asyncio.sleep(min(seconds, at_most))
             self.done.append(("wait", {"seconds": seconds}))
             return "waited"
 
