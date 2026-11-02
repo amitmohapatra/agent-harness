@@ -1233,3 +1233,15 @@ async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
     await trace.on_run_end(SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}), None)
     await trace.on_run_end(SimpleNamespace(run_id="r1", used={"Bash"}), None)  # a resume
     assert trace.used == {"r1": {"WebSearch", "store_list", "Bash"}}
+
+
+def test_claude_and_kimi_work_in_a_folder_of_their_own(tmp_path, monkeypatch) -> None:
+    """What a run saves for the user lands in its own working folder, which the suite's
+    approver writes may go to: Claude's too (it ran in this checkout before)."""
+    monkeypatch.setenv("CLAUDE_RUN_ROOT", str(tmp_path / "claude"))
+    monkeypatch.setenv("KIMI_RUN_ROOT", str(tmp_path / "kimi"))
+    assert cx.work_folder("claude") == (tmp_path / "claude" / "cwd").resolve()
+    assert cx.work_folder("kimi") == (tmp_path / "kimi" / "cwd").resolve()
+    assert cx.work_folder("react") is None and cx.work_folder("graph") is None
+    options, _ = cx.target_of("m", "memory", None, 6, adapter="claude")
+    assert options.cwd == str(tmp_path / "claude" / "cwd")

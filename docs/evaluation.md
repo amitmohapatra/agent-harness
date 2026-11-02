@@ -487,8 +487,12 @@ before a later chat the harness's writes are drained, as a chat an hour later fi
 A run that pauses to ask a person about a shell command that only reads (Claude Code's or Kimi's
 `Bash`: a program that reads, joined by pipes and sequences, or Python whose code writes
 nothing; `benchmark/cost/approvals.py`) is resumed approved, as a user reading it would, and the
-row says which commands (`approved`); a pause on anything else (a write, a delete, an install,
-the network, a script it cannot read) stays a pause. A `cannot` turn whose run ran such a
+row says which commands (`approved`). So is a save inside the run's own working folder
+(`complex.work_folder`: Kimi's and Claude's, under `KIMI_RUN_ROOT` / `CLAUDE_RUN_ROOT`): their
+file tool on a path there, or a command whose every write (`mkdir`, `touch`, `cp`'s target, a
+redirect, Python's `to_excel`/`savefig`/`save`/`open(..., "w")` on a path written out) resolves
+inside it, after a `cd` into it if any. A pause on anything else (a write elsewhere, a delete or
+a move, an install, the network, a script it cannot read) stays a pause. A `cannot` turn whose run ran such a
 command is scored on what it did: the result is its answer, and only output the user cannot
 reach (a file link, a file it says it saved) is made up; a refusal is still right. A question
 the data cannot answer that a framework's own web search can (the weather, `abstain(web=True)`)
