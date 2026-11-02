@@ -154,6 +154,8 @@ async def test_the_status_view_is_one_source_for_the_ui_and_the_chat(
     said = await d.lead.run("status", user="u1", thread="t1")
     assert json.loads(str(said.answer)) == [shown]
     assert (await client.get(f"{PATH}/tasks", headers={"x-user": "u2"})).json() == {"tasks": []}
+    nobody = await client.get(f"{PATH}/tasks", headers={"x-user": ""})
+    assert nobody.status_code == 401
 
 
 async def test_a_resume_that_loses_a_race_is_refused(
