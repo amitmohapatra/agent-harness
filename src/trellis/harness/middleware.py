@@ -34,7 +34,7 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   a crash — continues where the graph stopped, without asking the model again;
 * :class:`PromptCache` — Anthropic's prompt cache (LangChain's
   ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model however it is given, a
-  model name the harness routes too, and the answer that ends the history marked with it;
+  model name the harness routes too, and the answer that ends a replayed history marked with it;
 * :func:`narrowing` — not given by anyone: the harness runs a ``create_agent`` graph built
   without :class:`HarnessTools` as a copy whose model calls are offered only the tools the run
   offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
@@ -1206,8 +1206,9 @@ class PromptCache(AgentMiddleware):
     route makes one of it now (the provider's own SDK). LangChain's
     ``AnthropicPromptCachingMiddleware`` (``native``: the one given to ``ReAct``, else its
     defaults) decides on the chat model the call is made with and marks what it marks — the
-    tools, the instructions, the request's own breakpoint — and the answer that ends the
-    history gets the same mark (:func:`history_marked`): 4 breakpoints, Anthropic's most. Any
+    tools, the instructions, the request's own breakpoint — and the answer that ends a history
+    the harness replays gets the same mark (:func:`history_marked`; the model's own answer in
+    a graph's thread is sent as it gave it): 4 breakpoints, Anthropic's most. Any
     other chat model's request is sent as it was. Named as LangChain's, it stands in Deep
     Agents' place for it (Deep Agents replaces a middleware of the same name), last of what
     changes the request."""
@@ -1254,8 +1255,13 @@ def prompt_cache(given: Sequence[Any]) -> tuple[PromptCache, list[Any]]:
 
 def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
     """The answer that ends the history with a cache breakpoint (``marker``) on its last text
-    part; any other message (a call, a result) as it is, and so is an answer that has one."""
-    if not isinstance(answer, AIMessage) or answer.tool_calls:
+    part; any other message (a call, a result) as it is, and so is an answer that has one.
+    So is an answer the model itself gave in this thread (a graph's own checkpointer keeps it,
+    with its usage): Anthropic holds a model's own earlier turns to what it produced (its
+    thinking stays valid only in that conversation), and marking one measurably changed the
+    answers after it — the request's own breakpoint caches that thread anyway. What is marked
+    is a history the harness replays (memory's window)."""
+    if not isinstance(answer, AIMessage) or answer.tool_calls or answer.usage_metadata:
         return answer
     content = answer.content
     parts: list[Any] = (

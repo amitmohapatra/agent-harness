@@ -74,6 +74,7 @@ def test_middleware_is_the_harness_part_in_its_order() -> None:
         "ReadTools",
         "FitWindow",
         "ModelHooks",
+        "AnthropicPromptCachingMiddleware",  # PromptCache, in Deep Agents' own one's place
     ]
     with pytest.raises(
         TypeError, match=r"middleware\(capabilities=\) was removed: .*system_prompt"
