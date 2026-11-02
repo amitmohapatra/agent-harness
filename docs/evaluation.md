@@ -559,3 +559,54 @@ and worker ~2.1–2.3 GB each (their encoders), agent-runs 138 MB, the ticker 11
 slopes are a few MB an hour (0.5–1.5 kB a run: allocator noise at this length, not a growth a
 longer run continues). The one error was agent-runs' tenant request budget (429) answering a
 result poll; `handle.result` now waits what it says and polls again.
+
+### Background agents
+
+`python -m benchmark.load.background` loads background tasks the way a deployment sees them;
+`benchmark/load/background_stack.sh` stands up a private PostgreSQL database, agent-runs and a
+key-registry stub, then runs it. It seeds idle chats into agent-runs (`--chats`), runs
+`--tasks` research tasks on `--workers` worker processes (a scripted model, `--pace` seconds a
+call), and has `--users` users check, list, steer and cancel them (`--think` seconds apart).
+Arm `A` starts each task from a lead's `start_async_task` and operates it through AG-UI's task
+routes (`--ops direct`) or the lead's tools (`--ops chat`); arm `B` runs the same work as plain
+queued runs (`agent.start`, `runs.get`, the run's inbox, `agent.cancel`). It reports each
+process's CPU and memory, the database's statements a second by kind (`pg_stat_statements`),
+its connections, each operation's p50, p95 and p99, the rows written and the errors.
+`tests/integration/test_load_background.py` runs both arms in process as a smoke test.
+
+```bash
+RUNS_SRC=../agent-runs RUNS_PY=<python with agent-runs> RUNS__RATE_LIMIT__PER_MINUTE=0 \
+  benchmark/load/background_stack.sh --arm A --ops direct --tasks 100 --users 50 --seconds 120
+```
+
+Measured 2026-11-02 on 4 cores: one agent-runs process, one worker process, `--pace 0.5`, two
+minutes a step. agent-runs' per-tenant rate limit was off: at its default (3,000 requests a
+minute) 100 tasks and 50 users of one tenant are throttled in both arms. Latencies are p95 for
+status, list, steer and cancel.
+
+| step | arm A (background) | arm B (plain runs) |
+|---|---|---|
+| idle chats, no task: 1k, 10k, 50k, 100k | 0.1 statements/s; agent-runs 0.2–0.3% CPU, worker 1.2%: flat | — |
+| 100 tasks, no user | 474 statements/s; agent-runs 56%, worker 94% CPU; 241 MB | 465; 56%, 92%; 238 MB |
+| 100 tasks, 50 users | 234 statements/s; 84, 145, 156, 203 ms | 254; 152, 224, 140, 250 ms |
+| 500 tasks, 50 users | 754 statements/s; agent-runs 87%, worker 99%; 124, 214, 156, 265 ms | 803; 90%, 98%; 113, 120, 155, 309 ms |
+| 500 tasks, two workers | workers 89% and 90%, 35% more task steps (the 4 cores are shared); 46, 91, 76, 200 ms | — |
+| 1,000 tasks, 50 users | worker 100%, its CPU the ceiling; 98, 183, 142, 256 ms | worker 103%; 111, 126, 149, 304 ms |
+| 100 tasks, 200 and 500 users, one driver | status 598 and 6,582 ms | 582 and 6,034 ms |
+| 100 tasks, 500 users, two agent-runs processes | one driver: status 7,334 ms; four: 633; eight: 947 | — |
+
+Both arms' `list` reads what a status view shows: the user's runs (one page), then each run
+whole (read at once), two round trips. There were no errors in any step. Idle chats cost nothing: a chat is rows in agent-runs, read
+when it is asked about, with no process, timer or poll kept for it. A background task costs
+what the same run costs in the foreground. The ceiling is the worker process's CPU, and 200 or
+more users operating at once slow both arms alike. At 500 users the first limit is the one
+process they act from (`--drivers 1`: its CPU at 72–78%, one HTTP client): a second agent-runs
+process alone changes nothing (its two processes at 35% and 23% CPU), and spreading the users
+over four harness processes takes status from 6.7 s to 0.63 s at p95. The next limit is
+agent-runs' database pool, 20 connections a process: at eight driver processes all 41 are in
+use and requests wait for one (`RUNS__DATABASE__CONNECTION_BUDGET`, or more agent-runs
+processes).
+
+Before `ix_runs_user` and `ix_runs_thread` in agent-runs, and before the status view read the
+user's tasks by user, `list` took 2,782 ms at p95 with 50 users. A finished task reaches an
+idle chat at its next turn: nothing is pushed to an idle chat yet.

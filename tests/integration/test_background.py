@@ -649,3 +649,29 @@ async def test_every_state_of_a_task_is_an_event_of_the_conversations_stream(
         )
     )
     assert update is not None and update.state is TaskState.TASK_STATE_WORKING
+
+
+async def test_a_users_tasks_are_listed_however_many_other_users_have(
+    harness: Harness,
+) -> None:
+    """The status view lists the user's own tasks, read by their user (an index in agent-runs),
+    not the tenant's newest filtered here: a user's task older than many others' is listed."""
+    from trellis.contracts import RunStart
+    from trellis.harness.background import LISTED, users_tasks
+
+    child = researcher(harness, Gate())
+    parent = lead(harness, ScriptedChat(), child)
+    tenant = await harness._tenant()
+    for n, user in enumerate(["ada"] + ["eve"] * (LISTED + 5)):
+        start = RunStart(
+            run_id=f"run_{n}",
+            tenant_id=tenant,
+            agent_id="research",
+            thread_id=f"t{n}",
+            user_id=user,
+            input="tides",
+            metadata={BACKGROUND: f"k{n}"},
+        )
+        await harness.runs.start(start, queue=True)
+        await asyncio.sleep(0.001)  # each newer than the last
+    assert [r.run_id for r in await users_tasks(parent, "ada")] == ["run_0"]

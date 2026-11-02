@@ -204,6 +204,7 @@ class RunStore(Protocol):
         agent_id: str | None = ...,
         thread_id: str | None = ...,
         parent_run_id: str | None = ...,
+        user_id: str | None = ...,
         limit: int = ...,
         tenant: str | None = ...,
         max_pages: int | None = ...,
@@ -483,6 +484,7 @@ class LocalRuns:
         agent_id: str | None = None,
         thread_id: str | None = None,
         parent_run_id: str | None = None,
+        user_id: str | None = None,
         limit: int = PAGE_LIMIT,
         tenant: str | None = None,
         max_pages: int | None = None,
@@ -497,6 +499,7 @@ class LocalRuns:
             and agent_id in (None, r.agent_id)
             and thread_id in (None, r.thread_id)
             and parent_run_id in (None, r.parent_run_id)
+            and user_id in (None, r.user_id)
             and assignee in (None, _assignee(r))
         ]
         matching.sort(key=lambda r: r.updated_at, reverse=True)
