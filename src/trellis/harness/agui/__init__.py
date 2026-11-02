@@ -12,9 +12,6 @@
   any replica serves any run.
 * ``POST {path}/runs/{run_id}/cancel`` — stop the run, whatever it is doing (``agent.cancel``):
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
-* ``GET {path}/runs/{run_id}/transcript?after=&limit=`` — the transcript of any run of the
-  user's, a sub-agent's included: its messages and tool calls, each with its arguments and its
-  result, from its run log in agent-runs (``transcript.py``), a page at a time.
 * ``GET {path}/tasks`` — the status view: the user's background tasks, each with its usage
   (model and tool calls, commands, tokens, cost) and elapsed time, as the chat's
   ``list_async_tasks`` reads them (one source: ``background.described``).
@@ -104,7 +101,6 @@ from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
-from trellis.harness.transcript import PAGE, transcript
 from trellis.memory.errors import AuthorizationError, NotFoundError
 from trellis.runs import ConflictError
 
@@ -418,19 +414,6 @@ class _Surface:
             raise HTTPException(409, str(exc)) from exc
         return sent.position
 
-    async def transcript(self, request: Request, run_id: str, after: int, limit: int) -> Any:
-        """A page of the transcript of the user's own run — any agent's, a sub-agent's
-        included — from its run log (404 without one: ``RUNS_URL`` unset)."""
-        user = await self.user(request)
-        harness = self.agent.harness
-        record = await harness.runs.get(run_id, tenant=await harness._tenant())
-        if record is None or record.user_id != user:
-            raise HTTPException(404, f"no run {run_id}")
-        store = event_log(harness.runs)
-        if store is None or not hasattr(store, "events"):
-            raise HTTPException(404, "no run log here: the transcript needs agent-runs (RUNS_URL)")
-        return await transcript(store, record, after=after, limit=limit)
-
     async def resume_pause(self, request: Request, run_id: str) -> RunStatus:
         """The pause the user's run waits on, resumed: a task goes back to its worker; a run of
         this process continues here (its events: ``/runs/{run_id}/events``)."""
@@ -725,32 +708,6 @@ def _controls(router: APIRouter, surface: _Surface) -> None:
             return _problem(exc, request)
         found = await users_tasks(surface.agent, user)
         return JSONResponse({"tasks": [described(r) for r in found]})
-
-    @router.get(
-        "/runs/{run_id}/transcript",
-        summary="A run's (or a sub-agent's) transcript, a page at a time",
-        responses={
-            200: {
-                "description": '`{"run_id", "agent_id", "parent_run_id", "status", "input", '
-                '"items", "after", "more"}`: its messages and tool calls (each with its `args` '
-                "and `result`), from its run log",
-                "content": {"application/json": {}},
-            },
-            **_refusals(401, 404, 422),
-        },
-    )
-    async def transcript_page(
-        request: Request, run_id: str, after: int = 0, limit: int = PAGE
-    ) -> Response:
-        """The run's messages and tool calls past position `after` of its log; read on from
-        the `after` it answers while `more`. Only the run's own user."""
-        if after < 0 or not 1 <= limit <= PAGE:
-            return _problem(HTTPException(422, f"after >= 0, limit 1 to {PAGE}"), request)
-        try:
-            page = await surface.transcript(request, run_id, after, limit)
-        except HTTPException as exc:
-            return _problem(exc, request)
-        return JSONResponse(page)
 
     @router.post(
         "/runs/{run_id}/messages",
