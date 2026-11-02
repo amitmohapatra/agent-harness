@@ -84,7 +84,7 @@ NAMED: Final = 5
 
 NOTE: Final = (
     "Before you answer: {figures} in your answer {verb} not in any tool result, nor a step or "
-    "two of arithmetic from the figures you state, so {pronoun} {was} worked out by hand. "
+    "two of arithmetic from the figures you state, so {subject} {was} worked out by hand. "
     "Compute {pronoun} with a tool instead: {how}. Then give your answer again. If a tool "
     "result does hold {pronoun}, say which."
 )
@@ -401,6 +401,7 @@ def _note(found: Sequence[str], how: str) -> str:
         figures=", ".join(shown),
         verb="is" if one else "are",
         pronoun="it" if one else "them",
+        subject="it" if one else "they",
         was="was" if one else "were",
         how=how,
     )
