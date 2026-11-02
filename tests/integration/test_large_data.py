@@ -527,7 +527,8 @@ async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:
 
 
 @pytest.mark.parametrize(
-    "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
+    "framework",
+    ["react", "middleware", "langgraph", "deepagents", "openai_agents", "claude_agent_sdk", "kimi"],
 )
 async def test_every_framework_counts_a_table_read_whole_exactly(
     harness: Harness, engine: str, framework: str, tmp_path: Path

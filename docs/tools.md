@@ -87,7 +87,7 @@ format. What helps it choose, whatever the source:
 |---|---|
 | **Descriptions worth choosing by** — what the tool is for, when to use it rather than a broader or narrower one, each parameter described | the tool's author: the docstring (functions), the MCP server, the OpenAPI document. The harness checks, below |
 | **A check of the tool set** — `trellis.harness.tools.lint.lint(specs)`: a missing or short description (under 5 words), an undescribed parameter, a name the OpenAI API refuses (letters, digits, `_`, `-`, at most 64), names differing only in case or separators, two tools described the same or nearly (75% of their words shared), 20 tools or more at once (OpenAI's guide suggests fewer), over 128 (the most the OpenAI API takes) | automatic: the toolbox logs each finding as a warning (`trellis.tools`, `tool choice: ...`) when the tools it lists change; in CI, assert `lint([t.spec for t in tools]) == []` |
-| **Fewer tools per call** — the memory service's tool hints (they narrow from 30 tools in the run, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
+| **Fewer tools per call** — the memory service's tool hints (they narrow from 30 tools of the run's own, [below](#tool-hints-what-the-model-is-offered)) and its `tool_search` tool: the one owner of narrowing. Without memory every tool is offered (the check below warns from 20). A team that wants narrowing without memory adds its own: LangChain's `LLMToolSelectorMiddleware` in a `ReAct` or `create_agent` graph (its own model call per step picks the tools) — the team's code, not a harness fallback | automatic with memory; your opt-in without: `ReAct(middleware=[LLMToolSelectorMiddleware(max_tools=8, on_parsing_failure="all")])` |
 | **Tool chains** — which tool's output is another's argument (`find_sku → sku_id → get_stock`), read from the schemas the tools publish ([below](#tool-chains)) | automatic: a function's return annotation, an MCP tool's `outputSchema` |
 | **What it can do** — capabilities beyond the tools, said plainly | the instructions: `ReAct("... You cannot accept an image upload.", ...)` |
 | **Measured** — `tool_coverage()` scores each evaluation item by the share of its `needed_tools` the run called | [evaluation.md](evaluation.md#trajectories) |
@@ -324,10 +324,15 @@ with the skills the agent learned for the task ("Learned skills for this task", 
 tools) and, from five tools (the memory service's threshold), the tools section (the next step,
 argument values found in memory, what is missing) and the `tools` that fit the task
 (`[{name, confidence}]`, confidence 0–1) — one call, no separate hints request. With 30 or
-more tools in the run (`NARROW_FROM`: its own, its framework's and memory's), the model is then
-offered the following; with fewer, every tool, and the tools section still says which fit
-(narrowing a set of 20 hid a tool the question needed in about a quarter of the turns, and
-those turns went wrong two to three times as often: the holistic small-model run):
+more tools of the run's own (`NARROW_FROM`, `Runtime.own_tools`: the harness's tools and the ones
+your agent declares; not memory's, and not the framework's built-ins — Claude Code's and Kimi's
+own tools, Deep Agents' `task` and file tools, tagged `builtin`), the model is then offered the
+following; with fewer, every tool, and the tools section still says which fit (narrowing a set
+of 20 hid a tool the question needed in about a quarter of the turns, and those turns went
+wrong two to three times as often: the holistic small-model run). Counted with Claude's or
+Kimi's 20-odd built-ins, a run of 14 tools of its own narrowed, and the `trellis` server, which
+the CLI lists once per query, never listed the `find_sku` a later `tool_search` found (the
+break-and-fix gate: 4 turns):
 
 * the memory tools,
 * the tools the service named (at most 8),

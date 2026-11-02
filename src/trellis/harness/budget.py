@@ -52,6 +52,18 @@ TURN_LIMIT: Final = (
     "you found, and say what is left undone. The limit is for this turn only: the user's next "
     "message starts a new turn, with your tools."
 )
+#: What a model is told when its reply was cut at its output limit (its ``max_tokens``) before
+#: it gave an answer — the reply spent on working, such as rows summed by hand (the
+#: break-and-fix gate: two LangGraph turns at 4,096 tokens) —: its one more call, with no tool,
+#: answers.
+CUT_OFF: Final = (
+    "Your last reply reached the output limit before it gave an answer. Do not call tools now "
+    "and do not write out data or working: answer in a few sentences with what you found, and "
+    "say what is left undone."
+)
+#: Why a run that would end with no answer ends ``ERROR`` instead (``pipeline``): an empty
+#: answer reported as a success hid the failure (the break-and-fix gate's two LangGraph turns).
+NO_ANSWER: Final = "NO_ANSWER"
 
 
 @dataclass(frozen=True)

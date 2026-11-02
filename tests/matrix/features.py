@@ -1747,16 +1747,12 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
-    if w.adapter in ANSWER_AT_LIMIT and (w.adapter != "openai_agents" or w.mode != "elsewhere"):
-        # one last answer at the limit, its warning on the stream; elsewhere the resumed turn's
-        # planned last call is a tool, so the SDK's own error stands (test_framework_options)
+    if w.adapter in ANSWER_AT_LIMIT:  # one last answer at the limit, its warning on the stream
         o.succeeded()
         warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
         assert any(said in m for m in warned), o.custom(WARNING)
         return
     assert o.status is RunStatus.ERROR and o.record.error is not None, o.status
-    if w.adapter == "openai_agents":
-        said = "Max turns (1) exceeded"
     assert said in o.record.error.message, o.record.error.message
 
 

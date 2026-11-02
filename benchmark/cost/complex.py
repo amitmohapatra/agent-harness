@@ -63,7 +63,7 @@ from typing import Any, Final
 
 from langchain_core.messages import convert_to_openai_messages
 
-from benchmark.cost import prices, stats
+from benchmark.cost import approvals, prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
@@ -2617,12 +2617,17 @@ _WHY: Final = re.compile(
     r"no way to (?:create|make|produce|attach|export|run)",
     re.IGNORECASE,
 )
-#: Output made up for a request that could not be met: a file or image link, a file it says it
-#: saved where the user cannot reach it, or a claim to have run what it cannot run.
-_FAKE: Final = re.compile(
+#: Output the user cannot reach: a file or image link, a file it says it saved (a command that
+#: writes is never approved, so none was).
+_UNREACHABLE: Final = (
     r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
-    r"\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)|"
-    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]",
+    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]"
+)
+#: Output made up for a request that could not be met: what the user cannot reach, or a claim
+#: to have run what it cannot run.
+_FAKE: Final = re.compile(
+    _UNREACHABLE
+    + r"|\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)",
     re.IGNORECASE,
 )
 _ABSTAIN: Final = re.compile(
@@ -2755,9 +2760,13 @@ def score(
     records: Sequence[dict[str, Any]],
     question: str = "",
     context: str = "",
+    *,
+    ran: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
-    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``).
+    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
+    ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
+    scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -2819,6 +2828,15 @@ def score(
             int(n) for n in numbers(a) if n == int(n)
         ]:
             missing.append(f"count {len(held.get('calls', []))}")
+    elif k == "cannot" and ran:
+        # a shell of its own ran what the suite wrote as "no code execution here": what it
+        # computed is its answer, not made up; what the user cannot reach still is, and a
+        # refusal is still right
+        if not a.strip():
+            missing.append("an answer")
+        unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
+        if unreachable:
+            made_up.append(unreachable.group(0))
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
@@ -3306,6 +3324,8 @@ async def run_case(
         return f"{t.user or runner.USER}-{tag}-{case.id}"
 
     paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+    #: the read-only commands each turn (by id) was resumed past, approved
+    approved: dict[int, list[str]] = {}
 
     async def asked(t: Turn) -> Any:
         result = await agent.run(
@@ -3317,6 +3337,9 @@ async def run_case(
         if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
             paused.add(id(t))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+        # a shell command that only reads is approved, as a user reading it would; any other
+        # pause stays one
+        result, approved[id(t)] = await approvals.approved_reads(agent, result, REVIEWER)
         return result
 
     i = 0
@@ -3393,6 +3416,7 @@ async def run_case(
                 "status": status,
                 "error": error,
                 "calls": calls,
+                "approved": approved.get(id(turn), []),
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
@@ -3418,7 +3442,8 @@ async def run_case(
                 said = "\n".join(
                     _texts(m) for q in captured.requests for m in q.get("messages") or []
                 )
-                row["score"] = score(turn.expect, answer, records, turn.text, said)
+                ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
+                row["score"] = score(turn.expect, answer, records, turn.text, said, ran=ran)
             records.append(row)
             requests += [
                 {"case": case.id, "turn": i + n, "call": c, **q}
