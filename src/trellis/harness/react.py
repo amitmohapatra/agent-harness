@@ -151,14 +151,22 @@ def middleware(
     needed); and
     :class:`~.middleware.ModelHooks` (the run's hooks, the span, ``call_timeout`` and the
     run's time left, a ``stored(...)`` ``system_prompt`` pinned for the run, the gateway's
-    headers on a routed model). Outside a harness run each steps aside."""
-    return _middleware(
-        max_steps=max_steps,
-        max_repeats=max_repeats,
-        call_timeout=call_timeout,
-        context_window=context_window,
-        system_prompt=system_prompt,
-    )
+    headers on a routed model); last, the prompt cache (:class:`~.middleware.PromptCache`:
+    LangChain's ``AnthropicPromptCachingMiddleware`` for an Anthropic model, a routed name too,
+    in Deep Agents' own one's place, as ``ReAct`` has it). Outside a harness run each steps
+    aside."""
+    from trellis.harness.middleware import PromptCache
+
+    return [
+        *_middleware(
+            max_steps=max_steps,
+            max_repeats=max_repeats,
+            call_timeout=call_timeout,
+            context_window=context_window,
+            system_prompt=system_prompt,
+        ),
+        PromptCache(),
+    ]
 
 
 def _middleware(
@@ -342,7 +350,7 @@ def ReAct(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
     profiled = _profiled(chat, window)
-    cache, middleware = ours.prompt_cache(middleware)
+    cached, middleware = ours.prompt_cache(middleware)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
     instructions = system_prompt if not isinstance(system_prompt, Stored) else None
     if not _deep(
@@ -372,7 +380,7 @@ def ReAct(
                     ),
                     middleware,
                 ),
-                cache,  # last of what changes the request, where Deep Agents puts its own
+                cached,  # last of what changes the request, where Deep Agents puts its own
             ],
             response_format=cast(Any, response_format),  # a JSON schema too, at run time
             state_schema=state_schema,
@@ -413,7 +421,7 @@ def ReAct(
         system_prompt=instructions,
         # Deep Agents' summarization stands after the harness's narrowing, which it counts;
         # the prompt cache in its own caching middleware's place
-        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cache],
+        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cached],
         subagents=cast(Any, native),  # Deep Agents' own dicts, as given
         skills=skills,
         memory=memory_files,

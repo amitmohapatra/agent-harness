@@ -236,11 +236,14 @@ adds on top of the frameworks):
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped.
 
-Last of what changes a request, where Deep Agents puts its own, both bases have `PromptCache`:
+Last of what changes a request, where Deep Agents puts its own, both bases (and `middleware()`
+on your own graph) have `PromptCache`:
 LangChain's `AnthropicPromptCachingMiddleware` (the one you give `ReAct(middleware=)`, its
 settings kept) run on the chat model the call is made with — a `ChatAnthropic`, or a model name
 routed to Anthropic's own SDK or to Anthropic's API as an OpenAI-compatible endpoint — so the tools, the instructions, the request's end and the
-answer that ends the history are marked (4 breakpoints). Any other model's request is sent as
+answer that ends a history the harness replays (memory's window) are marked (4 breakpoints). An
+answer the model itself gave in a graph's own thread is sent exactly as it gave it: marking one
+changed the answers after it. Any other model's request is sent as
 it was. Through Bifrost the gateway caches (`prompt_cache.auto_inject`); any other
 OpenAI-compatible endpoint's chat completions carry no breakpoints.
 
