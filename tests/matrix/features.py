@@ -310,7 +310,11 @@ async def cancel(w: World) -> None:
         await asyncio.wait_for(d.started.wait(), STARTED_SECONDS)
         await w.cancel(run_id, "a duplicate")
 
-    o = await w.go([d.wait()], [("wait", {"seconds": 30})], during=cancelling)
+    # the tool waits until the cancel stops it (at most the guard): a fixed second let a cancel
+    # a loaded runner delivered later (A2A's tasks/cancel round trip) land after the run ended
+    o = await w.go(
+        [d.wait(at_most=STARTED_SECONDS)], [("wait", {"seconds": 30})], during=cancelling
+    )
     assert o.status is RunStatus.CANCELLED, (o.status, o.record.error)
     assert d.ran("wait") == []  # stopped while it waited
     finished = [e for e in o.events if e.type is RunEventType.RUN_FINISHED]
