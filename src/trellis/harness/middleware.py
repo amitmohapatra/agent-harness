@@ -1421,7 +1421,7 @@ class StallGuard(AgentMiddleware):
     consecutive steps in which every call failed (a malformed one among them) and a failure
     was met again (:func:`_failing`), or a reply cut at the model's output limit with no answer
     (:func:`answered_in_full`). The model is told so (``bridge.STALLED``, :data:`FAILING`,
-    ``budget.CUT_OFF``) and called once more, offered no tool (``tool_choice="none"``), so the
+    ``budget.CUT_OFF``) and called once more, offered no tool (:func:`no_tool`), so the
     user is told what went wrong; no answer then stops the run (``ModelError``)."""
 
     def __init__(self, max_repeats: int = MAX_REPEATS) -> None:
@@ -1488,6 +1488,18 @@ async def answered_in_full(
     return await _answer_now(request, handler, budget.CUT_OFF, CUT_STOPPED, warning="output_limit")
 
 
+def no_tool(model: Any) -> Any:
+    """The ``tool_choice`` that offers ``model`` no tool, in its own terms: LangChain's
+    ``"none"`` (OpenAI's word), and Anthropic's ``{"type": "none"}`` for a ``ChatAnthropic`` — a
+    model name routed to one too — whose ``bind_tools`` reads any other string as the name of
+    a tool to force (Anthropic's API then refuses the request). The tools stay defined: a
+    history with tool calls needs them."""
+    from langchain_anthropic import ChatAnthropic  # noqa: PLC0415 - Deep Agents' own
+
+    made = cast(Any, model).resolved() if routed(model) else model
+    return {"type": "none"} if isinstance(made, ChatAnthropic) else "none"
+
+
 async def _answer_now(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
@@ -1500,7 +1512,7 @@ async def _answer_now(
     on the run's stream), or the run stopped (``ModelError(stopped)``) when it gives none."""
     last = request.override(
         messages=[*request.messages, HumanMessage(content=told)],
-        tool_choice="none" if request.tools else request.tool_choice,
+        tool_choice=no_tool(request.model) if request.tools else request.tool_choice,
     )
     reply = await handler(last)
     message = _ai(reply)
