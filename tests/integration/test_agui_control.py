@@ -5,6 +5,7 @@ user only; a target with no step to take them at says so."""
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -33,6 +34,8 @@ class Deployment:
         self.child = researcher(self.harness, self.gate, model=self.work)
 
         async def lead(input: Any, agent: Runtime) -> Any:
+            if input == "status":
+                return await agent.tools.call("list_async_tasks", status_filter="all")
             return await agent.tools.call(
                 "start_async_task", description=str(input), subagent_type="research"
             )
@@ -128,3 +131,25 @@ async def test_a_target_with_no_step_says_it_takes_no_instruction(deployed: Depl
     finally:
         held.set()
         await run
+
+
+async def test_the_status_view_is_one_source_for_the_ui_and_the_chat(
+    deployed: Deployment,
+) -> None:
+    """``GET {path}/tasks`` lists the user's tasks with their counts, read as the chat's
+    ``list_async_tasks`` reads them: the same records, the same shape."""
+    d, client = deployed, deployed.client
+    async with working(d.harness, d.child):
+        task = await d.task()
+        d.gate.released.set()
+        await ended(d.harness, task)
+    view = await client.get(f"{PATH}/tasks")
+    assert view.status_code == 200, view.text
+    [shown] = view.json()["tasks"]
+    assert (shown["task_id"], shown["status"]) == (task, "success")
+    usage = shown["usage"]
+    assert (usage["model_calls"], usage["tool_calls"], usage["commands"]) == (3, 2, 0), usage
+    assert shown["elapsed_seconds"] >= 0
+    said = await d.lead.run("status", user="u1", thread="t1")
+    assert json.loads(str(said.answer)) == [shown]
+    assert (await client.get(f"{PATH}/tasks", headers={"x-user": "u2"})).json() == {"tasks": []}

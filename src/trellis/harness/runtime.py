@@ -556,6 +556,8 @@ class Runtime:
         clock = time.monotonic()
         if not now and self._saved_at is not None and clock - self._saved_at < PROGRESS_SECONDS:
             return
+        from trellis.harness import budget  # noqa: PLC0415 - it imports the runtime
+
         runs = self.agent.harness.runs
         try:
             checkpoint = await self.replay.journal.checkpoint(
@@ -566,6 +568,7 @@ class Runtime:
                 self.worker_id,
                 lease_seconds=self.lease_seconds,
                 checkpoint=checkpoint,
+                usage=budget.used(self),
                 tenant=self.tenant,
             )
             self._inbox_said = lease.inbox

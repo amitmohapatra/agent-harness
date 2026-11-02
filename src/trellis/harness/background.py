@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import (
@@ -40,6 +41,7 @@ from trellis.contracts import (
     RunOutcome,
     RunRecord,
     RunStatus,
+    RunUsage,
     ToolSpec,
     stable_id,
 )
@@ -343,15 +345,35 @@ async def tasks_of(runtime: Runtime, agents: Any) -> list[RunRecord]:
     return [r for r in records if r is not None and _of(r, runtime.conversation, agents)]
 
 
+async def users_tasks(agent: Agent, user: str) -> list[RunRecord]:
+    """The user's tasks of ``agent``'s background agents, from any of their chats, newest
+    first, at most :data:`LISTED` (the status view)."""
+    runs, tenant = agent.harness.runs, await agent.harness._tenant()
+    found = []
+    for name in {n for s in sources(agent) for n in s.agents}:
+        async for summary in runs.iterate(agent_id=name, tenant=tenant, limit=LISTED, max_pages=1):
+            found.append(summary)
+    found.sort(key=lambda s: s.updated_at, reverse=True)
+    records = await asyncio.gather(*(runs.get(s.run_id, tenant=tenant) for s in found))
+    mine = [r for r in records if r is not None and r.user_id == user and BACKGROUND in r.metadata]
+    return mine[:LISTED]
+
+
 def described(record: RunRecord, *, whole: bool = False) -> dict[str, Any]:
-    """A task as the model reads it: its id, agent and status, and — as it stands — its
-    answer (cut to :data:`ANSWER_CHARS` unless ``whole``), why it failed, or its question."""
+    """A task as the model reads it, and as a UI shows it (one source: the chat's tools, the
+    turn's note, the ``background_task`` events and AG-UI's ``GET {path}/tasks``): its id,
+    agent and status, what it has used (``RunRecord.usage``: model and tool calls, commands,
+    tokens, cost, as last saved), how long it has been going, and — as it stands — its answer
+    (cut to :data:`ANSWER_CHARS` unless ``whole``), why it failed, or its question."""
+    until = record.updated_at if record.status.final else datetime.now(UTC)
     said: dict[str, Any] = {
         "task_id": record.run_id,
         "subagent_type": record.agent_id,
         "status": record.status.value.lower(),
         "started_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
+        "elapsed_seconds": round(max(0.0, (until - record.created_at).total_seconds()), 1),
+        "usage": (record.usage or RunUsage()).model_dump(),
     }
     if record.status in FILTERS["success"]:
         answer = record.output if isinstance(record.output, str) else json.dumps(record.output)
@@ -481,4 +503,5 @@ __all__ = [
     "sources",
     "tasks_of",
     "told",
+    "users_tasks",
 ]

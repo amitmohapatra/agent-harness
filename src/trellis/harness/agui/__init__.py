@@ -12,6 +12,9 @@
   any replica serves any run.
 * ``POST {path}/runs/{run_id}/cancel`` — stop the run, whatever it is doing (``agent.cancel``):
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
+* ``GET {path}/tasks`` — the status view: the user's background tasks, each with its usage
+  (model and tool calls, commands, tokens, cost) and elapsed time, as the chat's
+  ``list_async_tasks`` reads them (one source: ``background.described``).
 * ``POST {path}/runs/{run_id}/messages`` (``{"text"}``), ``/pause``, ``/resume`` — a new
   instruction for the run, or one of its background tasks, read at its next step on whichever
   worker it works; a pause at its next step (it waits on an interrupt of reason ``PAUSE``); and
@@ -89,7 +92,7 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
-from trellis.harness.background import sources
+from trellis.harness.background import described, sources, users_tasks
 from trellis.harness.conversation import Mode
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.frontend import FRONTEND_TOOL, Frontend
@@ -632,6 +635,29 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         except HTTPException as exc:
             return _problem(exc, request)
         return JSONResponse({"runId": run_id, "status": status.value})
+
+    @router.get(
+        "/tasks",
+        summary="The user's background tasks, as they stand",
+        responses={
+            200: {
+                "description": '`{"tasks": [...]}`: each task\'s id, agent, status, usage '
+                "(model and tool calls, commands, tokens, cost), elapsed seconds and its "
+                "answer, error or question: what the chat's `list_async_tasks` reads",
+                "content": {"application/json": {}},
+            },
+            **_refusals(401),
+        },
+    )
+    async def tasks(request: Request) -> Response:
+        """The status view: the user's tasks of this agent's background agents, from any of
+        their chats, newest first. Only the user's own."""
+        try:
+            user = await surface.user(request)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        found = await users_tasks(surface.agent, user)
+        return JSONResponse({"tasks": [described(r) for r in found]})
 
     @router.post(
         "/runs/{run_id}/messages",

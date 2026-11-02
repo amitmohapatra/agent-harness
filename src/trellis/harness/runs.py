@@ -60,6 +60,7 @@ from trellis.contracts import (
     RunRecord,
     RunStart,
     RunStatus,
+    RunUsage,
     Schedule,
     ScheduleSpec,
     new_id,
@@ -136,6 +137,7 @@ class RunStore(Protocol):
         *,
         lease_seconds: int = ...,
         checkpoint: dict[str, Any] | None = ...,
+        usage: RunUsage | None = ...,
         tenant: str | None = ...,
     ) -> Lease: ...
 
@@ -158,6 +160,7 @@ class RunStore(Protocol):
         *,
         checkpoint: dict[str, Any] | None = ...,
         worker_id: str | None = ...,
+        usage: RunUsage | None = ...,
     ) -> RunRecord: ...
 
     async def resume(
@@ -172,6 +175,7 @@ class RunStore(Protocol):
         output: Any = ...,
         error: AgentError | None = ...,
         worker_id: str | None = ...,
+        usage: RunUsage | None = ...,
         tenant: str | None = ...,
     ) -> RunRecord: ...
 
@@ -332,11 +336,14 @@ class LocalRuns:
         *,
         lease_seconds: int = LEASE_SECONDS,
         checkpoint: dict[str, Any] | None = None,
+        usage: RunUsage | None = None,
         tenant: str | None = None,
     ) -> Lease:
         record = self._fenced(run_id, worker_id, tenant)
         if checkpoint is not None:
             record = self._move(record, record.status, checkpoint=checkpoint)
+        if usage is not None:
+            record = self._move(record, record.status, usage=usage)
         if run_id in self._cancelling:  # asked to stop: the lease is not extended
             return self._leased(record, worker_id, self._leases[run_id][1])
         return self._lease(run_id, worker_id, lease_seconds)
@@ -376,10 +383,14 @@ class LocalRuns:
         *,
         checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
+        usage: RunUsage | None = None,
     ) -> RunRecord:
         record = self._fenced(interrupt.run_id, worker_id, interrupt.tenant_id)
         self._leases.pop(record.run_id, None)
-        return self._move(record, RunStatus.PAUSED, awaiting=interrupt, checkpoint=checkpoint)
+        kept = {} if usage is None else {"usage": usage}
+        return self._move(
+            record, RunStatus.PAUSED, awaiting=interrupt, checkpoint=checkpoint, **kept
+        )
 
     async def resume(
         self, resolution: InterruptResolution, *, tenant: str | None = None
@@ -409,11 +420,13 @@ class LocalRuns:
         output: Any = None,
         error: AgentError | None = None,
         worker_id: str | None = None,
+        usage: RunUsage | None = None,
         tenant: str | None = None,
     ) -> RunRecord:
         record = self._fenced(run_id, worker_id, tenant)
         self._leases.pop(run_id, None)
-        return self._move(record, status, output=output, error=error)
+        kept = {} if usage is None else {"usage": usage}
+        return self._move(record, status, output=output, error=error, **kept)
 
     async def get(self, run_id: str, *, tenant: str | None = None) -> RunRecord | None:
         record = self._runs.get(run_id)

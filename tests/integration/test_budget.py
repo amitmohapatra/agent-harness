@@ -250,7 +250,14 @@ async def test_a_finished_run_says_what_it_spent_on_its_end(harness: Harness) ->
         return "done"
 
     agent = arm(harness.wrap(spender, id="spender"), shop.tools())
-    spent = {"tokens": 175, "cached_tokens": 40, "cost": 0.75, "model_calls": 2, "tool_calls": 1}
+    spent = {
+        "tokens": 175,
+        "cached_tokens": 40,
+        "cost": 0.75,
+        "model_calls": 2,
+        "tool_calls": 1,
+        "commands": 0,
+    }
     for asked in ("ok", "fail"):
         events = [e async for e in agent.stream(asked, user="u")]
         finished = events[-1]

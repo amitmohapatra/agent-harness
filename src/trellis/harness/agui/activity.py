@@ -13,14 +13,11 @@ from typing import Final
 
 from trellis.contracts import RunEvent, RunEventType
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType
-from trellis.harness.sandbox import EXEC
+from trellis.harness.budget import COMMANDS
 from trellis.harness.tools.bridge import PAUSED
-from trellis.harness.tools.results import EXECUTE
 
 #: The ``activityType`` of the line.
 ACTIVITY_TYPE: Final = "tools"
-#: The tools that run a command: the harness's sandbox, Deep Agents' backend, Claude's shell.
-COMMANDS: Final = frozenset({EXEC, EXECUTE, "Bash"})
 
 
 class Activity:
