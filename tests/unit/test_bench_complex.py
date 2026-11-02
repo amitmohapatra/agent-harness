@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
+import io
 import json
+import math
+import re
 import statistics
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -578,7 +583,94 @@ def test_the_rounds_pick_by_round_and_the_held_out_set_apart() -> None:
     for n in (1, 2, 3):
         got = cx.picked(f"round:{n}", every)
         assert len(got) == 20 and all(c.id.startswith(f"bf{n}-") for c in got)
-        assert {c.category for c in got} == set(breakfix.CATEGORIES)
+        assert {c.category for c in got} == set(breakfix.CATEGORIES) - {"bf_derive"}
+    derive = cx.picked("round:4", every)
+    assert [c.id for c in derive] == [f"bf4-derive-0{n}" for n in range(1, 6)]
+    assert {c.category for c in derive} == {"bf_derive"}
+
+
+def test_the_derive_and_apply_truths_are_the_fits_worked_by_hand() -> None:
+    """Round 4's truths, recomputed here from the tools' own rows with plain sums (no
+    ``statistics``): a trend's slope and its Q4 forecast, a fitted line over a join, a compound
+    rate carried forward, a break-even point, a correlation and its line."""
+    w = r.world()
+    by = {c.id: c for c in breakfix.derived(w)}
+
+    def tool_rows(**args: Any) -> list[tuple[str, float]]:
+        found = json.loads(r.sales_summary.fn(**args))["rows"]
+        return [(x["key"], x["value"]) for x in found]
+
+    def fit(xs: list[float], ys: list[float]) -> tuple[float, float]:
+        n, sx, sy = len(xs), sum(xs), sum(ys)
+        sxy, sxx = sum(x * y for x, y in zip(xs, ys, strict=True)), sum(x * x for x in xs)
+        b = (n * sxy - sx * sy) / (n * sxx - sx * sx)
+        return b, (sy - b * sx) / n
+
+    def value(case: str, turn: int, field: str) -> float:
+        return by[case].turns[turn].expect.value[field]["value"]
+
+    months = [v for _, v in tool_rows(group_by="month", metric="units", category="outerwear")]
+    b, a = fit([float(m) for m in range(1, 10)], months)
+    q4 = sum(a + b * m for m in (10, 11, 12))
+    assert value("bf4-derive-01", 0, "slope") == pytest.approx(b)
+    assert value("bf4-derive-01", 0, "q4") == pytest.approx(q4)
+    assert value("bf4-derive-01", 1, "short") == pytest.approx(0.08 * q4)
+
+    q3 = {"start": "2026-07-01", "end": "2026-09-30"}
+    sold = dict(tool_rows(group_by="sku", metric="units", category="denim", **q3))
+    prices = {row[0]: float(row[5]) for row in csv.reader(io.StringIO(r.sku_catalog.fn("denim")))
+              if row[0] in sold}  # fmt: skip
+    b, a = fit([prices[k] for k in sold], list(sold.values()))
+    assert value("bf4-derive-02", 0, "a") == pytest.approx(a)
+    assert value("bf4-derive-02", 0, "b") == pytest.approx(b)
+    assert value("bf4-derive-02", 0, "at_95") == pytest.approx(a + 95 * b)
+
+    revenue = [v for _, v in tool_rows(group_by="month")]
+    g = (revenue[-1] / revenue[0]) ** (1 / 8)
+    assert value("bf4-derive-03", 0, "rate") == pytest.approx((g - 1) * 100)
+    assert value("bf4-derive-03", 0, "december") == pytest.approx(revenue[-1] * g**3)
+    assert value("bf4-derive-03", 1, "q4") == pytest.approx(revenue[-1] * (g + g**2 + g**3))
+
+    name = re.search(r"of the (.+?) costs", by["bf4-derive-04"].turns[0].text)
+    sku = json.loads(r.find_sku.fn(name[1]))["items"][0]["sku"]
+    detail = json.loads(r.sku_details.fn(sku))
+    margin, cut = detail["price"] - detail["unit_cost"], detail["price"] * 0.9 - detail["unit_cost"]
+    units = sum(v for _, v in tool_rows(group_by="sku", metric="units", sku=sku, **q3))
+    assert value("bf4-derive-04", 0, "units") == math.ceil(6000 / margin)
+    assert value("bf4-derive-04", 0, "days") == math.ceil(math.ceil(6000 / margin) / (units / 92))
+    assert value("bf4-derive-04", 1, "units") == math.ceil(6000 / cut)
+
+    def daily(category: str) -> list[float]:
+        found = dict(tool_rows(group_by="date", metric="units", category=category, **q3))
+        days = (date(2026, 7, 1) + timedelta(days=n) for n in range(92))
+        return [found.get(d.isoformat(), 0.0) for d in days]
+
+    kn, ou = daily("knitwear"), daily("outerwear")
+    b, a = fit(kn, ou)
+    mk, mo = sum(kn) / 92, sum(ou) / 92
+    cov = sum((x - mk) * (y - mo) for x, y in zip(kn, ou, strict=True))
+    rho = cov / math.sqrt(sum((x - mk) ** 2 for x in kn) * sum((y - mo) ** 2 for y in ou))
+    assert value("bf4-derive-05", 0, "r") == pytest.approx(rho)
+    assert value("bf4-derive-05", 0, "predicted") == pytest.approx(a + 60 * b)
+
+
+def test_a_derived_figure_off_by_a_hand_rounding_fails() -> None:
+    """A fit worked by hand with rounded sums lands near, not on, the truth: the round's
+    tolerances take the line as a tool computes it, and refuse a figure a few tenths of a
+    percent off."""
+    by = {c.id: c for c in breakfix.derived(r.world())}
+
+    def ok(case: str, turn: int, answer: str) -> bool:
+        t = by[case].turns[turn]
+        return bool(cx.score(t.expect, answer, [], t.text, answer)["correct"])
+
+    assert ok("bf4-derive-01", 0, "Slope 149.5 units a month; Q4 forecast 8,725 units.")
+    assert not ok("bf4-derive-01", 0, "Slope about 150 units a month; Q4 forecast 8,760 units.")
+    assert ok("bf4-derive-03", 0, "6.93% a month; December ≈ £2,911,135.")
+    assert not ok("bf4-derive-03", 0, "6.9% a month; December ≈ £2,900,000.")
+    assert ok("bf4-derive-04", 1, "157 units.") and not ok("bf4-derive-04", 1, "156 units.")
+    assert ok("bf4-derive-05", 0, "r = -0.235; predicted 87.38 units.")
+    assert not ok("bf4-derive-05", 0, "r = -0.25; predicted 86.9 units.")
 
 
 async def test_a_cases_chats_share_one_user_kept_to_the_run_and_the_case(
