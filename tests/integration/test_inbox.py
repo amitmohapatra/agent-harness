@@ -369,6 +369,7 @@ async def test_an_inbox_that_cannot_be_read_is_said_once_and_the_run_goes_on() -
 
 async def test_the_in_process_inbox_keeps_a_message_sent_again_once() -> None:
     store = LocalRuns()
+
     async def fn(input: Any, agent: Any) -> str:
         return "done"
 
