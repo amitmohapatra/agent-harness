@@ -3169,10 +3169,12 @@ def said_in(requests: Sequence[dict[str, Any]], calls: Sequence[dict[str, Any]])
 
 # --------------------------------------------------------------------------- running
 #: The adapters a run can wrap: ``react`` (``ReAct``), ``langgraph`` (LangChain's
-#: ``create_agent``), ``deepagents`` (``create_deep_agent``), ``openai`` (the OpenAI Agents
+#: ``create_agent`` with the harness's middleware), ``graph`` (``create_agent`` as a LangGraph
+#: team builds it: its tools bound, no harness middleware), ``deepagents``
+#: (``create_deep_agent``), ``openai`` (the OpenAI Agents
 #: SDK on the ``LLM_*`` endpoint's chat completions), ``claude`` (the Claude Agent SDK, its
 #: CLI on the provider's own API) and ``kimi`` (Kimi Code over ACP, on the endpoint's model).
-ADAPTERS: Final = ("react", "langgraph", "deepagents", "openai", "claude", "kimi")
+ADAPTERS: Final = ("react", "langgraph", "graph", "deepagents", "openai", "claude", "kimi")
 #: Where a ``kimi`` run keeps its working directory and Kimi's home (``KIMI_RUN_ROOT``), and the
 #: ``kimi`` program it starts (``KIMI_BIN``).
 KIMI_ROOT: Final = "build/kimi"
@@ -3182,7 +3184,7 @@ KIMI_OUTPUT: Final = "16000"
 KIMI_WINDOW: Final = "200000"
 #: The adapters whose model calls are LangChain's (metered by its callbacks); the others are
 #: metered by what the harness accounts to the run's budget (``trellis.harness.budget``).
-LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "deepagents"})
+LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "graph", "deepagents"})
 
 
 def adapter_of(history: str, adapter: str | None) -> str:
@@ -3200,11 +3202,15 @@ def target_of(
     adapter: str | None = None,
     wire: list[dict[str, Any]] | None = None,
     tools: Sequence[Any] = r.TOOLS,
+    bound: Sequence[Any] = (),
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
     ``langgraph`` / ``deepagents`` — ``create_agent`` / ``create_deep_agent`` with the
     harness's middleware and an in-process checkpointer (the framework keeps the conversation);
+    ``graph`` — ``create_agent`` with the retail tools and ``bound`` (memory's LangChain tools,
+    ``h.memory_tools()``) bound when it is built, the checkpointer and no harness middleware,
+    its step limit LangGraph's ``recursion_limit`` (a model call and a tool step a step);
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter."""
@@ -3242,6 +3248,20 @@ def target_of(
             )  # fmt: skip
         setattr(graph, TOOLS_ATTRIBUTE, list(tools))
         return graph, {}
+    if kind == "graph":
+        from langchain.agents import create_agent
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from trellis.harness.adapters import convert
+        from trellis.harness.gateways import routed_chat_model
+
+        chat = routed_chat_model(model) if isinstance(model, str) else model
+        own = convert("langchain", [t.tool for t in tools]) or []
+        graph = create_agent(
+            chat, tools=[*own, *bound], system_prompt=r.SYSTEM,
+            checkpointer=InMemorySaver(), name="complex",
+        )  # fmt: skip
+        return graph, {"framework_options": {"recursion_limit": 2 * max_steps + 1}}
     if kind == "openai":
         import httpx
         from agents import Agent, OpenAIChatCompletionsModel, set_tracing_disabled
@@ -3430,6 +3450,7 @@ async def run_case(
     target, options = target_of(
         model, history, case.window or window, max_steps, adapter=kind, wire=wire,
         tools=(*r.TOOLS, *case.tools),
+        bound=await h.memory_tools() if kind == "graph" else (),
     )  # fmt: skip
     agent = h.wrap(
         target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
