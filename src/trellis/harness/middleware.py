@@ -34,7 +34,7 @@ run with a :class:`RunCheckpointer` without being given one: ``adapters.langgrap
   a crash — continues where the graph stopped, without asking the model again;
 * :class:`PromptCache` — Anthropic's prompt cache (LangChain's
   ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model however it is given, a
-  model name the harness routes too, and the answer that ends the history marked with it;
+  model name the harness routes too, and the answer that ends a replayed history marked with it;
 * :func:`narrowing` — not given by anyone: the harness runs a ``create_agent`` graph built
   without :class:`HarnessTools` as a copy whose model calls are offered only the tools the run
   offers (the tool hints, the parts it is without), as :class:`ModelHooks` does.
@@ -1206,8 +1206,9 @@ class PromptCache(AgentMiddleware):
     route makes one of it now (the provider's own SDK). LangChain's
     ``AnthropicPromptCachingMiddleware`` (``native``: the one given to ``ReAct``, else its
     defaults) decides on the chat model the call is made with and marks what it marks — the
-    tools, the instructions, the request's own breakpoint — and the answer that ends the
-    history gets the same mark (:func:`history_marked`): 4 breakpoints, Anthropic's most. Any
+    tools, the instructions, the request's own breakpoint — and the answer that ends a history
+    the harness replays gets the same mark (:func:`history_marked`; the model's own answer in
+    a graph's thread is sent as it gave it): 4 breakpoints, Anthropic's most. Any
     other chat model's request is sent as it was. Named as LangChain's, it stands in Deep
     Agents' place for it (Deep Agents replaces a middleware of the same name), last of what
     changes the request."""
