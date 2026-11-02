@@ -593,12 +593,11 @@ class Runtime:
         reached (a save that may pass later) it tries again, waiting longer each time, for up
         to half the lease: past the lease another worker may take the run, and finding no start
         it would run the call again. ``False`` then: the call must not run. A save refused for
-        good (one that will not pass) is a warning, as for any save, and the call runs."""
+        good (one that will not pass) is a warning, as for any save, and the call runs; an
+        in-process run saves no progress (nobody resumes it elsewhere)."""
         root = self
         while root.parent is not None:
             root = root.parent
-        if root.worker_id is None or root.lease_seconds is None:
-            return True  # an in-process run saves no progress: nobody resumes it elsewhere
         began, slept = time.monotonic(), 0.0
         wait, longest = START_RETRY_SECONDS
         while True:
@@ -607,7 +606,7 @@ class Runtime:
             error = root._unsaved_error
             if error is None or not getattr(error, "retryable", False):
                 return True
-            if max(time.monotonic() - began, slept) + wait > root.lease_seconds / 2:
+            if max(time.monotonic() - began, slept) + wait > (root.lease_seconds or 0) / 2:
                 return False
             await _pause(wait)
             slept += wait
