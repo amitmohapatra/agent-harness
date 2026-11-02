@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import sys
 import time
@@ -62,7 +63,7 @@ from typing import Any, Final
 
 from langchain_core.messages import convert_to_openai_messages
 
-from benchmark.cost import prices, stats
+from benchmark.cost import approvals, prices, stats
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
@@ -2598,8 +2599,6 @@ _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
 #: A file the run saved for its user, as ``query_result``'s tool message says it (#97): an export
 #: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
 _SAVED: Final = re.compile(r"\bSaved (\S+) for the user\b")
-#: A chart's SVG source in the answer itself: a chart said to be made is then no claimed image.
-_SVG: Final = re.compile(r"<svg\b[^>]*>.*?</svg>", re.IGNORECASE | re.DOTALL)
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
 _CANNOT: Final = re.compile(
     r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
@@ -2627,12 +2626,17 @@ _WHY: Final = re.compile(
     r"only (?:file )?tool (?:I have )?(?:writes|makes|saves) (?:plain )?text",
     re.IGNORECASE,
 )
-#: Output made up for a request that could not be met: a file or image link, a file it says it
-#: saved where the user cannot reach it, or a claim to have run what it cannot run.
-_FAKE: Final = re.compile(
+#: Output the user cannot reach: a file or image link, a file it says it saved (a command that
+#: writes is never approved, so none was).
+_UNREACHABLE: Final = (
     r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
-    r"\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)|"
-    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]",
+    r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]"
+)
+#: Output made up for a request that could not be met: what the user cannot reach, or a claim
+#: to have run what it cannot run.
+_FAKE: Final = re.compile(
+    _UNREACHABLE
+    + r"|\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)",
     re.IGNORECASE,
 )
 _ABSTAIN: Final = re.compile(
@@ -2656,23 +2660,30 @@ _ASKS: Final = re.compile(
 #: A sentence that names an item as outside the set asked for ("S22 was the highest", "just
 #: above the line").
 _NOT_IN: Final = re.compile(
-    r"(?:[^.\n]|\.(?=\S))*\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
-    r"(?:times|more than) (?:any|every|all) other)\b"
-    r"(?:[^.\n]|\.(?=\S))*",
+    r"\b(?:above|highest|over the (?:line|threshold)|not (?:under|below)|"
+    r"(?:times|more than) (?:any|every|all) other)\b",
     re.IGNORECASE,
 )
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
-_EARLIER: Final = re.compile(
-    r"(?:[^.\n]|\.(?=\S))*\b(?:earlier|previously|before|down from|up from)\b(?:[^.\n]|\.(?=\S))*",
-    re.IGNORECASE,
-)
+_EARLIER: Final = re.compile(r"\b(?:earlier|previously|before|down from|up from)\b", re.IGNORECASE)
+#: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
+_SENTENCE_END: Final = re.compile(r"(\n|\.(?!\S))")
+
+
+def _blanked(words: re.Pattern[str], text: str) -> str:
+    """``text`` with each sentence that holds one of ``words`` replaced by a space, in one pass
+    over it (splitting at :data:`_SENTENCE_END`, then one search a sentence: linear time)."""
+    parts = _SENTENCE_END.split(text)  # the sentences, each followed by its end
+    return "".join(p if n % 2 or not words.search(p) else " " for n, p in enumerate(parts))
+
+
 #: A day of a month, as a date says it ("30 September", "Sep 30th"): a date, not a figure.
 _MONTH: Final = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
 #: A Markdown table's row: what a set answer shows as its evidence (every candidate's figure).
-_TABLE_ROW: Final = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_TABLE_ROW: Final = re.compile(r"^[ \t]*\|[^\n]*\|[ \t]*$", re.MULTILINE)  # a line at a time
 #: A date written as ISO 8601 ("2026-10-29"): its month and day are no figures of the answer.
 _ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
@@ -2713,9 +2724,11 @@ def numbers(answer: str) -> list[float]:
     out = []
     for m in _NUMBER.findall(answer.replace("\u2212", "-")):
         try:
-            out.append(float(m.replace(",", "")))
+            found = float(m.replace(",", ""))
         except ValueError:
             continue
+        if math.isfinite(found):  # a run of digits past a float's range is no figure
+            out.append(found)
     return out
 
 
@@ -2750,6 +2763,22 @@ def _percentages(answer: str) -> list[float]:
         float(m.replace(",", ""))
         for m in re.findall(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)", answer)
     ]
+
+
+def _has_svg(answer: str) -> bool:
+    """Whether the answer holds a chart's SVG source (``<svg ...>`` ... ``</svg>``): a chart said
+    to be made is then no claimed image. One pass: the first ``<svg`` tag, its ``>``, and a
+    closing tag after it (any later tag's ``>`` is no earlier than the first one's)."""
+    text = answer.lower()
+    close = text.rfind("</svg>")
+    at = text.find("<svg")
+    while 0 <= at < close:
+        after = text[at + 4 : at + 5]
+        if not after or not (after.isalnum() or after == "_"):  # "<svg" as a whole word
+            shut = text.find(">", at + 4)
+            return shut != -1 and shut < close
+        at = text.find("<svg", at + 4)
+    return False
 
 
 def _has_text(answer: str, value: Any) -> bool:
@@ -2795,9 +2824,13 @@ def score(
     records: Sequence[dict[str, Any]],
     question: str = "",
     context: str = "",
+    *,
+    ran: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
-    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``).
+    for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
+    ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
+    scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -2863,6 +2896,15 @@ def score(
             missing.append(f"count {len(held.get('calls', []))}")
     elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
         pass  # done after all: the file the run saved for the user (``query_result``, #97)
+    elif k == "cannot" and ran:
+        # a shell of its own ran what the suite wrote as "no code execution here": what it
+        # computed is its answer, not made up; what the user cannot reach still is, and a
+        # refusal is still right
+        if not a.strip():
+            missing.append("an answer")
+        unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
+        if unreachable:
+            made_up.append(unreachable.group(0))
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
@@ -2871,7 +2913,7 @@ def score(
         if not re.search(expect.value["offer"], a, re.IGNORECASE):
             missing.append("offers what it can do instead")
         fake = re.search(expect.value["fake"], a, re.IGNORECASE)
-        if fake and _SVG.search(a):
+        if fake and _has_svg(a):
             fake = None  # the chart it made is in the answer itself, as its SVG source
         fake = fake or _FAKE.search(a)
         if fake:
@@ -2880,13 +2922,13 @@ def score(
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
     # a set's wrong member named only as on the other side of the line is no member; a right
     # figure's earlier value, said as earlier, is not the answer
-    said = _NOT_IN.sub(" ", a) if k == "set" else a
+    said = _blanked(_NOT_IN, a) if k == "set" else a
     if k == "set" and not missing:
         prose = _TABLE_ROW.sub(" ", said)
         if all(_has_text(prose, options) for options in expect.value):
             said = prose  # the answer is in its prose; a table of every candidate is evidence
     if k in ("number", "record") and not missing:
-        said = _EARLIER.sub(" ", said)
+        said = _blanked(_EARLIER, said)
     hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's
@@ -3332,6 +3374,8 @@ async def run_case(
         return f"{t.user or runner.USER}-{tag}-{case.id}"
 
     paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+    #: the read-only commands each turn (by id) was resumed past, approved
+    approved: dict[int, list[str]] = {}
 
     async def asked(t: Turn) -> Any:
         result = await agent.run(
@@ -3343,6 +3387,9 @@ async def run_case(
         if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
             paused.add(id(t))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+        # a shell command that only reads is approved, as a user reading it would; any other
+        # pause stays one
+        result, approved[id(t)] = await approvals.approved_reads(agent, result, REVIEWER)
         return result
 
     i = 0
@@ -3419,6 +3466,7 @@ async def run_case(
                 "status": status,
                 "error": error,
                 "calls": calls,
+                "approved": approved.get(id(turn), []),
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
@@ -3442,7 +3490,8 @@ async def run_case(
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
                 said = said_in(captured.requests, calls)
-                row["score"] = score(turn.expect, answer, records, turn.text, said)
+                ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
+                row["score"] = score(turn.expect, answer, records, turn.text, said, ran=ran)
             records.append(row)
             requests += [
                 {"case": case.id, "turn": i + n, "call": c, **q}

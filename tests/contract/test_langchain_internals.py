@@ -45,6 +45,23 @@ def test_create_agents_model_node_is_of_the_shape_the_narrowing_reads() -> None:
     assert callable(_chain_async_model_call_handlers)
 
 
+async def test_the_narrowing_copy_run_outside_a_harness_run_offers_the_graph_as_built() -> None:
+    """Outside a run there is nothing to narrow, keep or read back: the copy's model is offered
+    the tools the graph was built with, and no reader of the harness's."""
+    from langchain_core.tools import tool
+
+    @tool
+    def lookup(key: str) -> str:
+        """Look a key up."""
+        return key
+
+    model = ScriptedChatModel(turns=["done"])
+    copy = _narrowed(create_agent(model, tools=[lookup]))
+    assert copy is not None
+    await copy.ainvoke({"messages": [("user", "x")]})
+    assert model.requests[0]["tools"] == ["lookup"]
+
+
 def test_deep_agents_keeps_messages_and_files_as_delta_channels() -> None:
     for schema, key in ((DeepAgentState, "messages"), (FilesystemState, "files")):
         assert _delta(get_type_hints(schema, include_extras=True)[key])

@@ -79,6 +79,7 @@ from trellis.harness.adapters.base import (
     NativePause,
     Output,
     ToolFormat,
+    builtin,
     helper,
     unique,
 )
@@ -304,7 +305,8 @@ class LangGraphAdapter:
         cannot be read; the graph's state tools (its plan, its virtual files) are not tools of
         the run's set, unless their backend is outside the state (``OUTSIDE_STATE``), nor is
         the graph's own machinery (``MACHINERY``: ``ReAct``'s idle ``execute``, its
-        general-purpose helper). A graph
+        general-purpose helper). Deep Agents' own (``task``, its file tools outside the
+        state) are tagged ``BUILTIN``: the framework's, not counted for the narrowing. A graph
         that takes the run's tools per model call (``ReAct``, ``middleware()``) has its own
         LangChain tools and sub-agents here, beside the run's toolbox. Read once per graph."""
         if self._native is None:
@@ -312,7 +314,7 @@ class LangGraphAdapter:
             from trellis.harness.tools.convert.langchain import made
 
             found = (
-                helper(spec_of(t)) if t.name == TASK_TOOL else spec_of(t)
+                _own_spec(spec_of(t), outside=bool((t.metadata or {}).get(OUTSIDE_STATE)))
                 for t in graph_tools(target)
                 if (t.name not in STATE_TOOLS or (t.metadata or {}).get(OUTSIDE_STATE))
                 and not (t.metadata or {}).get(MACHINERY)
@@ -348,6 +350,14 @@ class LangGraphAdapter:
         return config
 
 
+def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:
+    """A graph's own tool as the run's tool set has it: Deep Agents' ``task`` a helper, and it
+    and Deep Agents' file tools outside the state (``outside``) the framework's built-ins."""
+    if spec.name == TASK_TOOL:
+        return builtin(helper(spec))
+    return builtin(spec) if outside else spec
+
+
 def _run_arguments(runtime: Runtime) -> dict[str, Any]:
     """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
     options = runtime.framework_options
@@ -376,7 +386,8 @@ def _without_middleware(name: str) -> None:
     what the middleware gives."""
     log.warning(
         "the graph %s is wrapped without the harness's middleware: its tools are governed and "
-        "narrowed, but it has no memory or gateway MCP tools, no step limit or stall guard, no "
+        "narrowed, and a large result is kept for read_file and query_result, but it has no "
+        "memory or gateway MCP tools, no step limit or stall guard, no "
         "model spans, call_timeout or budget stop, and no checkpoint in the run — build it with "
         "middleware=trellis.middleware() (its checkpoint is then kept in the run)",
         name,

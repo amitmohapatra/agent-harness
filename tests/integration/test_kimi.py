@@ -28,10 +28,11 @@ from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import compat
-from trellis.harness.adapters.acp import KIMI_BUILTINS
+from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
 from trellis.harness.adapters.claude import RESUMED_CALL
 from trellis.harness.budget import Budget
 from trellis.harness.sandbox import sandbox
+from trellis.harness.tools.bridge import TURN_STALLED
 
 pytestmark = needs_kimi
 lookups: list[str] = []
@@ -99,8 +100,28 @@ async def test_kimi_calls_a_harness_tool_and_answers(
     # the harness's tools through its MCP server, beside Kimi's own — its swarm included
     assert "mcp__trellis__lookup" in offered and "mcp__trellis__read_file" in offered
     assert {"Bash", "Agent", "AgentSwarm", "Skill"} <= set(offered)
-    assert set(offered) - {t for t in offered if t.startswith("mcp__")} <= set(KIMI_BUILTINS)
+    own = set(KIMI_BUILTINS) | set(KIMI_OUTLIVES_THE_TURN)  # listed by Kimi, turned off
+    assert set(offered) - {t for t in offered if t.startswith("mcp__")} <= own
     assert "what about tea?" in endpoint.said()
+
+
+async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's scheduled prompt (``CronCreate``) fires only while Kimi runs, and the harness ends
+    Kimi with each attempt: nothing would ever fire it. Kimi's own switch turns scheduling off
+    (``KIMI_DISABLE_CRON``): the call says so and the model can tell the user, where Kimi
+    scheduled it and answered as if it would run (the break-and-fix gate: bf2-cantdo-02). The
+    cron tools are not of the run's tool set (no hint offers them)."""
+    schedule = {"cron": "0 9 * * 1", "prompt": "send the top 5 SKUs", "recurring": True}
+    endpoint.plan = [("CronCreate", schedule)]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron")
+    result = await agent.run("every Monday, send me the top 5 SKUs", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert "Cron scheduling is disabled" in str(result.answer)
+    assert "nextFireAt" not in str(result.answer)  # nothing was scheduled
+    own = {t.name for t in await agent.adapter.native(agent.target)}
+    assert not own & set(KIMI_OUTLIVES_THE_TURN)
 
 
 async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
@@ -161,6 +182,19 @@ async def test_kimis_usage_log_is_the_contract_the_budget_reads(
             "inputCacheCreation",
         }
         assert record["usage"]["inputOther"] == 10 and record["usage"]["output"] == 5
+    # every turn's end is logged too (Kimi's durable ``TurnEnded``; a step limit is reason
+    # "failed" with error.code loop.max_steps_exceeded): the turn settles on it. Its
+    # ``agent.turn.ended`` lines are another record (``outcome``), not read
+    ends = [
+        entry
+        for entry in map(json.loads, log.read_text().splitlines())
+        if entry.get("type") == "turn.ended"
+    ]
+    assert ends, "Kimi logs each turn's end as a turn.ended line"
+    for end in ends:
+        assert end["agentId"] == "main" and isinstance(end["turnId"], int)
+        assert end["reason"] in {"completed", "cancelled", "failed", "blocked"}, end
+    assert ends[-1]["reason"] == "cancelled"  # the budget stopped the turn
     # 15 tokens a request: past 20 after the second, and the run stops there
     assert result.status is RunStatus.PARTIAL and result.error is not None
     assert result.error.code == "BUDGET_EXCEEDED"
@@ -373,3 +407,46 @@ async def test_at_its_step_limit_kimi_is_asked_once_for_a_last_answer(
     assert warned == ["stopped: the step limit (1) was reached"]
     # Kimi's session keeps it: told it holds for this turn only (a later turn calls tools again)
     assert TURN_LIMIT.format(limit=1) in endpoint.said()
+
+
+#: More times than Kimi's own repeat breaker lets one call repeat before it ends the turn (12).
+LOOPS = 20
+
+
+async def test_a_loop_kimis_repeat_breaker_ends_is_asked_once_for_an_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A model looping on one harness call (ADV-9): the bridge refuses the third (``STALLED``)
+    and Kimi's own repeat breaker ends the turn at the twelfth with no answer (its log's
+    ``stopReason`` ``repeat_breaker``; ACP's ``end_turn``). As at its step limit, the run asks
+    once more in the same session, told the turn stalled: its answer is the run's."""
+    lookups.clear()
+    endpoint.plan = [("lookup", {"topic": "tea"})] * LOOPS
+    agent = arm(harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-loop"), [lookup])
+    events = [e async for e in agent.stream("tea?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.startswith("Done."), said[:200]  # the planned model's answer: what it read last
+    assert lookups == ["tea", "tea"]
+    assert "You called lookup with the same arguments 3 times in a row" in endpoint.said()
+    warned = [e.data.get("code") for e in events if e.data.get("name") == "warning"]
+    assert warned == ["stalled"]  # the bridge's, once
+    assert TURN_STALLED in endpoint.said()
+    assert len(endpoint.requests) < LOOPS  # told so, the model answered
+
+
+async def test_a_loop_on_kimis_own_tool_is_asked_once_for_an_answer(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's own tools do not go through the bridge's refusal: its repeat breaker alone ends
+    the loop, with no answer — asked once more the same way, said as a ``stalled`` warning."""
+    endpoint.plan = [("Glob", {"pattern": "*.md"})] * LOOPS
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-own-loop")
+    events = [e async for e in agent.stream("which notes?", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    said = "".join(e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT)
+    assert said.startswith("Done."), said[:200]
+    warned = [e.data for e in events if e.data.get("name") == "warning"]
+    assert [w["code"] for w in warned] == ["stalled"], warned
+    assert TURN_STALLED in endpoint.said()
+    assert len(endpoint.requests) < LOOPS  # told so, the model answered

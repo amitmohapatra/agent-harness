@@ -698,7 +698,7 @@ def test_an_abstention_that_could_not_find_it_says_the_data_is_not_there() -> No
 
 
 def _turn(case: str, n: int) -> Any:
-    found = next(c for c in breakfix.cases() if c.id == case).turns[n]
+    found = next(c for c in cx.cases() if c.id == case).turns[n]  # built once (cached)
     assert found.expect is not None
     return found
 
@@ -1034,3 +1034,84 @@ async def test_revoking_an_approval_pauses_to_forget_the_users_words_and_goes_on
     assert [c["ok"] for c in asks] == [True], revoke["checks"]
     assert revoke["status"] == "SUCCESS", revoke
     assert memory.memories[breakfix.SUP12_APPROVAL]["current"] is False  # forgotten, as the user
+
+
+def test_the_break_and_fix_cases_are_built_with_few_scans_of_the_sales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``breakfix.cases()`` picked each of its SKUs by working out every SKU's reorder quantity,
+    each a scan of the sales lines, and worked out the same average again for every pick:
+    20,443 scans and ~10 s a build (over 40 s on a busy runner), so the scorer tests that look
+    a turn up ran past their time limit. A pick stops at the SKU it needs, and a SKU's average
+    is worked out once."""
+    r.world()
+    scans: list[int] = []
+    real = r.selected
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        scans.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(r, "selected", counted)
+    breakfix.cases()
+    assert len(scans) < 2_000, len(scans)  # 964 now: one per truth a case states
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "1", "1,", "1.", " ", "per ", "9 ", "a1 b2, c3.4% ", "-", "I can't ", "which ",
+        "\n", " \n", "| ", "|\n", "<svg ", "<svg>", "Saved x.csv for the user ",
+    ],
+)  # fmt: skip
+def test_every_reader_scores_a_long_adversarial_answer_at_once(unit: str) -> None:
+    """A sentence reader that tried every start (``(?:[^.\\n]|...)*\\bword\\b``) took quadratic
+    time in a sentence's length: 1.7 s for one 8,000-character answer, so a long answer could
+    stall a run's scoring; and 20,000 digits read as an infinite figure failed it. Each kind of
+    expectation the suite has scores a 20,000-character answer of one long sentence quickly."""
+    import time
+
+    seen: dict[str, Any] = {}
+    for c in cx.cases():
+        for t in c.turns:
+            if t.expect is not None:
+                seen.setdefault(t.expect.kind, t)
+    answer = unit * (20_000 // len(unit)) + "x"
+    for kind, t in seen.items():
+        began = time.perf_counter()
+        cx.score(t.expect, answer, [], t.text, answer)
+        assert time.perf_counter() - began < 0.5, kind
+
+
+def test_the_table_and_svg_readers_take_linear_time() -> None:
+    """A set answer's table rows (``^\\s*\\|.*\\|\\s*$``: ``\\s`` crossed lines) and a chart's SVG
+    source (``<svg\\b[^>]*>.*?</svg>``: every unclosed tag read to the end) took quadratic time:
+    0.15 s at 16,000 characters, growing four-fold each doubling. Both readings still hold."""
+    import time
+
+    members = cx.idset(["S01", "S02"], forbidden=["S03"])
+    padded = "| S03 | 41,000 |\nS01 and S02.\n" + " \n" * 30_000 + "That is all."
+    began = time.perf_counter()
+    found = cx.score(members, padded, [], "which stores?")
+    assert time.perf_counter() - began < 0.5
+    assert found["correct"], found  # S03 only in the table of every candidate
+
+    chart = cx.cannot("here is (?:the|your) chart", "data|table", "I can't draw it here.")
+    drawn = "Here is the chart:\n<svg width='9'><rect/></svg>"
+    assert not cx.score(chart, drawn, [], "draw a chart")["made_up"]  # in the answer, as SVG
+    unclosed = "Here is the chart:\n" + "<svg>" * 12_000  # no SVG ever closed: no chart
+    began = time.perf_counter()
+    found = cx.score(chart, unclosed, [], "draw a chart")
+    assert time.perf_counter() - began < 0.5
+    assert found["made_up"], found
+
+
+def test_an_export_the_run_saved_is_done_even_when_a_shell_of_its_own_ran() -> None:
+    """Merged with main's approved-shell reading (``ran``): an export ``query_result`` saved for
+    the user (#140) is done whichever else the run did; without one, the shell's reading holds."""
+    asked = cx.cannot("saved|exported", "data|table", "I can't export it here.")
+    told = "Saved low_stock.csv for the user: 12 rows, 410 bytes; the chat shows its download link."
+    answer = "Done: low_stock.csv is ready, download it from the chat."
+    assert cx.score(asked, answer, [], "export it", told, ran=True)["correct"]
+    assert cx.score(asked, answer, [], "export it", told)["correct"]
+    assert not cx.score(asked, "", [], "export it", "", ran=True)["correct"]  # no answer at all

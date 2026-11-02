@@ -25,7 +25,7 @@ from deepagents import create_deep_agent
 from langchain.agents import create_agent
 
 from tests.support.arm import native_tools
-from tests.support.planned import FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
+from tests.support.planned import CUT, FINAL, Call, PlannedChat, PlannedChatModel, PlannedModel
 from trellis import Harness, ReAct, Runtime, middleware
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.tools.convert import text_of
@@ -197,7 +197,10 @@ async def _claude(
     seen: list[Any] | None = None,
     stall: float = 0.0,
 ) -> Built:
-    script = [{"tool": name, "args": args} for name, args in plan] + [{"text": FINAL}]
+    script = [
+        {"cut": True} if (name, args) == CUT else {"tool": name, "args": args}
+        for name, args in plan
+    ] + [{"text": FINAL}]
     if stall:
         script.insert(0, {"stall": stall})
     record = tmp / f"cli-{uuid.uuid4().hex[:6]}.json"

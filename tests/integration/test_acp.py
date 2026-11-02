@@ -23,6 +23,8 @@ from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
     EDITED,
     KIMI,
+    KIMI_BUILTINS,
+    KIMI_ENV,
     REJECTED,
     ACPAgent,
     UsageLog,
@@ -30,6 +32,7 @@ from trellis.harness.adapters.acp import (
     native_spec,
 )
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import sandbox
@@ -355,7 +358,7 @@ async def test_each_swarm_member_is_a_child_run(harness: Harness, tmp_path: Path
         ("Review b.ts", RunStatus.ERROR),
         ("Review c.ts", RunStatus.ERROR),
     ]
-    assert native_spec("AgentSwarm", KIMI).tags == ["helper"]
+    assert "helper" in native_spec("AgentSwarm", KIMI).tags
 
 
 async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_tree(
@@ -385,6 +388,18 @@ async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_
     own = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={SWARM_LIMIT: "7"}), id="own")
     await own.run("x", user="u1")
     assert recorded(tmp_path)["started"][-1]["env"][SWARM_LIMIT] == "7"
+
+
+async def test_kimis_scheduling_is_turned_off_whatever_its_own_environment_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A schedule fires only while Kimi runs, and Kimi ends with each attempt: Kimi's own switch
+    (``KIMI_DISABLE_CRON``) is set for it, an agent's own value included, as Claude's cron tools
+    are disallowed whatever its options say."""
+    agent = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={"KIMI_DISABLE_CRON": "0"}), id="c")
+    await agent.run("every Monday", user="u1")
+    assert recorded(tmp_path)["started"][0]["env"]["KIMI_DISABLE_CRON"] == "1"
+    assert KIMI.env == KIMI_ENV
 
 
 # --------------------------------------------------------------------------- sessions
@@ -439,6 +454,31 @@ async def test_the_session_mode_is_set_and_one_that_asks_nothing_refused(
     assert recorded(tmp_path)["modes"] == ["plan"]
     with pytest.raises(ConfigurationError, match="a mode that approves on its own"):
         kimi(mode="yolo")
+
+
+async def test_kimis_built_in_tools_do_not_count_toward_narrowing_the_runs_own(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Kimi's built-ins are the framework's, not the run's: the tools the hints narrow from
+    (``NARROW_FROM``) are the run's own. Counted with them, a run of a few tools of its own
+    narrowed, and the ``trellis`` server did not list the tool a question needed."""
+
+    def make(i: int) -> Any:
+        def look(key: str) -> str:
+            return f"t{i}"
+
+        return tool(look, name=f"t{i}", side_effects="read")
+
+    memory_service.candidates = ["t1"]
+    own = NARROW_FROM - len(KIMI_BUILTINS) + 1  # with the built-ins, past the threshold
+    script = [{"tool": "t0", "args": {"key": "a"}}, {"text": "{last}"}]
+    agent = arm(
+        memory_harness.wrap(fake(tmp_path, script), id="own"), [make(i) for i in range(own)]
+    )
+    result = await agent.run("look a up", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == "t0"
+    [listed] = recorded(tmp_path)["listed"]
+    assert {f"t{i}" for i in range(own)} <= set(listed)
 
 
 # --------------------------------------------------------------------------- the context
@@ -594,6 +634,53 @@ async def test_a_process_that_ends_mid_turn_fails_the_run_with_its_stderr(
     result = await agent.run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None
     assert "out of memory" in result.error.message and "exit 3" in result.error.message
+
+
+def wait_times_out_as_the_process_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every wait for an agent's process ends with the process gone and its pipes closed, yet
+    raises ``TimeoutError``: asyncio's race when a timed wait's deadline falls in the moment
+    the process ends (the wait's wake-up is lost to the timeout). The ACP SDK's shutdown then
+    signals the process, and asyncio raises ``ProcessLookupError``: it is already gone."""
+    real = asyncio.subprocess.Process.wait
+
+    async def gone(self: asyncio.subprocess.Process) -> int:
+        await real(self)
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", gone)
+
+
+async def test_a_process_already_gone_when_the_attempt_stops_it_keeps_the_answer(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wait_times_out_as_the_process_ends(monkeypatch)
+    agent = harness.wrap(fake(tmp_path, [{"text": "done"}]), id="gone")
+    result = await agent.run("x", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "done"
+
+
+async def test_a_process_already_gone_when_a_failed_attempt_stops_it_keeps_the_failure(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wait_times_out_as_the_process_ends(monkeypatch)
+    agent = harness.wrap(fake(tmp_path, [{"crash": "out of memory"}]), id="crash")
+    result = await agent.run("x", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "out of memory" in result.error.message and "exit 3" in result.error.message
+
+
+async def test_a_turn_ended_at_the_step_limit_is_asked_once_more(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi ends a turn at its step limit with no answer, the reason only in its log: the run
+    asks once more in the same session, and says so on the stream."""
+    script = [{"step_limit": 1}, {"text": "the answer at the limit"}]
+    agent = harness.wrap(fake(tmp_path, script), id="limited")
+    events = [e async for e in agent.stream("work", user="u1")]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
+    assert warned == ["stopped: the step limit (1) was reached"]
+    assert events[-1].data.get("result") == "the answer at the limit"
 
 
 async def test_a_refusal_fails_the_run(harness: Harness, tmp_path: Path) -> None:
