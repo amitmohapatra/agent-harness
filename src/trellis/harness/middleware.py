@@ -1254,8 +1254,13 @@ def prompt_cache(given: Sequence[Any]) -> tuple[PromptCache, list[Any]]:
 
 def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
     """The answer that ends the history with a cache breakpoint (``marker``) on its last text
-    part; any other message (a call, a result) as it is, and so is an answer that has one."""
-    if not isinstance(answer, AIMessage) or answer.tool_calls:
+    part; any other message (a call, a result) as it is, and so is an answer that has one.
+    So is an answer the model itself gave in this thread (a graph's own checkpointer keeps it,
+    with its usage): Anthropic holds a model's own earlier turns to what it produced (its
+    thinking stays valid only in that conversation), and marking one measurably changed the
+    answers after it — the request's own breakpoint caches that thread anyway. What is marked
+    is a history the harness replays (memory's window)."""
+    if not isinstance(answer, AIMessage) or answer.tool_calls or answer.usage_metadata:
         return answer
     content = answer.content
     parts: list[Any] = (

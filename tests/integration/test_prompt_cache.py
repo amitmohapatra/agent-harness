@@ -167,7 +167,10 @@ async def test_a_graph_built_with_the_middleware_is_cached_as_react_is(
 ) -> None:
     """``middleware()`` carries ``PromptCache``: a team's own ``create_agent`` or
     ``create_deep_agent`` graph on an Anthropic model (a routed name too, which Deep Agents'
-    own caching middleware does not recognise) marks what ``ReAct``'s marks."""
+    own caching middleware does not recognise) marks the tools, the instructions and the
+    request's end. Its checkpointer keeps the model's own answers, which are sent exactly as
+    the model gave them (the request's breakpoint caches the thread): marking one changed the
+    answers after it."""
     model = (
         "anthropic:claude-x"
         if given == "name"
@@ -180,11 +183,9 @@ async def test_a_graph_built_with_the_middleware_is_cached_as_react_is(
         assert body["system"][-1]["cache_control"] == MARK
         assert body["tools"][-1]["cache_control"] == MARK
         assert breakpoints(body) <= 4
-    assert later["messages"][-2]["content"][-1] == {
-        "type": "text",
-        "text": ANSWERS[0],
-        "cache_control": MARK,
-    }
+    assert later["messages"][-2]["role"] == "assistant"
+    assert "cache_control" not in json.dumps(later["messages"])  # the model's answer as given
+    assert breakpoints(later) == 3
 
 
 @pytest.mark.parametrize("deep", [False, True], ids=["langchain", "deepagents"])
