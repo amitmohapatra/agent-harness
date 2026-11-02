@@ -71,3 +71,5 @@ What existed, checked against the code:
     `middleware()`, a hand-built `StateGraph`) is not paused yet. Pausing it between supersteps,
     with `update_state` on the resume, is a follow-up.
   - Deep Agents' native async sub-agents (a LangGraph server) are not wired.
+- **The transcript view** (follow-up): `GET {path}/runs/{id}/transcript` folds the run's own
+  log in agent-runs (`transcript.py`): nothing new is recorded.
