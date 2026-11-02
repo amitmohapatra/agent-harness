@@ -30,12 +30,13 @@ from agents.tool_context import ToolContext
 from trellis.contracts import ToolOutcome, ToolSpec
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
+from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
-__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed"]
+__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed", "held"]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
@@ -92,6 +93,29 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     setattr(invoke, MADE, True)
     enabled = _narrowed(tool.name, tool.is_enabled)
     return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+
+
+def held(tool: Any, spec: ToolSpec) -> Any:
+    """``tool`` (a ``FunctionTool``) held at the SDK's own approval gate (``needs_approval``)
+    whenever governance asks a person about a call of it (``bridge.asks_first``: asked then,
+    governance's question): the SDK pauses its run before the call and keeps its
+    ``RunState``, and the resume continues it — the approved call runs, the model is not asked
+    again. A tool with a gate of its own keeps it; anything else is returned as it is."""
+    if not isinstance(tool, FunctionTool) or tool.needs_approval is not False:
+        return tool
+
+    async def asks(_context: Any, args: dict[str, Any], call_id: str) -> bool:
+        if not await bridge.asks_first(spec, args):
+            return False
+        runtime = current()
+        assert runtime is not None and runtime.pending is not None  # it asked: the run's pause
+        if runtime.pending.native_id is None and runtime.pending.key == content_key(
+            "approve", spec.name, args
+        ):  # this call's: the SDK's handle on it, for the resume to approve
+            runtime.pending = runtime.pending.model_copy(update={"native_id": call_id})
+        return True
+
+    return dataclasses.replace(tool, needs_approval=asks)
 
 
 def _narrowed(name: str, own: Any) -> Any:
