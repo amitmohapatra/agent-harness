@@ -16,6 +16,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   its user, its `can_use_tool` asks the harness (your own callback, else a person). Kimi
   asks over ACP: after hooks and governance, a person is asked, as Kimi asked (`Write` and
   `Edit` outside a git working tree included, where they ran announced before).
+- A file Claude Code or Kimi Code writes in `outputs/` of its working folder is the user's, as
+  a sandbox's `outputs/` is (`sandbox.delivered`, `Adapter.workdir`): kept in the file store on
+  success, announced with the `file` event, then removed from the folder. Each is told so
+  (`sandbox.DELIVERS_HERE`: Claude after its system prompt, Kimi before its prompt).
 - `Bash`'s risk is `write` for both (it was `irreversible`: every command asked): a team that
   wants every shell command approved gives it the risk `irreversible`, or an `approve_when`,
   in the tool catalog. `bridge.asked` asks a person about a call its framework asks about.

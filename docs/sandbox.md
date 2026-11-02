@@ -153,6 +153,14 @@ is deleted. The file is named in the run's journal and announced with the `file`
 take is left behind and reported in a warning: a name that is not one safe path part, or a file
 over 50 MiB. A run that fails keeps none.
 
+Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
+`outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
+so after its system prompt, Kimi in a block before its prompt; when the run succeeds each file
+directly in that `outputs/` is kept, announced and served as above, then removed from the folder
+(so a later run does not give it again); the rest of the folder is left alone. Runs that share a
+working folder share its `outputs/`: give each user's runs a folder of their own. A sandboxed
+Kimi run writes in its sandbox instead.
+
 ## Automatic
 
 **Its life is the run's.**

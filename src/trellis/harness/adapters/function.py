@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any, ClassVar
 
 from trellis.contracts import InterruptResolution, ToolSpec
@@ -85,6 +86,9 @@ class FunctionAdapter:
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         no_options(options, "a function target", "it reads what it needs from its input")
+
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        return None  # no folder of its own: a sandbox's outputs/ are its outputs
 
     async def native(self, target: Any) -> list[ToolSpec]:
         return []  # a function calls the run's tools, nothing of its own the harness can read

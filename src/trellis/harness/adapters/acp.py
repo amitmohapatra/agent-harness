@@ -567,6 +567,12 @@ class ACPAdapter:
         _check_mode(options.get("mode"))
         _check_servers(options.get("mcp_servers") or ())
 
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        """Where the agent works on this machine (its ``cwd``, else this process's); ``None``
+        for a sandboxed run, whose writes go to the sandbox."""
+        ran = given(target, options)
+        return None if ran.sandbox is not None else Path(ran.cwd or os.getcwd())
+
     async def native(self, target: Any) -> list[ToolSpec]:
         """The agent's built-in tools (its profile's) and the MCP tools it was seen calling
         (its own servers', listed by the agent only)."""
@@ -902,9 +908,13 @@ class Attempt:
 
         if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
             return [text_block(self._resumed(native_input))]
+        from trellis.harness.sandbox import DELIVERS_HERE
+
         blocks = [text_block(native_input.prompt)]
         if native_input.context:  # marked off: the question is the block after it
             blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
+        if self.target.sandbox is None:  # its own folder's outputs/ are the user's (workdir)
+            blocks.insert(0, text_block(DELIVERS_HERE))
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:

@@ -28,6 +28,7 @@ from trellis.harness.agent import NARROW_FROM
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.journal import content_key
+from trellis.harness.sandbox import DELIVERS_HERE
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
 
@@ -81,7 +82,8 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
     assert cli["tools"] == ["refund", "read_file", "query_result"] and cli["allowed_tools"] is None
     # what Claude Code would ask its user, it asks the harness (its can_use_tool)
     assert cli["permission_prompt_tool"] == "stdio"
-    assert cli["system_prompt"] == "You refund."
+    # the team's, then what Claude is told of its folder's outputs/ (the user's)
+    assert cli["system_prompt"] == f"You refund.\n\n{DELIVERS_HERE}"
     assert target.mcp_servers == {}  # the team's options are untouched
 
 
@@ -304,6 +306,39 @@ async def test_the_teams_own_callback_is_asked_only_what_claude_code_asks(
     assert [b["tool"] for b in built_ins(tmp_path)] == ["Write", "Bash"]
 
 
+async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file Claude writes in ``outputs/`` of its working folder is the user's, as a
+    sandbox's ``outputs/`` is (``sandbox.delivered``): on success it moves to the file store,
+    named in the journal and announced; the rest of the folder stays; Claude is told so."""
+    import trellis.harness.sandbox as boxes
+    from trellis import Settings
+
+    monkeypatch.setattr(boxes, "OUTPUT_MAX_BYTES", 8)
+    work = tmp_path / "work"
+    (work / "outputs" / "sub").mkdir(parents=True)
+    for name, text in (("report.csv", "n\n1\n"), ("big.csv", "x" * 9), ("sub/x.txt", "x")):
+        (work / "outputs" / name).write_text(text)
+    (work / "notes.txt").write_text("scratch")
+    script = [{"text": "saved"}]
+    harness = Harness(config=Settings(files_url=f"memory://claude-out-{id(tmp_path)}"))
+    agent = harness.wrap(options(tmp_path, script, cwd=str(work)), id="saver")
+    events = [e async for e in agent.stream("save it", user="u1")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    files = [e.data for e in events if e.data.get("name") == "file"]
+    assert [(f["file"], f["size"], f["source"]) for f in files] == [
+        ("report.csv", 4, "claude_agent_sdk")
+    ]
+    warned = [e.data["message"] for e in events if e.data.get("code") == "sandbox"]
+    assert warned == ["the output big.csv was not kept: 9 bytes, past the 8 kept"]
+    assert not (work / "outputs" / "report.csv").exists()  # moved to the file store
+    assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
+    assert (work / "outputs" / "sub" / "x.txt").exists()
+    assert started_with(tmp_path)["system_prompt"] == boxes.DELIVERS_HERE  # none of its own
+    await harness.aclose()
+
+
 async def test_a_built_in_tool_goes_through_the_hooks_then_the_teams_own_callback(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -384,7 +419,7 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     target = options(tmp_path, [{"text": "told: {context}"}], system_prompt="You help.")
     await memory_harness.wrap(target, id="helper").run("reach me how?", user="u1")
     started = started_with(tmp_path)
-    assert started["system_prompt"] == "You help."  # the team's, as it wrote it
+    assert started["system_prompt"] == f"You help.\n\n{DELIVERS_HERE}"  # the team's first
     # Claude's built-in tools are the agent's tools too, sorted: the context carries their hints
     rendered = memory_service.context_text + "\n\n## Tools\n- Agent (confidence 0.90)"
     assert started["context"] == rendered

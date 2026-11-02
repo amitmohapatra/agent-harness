@@ -26,7 +26,7 @@ from tests.support.kimi import (
     text_of,
 )
 from tests.support.sandbox import FakeSandboxes
-from trellis import Harness, Settings, tool
+from trellis import Harness, Hooks, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import compat
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN
@@ -198,6 +198,33 @@ async def test_a_team_that_wants_every_shell_command_approved_says_so_in_the_cat
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         call = paused.interrupt.tool_call
         assert call is not None and (call.tool, call.args) == ("Bash", {"command": "ls"})
+
+
+async def test_a_file_kimi_saves_in_its_outputs_folder_is_kept_for_its_user(
+    endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi is told that ``outputs/`` of its working folder is the user's; a file it writes
+    there (its own ``Bash``, asked about and approved) moves to the file store on success."""
+    from trellis.harness.sandbox import DELIVERS_HERE
+
+    save = "mkdir -p outputs && printf 'a,b\\n1,2\\n' > outputs/sales.csv"
+    endpoint.plan = [("Bash", {"command": save})]
+    folders: list[str] = []
+
+    class Ended(Hooks):
+        async def on_run_end(self, run: Any, result: Any) -> None:
+            folders.append(run.files_folder())
+
+    h = Harness(config=Settings(files_url=f"memory://kimi-out-{id(tmp_path)}"))
+    agent = h.wrap(kimi_target(endpoint, tmp_path), id="kimi-saver", hooks=[Ended()])
+    paused = await agent.run("save the sales", user="u1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert await h.files.read(folders[-1], "sales.csv") == b"a,b\n1,2\n"
+    assert not (tmp_path / "kimi-work" / "outputs" / "sales.csv").exists()
+    assert DELIVERS_HERE in endpoint.said()
+    await h.aclose()
 
 
 async def test_a_bash_call_whose_arguments_stream_pauses_with_its_command(

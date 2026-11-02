@@ -35,7 +35,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
-from trellis.harness.sandbox import sandbox
+from trellis.harness.sandbox import DELIVERS_HERE, sandbox
 
 #: What Kimi reads its swarm's concurrency from.
 SWARM_LIMIT = "KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"
@@ -101,7 +101,8 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert server["headers"][0]["name"] == "Authorization"
     # the harness tool needs no person: Kimi asks, the harness lets it through
     assert record["permissions"] == [{"title": "mcp__trellis__lookup", "answer": "approve_once"}]
-    assert record["prompts"] == ["tell me about tea"]
+    # what Kimi is told of its folder's outputs/ (the user's), then the user's message
+    assert record["prompts"] == [f"{DELIVERS_HERE}\ntell me about tea"]
     assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
 
 
@@ -425,7 +426,8 @@ async def test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt(
     assert done.status is RunStatus.SUCCESS and refunds == ["o4"]
     [warning] = [e for e in events if e.data.get("code") == "acp_session"]
     assert "was not resumed" in warning.data["message"]
-    assert recorded(tmp_path)["prompts"][-1] == "refund o4"  # from the prompt, the journal's
+    # from the prompt, the journal's
+    assert recorded(tmp_path)["prompts"][-1] == f"{DELIVERS_HERE}\nrefund o4"
 
 
 async def test_an_agent_without_session_resume_loads_the_session(
@@ -495,7 +497,7 @@ async def test_the_context_goes_before_the_prompt_marked_off_from_it(
     )
     [prompt] = recorded(tmp_path)["prompts"]
     opened, closed = ASKED_WITH.split("{context}")
-    assert prompt.startswith(opened + memory_service.context_text)
+    assert prompt.startswith(f"{DELIVERS_HERE}\n{opened}{memory_service.context_text}")
     assert prompt.endswith(f"{closed}\nreach me?")
     [request] = memory_service.named("context")
     available = request.body["tools"]["available"]

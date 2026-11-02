@@ -25,6 +25,7 @@ from trellis.contracts import ConfigurationError, RunOutcome, RunStatus
 from trellis.harness import agent as agent_module
 from trellis.harness import budget
 from trellis.harness.runs import LocalRuns
+from trellis.harness.sandbox import DELIVERS_HERE
 
 #: Each framework's own limit on a run's steps, below what one tool call needs, and what its
 #: error says; and one with room enough.
@@ -200,7 +201,7 @@ async def test_claudes_options_merge_with_what_the_harness_sets(
     result = await agent.run("tides?", user="u", framework_options=given)
     assert result.answer == "read: facts about tides" and asked == ["Read"]
     cli = json.loads(record.read_text())
-    assert cli["system_prompt"] == "Be brief."
+    assert cli["system_prompt"] == f"Be brief.\n\n{DELIVERS_HERE}"  # the run's, then outputs/
     servers = json.loads(cli["mcp_config"])["mcpServers"]
     assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"
 

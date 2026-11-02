@@ -324,6 +324,11 @@ class ClaudeAdapter:
                 "(its tools) has that name"
             )
 
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        """Where the CLI works: the options' ``cwd`` (the run's own over the agent's), else
+        this process's working directory."""
+        return Path(options.get("cwd") or target.cwd or os.getcwd())
+
     async def native(self, target: Any) -> list[ToolSpec]:
         """Claude Code's built-in tools the options leave it (``tools``, else the ones
         :data:`BUILTIN_SIDE_EFFECTS` knows, less ``disallowed_tools``) and the MCP tools of its
@@ -623,6 +628,7 @@ def _options(
     hooks = _with_governance(options.hooks, steps)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context) if context else hooks,
+        "system_prompt": _told(options.system_prompt),
         # what Claude Code asks its user about, the harness answers (the team's own first)
         "can_use_tool": _asked(options.can_use_tool, steps),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
@@ -643,6 +649,26 @@ def _options(
         env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
     changes["env"] = env
     return dataclasses.replace(options, **changes)
+
+
+def _told(given: Any) -> Any:
+    """The options' system prompt with what Claude is told of its folder's ``outputs/``
+    (``sandbox.DELIVERS_HERE``: the user's), after it — appended to a preset (``append``), to
+    a custom prompt or text, or as the prompt when there is none (the SDK's empty one). A
+    prompt read from a file is left as it is: the CLI takes no text beside it."""
+    from trellis.harness.sandbox import DELIVERS_HERE
+
+    def after(text: str | None) -> str:
+        return f"{text}\n\n{DELIVERS_HERE}" if text else DELIVERS_HERE
+
+    if given is None or isinstance(given, str):
+        return after(given)
+    kind = given.get("type")
+    if kind == "preset":
+        return {**given, "append": after(given.get("append"))}
+    if kind == "custom":
+        return {**given, "prompt": after(given.get("prompt"))}
+    return given
 
 
 def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:

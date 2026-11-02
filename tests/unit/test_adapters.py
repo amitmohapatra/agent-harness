@@ -222,6 +222,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     unchanged = {
         "hooks": None,
         "can_use_tool": None,
+        "system_prompt": "Mine.",  # told of outputs/ after it (``sandbox.DELIVERS_HERE``)
         "max_buffer_size": None,
         "session_store": None,
         "disallowed_tools": [],
@@ -563,3 +564,18 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
     ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
     for kept in (own, off, plain, ours, object()):
         assert checkpointing(kept) is kept
+
+
+def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> None:
+    """``sandbox.DELIVERS_HERE`` after the team's prompt in every form the SDK takes; a prompt
+    read from a file is left as it is (the CLI takes no text beside it)."""
+    from trellis.harness.adapters.claude import _told
+    from trellis.harness.sandbox import DELIVERS_HERE
+
+    preset = {"type": "preset", "preset": "claude_code"}
+    assert _told(None) == DELIVERS_HERE and _told("") == DELIVERS_HERE
+    assert _told("Mine.") == f"Mine.\n\n{DELIVERS_HERE}"
+    assert _told(preset) == {**preset, "append": DELIVERS_HERE}
+    assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
+    assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
+    assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
