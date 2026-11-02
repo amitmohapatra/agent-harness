@@ -139,7 +139,9 @@ async def says_how_it_goes(w: World) -> None:
 
 async def takes_an_instruction(w: World) -> None:
     """The agent under test is the task: its next step reads the instruction (where its
-    framework has a step the harness reaches; else the instruction is refused, said)."""
+    framework has a step the harness reaches; else the instruction is refused, said). The
+    lead is a function (its code makes the calls): with named models every ``ReAct`` of a
+    cell is served the one planned model, which a ``ReAct`` lead's plan would replace."""
     from tests.matrix.kit import Desk
 
     d = Desk()
@@ -161,14 +163,14 @@ async def takes_an_instruction(w: World) -> None:
     )
     async with worked(w, child, gate):
         start = ("start_async_task", {"description": "the tides", "subagent_type": "research"})
-        lead = await w.agent([background(child)], [start], parent="react")
+        lead = await w.agent([background(child)], [start], parent="function")
         answer = str((await lead.run("about the tides", user=USER, thread="t")).answer)
         run_id = answer.rsplit("task_id: ", 1)[1].strip()
         await asyncio.wait_for(d.started.wait(), WAIT)
         update = ("update_async_task", {"task_id": run_id, "message": "mind the north too"})
-        lead = await w.agent([background(child)], [update], parent="react")
-        await lead.run("and the north", user=USER, thread="another chat")
-        answer = w.said()
+        lead = await w.agent([background(child)], [update], parent="function")
+        updated = await lead.run("and the north", user=USER, thread="another chat")
+        answer = str(updated.answer)  # the lead's code's last result
         gate.set()
         record = await _ended(w, run_id)
     assert record.status is RunStatus.SUCCESS, (record.status, record.error)
