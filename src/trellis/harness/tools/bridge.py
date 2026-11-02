@@ -67,7 +67,7 @@ from trellis.harness.conversation import result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, content_key, reach
+from trellis.harness.journal import OUTCOME, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
@@ -201,7 +201,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     journal = runtime.replay.journal
     if (
         not decision.asks
-        or reach(spec.name, decision.assignee) in journal.remembered
+        or _reach(spec.name, decision.assignee) in journal.remembered
         or content_key("approved", spec.name, args) in journal.approved
         or runtime.replay.answered(content_key("approve", spec.name, args))
     ):
@@ -479,8 +479,8 @@ async def _decided(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     remembered = runtime.replay.journal.remembered
-    covers = reach(spec.name, decision.assignee)
-    if decision.asks and covers in remembered:
+    reach = _reach(spec.name, decision.assignee)
+    if decision.asks and reach in remembered:
         decision = decision.approved(f"{spec.name} was approved for the rest of the run.")
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
     gated = content_key("approved", spec.name, call.args)
@@ -492,8 +492,8 @@ async def _decided(
     if decision.asks:
         resolution = await runtime.approve(call, decision)
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
-        if resolution.remember == "run" and covers not in remembered:
-            remembered.append(covers)  # in the journal: later calls of it are not asked
+        if resolution.remember == "run" and reach not in remembered:
+            remembered.append(reach)  # in the journal: later calls of it are not asked
         if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             rejected = ToolOutcome(
@@ -509,6 +509,12 @@ async def _decided(
     elif decision.announces:
         runtime.events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+def _reach(tool: str, assignee: str | None) -> str:
+    """What an approval remembered for the run covers: the tool's later calls asked of the
+    same person or role (an ``Ask`` naming someone else still asks)."""
+    return tool if assignee is None else f"{tool} for {assignee}"
 
 
 async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> ToolOutcome:

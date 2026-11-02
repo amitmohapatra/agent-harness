@@ -85,12 +85,6 @@ def content_key(kind: str, *parts: Any) -> str:
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
 
 
-def reach(tool: str, assignee: str | None) -> str:
-    """What an approval remembered for the run covers: the tool's later calls asked of the
-    same person or role (an ``Ask`` naming someone else still asks)."""
-    return tool if assignee is None else f"{tool} for {assignee}"
-
-
 class Pending(BaseModel):
     """The interrupt the run is waiting on, and the key its answer is filed under."""
 
@@ -103,6 +97,18 @@ class Pending(BaseModel):
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
+
+
+def governance_held(pending: Pending) -> bool:
+    """Whether ``pending`` is governance's own approval of a call that a framework's gate held
+    (OpenAI Agents' ``needs_approval``, ``bridge.asks_first``): its answer is filed as a harness
+    pause's, read where the call asks again when the framework runs it."""
+    call = pending.interrupt.tool_call
+    return (
+        pending.native_state is not None
+        and call is not None
+        and pending.key == content_key("approve", call.tool, call.args)
+    )
 
 
 class Journal(BaseModel):
@@ -211,6 +217,8 @@ class Journal(BaseModel):
         if isinstance(actions, list) and payload.get("review_configs") is not None:
             calls = [(a.get("name"), a.get("args") or {}) for a in actions]
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
+            if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
+                return  # governance's own question: its answer is read where the call asks
             calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
         else:
             return  # the harness's own question: governance asked it
@@ -218,14 +226,6 @@ class Journal(BaseModel):
         if isinstance(edited, dict) and calls:
             calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
-        call = interrupt.tool_call
-        if (
-            call is not None
-            and self.pending.key == content_key("approve", call.tool, call.args)
-            and resolution.remember == "run"
-        ):  # governance's own question, which the framework's gate held the call for: the
-            # later calls of the tool it covers are not held (``bridge.asks_first``)
-            self.remembered.append(reach(call.tool, interrupt.assignee))
 
     def answered(self, resolution: InterruptResolution) -> None:
         """File the answer to the open pause, and close it."""

@@ -77,7 +77,7 @@ from trellis.harness.features import run_without
 from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay, content_key
+from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
@@ -753,7 +753,7 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     pending = journal.pending
     if resolution is not None and pending is not None:
         journal.approved_in_framework(resolution)
-        if pending.native_state:
+        if pending.native_state and not governance_held(pending):
             journal.pending = None
         else:
             # a checkpointed graph is handed it by its framework too; filed here, a later
