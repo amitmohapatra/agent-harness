@@ -56,6 +56,10 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A Kimi call that asks permission carries its arguments when the model streamed them: Kimi
+  asks before it starts the call, so its arguments were only in the call's streamed updates,
+  which the adapter dropped, and a pause on `Bash` showed `{}` (no command) to the person and
+  to governance. On Haiku, the break-and-fix suite could approve none of 8 such pauses.
 - A framework's built-in tools no longer count toward the tool hints' narrowing threshold
   (`NARROW_FROM`, 30): only the run's own tools do (`Runtime.own_tools`). Claude Code's and
   Kimi's built-ins, and Deep Agents' `task` and file tools, are tagged `builtin`. Counted with

@@ -102,9 +102,13 @@ class PlannedEndpoint:
         final: str = FINAL,
         turns: Callable[[dict[str, Any]], Turn] | None = None,
         stall: float = 0.0,
+        streamed: bool = False,
     ) -> None:
         #: each step a call, or the calls made in one message
         self.plan: list[Any] = list(plan)
+        #: a call's arguments streamed in pieces after its name, as a provider streams them
+        #: (Anthropic's, OpenAI's), instead of whole in one chunk
+        self.streamed = streamed
         self.final = final
         self.turns = turns
         self.stall = stall
@@ -208,7 +212,9 @@ class PlannedEndpoint:
         reply = self.reply(body)
         if not body.get("stream"):
             return JSONResponse({**reply, "object": "chat.completion"})
-        return StreamingResponse(_chunks(reply), media_type="text/event-stream")
+        return StreamingResponse(
+            _chunks(reply, streamed=self.streamed), media_type="text/event-stream"
+        )
 
     async def attached(self) -> PlannedEndpoint:
         """This endpoint on the event loop's shared server (made the first time, stopped at the
@@ -291,16 +297,33 @@ def _system_reminders(text: str) -> str:
     return re.sub(r"<system-reminder>.*?</system-reminder>\s*", "", text, flags=re.DOTALL).strip()
 
 
-async def _chunks(reply: dict[str, Any]) -> AsyncIterator[str]:
+async def _chunks(reply: dict[str, Any], *, streamed: bool = False) -> AsyncIterator[str]:
+    """``reply`` as stream chunks; ``streamed``: each call's arguments in pieces after a chunk
+    with its name and empty arguments, as a provider streams them."""
     [choice] = reply["choices"]
     message = choice["message"]
     delta: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
-    if message.get("tool_calls"):
-        delta["tool_calls"] = [{"index": n, **c} for n, c in enumerate(message["tool_calls"])]
+    pieces: list[dict[str, Any]] = []
+    calls = message.get("tool_calls") or []
+    if calls and not streamed:
+        delta["tool_calls"] = [{"index": n, **c} for n, c in enumerate(calls)]
+    elif calls:
+        delta["tool_calls"] = [
+            {"index": n, **c, "function": {**c["function"], "arguments": ""}}
+            for n, c in enumerate(calls)
+        ]
+        for n, c in enumerate(calls):
+            text = c["function"]["arguments"]
+            half = len(text) // 2
+            pieces += [
+                {"tool_calls": [{"index": n, "function": {"arguments": part}}]}
+                for part in (text[:half], text[half:])
+            ]
     base = {key: reply[key] for key in ("id", "created", "model")}
     chunk = "chat.completion.chunk"
     for part in (
         {**base, "object": chunk, "choices": [{"index": 0, "delta": delta}]},
+        *({**base, "object": chunk, "choices": [{"index": 0, "delta": d}]} for d in pieces),
         {
             **base,
             "object": chunk,
