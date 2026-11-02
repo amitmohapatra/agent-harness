@@ -229,7 +229,8 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped.
 
-Last of what changes a request, where Deep Agents puts its own, both bases have `PromptCache`:
+Last of what changes a request, where Deep Agents puts its own, both bases (and `middleware()`
+on your own graph) have `PromptCache`:
 LangChain's `AnthropicPromptCachingMiddleware` (the one you give `ReAct(middleware=)`, its
 settings kept) run on the chat model the call is made with — a `ChatAnthropic`, or a model name
 routed to Anthropic's own SDK or to Anthropic's API as an OpenAI-compatible endpoint — so the tools, the instructions, the request's end and the

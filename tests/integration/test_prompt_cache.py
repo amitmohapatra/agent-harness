@@ -16,7 +16,7 @@ import respx
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 
-from trellis import Harness, ReAct, Settings, tool
+from trellis import Harness, ReAct, Settings, middleware, tool
 from trellis.contracts import RunStatus
 from trellis.harness.automatic import JournalBackend
 
@@ -128,6 +128,65 @@ async def test_an_anthropic_model_however_given_marks_what_the_next_call_repeats
     assert breakpoints(later) == 4
 
 
+def own_graph(model: Any, deep: bool) -> Any:
+    """A graph its team built — ``create_agent`` / ``create_deep_agent`` with the harness's
+    ``middleware()`` — on a model name the harness routes, or a chat model of its own."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+    from trellis.harness.gateways import routed_chat_model
+
+    chat = routed_chat_model(model) if isinstance(model, str) else model
+    if deep:
+        from deepagents import create_deep_agent
+
+        built = create_deep_agent(
+            model=chat,
+            tools=[],
+            system_prompt="You answer stock questions.",
+            middleware=middleware(context_window=50_000),
+            checkpointer=InMemorySaver(),
+        )
+    else:
+        built = create_agent(
+            chat,
+            tools=[],
+            system_prompt="You answer stock questions.",
+            middleware=middleware(context_window=50_000),
+            checkpointer=InMemorySaver(),
+        )
+    setattr(built, TOOLS_ATTRIBUTE, [stock])
+    return built
+
+
+@pytest.mark.parametrize("deep", [False, True], ids=["create_agent", "create_deep_agent"])
+@pytest.mark.parametrize("given", ["name", "object"])
+async def test_a_graph_built_with_the_middleware_is_cached_as_react_is(
+    memory_harness: Harness, anthropic: list[dict[str, Any]], deep: bool, given: str
+) -> None:
+    """``middleware()`` carries ``PromptCache``: a team's own ``create_agent`` or
+    ``create_deep_agent`` graph on an Anthropic model (a routed name too, which Deep Agents'
+    own caching middleware does not recognise) marks what ``ReAct``'s marks."""
+    model = (
+        "anthropic:claude-x"
+        if given == "name"
+        else ChatAnthropic(model_name="claude-x", api_key="test-key")  # type: ignore[call-arg,arg-type]
+    )
+    await two_turns(memory_harness, own_graph(model, deep), f"own-graph-{given}-{deep}")
+    first, later = anthropic
+    for body in (first, later):
+        assert body["cache_control"] == MARK
+        assert body["system"][-1]["cache_control"] == MARK
+        assert body["tools"][-1]["cache_control"] == MARK
+        assert breakpoints(body) <= 4
+    assert later["messages"][-2]["content"][-1] == {
+        "type": "text",
+        "text": ANSWERS[0],
+        "cache_control": MARK,
+    }
+
+
 @pytest.mark.parametrize("deep", [False, True], ids=["langchain", "deepagents"])
 async def test_your_own_caching_middleware_is_the_one_used(
     memory_harness: Harness, anthropic: list[dict[str, Any]], deep: bool
@@ -186,3 +245,21 @@ async def test_anthropics_own_endpoint_given_as_openai_compatible_is_cached(
     assert len(anthropic) == 2
     assert all(body["cache_control"] == MARK for body in anthropic)
     assert all(body["tools"][-1]["cache_control"] == MARK for body in anthropic)
+
+
+def test_reacts_own_langgraph_cache_is_the_one_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ReAct(cache=)`` is LangGraph's node cache, given to the graph as it is: the prompt
+    cache is a middleware, never in its place."""
+    from langgraph.cache.memory import InMemoryCache
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    given = InMemoryCache()
+    for deep in (False, True):
+        built = ReAct(
+            "s",
+            "openai:gpt-x",
+            context_window=50_000,
+            cache=given,
+            backend=JournalBackend() if deep else None,
+        )
+        assert built.cache is given
