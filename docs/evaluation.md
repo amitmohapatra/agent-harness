@@ -480,8 +480,12 @@ user, a decision or a correction made there, a colleague's statement that must n
 the user's), analytics over two or three tools, explanations of a turn just done or of an
 earlier chat, what-ifs, topic switches, corrections, ambiguity and requests this deployment
 cannot do; 20 new cases a round (`bf<n>-…`), categories `bf_past`, `bf_analytics`,
-`bf_explain`, `bf_mixed`, `bf_cantdo`, `bf_clarify`. The held-out cases (`bfh-…`) run every
-round and are never fixed against. Each case's chats are one user's, kept to the run and the
+`bf_explain`, `bf_mixed`, `bf_cantdo`, `bf_clarify`. Round 4 (`round:4`, `bf_derive`) derives
+a model from the data and applies it: a trend extended to a forecast, a formula fitted over a
+join of two tools, a compound growth rate carried forward, a break-even point, a correlation
+and the line that predicts one series from the other — each truth exact (least squares and
+correlation over the world's own rows), each a figure a model must compute with a tool, not by
+hand. The held-out cases (`bfh-…`) run every round and are never fixed against. Each case's chats are one user's, kept to the run and the
 case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
 before a later chat the harness's writes are drained, as a chat an hour later finds them.
 A shell command that only reads (Claude Code's or Kimi's `Bash`: a program that reads, joined
