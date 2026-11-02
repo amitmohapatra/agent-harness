@@ -697,12 +697,12 @@ def _steering() -> Any:
 
     async def steered(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         runtime = current()
-        if runtime is not None:
-            try:
-                await runtime.step()  # the run's inbox: its instructions, a person's pause
-            except Paused:  # a person paused it: Claude stops here, its session kept
-                return {"continue_": False, "stopReason": WAITING}
-        taken = runtime.steered() if runtime is not None else []
+        assert runtime is not None  # the CLI calls it inside the run it works for
+        try:
+            await runtime.step()  # the run's inbox: its instructions, a person's pause
+        except Paused:  # a person paused it: Claude stops here, its session kept
+            return {"continue_": False, "stopReason": WAITING}
+        taken = runtime.steered()
         if not taken:
             return {}
         said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)

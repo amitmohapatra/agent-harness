@@ -18,6 +18,7 @@ from tests.integration.test_inbox import status, stepper, working
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings, background
 from trellis.contracts import InterruptReason, RunStatus
+from trellis.runs import ConflictError
 
 PATH = "/agui"
 
@@ -153,3 +154,25 @@ async def test_the_status_view_is_one_source_for_the_ui_and_the_chat(
     said = await d.lead.run("status", user="u1", thread="t1")
     assert json.loads(str(said.answer)) == [shown]
     assert (await client.get(f"{PATH}/tasks", headers={"x-user": "u2"})).json() == {"tasks": []}
+
+
+async def test_a_resume_that_loses_a_race_is_refused(
+    deployed: Deployment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d, client = deployed, deployed.client
+    async with working(d.harness, d.child):
+        task = await d.task()
+        await entered(d.gate)
+        await client.post(f"{PATH}/runs/{task}/pause")
+        d.gate.released.set()
+        await status(d.harness, task, RunStatus.PAUSED)
+
+        async def answered_elsewhere(*args: Any, **kwargs: Any) -> Any:
+            raise ConflictError("answered by another click", code="CONFLICT", status=409)
+
+        monkeypatch.setattr(d.child, "_resolution", answered_elsewhere)
+        lost = await client.post(f"{PATH}/runs/{task}/resume")
+        assert lost.status_code == 409, lost.text
+        monkeypatch.undo()
+        assert (await client.post(f"{PATH}/runs/{task}/resume")).status_code == 200
+        await ended(d.harness, task)

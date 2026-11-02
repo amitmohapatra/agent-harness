@@ -365,3 +365,27 @@ async def test_an_inbox_that_cannot_be_read_is_said_once_and_the_run_goes_on() -
     assert seen[-1].outcome is RunOutcome.SUCCESS
     warned = [e for e in seen if e.data.get("code") == "inbox_unread"]
     assert len(warned) == 1 and store.reads == 2
+
+
+async def test_the_in_process_inbox_keeps_a_message_sent_again_once() -> None:
+    store = LocalRuns()
+    async def fn(input: Any, agent: Any) -> str:
+        return "done"
+
+    async with Harness(config=Settings(), runs=store) as h:
+        agent = h.wrap(fn, id="fn")
+        await agent.start("x", user="ada")
+        [summary] = [s async for s in store.iterate(agent_id="fn")]
+        run_id = summary.run_id
+        first = await send(h, run_id, RunMessageKind.INSTRUCTION, "north")
+        again = await store.send_message(
+            run_id, RunMessageKind.INSTRUCTION, message_id="m0", text="north", sender="ada"
+        )
+        assert again == first and len(await store.messages(run_id)) == 1
+        with pytest.raises(ConflictError):
+            await store.send_message(
+                run_id, RunMessageKind.INSTRUCTION, message_id="m0", text="south", sender="ada"
+            )
+        await store.cancel(run_id)
+        with pytest.raises(ConflictError):
+            await send(h, run_id, RunMessageKind.INSTRUCTION, "late")

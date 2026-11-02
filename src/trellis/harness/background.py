@@ -248,19 +248,17 @@ class Background:
                 "no step the harness reaches): cancel the task and start it again with the "
                 "new instructions."
             )
-        # sent as this call: a re-run after a crash sends the same message, kept once
+        # sent as this call: a re-run after a crash sends the same message, kept once (a task
+        # that ended since it was read refuses it: the call's error says so)
         sent_as = runtime.idempotency_key or runtime.run_id
-        try:
-            await agent.harness.runs.send_message(
-                found.run_id,
-                RunMessageKind.INSTRUCTION,
-                message_id=sent_as,
-                text=args["message"],
-                sender=runtime.user,
-                tenant=runtime.tenant,
-            )
-        except ConflictError:
-            return f"Task {found.run_id} already ended: nothing to update."
+        await agent.harness.runs.send_message(
+            found.run_id,
+            RunMessageKind.INSTRUCTION,
+            message_id=sent_as,
+            text=args["message"],
+            sender=runtime.user,
+            tenant=runtime.tenant,
+        )
         return f"Updated async subagent. task_id: {found.run_id}"
 
     async def _cancel(self, args: dict[str, Any]) -> str:
