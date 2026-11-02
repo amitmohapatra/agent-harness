@@ -48,6 +48,7 @@ import types
 import weakref
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from trellis.contracts import (
@@ -277,6 +278,9 @@ class OpenAIAgentsAdapter:
             message = answer if isinstance(answer, str) else json.dumps(answer, default=str)
             return _Continue(state, call_id, approve=False, message=message)
         return _Continue(state, call_id, approve=False, message=reason_of(resolution))
+
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        return None  # no folder of its own: a sandbox's outputs/ are its outputs
 
     async def native(self, target: Any) -> list[ToolSpec]:
         """The tools of every agent the run can reach (:func:`reachable`: ``target``, the agents

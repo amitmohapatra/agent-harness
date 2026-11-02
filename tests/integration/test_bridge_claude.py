@@ -41,9 +41,11 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def machine(tmp_path: Path, name: str, script: list[dict[str, Any]], **fields: Any) -> Any:
-    """The options as one machine runs them: its own CLI sessions folder, the shared logs."""
+    """The options as one machine runs them: its own CLI sessions folder, the shared logs;
+    Claude Code's own ``acceptEdits`` mode, so its file edits run without asking."""
     home = tmp_path / name
     home.mkdir(exist_ok=True)
+    fields.setdefault("permission_mode", "acceptEdits")
     return ClaudeAgentOptions(
         cli_path=CLI,
         env={

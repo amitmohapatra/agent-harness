@@ -68,6 +68,7 @@ import functools
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
@@ -297,6 +298,9 @@ class LangGraphAdapter:
                 "run's thread (or the run's own, for a graph that checkpoints into its run): "
                 "pass agent.run(thread=...) instead"
             )
+
+    def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
+        return None  # no folder of its own: a sandbox's outputs/ are its outputs
 
     async def native(self, target: Any) -> list[ToolSpec]:
         """What the graph's tool nodes run (:func:`graph_tools`: a Deep Agent's ``task``

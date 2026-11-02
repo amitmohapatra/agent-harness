@@ -488,14 +488,16 @@ correlation over the world's own rows), each a figure a model must compute with 
 hand. The held-out cases (`bfh-…`) run every round and are never fixed against. Each case's chats are one user's, kept to the run and the
 case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
 before a later chat the harness's writes are drained, as a chat an hour later finds them.
-A run that pauses to ask a person about a shell command that only reads (Claude Code's or Kimi's
-`Bash`: a program that reads, joined by pipes and sequences, or Python whose code writes
-nothing; `benchmark/cost/approvals.py`) is resumed approved, as a user reading it would, and the
-row says which commands (`approved`). So is a save inside the run's own working folder
+A shell command that only reads (Claude Code's or Kimi's `Bash`: a program that reads, joined
+by pipes and sequences, or Python whose code writes nothing) no longer pauses: the harness lets
+it run (`trellis/harness/governance/shell.py`). A run that pauses to ask a person about a save
+inside the run's own working folder
 (`complex.work_folder`: Kimi's and Claude's, under `KIMI_RUN_ROOT` / `CLAUDE_RUN_ROOT`): their
 file tool on a path there, or a command whose every write (`mkdir`, `touch`, `cp`'s target, a
 redirect, Python's `to_excel`/`savefig`/`save`/`open(..., "w")` on a path written out) resolves
-inside it, after a `cd` into it if any. A pause on anything else (a write elsewhere, a delete or
+inside it, after a `cd` into it if any, is resumed approved, as a user reading it would, and the
+row says which commands (`approved`; `benchmark/cost/approvals.py`, read by the same check).
+A pause on anything else (a write elsewhere, a delete or
 a move, an install, the network, a script it cannot read) stays a pause. A `cannot` turn whose run ran such a
 command is scored on what it did: the result is its answer, and only output the user cannot
 reach (a file link, a file it says it saved) is made up; a refusal is still right. A question

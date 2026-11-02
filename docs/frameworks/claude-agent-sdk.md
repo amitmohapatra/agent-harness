@@ -63,29 +63,41 @@ deferral.
 
 ## Claude Code's built-in tools
 
-`Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own: it runs them. The
-harness decides whether it may, through the SDK's own `PreToolUse` hook, which the CLI runs
-before every tool call in every permission mode — the options it runs carry the harness's hook
-after any of yours:
+`Read`, `Write`, `Edit`, `Bash`, `WebFetch` and the rest are the CLI's own: it runs them, and
+asks before them as it always does. The harness adds your governance on top and stands in for
+the user Claude Code would ask:
 
-* **What.** Every built-in call is decided as a harness tool call is, under `allowed_tools`,
-  `acceptEdits` and `bypassPermissions` too:
-  the run's `before_tool` hooks ([hooks.md](../hooks.md)), then governance by the tool's risk —
-  and a person when it asks. Approved (or edited), it runs once; rejected or denied, Claude reads
-  why.
+* **Your rules first.** The SDK's own `PreToolUse` hook, which the CLI runs before every tool
+  call in every permission mode (the options it runs carry the harness's hook after any of
+  yours), decides each built-in call as a harness tool call is: the run's `before_tool` hooks
+  ([hooks.md](../hooks.md)), then governance by the tool's risk and the tool catalog's rules.
+  A call they refuse, or ask a person about, stops there.
+* **Then Claude Code's own.** A call they let through goes to Claude Code's own permission
+  check: its `permission_mode`, its rules (`allowed_tools`, `disallowed_tools`, its settings
+  files: your allowlist, passed through as it is) and its own read-only checks. What it lets
+  run, runs; nothing more is asked.
+* **When Claude Code would ask** its user, it asks the harness (its `can_use_tool`): a call
+  that only reads runs — a read tool, or a `Bash` command the harness reads as read-only (`ls`,
+  `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`, read with
+  `shlex` and `ast`); any other asks a person. Approved (or edited), it runs once; rejected or
+  denied, Claude reads why.
 * **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
-  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` write (they run, announced); `Bash` is
-  irreversible (it asks). Your in-process server's tool is what its annotations say; any other
+  `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` write (announced; Claude Code asks
+  first where it would). Your in-process server's tool is what its annotations say; any other
   tool the CLI asks about (an MCP server's of yours) is a write.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
-  ([governance.md](../governance.md)).
+  ([governance.md](../governance.md)): a team that wants every shell command approved, even
+  one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
+  `true`) there.
 * **Not offered: schedules.** The CLI runs for one attempt and ends with it, so a scheduled
   prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) would never fire: these, with
   `CronList` and `CronDelete`, are added to the query's `disallowed_tools`, after your own.
   Offered, Claude promised a weekly report that nothing would send.
-* **Your own `can_use_tool`** is asked by the harness's hook after its decision, with the
-  arguments as they were decided (a hook's rewrite, a reviewer's edit): what it answers stands.
-  A `permission_prompt_tool_name` of your own is refused: give your check as `can_use_tool`.
+* **Your own `can_use_tool`** answers what Claude Code asks, as without the harness: it is
+  asked when Claude Code would ask its user, after your hooks and governance, with the
+  arguments as they were decided (a call a hook rewrote is asked about as rewritten); what it
+  answers stands. A `permission_prompt_tool_name` of your own is refused: give your check as
+  `can_use_tool`.
 * **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
   result in its session, below).
 
@@ -105,7 +117,7 @@ after any of yours:
   `setting_sources` unset, loads the user's and the project's settings)
   ([skills.md](../skills.md#native-or-ours)).
 * **Sandbox:** prefer Claude's own `Bash` and file tools, confined with
-  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness decides each
+  `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))`; the harness answers each
   call the CLI asks about (above), and a sandboxed `Bash` call is asked about only with
   `autoAllowBashIfSandboxed` false ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
 * **Prompts:** the options take text: `system_prompt=(await h.prompt("triage")).text` for a

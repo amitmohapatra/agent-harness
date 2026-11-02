@@ -34,7 +34,7 @@ h = Harness()
 agent = h.wrap(kimi(model="moonshot/kimi-k2", cwd="/srv/repo"), id="maintainer")
 
 result = await agent.run("The build is red: find out why and fix it.", user="ada")
-if result.interrupt:  # Kimi asked to run a command: Bash is irreversible, a person approves
+if result.interrupt:  # Kimi asked to run a command that writes: a person approves
     result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="ada")
 ```
 
@@ -60,7 +60,7 @@ command="kimi")`:
 |---|---|
 | Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt), marked off from the question as `ReAct`'s is (`<memory_context>`, `history.ASKED_WITH`) |
 | Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the attempt on `127.0.0.1` with a bearer token of its own, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run, from 30 tools of the run's own (Kimi's built-ins are not counted); `read_file` pages a large result |
-| Kimi's own tools | every call Kimi asks permission for (`Bash`, `Write`, `Edit`... in its default mode) is decided as a harness call is: the run's `before_tool` hooks, governance by its risk, a person when it asks. `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` write; `Bash` is irreversible; the catalog overrides |
+| Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked, unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Kimi Code 2.1.1 reads `[permission]` rules in its `config.toml` but does not apply them over ACP (pinned by `test_kimi.py`): it still asks, and a person is asked |
 | Schedules: off | Kimi runs for one attempt and ends with it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them, as ACP has no way to take a built-in off. A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
 | Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result. Kimi decides when (the model calls the tool): nothing to configure |

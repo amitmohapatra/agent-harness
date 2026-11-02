@@ -47,7 +47,7 @@ import re
 import time
 import uuid
 import weakref
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import ToolError, ToolSpec, stable_id
@@ -121,6 +121,12 @@ OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
 DELIVERS: Final = (
     f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
     "finish."
+)
+#: What an agent working in a folder of its own on this machine (Claude Code's, Kimi Code's:
+#: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way.
+DELIVERS_HERE: Final = (
+    f"Files you write in {OUTPUTS}/ of your working directory are given to the user when you "
+    "finish: save a file the user asks for there."
 )
 
 
@@ -358,24 +364,54 @@ def sandbox(
 
 
 async def delivered(runtime: Runtime) -> None:
-    """The run succeeded: each file its code wrote directly in :data:`OUTPUTS` of its sandbox
-    kept in the file store for its user (``Runtime.save_file``: named in its journal, announced,
-    served over AG-UI), before the sandbox is deleted. A file that cannot be kept (its name, its
-    size past :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
+    """The run succeeded: each file written directly in :data:`OUTPUTS` kept in the file store
+    for its user (``Runtime.save_file``: named in its journal, announced, served over AG-UI) —
+    its sandbox's, before the sandbox is deleted, and that of the folder its framework works in
+    on this machine (``Adapter.workdir``: Claude Code's, Kimi Code's), moved out of it so a
+    later run does not give it again. A file that cannot be kept (its name, its size past
+    :data:`OUTPUT_MAX_BYTES`) is left, said in a warning."""
     box, source = runtime.sandbox, _source(runtime.agent, runtime.added)
-    if box is None or source is None:
-        return
-    tool = EXEC if EXEC in runtime.toolbox else "execute"
-    listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
-    for line in listed.stdout.splitlines():
-        size, _, name = line.strip().partition(" ")
+    if box is not None and source is not None:
+        tool = EXEC if EXEC in runtime.toolbox else "execute"
+        listed = await box.exec(LIST_OUTPUTS, timeout=source.call_timeout)
+        found = [line.strip().partition(" ") for line in listed.stdout.splitlines()]
+        sized = [(int(size), name) for size, _, name in found]
+        await _kept(runtime, sized, lambda name: box.read(f"{OUTPUTS}/{name}"), tool)
+    agent = runtime.agent
+    folder = agent.adapter.workdir(agent.target, runtime.framework_options)
+    outputs = folder / OUTPUTS if folder is not None else None
+    if outputs is not None and outputs.is_dir():
+        here = outputs
+        files = sorted(f for f in here.iterdir() if f.is_file())
+
+        async def read(name: str) -> bytes:
+            return await asyncio.to_thread((here / name).read_bytes)
+
+        sized = [(f.stat().st_size, f.name) for f in files]
+        await _kept(runtime, sized, read, agent.adapter.name, moved=lambda n: (here / n).unlink())
+
+
+async def _kept(
+    runtime: Runtime,
+    sized: list[tuple[int, str]],
+    read: Callable[[str], Awaitable[bytes]],
+    source: str,
+    *,
+    moved: Callable[[str], None] | None = None,
+) -> None:
+    """Each of ``sized`` (its size and name) read and kept for the run's user, ``source`` what
+    made it, then ``moved`` (taken from where it was), when given. One past
+    :data:`OUTPUT_MAX_BYTES`, or that cannot be kept, is left, said in a warning."""
+    for size, name in sized:
         try:
-            if int(size) > OUTPUT_MAX_BYTES:
+            if size > OUTPUT_MAX_BYTES:
                 raise ToolError(f"{size} bytes, past the {OUTPUT_MAX_BYTES} kept", source="tools")
-            data = await box.read(f"{OUTPUTS}/{name}")
-            await runtime.save_file(name, data, source=tool)
+            await runtime.save_file(name, await read(name), source=source)
         except ToolError as exc:
             runtime.events.warning(EVENT, f"the output {name} was not kept: {exc}")
+            continue
+        if moved is not None:
+            moved(name)
 
 
 def card_of(found: ExecResult, *, offline: bool) -> str:
