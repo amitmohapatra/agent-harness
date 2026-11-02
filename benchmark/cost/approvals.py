@@ -146,7 +146,7 @@ def read_only(tool: str, args: Mapping[str, Any]) -> bool:
     """Whether a paused call is a shell command (:data:`SHELLS`) that only reads: each of its
     commands a program of :data:`READERS` with none of its writing arguments, or Python whose
     code writes nothing (:func:`python_reads`), joined by pipes and sequences only (an output
-    may be joined to another, ``2>&1``)."""
+    may be joined to another, ``2>&1``, or thrown away, ``2>/dev/null``)."""
     command = args.get("command")
     if tool not in SHELLS or not isinstance(command, str) or not command.strip():
         return False
@@ -170,12 +170,20 @@ def read_only(tool: str, args: Mapping[str, Any]) -> bool:
     return all(_reads(c) for c in commands)
 
 
+#: Where an output may go and nothing is written: thrown away.
+DISCARD: Final = "/dev/null"
+
+
 def _joined(words: list[str]) -> list[str]:
-    """``words`` less each ``N>&M``: one output sent where another goes, nothing written."""
+    """``words`` less each ``N>&M`` (one output sent where another goes) and ``N>/dev/null``
+    (an output thrown away): nothing written."""
     kept: list[str] = []
     rest = iter(enumerate(words))
     for n, word in rest:
-        if word == ">&" and n + 1 < len(words) and words[n + 1].isdigit():
+        after = words[n + 1] if n + 1 < len(words) else None
+        if (word == ">&" and after is not None and after.isdigit()) or (
+            word in (">", ">>") and after == DISCARD
+        ):
             if kept and kept[-1].isdigit():
                 kept.pop()
             next(rest)

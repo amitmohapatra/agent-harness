@@ -27,6 +27,9 @@ READS = [
     'python3 -c "import matplotlib, sys; print(matplotlib.__version__, sys.version)" 2>&1; which python3',
     'python3 -c "import matplotlib; print(matplotlib.__version__)" 2>&1; which python3; pwd; ls -la',
     "ls -la 2>&1 | head -5",
+    # Kimi's, run with the fixes: an error output thrown away
+    "which gnuplot convert magick 2>/dev/null; pwd",
+    "ls -la x > /dev/null && echo found",
 ]
 NOT = [
     "rm -rf /tmp/x",
@@ -57,6 +60,8 @@ NOT = [
     "ls 2>&1 > out.txt",
     "ls 2>errors.txt",
     "which python3 > where.txt",
+    "ls 2>/dev/null.txt",
+    "ls > /dev/sda",
 ]
 
 
