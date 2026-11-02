@@ -1171,3 +1171,29 @@ def test_an_export_the_run_saved_is_done_even_when_a_shell_of_its_own_ran() -> N
     assert cx.score(asked, answer, [], "export it", told, ran=True)["correct"]
     assert cx.score(asked, answer, [], "export it", told)["correct"]
     assert not cx.score(asked, "", [], "export it", "", ran=True)["correct"]  # no answer at all
+
+
+def test_a_record_date_said_in_words_names_it() -> None:
+    """bf2-explain-03 t1 on Claude (the Haiku re-measure): "the master record dates from
+    2 March" names the master's 2026-03-02; another day or month does not."""
+    rec = cx.record(
+        {"master": ("27 days", "27-day", "2026-03-02"), "portal": 34}, tol={"portal": 0}
+    )
+    said = "I'd plan on the 34-day portal quote; the master record dates from {}."
+    for day in ("2 March", "March 2", "2nd March", "Mar 2, 2026", "2 March 2026"):
+        assert cx.score(rec, said.format(day), [])["correct"], day
+    for day in ("12 March", "2 May", "March 20", "2 March 2025"):
+        assert not cx.score(rec, said.format(day), [])["correct"], day
+
+
+def test_a_difference_written_as_a_signed_change_is_the_difference() -> None:
+    """bf3-explain-02 t1 on Kimi (the Haiku re-measure): "40 units, down from 52 ... -12" is a
+    difference of 12; a difference is a magnitude, so its sign does not make it wrong."""
+    rec = cx.record(
+        {"then": 52, "now": 40, "difference": 12}, tol={"then": 0, "now": 0, "difference": 0}
+    )
+    assert cx.score(rec, "Now 40 units, down from 52: a change of -12 (about -23%).", [])["correct"]
+    assert cx.score(rec, "Now 40, then 52: 12 fewer.", [])["correct"]
+    assert not cx.score(rec, "Now 40, then 52: a change of -13.", [])["correct"]
+    signed = cx.record({"change": 12}, tol={"change": 0})  # any other field keeps its sign
+    assert not cx.score(signed, "The change is -12.", [])["correct"]
