@@ -632,6 +632,7 @@ def test_the_derive_and_apply_truths_are_the_fits_worked_by_hand() -> None:
     assert value("bf4-derive-03", 1, "q4") == pytest.approx(revenue[-1] * (g + g**2 + g**3))
 
     name = re.search(r"of the (.+?) costs", by["bf4-derive-04"].turns[0].text)
+    assert name is not None
     sku = json.loads(r.find_sku.fn(name[1]))["items"][0]["sku"]
     detail = json.loads(r.sku_details.fn(sku))
     margin, cut = detail["price"] - detail["unit_cost"], detail["price"] * 0.9 - detail["unit_cost"]
