@@ -3178,6 +3178,8 @@ ADAPTERS: Final = ("react", "langgraph", "graph", "deepagents", "openai", "claud
 #: Where a ``kimi`` run keeps its working directory and Kimi's home (``KIMI_RUN_ROOT``), and the
 #: ``kimi`` program it starts (``KIMI_BIN``).
 KIMI_ROOT: Final = "build/kimi"
+#: Where a ``claude`` run works (``CLAUDE_RUN_ROOT``): its own folder, not this checkout.
+CLAUDE_ROOT: Final = "build/claude"
 #: The most a Kimi model reply may be (Kimi asks for the model's whole window by default, which
 #: a provider refuses), and the window it is told.
 KIMI_OUTPUT: Final = "16000"
@@ -3295,13 +3297,29 @@ def target_of(
         # no filesystem settings (the SDK's isolation mode): by default the CLI loads the
         # CLAUDE.md of the directory it runs in, which is this checkout
         options = ClaudeAgentOptions(
-            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps, setting_sources=[]
-        )
+            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps,
+            setting_sources=[], cwd=str(work_folder("claude")),
+        )  # fmt: skip
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     if kind == "kimi":
         return kimi_target(str(model), tools), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
+
+
+def work_folder(kind: str) -> Path | None:
+    """The run's own working folder (made if missing) for an adapter with a shell of its own:
+    what it saves there for the user, the suite approves (``approvals.approvable``)."""
+    roots = {"kimi": ("KIMI_RUN_ROOT", KIMI_ROOT), "claude": ("CLAUDE_RUN_ROOT", CLAUDE_ROOT)}
+    return _working(*roots[kind]) if kind in roots else None
+
+
+def _working(variable: str, default: str) -> Path:
+    import os
+
+    folder = Path(os.environ.get(variable) or default).resolve() / "cwd"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def kimi_target(model: str, tools: Sequence[Any]) -> Any:
@@ -3315,8 +3333,7 @@ def kimi_target(model: str, tools: Sequence[Any]) -> Any:
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     root = Path(os.environ.get("KIMI_RUN_ROOT") or KIMI_ROOT).resolve()
-    cwd = root / "cwd"
-    cwd.mkdir(parents=True, exist_ok=True)
+    cwd = _working("KIMI_RUN_ROOT", KIMI_ROOT)
     (cwd / "AGENTS.md").write_text(r.SYSTEM)
     base = os.environ.get("LLM_BASE_URL", "")
     anthropic = urlsplit(base).hostname == "api.anthropic.com"
@@ -3480,9 +3497,11 @@ async def run_case(
         if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
             paused.add(id(t))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
-        # a shell command that only reads is approved, as a user reading it would; any other
-        # pause stays one
-        result, approved[id(t)] = await approvals.approved_reads(agent, result, REVIEWER)
+        # a shell command that only reads, or saves only inside the run's own folder, is
+        # approved, as a user reading it would; any other pause stays one
+        result, approved[id(t)] = await approvals.approved_reads(
+            agent, result, REVIEWER, work_folder(kind)
+        )
         return result
 
     i = 0
