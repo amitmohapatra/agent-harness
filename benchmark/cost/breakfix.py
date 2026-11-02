@@ -37,6 +37,8 @@ YTD: Final = {"start": "2026-01-01", "end": "2026-09-30"}
 FAKE_CHART: Final = (
     r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have)? ?(?:attached|created|made|generated|saved|"
     r"drew))(?: (?:the|your|a|an))?(?: [\w-]+)? (?:chart|image|png|graph|svg)"
+    # a chart given as its SVG source, in the answer itself, is no claimed image
+    r"(?!\s+(?:as\s+)?(?:svg\s+)?(?:source|code|markup)\b)"
 )
 MONTHS: Final = {
     f"2026-{n:02d}": name
@@ -625,7 +627,9 @@ def cases() -> list[Any]:
                  expect=cx.judge("Gives the master's figure and, if it checked, the portal's; "
                                  "says which is which.", f"{s3.lead_time_days} days (master).")),
             Turn("How sure are you, and which figure would you use for a reorder placed today?",
-                 expect=cx.record({"master": s3.lead_time_days,
+                 # the master named by its figure or by its date, as the rubric asks
+                 expect=cx.record({"master": (f"{s3.lead_time_days} days", f"{s3.lead_time_days}-day",
+                                              r.MASTER_UPDATED),
                                    "portal": s3.portal_lead_time_days},
                                   tol={"master": 0, "portal": 0},
                                   rubric="Names both sources and their update dates; prefers the "
