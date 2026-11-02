@@ -109,12 +109,13 @@ def test_counts_and_figures_the_question_gives_are_not_checked() -> None:
     )
 
 
-def test_a_long_answer_of_figures_is_read_not_searched() -> None:
-    """Past ``MOST_STATED`` traced figures, a figure one step from none is taken as traced:
-    a table is read, and the two-step search would be slow and trace anything."""
+def test_a_long_answer_of_figures_is_not_searched_two_steps_deep() -> None:
+    """Past ``MOST_STATED`` traced figures (an answer restating a table) the pairs of them
+    would trace any figure by chance: a figure one step from none of them is not traced."""
     table = "\n".join(f"| S{n:02d} | {1000 + 7 * n} |" for n in range(1, 50))
     given = ["\n".join(str(1000 + 7 * n) for n in range(1, 50))]
-    assert figures.untraced(f"{table}\nOne more: 98,765,432.1.", given) == []
+    assert figures.untraced(f"{table}\nOne more: 98,765,432.1.", given) == ["98,765,432.1"]
+    assert figures.untraced(f"{table}\nTheir first two: 2,021.", given) == []
 
 
 def test_a_figure_past_a_floats_range_is_no_figure_and_one_said_twice_is_named_once() -> None:
@@ -135,3 +136,9 @@ def test_a_table_is_kept_to_compute_over_only_with_a_column_of_numbers() -> None
     assert figures._numeric([["2026-07-01", "41"], ["2026-07-02", "38.5"]])
     assert figures._numeric([[1, "a"], [2.5, "b"]])
     assert not figures._numeric([["mem_1", "true", None], ["mem_2", "x", "2026-09-01"]])
+
+
+def test_a_what_if_factor_from_the_question_is_an_operand() -> None:
+    held = ['{"revenue": 1285983.79}']
+    asked = "If it had been 20% lower?"
+    assert figures.untraced("About £1,028,787.03 (£1,285,983.79 x 0.8).", held, asked) == []

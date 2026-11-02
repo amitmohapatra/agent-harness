@@ -24,7 +24,7 @@ reply first, deterministically and without a model call:
 
 A turn is checked once: the second answer is the answer. Most answers hold no such figure:
 replayed on the break-and-fix gate's recorded ``ReAct`` turns, it asks again on 1 of 336 with
-memory on and 2 of 168 with it off, so most turns cost nothing more.
+memory on and 3 of 168 with it off, so most turns cost nothing more.
 The draft and the note go only to that one model call; the conversation the graph keeps holds
 the answer alone.
 """
@@ -59,14 +59,17 @@ _NOT_FIGURES: Final = re.compile(
     r"\b\d{4}-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?\S*)?)?\b|\b\d{1,2}:\d{2}\b"
     r"|(?<![\d,.])(?:19|20)\d{2}(?!\d|,\d{3}|\.\d)"
 )
+#: A percentage as a question gives it ("12%", "5 per cent").
+_PERCENT: Final = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s?(?:%|per ?cent)")
 #: Figures every answer may use besides what it states, exact: a whole, a percentage's 100.
 _CONSTANTS: Final = ((1.0, 0.0), (100.0, 0.0))
 #: A whole number up to this is a count, a rank, a list's number, a percentage the question
 #: names: not checked (as the suite's scorer reads made-up figures).
 SMALL: Final = 100
-#: The most figures an answer and its question may state for the two-step search; past it the
-#: answer is taken as traced (a table of figures is read, not worked out).
-MOST_STATED: Final = 40
+#: The most traced figures the two-step search runs over: past it (an answer restating a
+#: table) the pairs of them are dense enough to trace any figure by chance, so a figure
+#: one step from none of them is not traced.
+MOST_STATED: Final = 12
 #: The most figures a text may hold for the runs of them to be totalled (a result's rows, a
 #: list), and for two of them to be worked into one (a record: a price and a cost).
 RUN: Final = 50
@@ -172,26 +175,33 @@ def _spread(value: float, half: float, a: Figure) -> float:
     return half + a[1] * reach + EPSILON * abs(value)
 
 
-def _derived(value: float, half: float, stated: Sequence[Figure], held: Sequence[float]) -> bool:
+def _derived(
+    value: float,
+    half: float,
+    stated: Sequence[Figure],
+    held: Sequence[float],
+    factors: Sequence[Figure] = (),
+) -> bool:
     """Whether ``value`` (said to ``half``) is worked from the ``stated`` figures (those traced
     so far): one of them rounded (up or down, to a whole number too), one operation on one of
-    them and a figure of ``held`` (sorted: what the model was given) or of ``stated``, or two
-    operations on three stated figures."""
+    them (or of ``factors``: a what-if's 0.88) and a figure of ``held`` (sorted: what the
+    model was given) or of ``stated``, or two operations on three stated figures."""
     whole = value == int(value)
     if any(abs(v - value) <= h + half or (whole and abs(v - value) < 1) for v, h in stated):
         return True
     pool = sorted({*held, *(v for v, _ in stated)})
-    for a in stated:
+    for a in [*stated, *factors]:
         spread = _spread(value, half, a)
         for x, off in _inverses(value, spread, a[0]):
             if _within(pool, x, off):
                 return True
-    if len(stated) > MOST_STATED:
-        return True  # a table of figures: read, not worked out (fail open, never ask in vain)
+    operands = [f for f in stated if f not in _CONSTANTS]  # 1 and 100 convert, never add
+    if len(operands) > MOST_STATED:
+        return False
     made = sorted(
         (w, off)
-        for i, a in enumerate(stated)
-        for j, b in enumerate(stated)
+        for i, a in enumerate(operands)
+        for j, b in enumerate(operands)
         if i != j
         for w, off in _made(a, b)
         if w and off <= PRECISE * abs(w)  # a figure that vague traces nothing
@@ -220,6 +230,10 @@ def untraced(answer: str, given: Iterable[str], question: str = "") -> list[str]
     # an operand written whole is taken as exact (a count, a month, a fee, a rounded-up
     # quantity), one with a fraction as rounded to its places
     traced = [(v, 0.0 if v == int(v) else h) for v, h in asked] + list(_CONSTANTS)
+    # a percentage the question gives, as the factor a what-if multiplies by (12% lower: 0.88):
+    # one step's operand, never the two steps' (it would only add chances)
+    shares = [float(p) for p in _PERCENT.findall(question)]
+    factors = [(w, 0.0) for v in shares for w in (v / 100, 1 + v / 100, 1 - v / 100) if w]
     pending: list[Figure] = []
     for value, half in said:
         if (value == int(value) and abs(value) <= SMALL) or _held(value, half, held):
@@ -238,7 +252,7 @@ def untraced(answer: str, given: Iterable[str], question: str = "") -> list[str]
         listed = _worked(_listed(said, {v for v, _ in traced}), pairs=False)
         for f in list(pending):
             if _within(listed, f[0], f[1] + EPSILON * abs(f[0])) or _derived(
-                f[0], f[1], traced, held
+                f[0], f[1], traced, held, factors
             ):
                 pending.remove(f)
                 traced.append((f[0], 0.0 if f[0] == int(f[0]) else f[1]))
