@@ -282,8 +282,11 @@ def idset(
     return Expect("set", value, forbidden=tuple(forbidden), reference=ref, **kw)
 
 
-def abstain(why: str, **kw: Any) -> Expect:
-    return Expect("abstain", reference=f"I can't answer that from the data: {why}", **kw)
+def abstain(why: str, *, web: bool = False, **kw: Any) -> Expect:
+    """The data is not there; ``web``: unless the run searched the web itself (a framework's
+    own search, :data:`WEB_SEARCH`) and answers from it, citing a source."""
+    value = {"web": True} if web else None
+    return Expect("abstain", value, reference=f"I can't answer that from the data: {why}", **kw)
 
 
 def clarify(candidates: Sequence[str], forbidden: Sequence[str] = (), **kw: Any) -> Expect:
@@ -2640,6 +2643,11 @@ _FAKE: Final = re.compile(
     + r"|\bi(?:'ve| have)? (?:ran|executed|run) (?:the|your|this) (?:python|code|script)",
     re.IGNORECASE,
 )
+#: A framework's own web tools (Claude Code's, Kimi Code's): a run that used one may answer
+#: what the data does not hold from the web, as its user asked.
+WEB_SEARCH: Final = frozenset({"WebSearch", "WebFetch", "FetchURL"})
+#: A source cited as a link.
+_CITED: Final = re.compile(r"https?://\S+")
 _ABSTAIN: Final = re.compile(
     r"(?:don't|do not|doesn't|does not) (?:have|hold|include|cover|track|exist)|no (?:data|record|such|"
     r"information|returns?|sales data|stock history|history)|not (?:available|tracked|recorded|covered|"
@@ -2854,11 +2862,13 @@ def score(
     context: str = "",
     *,
     ran: bool = False,
+    searched: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
     for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
     ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
-    scored on).
+    scored on; ``searched``: it used a web tool of its own, which an ``abstain`` turn that
+    allows the web is scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -2899,6 +2909,10 @@ def score(
         for options in expect.value:
             if not _has_text(a, options):
                 missing.append(options[0])
+    elif k == "abstain" and searched and (expect.value or {}).get("web") and _CITED.search(a):
+        # answered from the web search the run made, its source cited: not from the data,
+        # so nothing in it is a made-up figure of the data
+        return {"kind": k, "correct": True, "missing": [], "made_up": [], "forbidden": []}
     elif k == "abstain":
         if not _ABSTAIN.search(a):
             missing.append("says the data is not there")
@@ -3133,6 +3147,12 @@ class Trace(Hooks):
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.started = asyncio.Event()
+        #: every tool each run (by id) used, its framework's own too (Claude's WebSearch,
+        #: Kimi's Bash): those run outside the tool hooks (``bridge.observed``)
+        self.used: dict[str, set[str]] = {}
+
+    async def on_run_end(self, run: Any, result: Any) -> None:
+        self.used.setdefault(run.run_id, set()).update(run.used)
 
     async def before_tool(self, call: ToolCall) -> None:
         self.started.set()
@@ -3520,6 +3540,7 @@ async def run_case(
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
+        trace.used = {}
         trace.started.clear()
         wire.clear()
         captured: Any = Captured(spend) if kind in LANGCHAIN_ADAPTERS else Accounted(spend)
@@ -3584,6 +3605,8 @@ async def run_case(
                 "error": error,
                 "calls": calls,
                 "approved": approved.get(id(turn), []),
+                # the framework's own tools the run used (its WebSearch, its Bash)
+                "native": sorted(trace.used.get(run_id or "", set()) - {c["tool"] for c in calls}),
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "model_calls": captured.calls if n == 0 else 0,
@@ -3607,8 +3630,12 @@ async def run_case(
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
                 said = said_in(captured.requests, calls)
+                used = set(row["native"])
                 ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
-                row["score"] = score(turn.expect, answer, records, turn.text, said, ran=ran)
+                row["score"] = score(
+                    turn.expect, answer, records, turn.text, said,
+                    ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
+                )  # fmt: skip
             records.append(row)
             requests += [
                 {"case": case.id, "turn": i + n, "call": c, **q}
