@@ -143,6 +143,24 @@ async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     assert any("say it" in text_of(m.get("content")) for m in last)
 
 
+async def test_a_bash_call_whose_arguments_stream_pauses_with_its_command(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A provider streams a call's arguments after its name (Anthropic's, OpenAI's): Kimi asks
+    permission before it starts the call, so the arguments are only in the call's updates."""
+    async with PlannedEndpoint(streamed=True).serving() as endpoint:
+        endpoint.plan = [("Bash", {"command": "echo resumed"})]
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-bash-streamed")
+        paused = await agent.run("say it", user="u1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        assert paused.interrupt.tool_call is not None
+        assert paused.interrupt.tool_call.tool == "Bash"
+        assert paused.interrupt.tool_call.args == {"command": "echo resumed"}
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer == "Done. resumed"
+
+
 async def test_a_rejected_bash_call_is_not_run_and_kimi_reads_why(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
