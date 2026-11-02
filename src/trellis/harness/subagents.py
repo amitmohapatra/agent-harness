@@ -302,21 +302,13 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
 
 async def cancel_children(runs: RunStore, run_id: str, *, reason: str | None, tenant: str) -> None:
     """Cancel the children of ``run_id`` that have not ended, and theirs: a child paused for a
-    person waits on nobody once its parent is cancelled. A background task is its
-    conversation's, not the turn's that started it: it goes on (``background.py``)."""
+    person waits on nobody once its parent is cancelled."""
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
-        if child.status.final or await _background(runs, child.run_id, tenant):
+        if child.status.final:
             continue
         with contextlib.suppress(ConflictError):  # it ended meanwhile
             await runs.cancel(child.run_id, reason=reason, tenant=tenant)
         await cancel_children(runs, child.run_id, reason=reason, tenant=tenant)
-
-
-async def _background(runs: RunStore, run_id: str, tenant: str) -> bool:
-    from trellis.harness.background import BACKGROUND  # noqa: PLC0415 - it imports this module
-
-    record = await runs.get(run_id, tenant=tenant)
-    return record is not None and BACKGROUND in record.metadata
 
 
 async def _side_effects(agent: Agent) -> SideEffects:
