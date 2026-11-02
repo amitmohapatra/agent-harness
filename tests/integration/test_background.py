@@ -17,12 +17,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from a2a.types import TaskState
 
 from tests.support.arm import arm
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, background, tool
-from trellis.contracts import ConfigurationError, RunRecord, RunStatus
-from trellis.harness.background import BACKGROUND, NOTE
+from trellis.contracts import ConfigurationError, RunEvent, RunEventType, RunRecord, RunStatus
+from trellis.harness.a2a.translate import update_for
+from trellis.harness.agui.translate import translate
+from trellis.harness.background import BACKGROUND, NOTE, TASK_EVENT
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
 
@@ -539,3 +542,105 @@ async def test_what_a_turn_is_told_of_its_tasks(harness: Harness) -> None:
 def test_background_takes_its_agents() -> None:
     with pytest.raises(ConfigurationError, match="takes the agents it starts"):
         background()
+
+
+# --------------------------------------------------------------------------- events
+async def streamed(parent: Any, text: str, **run: Any) -> list[dict[str, Any]]:
+    """The ``background_task`` events a turn's stream carries, as a UI reads them."""
+    return [
+        event.data
+        async for event in parent.stream(text, user="ada", **run)
+        if event.type is RunEventType.CUSTOM and event.data.get("name") == TASK_EVENT
+    ]
+
+
+async def test_every_state_of_a_task_is_an_event_of_the_conversations_stream(
+    harness: Harness,
+) -> None:
+    """Started, running, each step done, and how it ended — success, failure, cancel — each
+    an event of the turn working in the conversation; and a later turn's stream starts with
+    each task as it stands (an idle chat is told at its next message). On AG-UI each is a
+    ``CUSTOM`` event, on A2A a working update's data part."""
+    gate, busy, ends = Gate(), Gate(), {"tides": "fine", "storms": "fail", "fog": "hold"}
+
+    async def research(input: str, agent: Runtime) -> str:
+        """Research a topic."""
+        found = await agent.tools.call("hold", topic=input)
+        if ends[input] == "fail":
+            raise RuntimeError("the archive is down")
+        if ends[input] == "hold":
+            await asyncio.Event().wait()  # until cancelled
+        return str(found)
+
+    child = arm(harness.wrap(research, id="research"), [gate.tool()])
+    model = ScriptedChat()
+    parent = arm(lead(harness, model, child), [background(child), busy.tool()])
+    async with working(harness, child):
+        for topic in ends:
+            model.turns += [
+                ("start_async_task", {"description": topic, "subagent_type": "research"}),
+                ("hold", {"topic": "the weather"}),
+                "meanwhile",
+            ]
+        turn = asyncio.create_task(streamed(parent, "go", thread="t1"))
+        await entered(busy)
+        busy.entered.clear()
+        task = task_id(told(model, -1)[-1])
+        gate.released.set()
+        record = await ended(harness, task)
+        busy.released.set()
+        events = await turn
+        assert [(e["task_id"], e["status"]) for e in events] == [
+            (task, "queued"),
+            (task, "running"),
+            (task, "running"),  # its step done
+            (task, "success"),
+        ], events
+        assert events[2]["progress"] == {"tool": "hold"}
+        assert events[3]["result"] == record.output
+        busy.released.clear()
+        for topic, status in (("storms", "error"), ("fog", "cancelled")):
+            turn = asyncio.create_task(streamed(parent, topic, thread="t1"))
+            await entered(busy)
+            busy.entered.clear()
+            task = task_id(told(model, -1)[-1])
+            if status == "cancelled":
+                async with asyncio.timeout(WAIT):
+                    while gate.done.count(topic) == 0:  # noqa: ASYNC110 - its step done
+                        await asyncio.sleep(0.01)
+                await child.cancel(task)
+            await ended(harness, task)
+            busy.released.set()
+            last = (await turn)[-1]
+            busy.released.clear()
+            assert (last["task_id"], last["status"]) == (task, status), last
+        assert last["status"] == "cancelled"
+        model.turns += ["told"]
+        later = await streamed(parent, "and?", thread="t1")
+    assert sorted(e["status"] for e in later) == ["cancelled", "error", "success"], later
+    [ui] = [
+        translate(
+            RunEvent(
+                type=RunEventType.CUSTOM,
+                run_id="r",
+                tenant_id="t",
+                thread_id="t",
+                attempt=1,
+                sequence=1,
+                data={"name": TASK_EVENT, **later[0]},
+            )
+        )
+    ]
+    assert ui is not None and ui.name == TASK_EVENT
+    update = update_for(
+        RunEvent(
+            type=RunEventType.CUSTOM,
+            run_id="r",
+            tenant_id="t",
+            thread_id="t",
+            attempt=1,
+            sequence=1,
+            data={"name": TASK_EVENT, **later[0]},
+        )
+    )
+    assert update is not None and update.state is TaskState.TASK_STATE_WORKING

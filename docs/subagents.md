@@ -203,6 +203,14 @@ any of the user's chats; another user's or another tenant's task is "no task". T
 turns' note are of the chat that started it. Cancelling the turn that started it leaves it
 working.
 
+**Its events.** Each state of a task is a `CUSTOM` event named `background_task`
+(`{"task_id", "subagent_type", "status", ...}`; on AG-UI a `CUSTOM` event, on A2A a working
+update's data part): `queued` on the turn that starts it; `running` as it starts and after each
+step it finishes (`progress`); then `success` (with its `result`), `error`, `timeout`,
+`cancelled` or `paused` (asking a person) — on the stream of the turn working in its
+conversation in this process. Every later turn's stream starts with one per task, as it stands,
+so an idle chat sees them at its next message.
+
 **Its result.** A turn working in the conversation when the task ends reads
 `[background task <id> (<agent>) ended SUCCESS]` and the answer at its next step; every later
 turn is told, as it starts, of the conversation's tasks — each one's status and each ended one's

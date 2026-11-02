@@ -68,6 +68,12 @@ framework does have, and the harness already uses, is a hook between two of its 
    each ended one's answer (`## Background tasks of this conversation`), read from the run
    store beside the memory context (`asyncio.gather`, so the turn does not wait longer).
 
+5. **Each state of a task is an event a UI shows.** A `CUSTOM` `background_task` event
+   (AG-UI's `CUSTOM`, an A2A working update): `queued` from the start tool; `running`, each
+   finished step, and its ending, relayed from the task's own run events to the run working in
+   its conversation in this process; and at every later turn's start, one per task as it
+   stands.
+
 ## Consequences
 
 * **Latency.** An agent without `background(...)` takes the old path (no extra call, no

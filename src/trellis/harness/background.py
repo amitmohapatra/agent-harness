@@ -29,10 +29,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import ConfigurationError, RunRecord, RunStatus, ToolSpec, stable_id
+from trellis.contracts import (
+    ConfigurationError,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+    RunRecord,
+    RunStatus,
+    ToolSpec,
+    stable_id,
+)
 from trellis.harness.conversation import Steer
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import Tool
@@ -73,6 +82,13 @@ TASK_ID: Final = {
     "type": "string",
     "description": "The exact task_id string returned by start_async_task. Pass it verbatim.",
 }
+#: The ``CUSTOM`` event each state of a task is (AG-UI's ``CUSTOM``, an A2A working update):
+#: ``{"task_id", "subagent_type", "status", ...}`` — ``queued`` as it starts, ``running`` as it
+#: works (``progress``: the step it finished), then how it ended (``success`` with its
+#: ``result``, ``error``, ``timeout``, ``cancelled``, ``paused`` asking a person).
+TASK_EVENT: Final = "background_task"
+#: A task's run's ending as its event says it.
+ENDINGS: Final = {RunOutcome.INTERRUPT: "paused"}
 #: The heading of what a turn is told of its conversation's tasks (:func:`note`).
 NOTE: Final = "## Background tasks of this conversation"
 #: What the run working in a conversation reads when one of its tasks ends (:func:`ended`).
@@ -202,6 +218,8 @@ class Background:
             update={"metadata": {**start.metadata, BACKGROUND: runtime.conversation}}
         )
         await admitted(agent.harness.runs.start(start, queue=True), "start")
+        said = {"task_id": start.run_id, "subagent_type": agent.id}
+        runtime.events.custom(TASK_EVENT, **said, status="queued")
         return f"Launched async subagent. task_id: {start.run_id}"
 
     async def _check(self, args: dict[str, Any]) -> str:
@@ -369,6 +387,8 @@ async def note(runtime: Runtime) -> str | None:
     except Exception as exc:
         runtime.events.warning("background", f"the conversation's background tasks: {exc}")
         return None
+    for task in tasks:  # the conversation's stream starts with each task as it stands
+        runtime.events.custom(TASK_EVENT, **described(task))
     if not tasks:
         return None
     return "\n".join([NOTE, *(json.dumps(described(t), default=str) for t in tasks)])
@@ -378,6 +398,42 @@ def told(runtime: Runtime, said: str | None) -> None:
     """The run told ``said`` (:func:`note`), after the rest of its context."""
     if said is not None:
         runtime.context = "\n\n".join(p for p in (runtime.pushed_context, said) if p)
+
+
+def relay(agent: Agent, record: RunRecord) -> Callable[[RunEvent], None]:
+    """A task's run's events as :data:`TASK_EVENT` events of the run working in the conversation
+    that started it, when one works in this process: its start, each step it finished, its
+    end."""
+    said = {"task_id": record.run_id, "subagent_type": agent.id}
+
+    def heard(event: RunEvent) -> None:
+        if event.type is RunEventType.RUN_STARTED:
+            state: dict[str, Any] = {"status": "running"}
+        elif event.type is RunEventType.TOOL_CALL_RESULT:
+            state = {"status": "running", "progress": {"tool": event.data.get("tool")}}
+        elif event.type is RunEventType.RUN_FINISHED:
+            outcome = event.outcome or RunOutcome.SUCCESS
+            state = {"status": ENDINGS.get(outcome, outcome.value)}
+            if event.error is not None:
+                state["error"] = event.error.message
+            elif outcome is RunOutcome.SUCCESS:
+                state["result"] = event.data.get("result")
+        else:
+            return
+        live = _live(agent, record.metadata.get(BACKGROUND))
+        if live is not None:
+            live.events.custom(TASK_EVENT, **said, **state)
+
+    return heard
+
+
+def _live(agent: Agent, conversation: Any) -> Runtime | None:
+    """The run working in ``conversation`` in this process, if one does."""
+    for parent in agent.harness.agents.values():
+        live = parent.turns.live(conversation) if isinstance(conversation, str) else None
+        if live is not None and (runtime := parent.running.get(live.run_id)) is not None:
+            return runtime
+    return None
 
 
 def ended(agent: Agent, record: RunRecord, result: Result) -> None:
@@ -407,12 +463,14 @@ def ended(agent: Agent, record: RunRecord, result: Result) -> None:
 
 __all__ = [
     "BACKGROUND",
+    "TASK_EVENT",
     "Background",
     "background",
     "described",
     "ended",
     "looks",
     "note",
+    "relay",
     "sources",
     "tasks_of",
     "told",
