@@ -14,6 +14,8 @@ their score stays honest. Categories: ``bf_past``, ``bf_analytics``, ``bf_explai
 
 from __future__ import annotations
 
+import functools
+import itertools
 from collections.abc import Callable
 from typing import Any, Final
 
@@ -55,6 +57,7 @@ def cases() -> list[Any]:
     def formula(review: int = 7) -> str:
         return cx.FORMULA.format(review=review)
 
+    @functools.cache  # each SKU's average once a build: a scan of the sales lines
     def avg28(sku: str, region: str | None) -> float:
         return r.truth_avg_daily_units(w, sku, start=cx.SEP28[0], end=cx.SEP28[1], region=region)
 
@@ -79,8 +82,9 @@ def cases() -> list[Any]:
         return (sku, w.skus[sku].name)
 
     def first(pick: Callable[[r.Sku], bool], skip: int = 0) -> r.Sku:
-        found = [k for k in sorted(w.skus.values(), key=lambda k: k.sku) if pick(k)]
-        return found[skip]
+        """The SKU after ``skip`` others that ``pick`` takes, in SKU order: the rest unchecked."""
+        found = (k for k in sorted(w.skus.values(), key=lambda k: k.sku) if pick(k))
+        return next(itertools.islice(found, skip, None))
 
     def moves_north(k: r.Sku) -> bool:
         """Its north reorder quantity changes when the clock ticks once (and is above 0)."""
@@ -367,7 +371,7 @@ def cases() -> list[Any]:
                  expect=cx.record(nq3, tol={"units": 0})),
             Turn("Plot its weekly units as a chart image I can paste into a slide.",
                  expect=cx.cannot(FAKE_CHART,
-                                  r"table|weekly|figures|numbers|instead|list",
+                                  r"table|weekly|figures|numbers|instead|list|here(?: is|'s) the",
                                   "I can't make an image here: there is no code execution, files or images in this setup. "
                                   "I can give the weekly figures as a table instead.")),
             Turn("Fine — then its best month of Q3 by units, and that month's units.",
@@ -687,8 +691,10 @@ def cases() -> list[Any]:
         "bf2-mixed-04", "bf_mixed", 3,
         (
             Turn("Give me every 2026 sales line for store S14 as a CSV I can download.",
-                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a)|i(?:'ve| have) "
-                                  r"(?:attached|created|exported|saved))\b.{0,40}(?:csv|file)",
+                 # the lines given inline, said to be no file, are not made up
+                 expect=cx.cannot(r"\b(?:here(?: is|'s) (?:the|your|a) (?:csv )?file|i(?:'ve| "
+                                  r"have) (?:attached|created|exported|saved))\b.{0,40}"
+                                  r"(?:csv|file)",
                                   r"count|total|summar|figures|instead|lines|revenue",
                                   "I can't make a file here: there is no code execution, files "
                                   "or images in this setup. I can give totals instead.")),
@@ -1147,7 +1153,8 @@ def cases() -> list[Any]:
                  expect=cx.record({"gap": abs(hs[0][1] * 0.88 - hs[1][1])})),
             Turn("Make that a chart I can download.",
                  expect=cx.cannot(FAKE_CHART,
-                                  r"figures|numbers|table|instead",
+                                  # the data given to chart elsewhere ("here is the data") is an offer too
+                                  r"figures|numbers|table|instead|here(?: is|'s) the|give you the data",
                                   "I can't make a chart here: there is no code execution, files or images in this setup. "
                                   "Here are the figures instead.")),
         ),

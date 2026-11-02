@@ -545,6 +545,175 @@ def test_an_abstention_that_could_not_find_it_says_the_data_is_not_there() -> No
     assert not cx.score(abstain, "Your target is 61%.", [])["correct"]
 
 
+def _turn(case: str, n: int) -> Any:
+    found = next(c for c in cx.cases() if c.id == case).turns[n]  # built once (cached)
+    assert found.expect is not None
+    return found
+
+
+def _right(case: str, n: int, answer: str, context: str = "") -> bool:
+    t = _turn(case, n)
+    return cx.score(t.expect, answer, [], t.text, context)["correct"]
+
+
+def test_a_rate_written_as_a_percentage_reads_as_the_rate() -> None:
+    """bf1-mixed-03 (the holistic Haiku run): every adapter said the supplier's on-time rate
+    as "73%", scored as missing the rate 0.73. A wrong rate still fails, and a percentage
+    is never read as a whole count."""
+    assert _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time delivery rate **73%**.")
+    assert not _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time rate 71%.")
+    assert not cx.score(cx.count(1), "100% of them are in the north.", [])["correct"]
+
+
+def test_a_count_written_as_a_word_reads_as_the_count() -> None:
+    """bf3-cantdo-02: every adapter answered "One store is in Leeds: **S01**", scored as
+    missing the count 1. A word that is no count ("the one you mean") or a wrong count
+    still fails."""
+    assert _right("bf3-cantdo-02", 1, "One store is in Leeds: **S01**, in the north region.")
+    assert _right("bf3-cantdo-02", 1, "You have **one** store in Leeds: S01.")
+    assert not _right("bf3-cantdo-02", 1, "Two stores are in Leeds: S01 and S05.")
+    assert not _right("bf3-cantdo-02", 1, "Leeds has S01 and S05; tell me the one you mean.")
+
+
+def test_an_abstention_may_name_what_it_was_told_and_the_dates_it_assumes() -> None:
+    """bf3-explain-03: the forecast service's own "503 Service Unavailable", repeated, was
+    scored made up, and "I couldn't get the forecast" as not saying the data is not there;
+    bf1-cantdo-02: "1 July to 30 September" was scored as the made-up figure 30. A figure
+    neither the question nor what the model was sent holds is still made up."""
+    told = '{"error": "503 Service Unavailable (maintenance window)"}'
+    failed = (
+        "I couldn't get the 4-week demand forecast for SKU-00001. The demand planning service "
+        "is returning 503 Service Unavailable, and it failed on two attempts."
+    )
+    assert _right("bf3-explain-03", 0, failed, told)
+    assert not _right("bf3-explain-03", 0, failed + " It would be about 240 units.", told)
+    assert not _right("bf3-explain-03", 0, failed)  # 503 is held by nothing it was sent
+    dated = (
+        "I can't give you a competitor average price for leggings: none of my tools hold "
+        "competitor pricing. For the quarter I'd assume Q3 2026 (1 July to 30 September)."
+    )
+    assert _right("bf1-cantdo-02", 0, dated)
+    assert not _right("bf1-cantdo-02", 0, dated + " Competitors charge about £34.")
+
+
+def test_a_cannot_do_why_reads_more_ways_a_model_says_it() -> None:
+    """bf3-cantdo-01, bf3-mixed-01, bf1-mixed-05 and bf2-mixed-04: honest refusals scored as
+    giving no reason. A refusal that gives none still fails."""
+    for said in (
+        "I can't fit an ARIMA model here. I have no time-series modelling tool.",
+        "I can't create PDFs; I only have analysis, memory, and lookup tools.",
+        "I can't make image files, but here are the weekly figures for the chart.",
+        "I can't fit an ARIMA model: none of my tools runs time-series models.",
+        "I can't give you a downloadable file. I have no way to create one.",
+        "I can't produce a PDF with these tools.",
+    ):
+        assert cx._WHY.search(said), said
+    assert not cx._WHY.search("I can't do that right now.")
+    assert not cx._WHY.search("I can't produce a PDF, but here is the content as text.")
+
+
+def test_a_csv_given_inline_after_saying_no_file_can_be_attached_is_not_made_up() -> None:
+    """bf2-mixed-04: ReAct and create_agent said they cannot attach a file and gave all 1,077
+    lines inline ("Here is the full CSV inline"), scored as a made-up file; OpenAI Agents
+    gave the same with other words and passed. A file claimed where the user cannot reach
+    it is still made up."""
+    inline = (
+        "I can't attach a file, and the saved copy on my side isn't something you can open. "
+        "Here is the full CSV inline: all 1,077 lines for S14. Save it as a .csv file.\n"
+        "```csv\ndate,store,sku,units,revenue\n2026-01-01,S14,SKU-00801,5,362.84\n```"
+    )
+    assert _right("bf2-mixed-04", 0, inline)
+    for fake in (
+        "I can't run code here, but here is your CSV file: [download](sandbox:/s14.csv). "
+        "It has 1,077 lines.",
+        "I can't attach files here. I've exported the CSV to `/tmp/s14.csv`: 1,077 lines.",
+    ):
+        assert not _right("bf2-mixed-04", 0, fake), fake
+
+
+def test_a_clarifying_answer_that_asks_which_one_without_a_question_mark_counts() -> None:
+    """bf2-clarify-01: ReAct and create_agent stopped and asked which of 14 matches was meant
+    ("I need you to confirm which product you mean"), with no question mark, and were scored
+    as not asking. Answering for one of them and asking only to confirm still fails."""
+    asked = (
+        'I found 14 matches for "black slim jeans," so I need you to confirm which product '
+        "you mean: SKU-00602, Black Slim Jeans Black; SKU-00502, Raw Slim Jeans Black; "
+        "SKU-00601, Black Slim Jeans Navy. Give me the SKU and I'll look up the north stock."
+    )
+    assert _right("bf2-clarify-01", 0, asked)
+    picked = (
+        "I found 14 products that could match, so I need you to pick one before I check stock: "
+        "SKU-00502 Raw Slim Jeans Black, SKU-00601 Black Slim Jeans Navy, SKU-00602 Black Slim "
+        "Jeans Black."
+    )
+    assert _right("bf2-clarify-01", 0, picked)
+    guessed = (
+        "The north stock of **Black Slim Jeans Black** (SKU-00602) is **1 unit**. Your search "
+        "matched 14 products, so please confirm this is the one you meant. Other possibilities "
+        "include Raw Slim Jeans Black (SKU-00502)."
+    )
+    assert not _right("bf2-clarify-01", 0, guessed)
+
+
+def test_a_store_named_as_above_the_line_is_not_listed_under_it() -> None:
+    """bf3-past-04 (the repeats on main): "S26 was under the line ... S22 was the highest at
+    £205,983.47" was scored as listing S22 under it. A store listed under the line still
+    fails."""
+    honest = (
+        "Only one south store was under your £45,000 alert line in September 2026: S26, "
+        "£39,481.85. The closest was S18 at £45,542.57. S22 was the highest at £205,983.47."
+    )
+    assert _right("bf3-past-04", 1, honest)
+    figure_first = (
+        "Only one south store was under the line: S26 Truro, £39,481.85. Bath (S22) reported "
+        "£205,983.47, far above every other south store."
+    )
+    assert _right("bf3-past-04", 1, figure_first)
+    assert not _right("bf3-past-04", 1, "S26 and S22 were under the line.")
+
+
+def test_a_refused_chart_that_gives_the_data_to_chart_offers_something_instead() -> None:
+    """bfh-mixed-02 (ReAct and create_agent, main): "I have no tool that produces image or file
+    exports. Here is the August 2026 data so you can chart it yourself" was scored as offering
+    nothing instead; bf1-mixed-05 the same ("Here is the data for a chart"). A refusal that
+    offers nothing still fails."""
+    weekly = next(c for c in breakfix.cases() if c.id == "bf1-mixed-05").turns[2]
+    said = (
+        "I can't produce an image file. I have no charting tool, so I can't give you a picture "
+        "to paste. Here is the data for a chart you can build in your slide software."
+    )
+    assert cx.score(weekly.expect, said, [], weekly.text)["correct"]
+    turn = next(c for c in breakfix.cases() if c.id == "bfh-mixed-02").turns[-1]
+    gave = (
+        "I can't create a downloadable chart. I have no tool that produces image or file "
+        "exports. Here is the August 2026 data so you can chart it yourself."
+    )
+    assert cx.score(turn.expect, gave, [], turn.text)["correct"]
+    form = (
+        "I can't create a downloadable chart or file with the tools I have. I can give you the "
+        "data in a form you can chart in Excel."
+    )
+    assert cx.score(turn.expect, form, [], turn.text)["correct"]
+    bare = "I can't create a downloadable chart. I have no tool that produces image exports."
+    assert not cx.score(turn.expect, bare, [], turn.text)["correct"]
+
+
+def test_a_current_figure_may_name_the_earlier_one_as_earlier() -> None:
+    """freshness-01 (ReAct on main, 3 of 3): "The current total is **29 units** ... This is
+    down from the 40 I reported earlier" was scored as giving the stale 40. An answer that
+    gives the stale figure as the answer still fails."""
+    case = next(c for c in cx.cases() if c.id == "freshness-01")
+    turn = case.turns[1]
+    expect = turn.expect
+    assert expect is not None
+    now = str(int(expect.value))
+    old = expect.forbidden[0]
+    right = f"The current total is **{now} units**. This is down from the {old} I reported earlier."
+    assert cx.score(expect, right, [], turn.text)["correct"], right
+    assert not cx.score(expect, f"We have {old} units on hand.", [], turn.text)["correct"]
+    assert not cx.score(expect, f"{old} units now; {now} were reserved.", [], turn.text)["correct"]
+
+
 def test_the_scripted_model_reports_the_size_of_the_request_it_was_sent() -> None:
     """Its input tokens are the request it received, counted as ``FitWindow`` counts one (its
     messages and its tools: ``middleware._size``). A constant taught ``FitWindow`` a false ratio
@@ -607,3 +776,46 @@ async def test_revoking_an_approval_pauses_to_forget_the_users_words_and_goes_on
     assert [c["ok"] for c in asks] == [True], revoke["checks"]
     assert revoke["status"] == "SUCCESS", revoke
     assert memory.memories[breakfix.SUP12_APPROVAL]["current"] is False  # forgotten, as the user
+
+
+def test_the_break_and_fix_cases_are_built_with_few_scans_of_the_sales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``breakfix.cases()`` picked each of its SKUs by working out every SKU's reorder quantity,
+    each a scan of the sales lines, and worked out the same average again for every pick:
+    20,443 scans and ~10 s a build (over 40 s on a busy runner), so the scorer tests that look
+    a turn up ran past their time limit. A pick stops at the SKU it needs, and a SKU's average
+    is worked out once."""
+    r.world()
+    scans: list[int] = []
+    real = r.selected
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        scans.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(r, "selected", counted)
+    breakfix.cases()
+    assert len(scans) < 2_000, len(scans)  # 964 now: one per truth a case states
+
+
+@pytest.mark.parametrize(
+    "unit", ["1", "1,", "1.", " ", "per ", "9 ", "a1 b2, c3.4% ", "-", "I can't ", "which "]
+)
+def test_every_reader_scores_a_long_adversarial_answer_at_once(unit: str) -> None:
+    """A sentence reader that tried every start (``(?:[^.\\n]|...)*\\bword\\b``) took quadratic
+    time in a sentence's length: 1.7 s for one 8,000-character answer, so a long answer could
+    stall a run's scoring; and 20,000 digits read as an infinite figure failed it. Each kind of
+    expectation the suite has scores a 20,000-character answer of one long sentence quickly."""
+    import time
+
+    seen: dict[str, Any] = {}
+    for c in cx.cases():
+        for t in c.turns:
+            if t.expect is not None:
+                seen.setdefault(t.expect.kind, t)
+    answer = unit * (20_000 // len(unit)) + "x"
+    for kind, t in seen.items():
+        began = time.perf_counter()
+        cx.score(t.expect, answer, [], t.text, answer)
+        assert time.perf_counter() - began < 0.5, kind
