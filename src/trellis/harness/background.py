@@ -12,9 +12,9 @@ backed by what the harness already has, so every adapter gets them the same way:
   run naming its parent, in its tenant, user and thread), and its id returned at once: the
   parent's answer does not wait for it, and a worker works it (a crash continues it there);
 * ``check_async_task`` / ``list_async_tasks`` — where it is, from its record in the run store;
-* ``update_async_task`` — an instruction given to it at its framework's next step: the hook
-  ``mode="steer"`` uses (``Adapter.steers``, ``Runtime.steered``), reached by its run id
-  (``Turns.give``);
+* ``update_async_task`` — an instruction put in its inbox in the run store, read at its
+  framework's next step on whichever worker it works: the hook ``mode="steer"`` uses
+  (``Adapter.steers``, ``Runtime.step``);
 * ``cancel_async_task`` — ``agent.cancel``, its own children with it.
 
 A task is its user's, in their tenant: a tool given its id finds it from any of the user's
@@ -36,6 +36,7 @@ from trellis.contracts import (
     ConfigurationError,
     RunEvent,
     RunEventType,
+    RunMessageKind,
     RunOutcome,
     RunRecord,
     RunStatus,
@@ -229,8 +230,9 @@ class Background:
         return json.dumps(described(found, whole=True), default=str)
 
     async def _update(self, args: dict[str, Any]) -> str:
-        """The instruction given to the task at its framework's next step (``Turns.give``):
-        now, when it works in this process; when it starts, while it is queued."""
+        """The instruction put in the task's inbox in the run store, which the task reads at
+        its framework's next step (``Runtime.step``), on whichever worker it works: now, when
+        it works; when it starts, while it is queued; when it goes on, while it is paused."""
         runtime = _runtime()
         found = await self._owned(runtime, args["task_id"])
         if isinstance(found, str):
@@ -244,14 +246,19 @@ class Background:
                 "no step the harness reaches): cancel the task and start it again with the "
                 "new instructions."
             )
-        if found.status is RunStatus.RUNNING and found.run_id not in agent.running:
-            return (
-                f"Task {found.run_id} works on another worker, which this instruction cannot "
-                "reach: cancel the task and start it again with the new instructions."
-            )
-        # sent as this call (its message's id is its own: ``conversation.question_id``)
+        # sent as this call: a re-run after a crash sends the same message, kept once
         sent_as = runtime.idempotency_key or runtime.run_id
-        agent.turns.give(found.run_id, Steer(args["message"], sent_as))
+        try:
+            await agent.harness.runs.send_message(
+                found.run_id,
+                RunMessageKind.INSTRUCTION,
+                message_id=sent_as,
+                text=args["message"],
+                sender=runtime.user,
+                tenant=runtime.tenant,
+            )
+        except ConflictError:
+            return f"Task {found.run_id} already ended: nothing to update."
         return f"Updated async subagent. task_id: {found.run_id}"
 
     async def _cancel(self, args: dict[str, Any]) -> str:

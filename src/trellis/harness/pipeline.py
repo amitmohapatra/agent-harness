@@ -314,6 +314,7 @@ async def _attempt(
         attempt=record.attempt,
         worker_id=None if job is None else job.worker_id,
         lease_seconds=None if job is None else job.lease_seconds,
+        job=job,
         run_memory=await agent.run_memory(identity, without),
         without=without,
         framework_options=merged(

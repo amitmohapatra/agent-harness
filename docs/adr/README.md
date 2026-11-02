@@ -13,7 +13,8 @@ and says so in both.
 | [0005](0005-conversations-across-runs.md) | A conversation across runs: history where nothing keeps it, busy-conversation modes, one id per message, the framework's session continued | Accepted; amends 0003 point 6 |
 | [0006](0006-what-the-model-gets.md) | The intelligent harness: what the model gets (a context map, data cards, built-in tools by run state), so a small model gives a big model's answers | Accepted as the direction; parts proposed; amended by 0007 (the query engine) |
 | [0007](0007-query-engine.md) | `query_result` runs on DuckDB when it is installed, with SQLite as the zero-dependency fallback | Accepted; amends 0006 |
-| [0008](0008-background-subagents.md) | Background sub-agents: Deep Agents' five task tools, backed by the run store, the step hooks and the cancel the harness already has | Proposed |
+| [0008](0008-background-subagents.md) | Background sub-agents: Deep Agents' five task tools, backed by the run store, the step hooks and the cancel the harness already has | Proposed; amended by 0009 (its limits) |
+| [0009](0009-run-inbox-and-person-pause.md) | A run's inbox, read at each step: an instruction reaches a run on any worker, and a person pauses and resumes it | Proposed; amends 0008 |
 
 The sibling repositories keep their own: the memory service's
 [docs/adr](https://github.com/amitmohapatra/agent-memory-service/blob/main/docs/adr/README.md)

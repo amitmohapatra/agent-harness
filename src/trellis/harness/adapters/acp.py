@@ -32,6 +32,10 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   how many members a swarm runs at once is the harness's adaptive limit of child runs
   (``admission.py``), as ``KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`` (the agent's own ``env``
   wins);
+* steering, the run's inbox: when one of the agent's calls ended, the run's inbox is read
+  (``Runtime.step``); a message steered into the run, or an instruction sent to it, stops the
+  turn (``session/cancel``) and the same session goes on with it as the user's next prompt (ACP
+  takes a turn's messages only as it starts), and a person's pause pauses it, as below;
 * pause: the turn is cancelled (``session/cancel``) and the process ends; the session is in the
   journal and the next attempt resumes it, told to call the tool again, which the journal
   answers. The agent keeps its sessions on its machine (Kimi: ``KIMI_CODE_HOME``): a resume
@@ -94,6 +98,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.conversation import STEERED_SAYS
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.history import ASKED_WITH, Said, Speaker
 from trellis.harness.journal import Pending
@@ -488,10 +493,12 @@ class ACPAdapter:
         self.seen: LRUSet[str] = LRUSet(maxsize=SEEN_KEPT)
 
     def steers(self, target: Any) -> bool:
-        """None: ACP has no point between an agent's steps where a client adds a message to a
-        turn under way (``session/prompt`` takes a turn's messages as it starts), so a
-        steered message waits its turn."""
-        return False
+        """Every agent, between two of its steps: ACP takes a turn's messages only as it
+        starts (``session/prompt``), so when one of its calls ended and a message was steered
+        into the run (or sent to its inbox), the turn is stopped (``session/cancel``) and the
+        same session goes on with it, as the user's (:meth:`Attempt._inbox`): its work so far
+        kept in the session."""
+        return True
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -943,6 +950,7 @@ class Attempt:
                     return
                 if await self._seen(item):
                     await self._spent()  # a call ended: what its step spent
+                    await self._inbox()  # and the run's inbox read, at this step
                 yield item
                 if runtime.pending is not None:
                     await self.cancel()  # the run paused: the agent stops here
@@ -1284,6 +1292,24 @@ class Attempt:
     def _refused(self, call: _Call | None) -> None:
         if call is not None:
             call.refused = True
+
+    async def _inbox(self) -> None:
+        """The run's inbox at a step of the agent (one of its calls ended): a person's pause
+        stops the turn (the run waits; the resume continues the session); a message steered
+        into the run, or an instruction sent to it, stops the turn too, and the same session
+        goes on with it as the user's next prompt (``followup``: ACP takes a turn's messages
+        only as it starts)."""
+        runtime = self.runtime
+        try:
+            await runtime.step()
+        except Paused:  # ``runtime.pending``: the turn stops at the next item
+            return
+        taken = runtime.steered()
+        if not taken:
+            return
+        said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)
+        self.followup = f"{self.followup}\n\n{said}" if self.followup else said
+        await self._stop()
 
     async def _stop(self) -> None:
         """Stop the turn once the agent has its answer (``session/cancel`` sent next)."""

@@ -55,6 +55,8 @@ from trellis.contracts import (
     Interrupt,
     InterruptDecision,
     InterruptResolution,
+    RunMessage,
+    RunMessageKind,
     RunRecord,
     RunStart,
     RunStatus,
@@ -175,6 +177,21 @@ class RunStore(Protocol):
 
     async def get(self, run_id: str, *, tenant: str | None = ...) -> RunRecord | None: ...
 
+    async def send_message(
+        self,
+        run_id: str,
+        kind: RunMessageKind,
+        *,
+        message_id: str,
+        text: str | None = ...,
+        sender: str | None = ...,
+        tenant: str | None = ...,
+    ) -> RunMessage: ...
+
+    async def messages(
+        self, run_id: str, *, after: int = ..., limit: int = ..., tenant: str | None = ...
+    ) -> list[RunMessage]: ...
+
     def iterate(
         self,
         *,
@@ -244,9 +261,14 @@ class LocalRuns:
         self._fired: dict[str, str] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
+        #: run id -> its inbox, oldest first (a message's position is its place in it, from 1)
+        self._inbox: dict[str, list[RunMessage]] = {}
         self._lock = asyncio.Lock()
         self.artifacts = LocalArtifacts(self)
         self.schedules = LocalSchedules(self)
+
+    #: its inbox is in this process: a run reads it at every step (``Runtime.step``)
+    remote = False
 
     async def start(self, start: RunStart, *, queue: bool = False) -> RunRecord:
         return self._start(start, RunStatus.QUEUED if queue else RunStatus.RUNNING)
@@ -397,6 +419,49 @@ class LocalRuns:
         record = self._runs.get(run_id)
         return record if record is not None and tenant in (None, record.tenant_id) else None
 
+    async def send_message(
+        self,
+        run_id: str,
+        kind: RunMessageKind,
+        *,
+        message_id: str,
+        text: str | None = None,
+        sender: str | None = None,
+        tenant: str | None = None,
+    ) -> RunMessage:
+        """A message kept at the next position of the run's inbox, as agent-runs keeps it: the
+        same ``message_id`` again answers the kept one (another message under it, an ended
+        run, or a pause of a paused run: ``ConflictError``)."""
+        record = self._require(run_id, tenant)
+        inbox = self._inbox.setdefault(run_id, [])
+        principal = (sender if ":" in sender else f"user:{sender}") if sender else "local"
+        for kept in inbox:
+            if kept.message_id == message_id:
+                if (kept.kind, kept.text, kept.sender) != (kind, text, principal):
+                    raise _conflict(f"message {message_id} was sent with another message")
+                return kept
+        if record.final:
+            raise _conflict(f"run {run_id} already ended {record.status.value}")
+        if kind is RunMessageKind.PAUSE and record.status is RunStatus.PAUSED:
+            raise _conflict(f"run {run_id} already waits on a person: resume it instead")
+        message = RunMessage(
+            message_id=message_id,
+            tenant_id=record.tenant_id,
+            run_id=run_id,
+            kind=kind,
+            text=text,
+            sender=principal,
+            position=len(inbox) + 1,
+        )
+        inbox.append(message)
+        return message
+
+    async def messages(
+        self, run_id: str, *, after: int = 0, limit: int = PAGE_LIMIT, tenant: str | None = None
+    ) -> list[RunMessage]:
+        self._require(run_id, tenant)
+        return self._inbox.get(run_id, [])[after : after + limit]
+
     async def iterate(
         self,
         *,
@@ -471,6 +536,7 @@ class LocalRuns:
             expires_at=until,
             remaining_seconds=remaining,
             cancel_requested=record.run_id in self._cancelling,
+            inbox=len(self._inbox.get(record.run_id, ())),
         )
 
     def _enqueue(self, run_id: str) -> None:
@@ -515,6 +581,7 @@ class LocalRuns:
         self._leases.pop(run_id, None)
         self._running_since.pop(run_id, None)
         self._cancelling.pop(run_id, None)  # (a finished run is in no queue: claim, cancel)
+        self._inbox.pop(run_id, None)
         tick = self._fired_by_run.pop(run_id, None)
         if tick is not None:
             self._fired.pop(tick, None)

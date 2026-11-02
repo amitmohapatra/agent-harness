@@ -12,6 +12,13 @@
   any replica serves any run.
 * ``POST {path}/runs/{run_id}/cancel`` — stop the run, whatever it is doing (``agent.cancel``):
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
+* ``POST {path}/runs/{run_id}/messages`` (``{"text"}``), ``/pause``, ``/resume`` — a new
+  instruction for the run, or one of its background tasks, read at its next step on whichever
+  worker it works; a pause at its next step (it waits on an interrupt of reason ``PAUSE``); and
+  the resume of that pause (a task goes back to its worker; a run of this process continues
+  here, its events on ``/runs/{run_id}/events``). Through the run's inbox in the run store
+  (``Runtime.step``). Only the run's own user; a target with no step the harness reaches (a
+  function, a graph without its middleware) takes neither, said as a ``409``.
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
   waits on carries by reference (``payload_ref``: a large ``ask`` table or diff), read from
   agent-runs.
@@ -59,8 +66,11 @@ from trellis.contracts import (
     InterruptReason,
     RunEvent,
     RunEventType,
+    RunMessageKind,
+    RunRecord,
     RunStatus,
     ToolError,
+    new_id,
     safe_id,
 )
 from trellis.harness import pipeline
@@ -79,6 +89,7 @@ from trellis.harness.agui.events import (
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.translate import translate
+from trellis.harness.background import sources
 from trellis.harness.conversation import Mode
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.frontend import FRONTEND_TOOL, Frontend
@@ -131,6 +142,14 @@ class Problem(BaseModel):
     instance: str
     code: str
     retryable: bool = False
+
+
+class Instruction(BaseModel):
+    """A new instruction for a run, read at its next step."""
+
+    text: str
+    #: the client's id for it: sent again (a retry), it is kept once
+    messageId: str | None = None
 
 
 class EventStream(StreamingResponse):
@@ -357,6 +376,67 @@ class _Surface:
             raise HTTPException(409, f"run {run_id} already ended") from exc
         return record.status
 
+    async def owned(self, request: Request, run_id: str) -> tuple[str, Agent, RunRecord]:
+        """The user, the agent and the record of the user's own run of this agent or of one of
+        its background agents (404 for anyone else's, another agent's, or none)."""
+        user = await self.user(request)
+        agent = self.agent
+        reachable = {agent.id: agent, **{n: a for s in sources(agent) for n, a in s.agents.items()}}
+        record = await agent.harness.runs.get(run_id, tenant=await agent.harness._tenant())
+        if record is None or record.agent_id not in reachable or record.user_id != user:
+            raise HTTPException(404, f"no run {run_id}")
+        return user, reachable[record.agent_id], record
+
+    async def send(
+        self, request: Request, run_id: str, kind: RunMessageKind, said: Instruction | None
+    ) -> int:
+        """An instruction or a pause put in the user's run's inbox: its position there."""
+        user, owner, record = await self.owned(request, run_id)
+        if not owner.adapter.steers(owner.target):
+            raise HTTPException(
+                409,
+                f"the {owner.id} agent has no step the harness reaches (a function, or a graph "
+                "without its middleware): it takes no instruction or pause; cancel it instead",
+            )
+        try:
+            sent = await owner.harness.runs.send_message(
+                run_id,
+                kind,
+                message_id=(said.messageId if said else None) or new_id("msg_"),
+                text=said.text if said else None,
+                sender=user,
+                tenant=record.tenant_id,
+            )
+        except ConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return sent.position
+
+    async def resume_pause(self, request: Request, run_id: str) -> RunStatus:
+        """The pause the user's run waits on, resumed: a task goes back to its worker; a run of
+        this process continues here (its events: ``/runs/{run_id}/events``)."""
+        user, owner, record = await self.owned(request, run_id)
+        awaiting = record.awaiting
+        if awaiting is None or awaiting.reason is not InterruptReason.PAUSE:
+            raise HTTPException(409, f"run {run_id} is {record.status.value}: not paused")
+        try:
+            record, resolution = await owner._resolution(
+                awaiting.interrupt_id,
+                InterruptDecision.APPROVE,
+                None,
+                user,
+                tenant=record.tenant_id,
+            )
+        except (ConfigurationError, ConflictError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        buffer = self.hub.open(record.run_id, user)
+        self._launch(
+            buffer,
+            record.thread_id or record.run_id,
+            record.run_id,
+            lambda listen: owner._continue(record, resolution, listen),
+        )
+        return RunStatus.QUEUED if record.metadata.get("background") else RunStatus.RUNNING
+
     async def artifact(self, request: Request, run_id: str, artifact_id: str) -> Response:
         await self.user(request)
         agent = self.agent
@@ -549,6 +629,69 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         `RUN_FINISHED`. Only the run's own user; `409` once the run ended."""
         try:
             status = await surface.cancel(request, run_id)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        return JSONResponse({"runId": run_id, "status": status.value})
+
+    @router.post(
+        "/runs/{run_id}/messages",
+        summary="Give a run (or one of its background tasks) a new instruction",
+        responses={
+            200: {
+                "description": 'kept in the run\'s inbox: `{"runId", "position"}`',
+                "content": {"application/json": {}},
+            },
+            **_refusals(401, 404, 409, 422),
+        },
+    )
+    async def instruct(request: Request, run_id: str, body: Instruction) -> Response:
+        """The instruction is read at the run's next step, on whichever worker it works (a
+        queued run: as it starts; a paused one: as it goes on). Only the run's own user; `409`
+        once it ended, or for a target with no step to read it at."""
+        try:
+            at = await surface.send(request, run_id, RunMessageKind.INSTRUCTION, body)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        return JSONResponse({"runId": run_id, "position": at})
+
+    @router.post(
+        "/runs/{run_id}/pause",
+        summary="Pause a run (or one of its background tasks) at its next step",
+        responses={
+            200: {
+                "description": 'asked: `{"runId", "position"}`',
+                "content": {"application/json": {}},
+            },
+            **_refusals(401, 404, 409),
+        },
+    )
+    async def pause(request: Request, run_id: str) -> Response:
+        """At its next step the run waits on an interrupt of reason `PAUSE` (LangGraph's own
+        `interrupt`; Claude's or Kimi's session stopped, kept for the resume). Only the run's
+        own user; `409` once it ended or already waits, or for a target with no step."""
+        try:
+            at = await surface.send(request, run_id, RunMessageKind.PAUSE, None)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        return JSONResponse({"runId": run_id, "position": at})
+
+    @router.post(
+        "/runs/{run_id}/resume",
+        summary="Resume a run (or one of its background tasks) a person paused",
+        responses={
+            200: {
+                "description": 'resumed: `{"runId", "status"}`',
+                "content": {"application/json": {}},
+            },
+            **_refusals(401, 404, 409),
+        },
+    )
+    async def resume(request: Request, run_id: str) -> Response:
+        """It goes on from where it paused, reading the instructions sent meanwhile: a task on
+        its worker, a run of this process here. Only the run's own user; `409` unless it
+        waits on a pause."""
+        try:
+            status = await surface.resume_pause(request, run_id)
         except HTTPException as exc:
             return _problem(exc, request)
         return JSONResponse({"runId": run_id, "status": status.value})

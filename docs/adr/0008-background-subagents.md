@@ -1,6 +1,7 @@
 # 0008. Background sub-agents: Deep Agents' five task tools, backed by the run store, the step hooks and the cancel the harness already has
 
-**Status:** Proposed (2026-11-02).
+**Status:** Proposed (2026-11-02). Amended by [0009](0009-run-inbox-and-person-pause.md): an
+instruction reaches a task on any worker, and a person pauses and resumes it.
 
 ## Context
 

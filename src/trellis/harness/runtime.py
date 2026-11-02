@@ -34,6 +34,8 @@ from trellis.contracts import (
     ModelError,
     Option,
     RunEventType,
+    RunMessage,
+    RunMessageKind,
     ToolCall,
     ToolError,
     ToolSpec,
@@ -47,7 +49,7 @@ from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Pending, Replay, content_key
-from trellis.runs import LeaseLostError
+from trellis.runs import Job, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -79,6 +81,9 @@ BUILTIN: Final = "builtin"
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
+#: How often a run reads its inbox in agent-runs at its steps, at most, unless its lease says
+#: a message came (``Lease.inbox``); in process (``LocalRuns``) it reads it at every step.
+INBOX_SECONDS: Final = 2.0
 
 #: The most one model call — a step, the provider's hosted tools it runs included — may go
 #: without an answer when nothing tighter bounds it (a ``call_timeout``, the run's time left):
@@ -234,6 +239,9 @@ class Runtime:
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
     lease_seconds: int | None = None
+    #: the worker's job, when a worker runs it: its latest lease says the newest position of
+    #: the run's inbox (``Job.inbox``)
+    job: Job | None = None
     #: the lease was lost while saving progress: the run stops and writes nothing more
     lease_lost: bool = False
     #: what this run turned off itself (``agent.run(without=)``, kept with its record; its
@@ -266,6 +274,11 @@ class Runtime:
     #: the child runs this attempt started, by where it started them and their agent
     _children: Counter[tuple[str, str]] = field(default_factory=Counter, repr=False)
     _saved_at: float | None = None
+    #: the newest position of the run's inbox the latest progress save's lease said, when the
+    #: inbox was last read (``time.monotonic``), and whether a read that failed was said
+    _inbox_said: int = 0
+    _inbox_read_at: float | None = None
+    _inbox_warned: bool = False
     #: one progress save at a time, so a later save never lands before an earlier one
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     #: the model calls under way, each with the watchdog that ends the attempt when it stalls
@@ -548,13 +561,14 @@ class Runtime:
             checkpoint = await self.replay.journal.checkpoint(
                 runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
             )
-            await runs.heartbeat(
+            lease = await runs.heartbeat(
                 self.run_id,
                 self.worker_id,
                 lease_seconds=self.lease_seconds,
                 checkpoint=checkpoint,
                 tenant=self.tenant,
             )
+            self._inbox_said = lease.inbox
         except LeaseLostError:
             raise
         except Exception as exc:
@@ -566,6 +580,56 @@ class Runtime:
         message = f"progress of run {self.run_id} not saved: {why}"
         log.warning("%s", message)
         self.events.warning("progress_unsaved", message)
+
+    # ------------------------------------------------------------------ the inbox
+    async def step(self) -> None:
+        """The run's inbox (agent-runs', or ``LocalRuns``'), read at one of its framework's
+        steps — the hook ``mode="steer"`` uses — wherever the run works: each instruction
+        given to it (:meth:`steered` takes it, in order), and a person's pause: the run waits
+        on them (:meth:`interrupt`, reason ``PAUSE``: LangGraph's own ``interrupt``, else the
+        attempt ends) and goes on once they resume it, reading what was sent meanwhile.
+        Several pauses read at once pause it once. The position taken is the journal's, so a
+        resume on any worker reads past it; a pause is taken only once answered. A read that
+        fails is a warning, once: the run goes on."""
+        from trellis.harness.conversation import Steer  # noqa: PLC0415 - it imports the runtime
+
+        unread = await self._unread()
+        pause = next((m for m in unread if m.kind is RunMessageKind.PAUSE), None)
+        if pause is not None:
+            await self.interrupt(
+                f"pause:{pause.message_id}",
+                reason=InterruptReason.PAUSE,
+                question=f"Paused by {pause.sender}. Resume to go on.",
+            )
+        for message in unread:
+            if message.kind is RunMessageKind.INSTRUCTION and message.text:
+                said_as = f"inbox:{self.run_id}:{message.position}"
+                self.agent.turns.give(self.run_id, Steer(message.text, said_as))
+            self.replay.journal.inbox = message.position
+
+    async def _unread(self) -> list[RunMessage]:
+        store = self.agent.harness.runs
+        taken = self.replay.journal.inbox
+        newest = max(self._inbox_said, 0 if self.job is None else self.job.inbox)
+        read_at = self._inbox_read_at
+        due = (
+            not getattr(store, "remote", True)
+            or newest > taken
+            or read_at is None
+            or time.monotonic() - read_at >= INBOX_SECONDS
+        )
+        if not due:
+            return []
+        self._inbox_read_at = time.monotonic()
+        try:
+            return await store.messages(self.run_id, after=taken, tenant=self.tenant)
+        except Exception as exc:
+            if not self._inbox_warned:
+                self._inbox_warned = True
+                message = f"the inbox of run {self.run_id} was not read: {exc}"
+                log.warning("%s", message)
+                self.events.warning("inbox_unread", message)
+            return []
 
     # ------------------------------------------------------------------ pausing
     async def ask(
