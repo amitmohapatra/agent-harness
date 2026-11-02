@@ -3141,9 +3141,16 @@ def said_in(requests: Sequence[dict[str, Any]], calls: Sequence[dict[str, Any]])
 # --------------------------------------------------------------------------- running
 #: The adapters a run can wrap: ``react`` (``ReAct``), ``langgraph`` (LangChain's
 #: ``create_agent``), ``deepagents`` (``create_deep_agent``), ``openai`` (the OpenAI Agents
-#: SDK on the ``LLM_*`` endpoint's chat completions) and ``claude`` (the Claude Agent SDK, its
-#: CLI on the provider's own API).
-ADAPTERS: Final = ("react", "langgraph", "deepagents", "openai", "claude")
+#: SDK on the ``LLM_*`` endpoint's chat completions), ``claude`` (the Claude Agent SDK, its
+#: CLI on the provider's own API) and ``kimi`` (Kimi Code over ACP, on the endpoint's model).
+ADAPTERS: Final = ("react", "langgraph", "deepagents", "openai", "claude", "kimi")
+#: Where a ``kimi`` run keeps its working directory and Kimi's home (``KIMI_RUN_ROOT``), and the
+#: ``kimi`` program it starts (``KIMI_BIN``).
+KIMI_ROOT: Final = "build/kimi"
+#: The most a Kimi model reply may be (Kimi asks for the model's whole window by default, which
+#: a provider refuses), and the window it is told.
+KIMI_OUTPUT: Final = "16000"
+KIMI_WINDOW: Final = "200000"
 #: The adapters whose model calls are LangChain's (metered by its callbacks); the others are
 #: metered by what the harness accounts to the run's budget (``trellis.harness.budget``).
 LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "deepagents"})
@@ -3236,12 +3243,48 @@ def target_of(
     if kind == "claude":
         from claude_agent_sdk import ClaudeAgentOptions
 
+        # no filesystem settings (the SDK's isolation mode): by default the CLI loads the
+        # CLAUDE.md of the directory it runs in, which is this checkout
         options = ClaudeAgentOptions(
-            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps
+            model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps, setting_sources=[]
         )
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
+    if kind == "kimi":
+        return kimi_target(str(model), tools), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
+
+
+def kimi_target(model: str, tools: Sequence[Any]) -> Any:
+    """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
+    Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one. No system prompt
+    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own."""
+    import os
+    from urllib.parse import urlsplit
+
+    from trellis.harness.adapters.acp import kimi
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    root = Path(os.environ.get("KIMI_RUN_ROOT") or KIMI_ROOT).resolve()
+    cwd = root / "cwd"
+    cwd.mkdir(parents=True, exist_ok=True)
+    (cwd / "AGENTS.md").write_text(r.SYSTEM)
+    base = os.environ.get("LLM_BASE_URL", "")
+    anthropic = urlsplit(base).hostname == "api.anthropic.com"
+    env = {
+        "KIMI_MODEL_PROVIDER_TYPE": "anthropic" if anthropic else "openai",
+        "KIMI_MODEL_BASE_URL": "https://api.anthropic.com" if anthropic else base,
+        "KIMI_MODEL_API_KEY": os.environ.get("LLM_API_KEY") or "none",
+        "KIMI_MODEL_NAME": model,
+        "KIMI_MODEL_MAX_CONTEXT_SIZE": KIMI_WINDOW,
+        "KIMI_MODEL_MAX_OUTPUT_SIZE": KIMI_OUTPUT,
+        "KIMI_MODEL_CAPABILITIES": "image_in",
+        "KIMI_CODE_HOME": str(root / "home"),
+        "KIMI_CODE_NO_AUTO_UPDATE": "1",
+    }
+    agent = kimi(model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"))
+    object.__setattr__(agent, TOOLS_ATTRIBUTE, list(tools))  # a frozen dataclass
+    return agent
 
 
 class Accounted:

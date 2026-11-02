@@ -326,6 +326,38 @@ def test_the_adapter_follows_the_history_unless_given() -> None:
     assert cx.adapter_of("memory", "openai") == "openai"
 
 
+def test_the_claude_agent_reads_no_settings_of_the_checkout_it_runs_in() -> None:
+    """The SDK loads every filesystem setting by default, the CLAUDE.md of the directory the
+    CLI runs in among them: run from this checkout, the agent under test read the repository's
+    own instructions to coding agents (and tried a shell command they name)."""
+    options, _ = cx.target_of("m", "memory", None, 6, adapter="claude")
+    assert options.setting_sources == [] and options.max_turns == 12
+
+
+def test_kimi_is_an_adapter_with_its_instructions_in_its_own_agents_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kimi Code over ACP: no system prompt crosses ACP, so the suite's instructions are the
+    AGENTS.md of a working directory of its own (Kimi's slot for a project's instructions); its
+    model is the endpoint's (Anthropic's own API: Kimi's ``anthropic`` provider)."""
+    from trellis.harness.adapters.acp import ACPAgent
+
+    monkeypatch.setenv("KIMI_RUN_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.anthropic.com/v1/")
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    agent, options = cx.target_of("claude-haiku-5-5", "memory", None, 6, adapter="kimi")
+    assert isinstance(agent, ACPAgent) and options == {}
+    assert Path(agent.cwd or "", "AGENTS.md").read_text() == r.SYSTEM
+    assert agent.env["KIMI_MODEL_PROVIDER_TYPE"] == "anthropic"
+    assert agent.env["KIMI_MODEL_BASE_URL"] == "https://api.anthropic.com"
+    assert agent.env["KIMI_MODEL_NAME"] == "claude-haiku-5-5"
+    assert agent.env["KIMI_CODE_HOME"] == str(tmp_path / "home")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+    agent, _ = cx.target_of("granite", "memory", None, 6, adapter="kimi")
+    assert agent.env["KIMI_MODEL_PROVIDER_TYPE"] == "openai"
+    assert agent.env["KIMI_MODEL_BASE_URL"] == "http://127.0.0.1:8080/v1"
+
+
 def test_a_cannot_do_answer_must_say_so_why_and_what_instead_with_nothing_made_up() -> None:
     case = next(c for c in cx.cases() if c.id == "cantdo-03")
     expect = case.turns[0].expect
@@ -714,6 +746,8 @@ def test_a_rate_written_as_a_percentage_reads_as_the_rate() -> None:
     is never read as a whole count."""
     assert _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time delivery rate **73%**.")
     assert not _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time rate 71%.")
+    assert _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06); on-time rate 0.73.")  # as kept
+    assert not _right("bf1-mixed-03", 2, "Bursa Textiles (SUP-06) shipped 73 orders.")  # no %
     assert not cx.score(cx.count(1), "100% of them are in the north.", [])["correct"]
 
 
