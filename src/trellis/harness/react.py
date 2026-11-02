@@ -181,14 +181,16 @@ def _middleware(
     summarization: Any = None,
     card: Any = None,
     scoped: bool = False,
+    asks: bool = False,
 ) -> list[Any]:
     """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
     offered (``held``: on its own backend, the scratch file tools, and its general-purpose
     ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
     from the start (``files``: its files are not in the graph's state), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
-    sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
-    resume included — :func:`~.middleware.step_limit`)."""
+    sent; whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
+    resume included — :func:`~.middleware.step_limit`); and whether the model is told when to
+    ask which record is meant (``asks``: :class:`~.clarify.AskWhich`, ``ReAct``'s own)."""
     _checked(
         max_steps=max_steps,
         max_repeats=max_repeats,
@@ -198,7 +200,7 @@ def _middleware(
     )
     from langchain.agents.middleware import ContextEditingMiddleware
 
-    from trellis.harness import automatic
+    from trellis.harness import automatic, clarify
     from trellis.harness import middleware as ours
 
     window = context_window
@@ -228,6 +230,7 @@ def _middleware(
         # what a long task is offered, decided before anything reads the request's tools
         automatic.Planning(window=window),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
+        *([clarify.AskWhich()] if asks else []),
         ours.HarnessTools(),
         ours.GovernTools(),
         ours.StallGuard(max_repeats),
@@ -371,6 +374,7 @@ def ReAct(
                         context_window=window,
                         system_prompt=stored_prompt,
                         scoped=True,
+                        asks=True,
                     ),
                     middleware,
                 ),
@@ -407,6 +411,7 @@ def ReAct(
         summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
         card=_card(files_backend),
         scoped=True,
+        asks=True,
     )
     graph = create_deep_agent(
         profiled,
