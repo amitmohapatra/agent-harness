@@ -55,9 +55,12 @@ from trellis.contracts import (
     Interrupt,
     InterruptDecision,
     InterruptResolution,
+    RunMessage,
+    RunMessageKind,
     RunRecord,
     RunStart,
     RunStatus,
+    RunUsage,
     Schedule,
     ScheduleSpec,
     new_id,
@@ -134,6 +137,7 @@ class RunStore(Protocol):
         *,
         lease_seconds: int = ...,
         checkpoint: dict[str, Any] | None = ...,
+        usage: RunUsage | None = ...,
         tenant: str | None = ...,
     ) -> Lease: ...
 
@@ -156,6 +160,7 @@ class RunStore(Protocol):
         *,
         checkpoint: dict[str, Any] | None = ...,
         worker_id: str | None = ...,
+        usage: RunUsage | None = ...,
     ) -> RunRecord: ...
 
     async def resume(
@@ -170,10 +175,26 @@ class RunStore(Protocol):
         output: Any = ...,
         error: AgentError | None = ...,
         worker_id: str | None = ...,
+        usage: RunUsage | None = ...,
         tenant: str | None = ...,
     ) -> RunRecord: ...
 
     async def get(self, run_id: str, *, tenant: str | None = ...) -> RunRecord | None: ...
+
+    async def send_message(
+        self,
+        run_id: str,
+        kind: RunMessageKind,
+        *,
+        message_id: str,
+        text: str | None = ...,
+        sender: str | None = ...,
+        tenant: str | None = ...,
+    ) -> RunMessage: ...
+
+    async def messages(
+        self, run_id: str, *, after: int = ..., limit: int = ..., tenant: str | None = ...
+    ) -> list[RunMessage]: ...
 
     def iterate(
         self,
@@ -244,9 +265,14 @@ class LocalRuns:
         self._fired: dict[str, str] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
+        #: run id -> its inbox, oldest first (a message's position is its place in it, from 1)
+        self._inbox: dict[str, list[RunMessage]] = {}
         self._lock = asyncio.Lock()
         self.artifacts = LocalArtifacts(self)
         self.schedules = LocalSchedules(self)
+
+    #: its inbox is in this process: a run reads it at every step (``Runtime.step``)
+    remote = False
 
     async def start(self, start: RunStart, *, queue: bool = False) -> RunRecord:
         return self._start(start, RunStatus.QUEUED if queue else RunStatus.RUNNING)
@@ -310,11 +336,14 @@ class LocalRuns:
         *,
         lease_seconds: int = LEASE_SECONDS,
         checkpoint: dict[str, Any] | None = None,
+        usage: RunUsage | None = None,
         tenant: str | None = None,
     ) -> Lease:
         record = self._fenced(run_id, worker_id, tenant)
         if checkpoint is not None:
             record = self._move(record, record.status, checkpoint=checkpoint)
+        if usage is not None:
+            record = self._move(record, record.status, usage=usage)
         if run_id in self._cancelling:  # asked to stop: the lease is not extended
             return self._leased(record, worker_id, self._leases[run_id][1])
         return self._lease(run_id, worker_id, lease_seconds)
@@ -354,10 +383,14 @@ class LocalRuns:
         *,
         checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
+        usage: RunUsage | None = None,
     ) -> RunRecord:
         record = self._fenced(interrupt.run_id, worker_id, interrupt.tenant_id)
         self._leases.pop(record.run_id, None)
-        return self._move(record, RunStatus.PAUSED, awaiting=interrupt, checkpoint=checkpoint)
+        kept = {} if usage is None else {"usage": usage}
+        return self._move(
+            record, RunStatus.PAUSED, awaiting=interrupt, checkpoint=checkpoint, **kept
+        )
 
     async def resume(
         self, resolution: InterruptResolution, *, tenant: str | None = None
@@ -387,15 +420,60 @@ class LocalRuns:
         output: Any = None,
         error: AgentError | None = None,
         worker_id: str | None = None,
+        usage: RunUsage | None = None,
         tenant: str | None = None,
     ) -> RunRecord:
         record = self._fenced(run_id, worker_id, tenant)
         self._leases.pop(run_id, None)
-        return self._move(record, status, output=output, error=error)
+        kept = {} if usage is None else {"usage": usage}
+        return self._move(record, status, output=output, error=error, **kept)
 
     async def get(self, run_id: str, *, tenant: str | None = None) -> RunRecord | None:
         record = self._runs.get(run_id)
         return record if record is not None and tenant in (None, record.tenant_id) else None
+
+    async def send_message(
+        self,
+        run_id: str,
+        kind: RunMessageKind,
+        *,
+        message_id: str,
+        text: str | None = None,
+        sender: str | None = None,
+        tenant: str | None = None,
+    ) -> RunMessage:
+        """A message kept at the next position of the run's inbox, as agent-runs keeps it: the
+        same ``message_id`` again answers the kept one (another message under it, an ended
+        run, or a pause of a paused run: ``ConflictError``)."""
+        record = self._require(run_id, tenant)
+        inbox = self._inbox.setdefault(run_id, [])
+        principal = (sender if ":" in sender else f"user:{sender}") if sender else "local"
+        for kept in inbox:
+            if kept.message_id == message_id:
+                if (kept.kind, kept.text, kept.sender) != (kind, text, principal):
+                    raise _conflict(f"message {message_id} was sent with another message")
+                return kept
+        if record.final:
+            raise _conflict(f"run {run_id} already ended {record.status.value}")
+        if kind is RunMessageKind.PAUSE and record.status is RunStatus.PAUSED:
+            raise _conflict(f"run {run_id} already waits on a person: resume it instead")
+        message = RunMessage(
+            message_id=message_id,
+            tenant_id=record.tenant_id,
+            run_id=run_id,
+            kind=kind,
+            text=text,
+            sender=principal,
+            position=len(inbox) + 1,
+        )
+        inbox.append(message)
+        return message
+
+    async def messages(
+        self, run_id: str, *, after: int = 0, limit: int = PAGE_LIMIT, tenant: str | None = None
+    ) -> list[RunMessage]:
+        self._require(run_id, tenant)
+        return self._inbox.get(run_id, [])[after : after + limit]
 
     async def iterate(
         self,
@@ -471,6 +549,7 @@ class LocalRuns:
             expires_at=until,
             remaining_seconds=remaining,
             cancel_requested=record.run_id in self._cancelling,
+            inbox=len(self._inbox.get(record.run_id, ())),
         )
 
     def _enqueue(self, run_id: str) -> None:
@@ -515,6 +594,7 @@ class LocalRuns:
         self._leases.pop(run_id, None)
         self._running_since.pop(run_id, None)
         self._cancelling.pop(run_id, None)  # (a finished run is in no queue: claim, cancel)
+        self._inbox.pop(run_id, None)
         tick = self._fired_by_run.pop(run_id, None)
         if tick is not None:
             self._fired.pop(tick, None)

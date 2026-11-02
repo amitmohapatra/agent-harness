@@ -194,7 +194,7 @@ worker = h.worker([research])  # the tasks are queued runs: run it beside the ch
 |---|---|---|
 | `start_async_task(description, subagent_type)` | starts a task and returns its `task_id` at once: the turn answers without waiting | a queued child run of the turn (`agent.start` inside a run), worked by a worker; after a crash another worker continues it |
 | `check_async_task(task_id)` | its status, and its result, error or question | the run store |
-| `update_async_task(task_id, message)` | a new instruction, read at the task's next step | the step hook `mode="steer"` uses (`Adapter.steers`) |
+| `update_async_task(task_id, message)` | a new instruction, read at the task's next step, on whichever worker it works | the task's inbox in the run store, read by the step hook `mode="steer"` uses (`Runtime.step`, [ADR 0009](adr/0009-run-inbox-and-person-pause.md)) |
 | `cancel_async_task(task_id)` | stops it | `agent.cancel` |
 | `list_async_tasks(status_filter)` | the conversation's tasks | the run store |
 
@@ -217,10 +217,17 @@ turn is told, as it starts, of the conversation's tasks — each one's status an
 answer. A task that asks a person waits in `h.inbox` on its own run: answer it there
 (`research.resume(task_id, ...)`).
 
-**Limits.** An instruction reaches a task working, or queued, in this process; one held by
-another process's worker is refused, said (cancel it and start it again). A sub-agent with no
-step the harness reaches (a function, a graph without the harness's middleware) takes none,
-said. An idle chat is told a result at its next message: AG-UI streams runs, not threads.
+**Pause, resume, instruct from a UI.** A person pauses a task (or any run of theirs) at its
+next step, gives it instructions while it waits and resumes it: `POST {path}/runs/{id}/pause`,
+`/messages` (`{"text"}`), `/resume` on the AG-UI surface (`serve_chat`), or the run store's
+inbox (`runs.send_message`, `RunMessageKind.PAUSE`) and `research.resume(task_id, "approve",
+reviewer=...)`. It waits on an interrupt of reason `PAUSE`: LangGraph's own `interrupt` (the
+checkpoint kept: no step is asked again), Claude's and Kimi's session stopped and continued;
+the instructions sent meanwhile are read as it goes on, on whichever worker resumes it.
+
+**Limits.** A sub-agent with no step the harness reaches (a function, a graph without the
+harness's middleware) takes no instruction and no pause, said. An idle chat is told a result
+at its next message: AG-UI streams runs, not threads.
 
 ## On failure
 
@@ -253,4 +260,5 @@ said. An idle chat is told a result at its next message: AG-UI streams runs, not
 * Tests: `tests/integration/test_subagents.py` (every adapter as a child, two at once, a child
   that asks, a worker killed inside a child, cancel, time), and against the real services
   `tests/live/test_live_subagents.py`; in the background `tests/integration/test_background.py`
-  and the matrix rows `B01`–`B06` (`tests/matrix/background.py`).
+  and `tests/integration/test_inbox.py`, and the matrix rows `B01`–`B07`
+  (`tests/matrix/background.py`).

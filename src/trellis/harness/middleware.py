@@ -672,7 +672,9 @@ class HarnessTools(AgentMiddleware):
     """The run's harness tools, offered per model call and run through the bridge — and,
     before each model call, the messages sent to the run's conversation with
     ``mode="steer"`` since the last one (``Runtime.steered``), added to the graph's messages
-    as the user's, each with its id (``conversation.question_id``)."""
+    as the user's, each with its id (``conversation.question_id``) — the run's inbox read
+    first (``Runtime.step``: an instruction sent from any process, a person's pause, which is
+    LangGraph's own ``interrupt``)."""
 
     state_schema = _HarnessToolsState
 
@@ -707,6 +709,9 @@ class HarnessTools(AgentMiddleware):
         return {"messages": said}
 
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        run = current()
+        if run is not None:
+            await run.step()  # the run's inbox: its instructions, a person's pause
         return self.before_model(state, runtime)
 
     async def awrap_model_call(

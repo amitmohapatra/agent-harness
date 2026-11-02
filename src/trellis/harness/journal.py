@@ -163,6 +163,9 @@ class Journal(BaseModel):
     #: the files the run kept for its user (``Runtime.save_file``): name, size, media type and
     #: what made each — their bytes are in the file store
     files: list[dict[str, Any]] = Field(default_factory=list)
+    #: the position of the last message of the run's inbox the run took (``Runtime.step``):
+    #: a resume, on any worker, reads past it
+    inbox: int = 0
     pending: Pending | None = None
 
     # ------------------------------------------------------------------ persistence

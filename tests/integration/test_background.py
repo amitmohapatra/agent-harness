@@ -350,8 +350,7 @@ async def test_the_turn_ending_or_cancelled_leaves_the_task_working(harness: Har
 
 async def test_a_task_whose_worker_dies_is_finished_by_another() -> None:
     """Two worker processes share the run store: the first dies inside the task's step, the
-    lease lapses, the second continues the task, and the conversation is told its answer. An
-    instruction for a task held by the other process is refused, not lost."""
+    lease lapses, the second continues the task, and the conversation is told its answer."""
 
     class Crash(BaseException):
         """The worker process dies."""
@@ -402,7 +401,11 @@ async def test_a_task_whose_worker_dies_is_finished_by_another() -> None:
             await h.aclose()
 
 
-async def test_an_instruction_for_a_task_on_another_worker_is_refused(harness: Harness) -> None:
+async def test_an_instruction_for_a_task_on_another_worker_waits_in_its_inbox(
+    harness: Harness,
+) -> None:
+    """Held by another process, the task reads the instruction from its inbox in the run
+    store at its next step there (``tests/integration/test_inbox.py`` follows it)."""
     gate = Gate()
     child = researcher(harness, gate)
     model = ScriptedChat()
@@ -413,8 +416,10 @@ async def test_an_instruction_for_a_task_on_another_worker_is_refused(harness: H
     assert await store.claim("another-process", ["research"]) is not None  # held elsewhere
     model.turns += [("update_async_task", {"task_id": task, "message": "the north"}), "ok"]
     await parent.run("also the north", user="ada", thread="t1")
-    assert "works on another worker" in told(model, -1)[-1]
-    assert not child.turns.given, "an instruction nobody will read was kept"
+    assert told(model, -1)[-1] == f"Updated async subagent. task_id: {task}"
+    [kept] = await store.messages(task)
+    assert (kept.text, kept.sender) == ("the north", "user:ada")
+    assert not child.turns.given, "an instruction was kept in this process"
 
 
 async def test_a_task_that_asks_is_answered_on_its_own_run(harness: Harness) -> None:
