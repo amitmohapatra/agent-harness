@@ -302,14 +302,13 @@ def python_reads(code: str, *, at: Path | None = None, home: Path | None = None)
 def _saved_to(call: ast.Call) -> str | None:
     """The path a call writes, when it is written out: its first argument, or the ``Path``
     it is called on (``Path("q3.csv").write_text(...)``)."""
-    first = call.args[0] if call.args else None
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
     on = call.func.value if isinstance(call.func, ast.Attribute) else None
     if isinstance(on, ast.Call) and getattr(on.func, "id", getattr(on.func, "attr", "")) == "Path":
-        inner = on.args[0] if on.args else None
-        if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
-            return inner.value
+        written = on.args[0] if on.args else None  # the Path's: its argument is the content
+    else:
+        written = call.args[0] if call.args else None
+    if isinstance(written, ast.Constant) and isinstance(written.value, str):
+        return written.value
     return None
 
 

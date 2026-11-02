@@ -503,12 +503,10 @@ def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:
 async def _briefed(
     runtime: Runtime, call_id: str, name: str, args: dict[str, Any]
 ) -> dict[str, Any]:
-    """A call as it runs: a subagent's (:data:`SUBAGENT_TOOLS`) started as a helper of the run
-    (``bridges.helpers``) and its ``prompt`` given the memory context for its task before it;
-    any other as it was decided."""
+    """A subagent's call (:data:`SUBAGENT_TOOLS`) as it runs: started as a helper of the run
+    (``bridges.helpers``), its ``prompt`` given the memory context for its task before it."""
     helpers = runtime.helpers
-    if helpers is None or name not in SUBAGENT_TOOLS:
-        return args
+    assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
     task = str(args.get("prompt") or args.get("description") or "")
     kind, called = Kind.SUBAGENT, str(args.get("subagent_type") or GENERAL_PURPOSE)
     helper = await helpers.start(call_id, kind=kind, name=called, task=task)
@@ -794,10 +792,8 @@ def _spec(runtime: Runtime, name: str) -> ToolSpec:
     """A call's tool as governance decides it: its risk as the run's tool set has it (an
     in-process server's tool: its annotations), else a built-in's
     (:data:`BUILTIN_SIDE_EFFECTS`)."""
-    known = runtime.native.get(name)
-    if known is not None:
-        return known
-    return ToolSpec(name=name, side_effects=BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS))
+    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
 
 
 def _recorded(steps: Steps) -> Any:

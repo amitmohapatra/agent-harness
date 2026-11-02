@@ -212,7 +212,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     # no context and no harness tools: the options as they were, the permission check and
     # the room for a large tool result and the run's journal as the session store added
     [sent] = seen
-    assert sent.can_use_tool is None and sent.resume is None
+    assert callable(sent.can_use_tool) and sent.resume is None  # what Claude Code asks
     assert sent.hooks is not None and len(sent.hooks["PreToolUse"]) == 1
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
@@ -221,6 +221,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
     unchanged = {
         "hooks": None,
+        "can_use_tool": None,
         "max_buffer_size": None,
         "session_store": None,
         "disallowed_tools": [],

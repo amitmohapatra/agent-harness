@@ -59,6 +59,7 @@ NOT = [
     "which python3 > where.txt",
     "ls 2>/dev/null.txt",
     "ls > /dev/sda",
+    "cat <<'EOF'\nhello\nEOF",  # a heredoc to anything but Python is not read here
 ]
 
 
@@ -104,6 +105,8 @@ OUTSIDE = [
     "python3 -c \"import os; os.remove('q3.xlsx')\"",
     "python3 -c \"open('/etc/passwd', 'w').write('x')\"",
     "python3 -c \"import shutil; shutil.copy('a', 'b')\"",
+    # the path a Path is made with, not what is written to it
+    "python3 -c \"from pathlib import Path; Path('/etc/motd').write_text('notes.md')\"",
     "pip install openpyxl",
     "curl -o page.html https://example.com",
 ]
