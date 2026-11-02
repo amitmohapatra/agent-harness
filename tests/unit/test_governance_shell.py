@@ -27,6 +27,8 @@ READS = [
     # Kimi's, run with the fixes: an error output thrown away
     "which gnuplot convert magick 2>/dev/null; pwd",
     "ls -la x > /dev/null && echo found",
+    # Kimi's, in the natural re-measure: a cd first (into any folder: nothing is written)
+    "cd /srv/kimi/cwd && ls -l /large_tool_results/3dfef05 && head -3 s.csv && wc -l s.csv",
 ]
 NOT = [
     "rm -rf /tmp/x",
@@ -60,6 +62,8 @@ NOT = [
     "ls 2>/dev/null.txt",
     "ls > /dev/sda",
     "cat <<'EOF'\nhello\nEOF",  # a heredoc to anything but Python is not read here
+    "cd /data && rm sales.csv",
+    "cd && ls",
 ]
 
 

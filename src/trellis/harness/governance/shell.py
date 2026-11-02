@@ -202,13 +202,14 @@ def _commands(text: str, home: Path | None) -> list[_Command] | None:
 
 def _approved(commands: list[_Command], stdin: str | None, home: Path | None) -> bool:
     """Whether every command reads, or writes only inside ``home`` from where the line's
-    ``cd`` (into it, if any) left it; the last one runs ``stdin`` (a heredoc) if given."""
+    ``cd`` (into it, if any) left it; the last one runs ``stdin`` (a heredoc) if given. With no
+    ``home`` (only reads), a ``cd`` into any one folder writes nothing."""
     at = home
     for n, (said, written) in enumerate(commands):
         if written and not all(_inside(w, at, home) for w in written):
             return False
         if said[:1] == ["cd"]:
-            if len(said) != 2 or not _inside(said[1], at, home):
+            if len(said) != 2 or (home is not None and not _inside(said[1], at, home)):
                 return False
             at = Path(os.path.normpath(at / said[1])) if at is not None else None
             continue
