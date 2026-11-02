@@ -636,6 +636,56 @@ def _router(surface: _Surface, path: str) -> APIRouter:
             return _problem(exc, request)
         return JSONResponse({"runId": run_id, "status": status.value})
 
+    _controls(router, surface)
+
+    @router.get(
+        "/runs/{run_id}/artifacts/{artifact_id}",
+        summary="Data the interrupt a paused run waits on carries by reference",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "the artifact's bytes, as the media type it was stored with",
+                "content": {"application/json": {}, "application/octet-stream": {}},
+            },
+            **_refusals(401, 404),
+        },
+    )
+    async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
+        """The bytes of the `payload_ref` of the interrupt the run waits on (an `ask`
+        table or diff), from agent-runs — so any replica serves them."""
+        try:
+            return await surface.artifact(request, run_id, artifact_id)
+        except HTTPException as exc:
+            return _problem(exc, request)
+
+    @router.get(
+        "/runs/{run_id}/files/{name}",
+        summary="A file the run kept for its user",
+        response_class=Response,
+        responses={
+            200: {
+                "description": "the file's bytes (a store that signs no links)",
+                "content": {"application/octet-stream": {}},
+            },
+            307: {"description": "a link the store signed, valid five minutes"},
+            **_refusals(401, 404),
+        },
+    )
+    async def file(request: Request, run_id: str, name: str) -> Response:
+        """A file the run kept for its user, which its `file` event names: a redirect to a
+        short-lived signed link (GCS, S3, Azure), else its bytes. Only the run's own user."""
+        try:
+            return await surface.file(request, run_id, name)
+        except HTTPException as exc:
+            return _problem(exc, request)
+
+    return router
+
+
+def _controls(router: APIRouter, surface: _Surface) -> None:
+    """The routes a UI shows and controls a run's work with: the user's tasks as they stand,
+    and a new instruction, a pause and a resume for a run or one of its tasks."""
+
     @router.get(
         "/tasks",
         summary="The user's background tasks, as they stand",
@@ -721,49 +771,6 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         except HTTPException as exc:
             return _problem(exc, request)
         return JSONResponse({"runId": run_id, "status": status.value})
-
-    @router.get(
-        "/runs/{run_id}/artifacts/{artifact_id}",
-        summary="Data the interrupt a paused run waits on carries by reference",
-        response_class=Response,
-        responses={
-            200: {
-                "description": "the artifact's bytes, as the media type it was stored with",
-                "content": {"application/json": {}, "application/octet-stream": {}},
-            },
-            **_refusals(401, 404),
-        },
-    )
-    async def artifact(request: Request, run_id: str, artifact_id: str) -> Response:
-        """The bytes of the `payload_ref` of the interrupt the run waits on (an `ask`
-        table or diff), from agent-runs — so any replica serves them."""
-        try:
-            return await surface.artifact(request, run_id, artifact_id)
-        except HTTPException as exc:
-            return _problem(exc, request)
-
-    @router.get(
-        "/runs/{run_id}/files/{name}",
-        summary="A file the run kept for its user",
-        response_class=Response,
-        responses={
-            200: {
-                "description": "the file's bytes (a store that signs no links)",
-                "content": {"application/octet-stream": {}},
-            },
-            307: {"description": "a link the store signed, valid five minutes"},
-            **_refusals(401, 404),
-        },
-    )
-    async def file(request: Request, run_id: str, name: str) -> Response:
-        """A file the run kept for its user, which its `file` event names: a redirect to a
-        short-lived signed link (GCS, S3, Azure), else its bytes. Only the run's own user."""
-        try:
-            return await surface.file(request, run_id, name)
-        except HTTPException as exc:
-            return _problem(exc, request)
-
-    return router
 
 
 def _problem(exc: HTTPException, request: Request) -> JSONResponse:
