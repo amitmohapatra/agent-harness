@@ -1106,6 +1106,20 @@ def test_a_fall_said_in_words_reads_as_a_negative_change() -> None:
     assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
 
 
+def test_a_fall_said_as_an_amount_or_a_percentage_reads_as_a_negative_change() -> None:
+    """bf2-mixed-05 (Kimi, task #12's gate): "down **£1,917.02** or **0.92%** from
+    **£207,900.49**" states the -0.92% change after the amount it fell by, and was scored as
+    missing it. A rise said the same way, or another percentage, still fails."""
+    said = (
+        "Our flagship (store S22) brought in **£205,983.47** in September 2026, down "
+        "**£1,917.02** or **0.92%** from **£207,900.49** in August 2026."
+    )
+    assert _right("bf2-mixed-05", 1, said)
+    assert _right("bf2-mixed-05", 1, said.replace(" or **0.92%**", " (**0.92%**)"))
+    assert not _right("bf2-mixed-05", 1, said.replace("down", "up"))
+    assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
+
+
 def test_which_figure_to_use_names_the_older_source_by_its_date() -> None:
     """bf2-explain-03 t1 (OpenAI Agents, the audit run): "How sure are you, and which figure
     would you use?" answered with the portal's 34 days, naming the master and its 2026-03-02

@@ -2786,7 +2786,8 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
 #: one ("a 0.92% drop", "£1,917 lower").
 _FALL: Final = re.compile(
     r"\b(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?[\s*_£$€]{0,6}"
-    r"(\d[\d,]*(?:\.\d+)?)|"
+    # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)"
+    r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:or|,|\()\s*[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
     r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
     r"(?:drop|decline|decrease|fall|lower|less)\b",
     re.IGNORECASE,
