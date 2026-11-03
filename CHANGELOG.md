@@ -23,6 +23,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   to the asking note: no tokens on the other turns, and the dated cases 28/36 → 36/36.
 - The schedule tools keep only what is theirs: the general asking words are the note's; the
   "update it" choice is recommended by the flag, not by its label.
+- `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
+  hour, for the cache): the model no longer "corrects" 03:53 for "in 2 hours" at 01:53 to 03:00.
 
 ### Schedules set in chat
 

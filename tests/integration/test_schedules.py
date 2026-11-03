@@ -6,6 +6,7 @@ delivered; a condition that still holds is reported once."""
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -114,8 +115,15 @@ async def test_a_fired_run_is_offered_no_schedule_tools_and_a_chat_the_day_and_h
         await fire(h, agent, only(h).schedule_id)
         assert not set(SCHEDULE_TOOLS) & chat.toolboxes[-1]
         local(h)._schedules.clear()
-        await said(agent, chat, "ada", ("schedule_task", {"task": "call SUP-3", "in_minutes": 120}))
+        answer = await said(
+            agent, chat, "ada", ("schedule_task", {"task": "call SUP-3", "in_minutes": 120})
+        )
         later = only(h)
+        # the minute it counted from, where the model reads the result (the tool's text says
+        # only the hour): a time two hours on from 01:53 is 03:53, not a mistake to correct
+        start = re.search(r"120 minutes from (\d\d:\d\d) \(UTC\), as asked\.$", answer)
+        assert start is not None, answer
+        assert start[1] in {f"{now:%H:%M}", f"{now + timedelta(minutes=1):%H:%M}"}
         due = later.next_fire_at
         assert later.metadata[TASK]["once"] is True and due is not None
         assert timedelta(minutes=119) <= due - now <= timedelta(minutes=121)
