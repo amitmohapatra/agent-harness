@@ -65,7 +65,6 @@ from trellis.harness.adapters.base import (
     model_name,
 )
 from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
-from trellis.harness.background import BACKGROUND
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.budget import BUDGET, Budget
@@ -630,7 +629,7 @@ class Agent:
             raise ConfigurationError(f"run {run_id} is {record.status.value}, not paused")
         if interrupt_id == run_id:  # the run's id: what it waits on now
             interrupt_id = record.awaiting.interrupt_id
-        if record.parent_run_id is not None and BACKGROUND not in record.metadata:
+        if record.parent_run_id is not None:
             raise ConfigurationError(
                 f"run {run_id} is a sub-agent's run: answer the question its parent run "
                 f"{record.parent_run_id} waits on"

@@ -305,7 +305,7 @@ async def _called(
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
-    budget.count_tool_call(runtime, tool.name)
+    budget.count_tool_call(runtime)
     _started(runtime, ref, tool.name, tool_call.args)
     try:
         outcome = await _ran(

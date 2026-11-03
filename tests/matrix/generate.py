@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from tests.matrix.adversarial import ADVERSARIAL
-from tests.matrix.background import BACKGROUND_ROWS
 from tests.matrix.dimensions import SELECTION_BY_ID, SELECTIONS
 from tests.matrix.extensions import EXTENSIONS
 from tests.matrix.features import FEATURES, SELECTION
@@ -154,7 +153,7 @@ def on_in(feature: Feature, way: str, selection: Selection) -> bool:
 
 def cells() -> Iterator[Cell]:
     everything = SELECTION_BY_ID["all"]
-    for feature in [*FEATURES, SELECTION, *EXTENSIONS, *ADVERSARIAL, *BACKGROUND_ROWS]:
+    for feature in [*FEATURES, SELECTION, *EXTENSIONS, *ADVERSARIAL]:
         for adapter in ADAPTERS:
             for way in WAYS:
                 for mode in MODES:

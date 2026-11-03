@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Background agents moved to their own branch
+
+- Background sub-agents (ADR 0008), a run's inbox and a person's pause (ADR 0009) and the
+  transcript of a run or sub-agent were reverted from `main` (#160, #166, #167) and continue on
+  the `background-agents` branch, with the matching agent-runs and agent-contracts work, until
+  they are ready to land together. `main` keeps every generic fix merged meanwhile (#162, #165,
+  #168) and requires `trellis-contracts>=0.6.3,<0.8`: 0.7.0, the contracts without the run inbox,
+  is admitted.
+
 ### Claude Code and Kimi Code ask as they do natively
 
 - A `Bash` command that only reads (`ls`, `cat`, `wc`, `which`, Python that opens files to

@@ -424,15 +424,6 @@ tools the virtual key allows are the gateway's: every run has them ([tools.md](t
 a2a(url)(message, user=, tenant=)` outside a run, as the run inside one)
 ([surfaces.md](surfaces.md#calling-a2a-agents)).
 
-### background
-
-`background(*agents)` — the agents as background tasks: Deep Agents' five async sub-agent
-tools (`start_async_task`, `check_async_task`, `update_async_task`, `cancel_async_task`,
-`list_async_tasks`). A task is a queued child run of the turn that started it, worked by a
-worker (`h.worker([agent])`) while the conversation goes on; it is its user's only, takes a new
-instruction at its next step, and its answer reaches the conversation. Opt-in
-(`ReAct(tools=[background(research)])`) ([subagents.md](subagents.md#in-the-background)).
-
 ### ask_user
 
 `ask_user()` — a tool the model asks the person with: `ask_user(question, options=None,
