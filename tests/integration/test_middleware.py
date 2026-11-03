@@ -68,7 +68,7 @@ async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
     alpha = tool(lambda: "a", name="alpha")
     model = ScriptedChatModel(turns=[("zeta", {}), "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
-    agent = arm(harness.wrap(target, id="sorted"), [zeta, alpha])
+    agent = arm(harness.wrap(target, id="sorted", without={"schedules"}), [zeta, alpha])
     assert isinstance(agent.adapter, LangGraphAdapter)
     assert (agent.adapter.fixed_tools, agent.adapter.narrows) == (False, "turn")
     assert HARNESS_TOOLS in _HarnessToolsState.__annotations__  # how the harness tells
@@ -93,7 +93,7 @@ async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None
 
     model = ScriptedChatModel(turns=[("mine", {"x": "1"}), "done"])
     target = graph(model, HarnessTools(), tools=[mine])
-    agent = arm(harness.wrap(target, id="own"), [look])
+    agent = arm(harness.wrap(target, id="own", without={"schedules"}), [look])
     assert (await agent.run("x", user="u")).answer == "done"
     assert model.requests[0]["tools"] == ["look", "mine"]
     assert tool_messages(model, 1) == [("call_1_0", "mine 1")]

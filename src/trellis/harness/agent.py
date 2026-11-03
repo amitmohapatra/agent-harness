@@ -100,6 +100,7 @@ from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
+from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
 from trellis.harness.tools.base import Source, Tool, arguments_problem
@@ -861,8 +862,9 @@ class Agent:
         return memory.bind(identity)
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
-        """The toolbox (kept fresh per tenant: ``tools/toolbox.py``) and the memory pull
-        tools — none, with a warning, when the memory service cannot list them — less the
+        """The toolbox (kept fresh per tenant: ``tools/toolbox.py``), the memory pull
+        tools — none, with a warning, when the memory service cannot list them — and the
+        schedule tools (``schedules.py``; a target whose tools are fixed gets neither), less the
         tools of what the run is without (``without=``: its MCP tools...); and the tools the
         run's front end declared (``frontend.py``), but one named as one of those, which is
         said in a warning."""
@@ -877,6 +879,9 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
+        if not self.adapter.fixed_tools:  # the agent's own tool of the same name wins
+            named = {t.name for t in tools}
+            tools.extend(t for t in schedule_tools() if t.name not in named)
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})

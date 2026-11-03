@@ -10,6 +10,9 @@
   (or ``?after=``), then live until it finishes. A run this process did not serve is read
   from agent-runs' event log when ``RUNS_URL`` is set (its ids are then the log's positions):
   any replica serves any run.
+* ``GET {path}/threads/{thread_id}/events`` — the caller's chat thread: every run of it, the
+  runs its schedules fire included, live and after ``Last-Event-ID`` (``threads.py``), so a
+  scheduled reply shows while the chat is open.
 * ``POST {path}/runs/{run_id}/cancel`` — stop the run, whatever it is doing (``agent.cancel``):
   it ends ``CANCELLED`` and its stream with ``RUN_FINISHED``. Only the run's own user.
 * ``GET {path}/runs/{run_id}/artifacts/{artifact_id}`` — data the interrupt a paused run
@@ -78,6 +81,7 @@ from trellis.harness.agui.events import (
 )
 from trellis.harness.agui.hub import Hub, RunBuffer
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
+from trellis.harness.agui.threads import Threads
 from trellis.harness.agui.translate import translate
 from trellis.harness.conversation import Mode
 from trellis.harness.files import StoredFile, scope
@@ -197,6 +201,7 @@ class _Surface:
         self.agent = agent
         self.identity = identity
         self.hub = Hub()
+        self.threads = Threads(agent)
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def user(self, request: Request) -> str:
@@ -532,6 +537,29 @@ def _router(surface: _Surface, path: str) -> APIRouter:
         except HTTPException as exc:
             return _problem(exc, request)
         return EventStream(_sse(buffer, start))
+
+    @router.get(
+        "/threads/{thread_id}/events",
+        summary="Every run of a chat thread, scheduled ones included",
+        response_class=EventStream,
+        responses={200: _SSE_DOC, **_refusals(401)},
+    )
+    async def thread_events(
+        request: Request,
+        thread_id: str,
+        after: str | None = None,
+        last_event_id: str | None = Header(default=None),
+    ) -> Response:
+        """The caller's thread: its latest runs after `Last-Event-ID` (or `?after=`; ids are
+        `<runId>:<number>`), then each run that starts in it, the runs its schedules fire
+        included (a scheduled run with nothing to report is left out), until the client
+        goes."""
+        try:
+            user = await surface.user(request)
+        except HTTPException as exc:
+            return _problem(exc, request)
+        tenant = await surface.agent.harness._tenant()
+        return EventStream(surface.threads.stream(tenant, user, thread_id, last_event_id or after))
 
     @router.post(
         "/runs/{run_id}/cancel",

@@ -89,7 +89,7 @@ def recorded(tmp_path: Path) -> dict[str, Any]:
 async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path: Path) -> None:
     refunds.clear()
     script = [{"tool": "lookup", "args": {"topic": "tea"}}, {"text": "found: {last}"}]
-    agent = arm(harness.wrap(fake(tmp_path, script), id="lookups"), [lookup])
+    agent = arm(harness.wrap(fake(tmp_path, script), id="lookups", without={"schedules"}), [lookup])
     result = await agent.run("tell me about tea", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "found: facts about tea"
     record = recorded(tmp_path)
@@ -730,6 +730,7 @@ async def test_framework_options_add_env_and_servers_and_replace_the_rest(
     agent = harness.wrap(
         fake(tmp_path, [{"text": "ok"}], env={"KIMI_ONE": "1"}),
         id="opts",
+        without={"schedules"},
         framework_options={"env": {"KIMI_TWO": "2"}, "mcp_servers": [server]},
     )
     await agent.run("x", user="u1", framework_options={"mode": "default"})
@@ -755,9 +756,9 @@ async def test_the_teams_http_and_sse_servers_go_to_the_agent(
         {"type": "http", "name": "web", "url": "http://127.0.0.1:9/mcp", "headers": []},
         {"type": "sse", "name": "old", "url": "http://127.0.0.1:9/sse", "headers": []},
     )
-    await harness.wrap(fake(tmp_path, [{"text": "ok"}], mcp_servers=servers), id="srv").run(
-        "x", user="u1"
-    )
+    await harness.wrap(
+        fake(tmp_path, [{"text": "ok"}], mcp_servers=servers), id="srv", without={"schedules"}
+    ).run("x", user="u1")
     assert [s["name"] for s in recorded(tmp_path)["sessions"][0]["servers"]] == ["web", "old"]
 
 

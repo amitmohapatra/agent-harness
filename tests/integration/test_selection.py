@@ -178,10 +178,12 @@ async def test_without_mcp_the_gateway_is_not_asked_for_the_keys_tools(
     async with Harness(
         config=Settings(), memory=memory_service.client(), gateway=cast("Gateway", stub)
     ) as h:
-        agent = arm(h.wrap(fn, id="local", without={"mcp"}), [stock])
+        agent = arm(h.wrap(fn, id="local", without={"mcp", "schedules"}), [stock])
         local = (await agent.run("q", user="u")).answer
         assert "stock" in local and "wiki-search" not in local
-        built = await native_tools(h, stock, framework="langgraph", without={"mcp", "memory"})
+        built = await native_tools(
+            h, stock, framework="langgraph", without={"mcp", "memory", "schedules"}
+        )
         assert [t.name for t in built] == ["stock"]
         await h.writes.drain()
         assert stub.listed == 0
@@ -209,7 +211,7 @@ async def test_a_graph_with_the_middleware_is_offered_only_the_tools_its_run_use
     from langchain.agents import create_agent
 
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
-        tools = await native_tools(h, stock, framework="langgraph")
+        tools = await native_tools(h, stock, framework="langgraph", without={"schedules"})
         bound = sorted(t.name for t in tools)
         assert "memory_search" in bound and "stock" in bound
         model = Offering(plan=[("stock", {"sku": "A-1"})])

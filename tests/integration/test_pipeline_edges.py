@@ -356,7 +356,9 @@ async def test_the_toolbox_for_openai_agents_is_function_tools(harness: Harness)
 
     # with read_file and query_result, which page and query a large result the run keeps
     # (enabled once there is one)
-    [native, read_file, query] = await native_tools(harness, lookup, framework="openai_agents")
+    [native, read_file, query] = await native_tools(
+        harness, lookup, framework="openai_agents", without={"schedules"}
+    )
     assert isinstance(native, FunctionTool) and native.name == "lookup"
     assert (read_file.name, query.name) == ("read_file", "query_result")
 

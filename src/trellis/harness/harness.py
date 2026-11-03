@@ -50,6 +50,7 @@ from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import Runtime, current, reason_of
+from trellis.harness.schedules import LimitsHook, schedule_tools
 from trellis.harness.settings import Settings, default_files_url
 from trellis.harness.subagents import asked_by
 from trellis.harness.tools.base import Source, Tool
@@ -108,7 +109,11 @@ class Harness:
     process): given, each is used as it is (and closed by its owner, not here); not given, each
     is built from the environment (``MEMORY_URL``, ``RUNS_URL``, ``LLM_GATEWAY=bifrost``); ``False``
     leaves memory, the gateway or agent-runs off (runs kept in this process) even where the
-    environment names them."""
+    environment names them.
+
+    ``schedule_limits``: ``async (user, tenant) -> ScheduleLimits | None``, the limits of the
+    schedules a user sets in chat for that user or their plan, over the environment's
+    (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``); ``None``: those."""
 
     def __init__(
         self,
@@ -117,8 +122,10 @@ class Harness:
         memory: MemoryClient | Literal[False] | None = None,
         runs: RunStore | Literal[False] | None = None,
         gateway: Gateway | Literal[False] | None = None,
+        schedule_limits: LimitsHook | None = None,
     ) -> None:
         self.settings = config or Settings.from_env()
+        self.schedule_limits = schedule_limits
         s = self.settings
         builds_runs = runs is None and s.runs_url is not None
         builds_memory = memory is None and s.memory_url is not None
@@ -560,6 +567,13 @@ class Harness:
             return []
         scope = self.memory.scoped(await self._tenant(tenant))
         return convert("langchain", await self._pull_tools(scope))
+
+    def schedule_tools(self) -> list[Any]:
+        """The schedule tools (``schedule_task``, ``list_schedules``, ``update_schedule``,
+        ``cancel_schedule``: ``schedules.py``) as LangChain tools, for a graph you build
+        yourself with its tools bound, as :meth:`memory_tools`; every other target gets them
+        on its own. Each call is the run's, governed and recorded like any tool of it."""
+        return convert("langchain", schedule_tools())
 
     async def _pull_tools(self, run_memory: RunMemory) -> list[Tool]:
         """The memory service's agent tools, each calling the service in the current run."""

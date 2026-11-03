@@ -259,7 +259,9 @@ async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     memory_service.candidates_for = {"find t4": ["t4", "eta"]}
     model = ScriptedModel([("tool_search", {"task": "find t4"}), ("t4", {"key": "k"}), "done"])
     target = Agent(name="n", model=model, tools=[eta])
-    agent = arm(memory_harness.wrap(target, id="n"), [make(i) for i in range(6)])
+    agent = arm(
+        memory_harness.wrap(target, id="n", without={"schedules"}), [make(i) for i in range(6)]
+    )
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
     # offered in name order, the agent's own among them, as every other adapter offers them
@@ -543,7 +545,9 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
         [("transfer_to_billing", {}), ("memory_search", {"query": "orders"}), "checked"]
     )
     triage, billing, _ = _desk(model)
-    agent = arm(memory_harness.wrap(triage, id="desk"), [make(i) for i in range(6)])
+    agent = arm(
+        memory_harness.wrap(triage, id="desk", without={"schedules"}), [make(i) for i in range(6)]
+    )
     assert (await agent.run("find t2", user="u1")).answer == "checked"
     assert model.tools[0] == sorted(["t2", *MEMORY_TOOLS])
     # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)

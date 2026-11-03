@@ -221,7 +221,7 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
 async def test_memory_tools_are_built_in_with_h_tools(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    tools = await native_tools(memory_harness, stock, framework="langgraph")
+    tools = await native_tools(memory_harness, stock, framework="langgraph", without={"schedules"})
     assert [t.name for t in tools] == ["stock", *MEMORY_TOOLS]
     model = ScriptedChatModel(
         turns=[("memory_search", {"query": "x"}), ("stock", {"sku": "a"}), "found"]

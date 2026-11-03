@@ -398,6 +398,66 @@ schedule with `RunsClient`: `await runs.schedules.update(schedule_id,
 ScheduleUpdate(enabled=False))` (or `True`). In process, a due schedule fires when a worker asks
 for work; in agent-runs its ticker queues the run.
 
+### Schedules users set in chat
+
+"Every Monday at 8 check stock and tell me if it's under 5", then "what are my schedules",
+"change it to 9", "pause it", "cancel it": every agent has four built-in tools for this
+(`trellis/harness/schedules.py`), on agent-runs' schedules (`RUNS_URL`) or `LocalRuns`'. Nothing
+to configure; `without=["schedules"]` turns them off (for the agent or one run). A graph built
+with its tools bound takes them as it takes the memory tools: `h.schedule_tools()`.
+
+| Tool | What it does |
+|---|---|
+| `schedule_task(task, when, condition=None, once=False, timezone="UTC")` | `when` is a 5-field cron the model writes (`0 9 * * *` daily at 9, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st), checked with `croniter`; `once=True` ends the schedule after its run |
+| `list_schedules()` | the user's schedules set in chat with this agent: id, task, time, condition, active or paused, next run |
+| `update_schedule(id, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes |
+| `cancel_schedule(id)` | deletes it |
+
+- **Whose.** A schedule acts for the run's user, in the key's tenant (`on_behalf_of`); each user
+  sees and changes only their own, and only those set in chat (a schedule your code makes with
+  `agent.schedule` is not listed).
+- **The same chat.** A fired run is the same agent, user and thread: the schedule's metadata
+  names the thread (`thread_id`), and agent-runs fires the run into it. Its reply is saved into
+  that conversation like any turn (memory's transcript, or this process's history with memory
+  off), so it is there when the user opens the chat; an open chat hears it at once on the AG-UI
+  thread stream ([surfaces.md](surfaces.md)). It takes the agent's own `run_timeout` and budget,
+  and a write it makes goes through the same governance and approvals (an `ask` in the chat).
+- **Only when it matters.** With a `condition`, the run is told to reply exactly `NO_REPORT`
+  when it does not hold. Such a run is not delivered: its output is `NO_REPORT`, it is not
+  written to the conversation, not grounded or judged, and the thread stream leaves it out. A
+  condition that still holds is reported once: the runs after stay quiet (`NO_REPORT`) until
+  it stops holding (`trellis_reported` in the schedule's metadata).
+- **Limits.** `TRELLIS_SCHEDULE_MIN_INTERVAL` (default 300 s) and
+  `TRELLIS_SCHEDULE_MAX_PER_USER` (default 20, per agent) ([configuration.md](configuration.md));
+  per user or plan, `Harness(schedule_limits=async (user, tenant) -> ScheduleLimits | None)`
+  (a `ScheduleLimits(min_interval=, max_per_user=)` field left `None` is the environment's).
+  agent-runs' own floor (one run an hour), its tenant rate limit and `max_running_per_tenant`
+  still apply. A limit reached is a sentence the model tells the user ("You have 20 of 20
+  schedules: cancel one before adding another."), not an error.
+
+**Push and email** need nothing in Trellis: agent-runs' signed webhook (`run.finished`) reaches
+your backend, which sends the notification. Its summary names the run's thread; a scheduled
+run carries `schedule_id` in its metadata, and one with nothing to report has the output
+`NO_REPORT`:
+
+```python
+from trellis.runs import RunsClient, WebhookEvent, parse_delivery, verify_signature
+from trellis.runs.webhooks import SIGNATURE_HEADER
+
+# once: await runs.webhooks.create("https://app.example/hooks/runs", [WebhookEvent.FINISHED])
+
+
+async def hook(request: Request) -> Response:
+    body = await request.body()
+    if not verify_signature(SECRET, request.headers.get(SIGNATURE_HEADER), body):
+        return Response(status_code=401)
+    delivery = parse_delivery(body)
+    record = await runs.get(delivery.data.run.run_id, tenant=delivery.tenant_id)
+    if record and "schedule_id" in record.metadata and record.output != "NO_REPORT":
+        await notify(record.on_behalf_of, record.thread_id, record.output)  # push, email
+    return Response(status_code=204)
+```
+
 ## The inbox
 
 `await h.inbox("role:procurement")` — the paused runs waiting on that assignee (or, with no

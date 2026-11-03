@@ -13,7 +13,8 @@ interchangeable. Both behave the same way:
   key and tenant) —, heartbeats it, and names itself on the pause and the finish so a worker
   whose lease lapsed cannot write over another's run; each lease says the working time the
   run has left; a stopping worker releases the runs it holds back to the queue;
-* a schedule's fire copies its ``timeout_seconds`` and ``agent_version`` into the run;
+* a schedule's fire copies its ``timeout_seconds`` and ``agent_version`` into the run, and
+  the thread its metadata names (``thread_id``) as the run's;
 * a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
   the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
   run is cancelled when its lease runs out.
@@ -70,7 +71,9 @@ from trellis.runs import (
     Lease,
     LeaseLostError,
     NotFoundError,
+    Page,
     RunSummary,
+    ScheduleUpdate,
 )
 from trellis.runs.artifacts import JSON_MIME
 from trellis.runs.client import LEASE_SECONDS
@@ -101,9 +104,29 @@ class RunArtifacts(Protocol):
 
 
 class RunSchedules(Protocol):
-    """``runs.schedules``: what ``Agent.schedule`` creates."""
+    """``runs.schedules``: what ``Agent.schedule`` creates, and what the chat's schedule tools
+    (``schedules.py``) list, change and cancel."""
 
     async def create(self, spec: ScheduleSpec) -> Schedule: ...
+
+    async def list(
+        self,
+        *,
+        enabled: bool | None = ...,
+        agent_id: str | None = ...,
+        on_behalf_of: str | None = ...,
+        cursor: str | None = ...,
+        limit: int = ...,
+        tenant: str | None = ...,
+    ) -> Page[Schedule]: ...
+
+    async def get(self, schedule_id: str, *, tenant: str | None = ...) -> Schedule | None: ...
+
+    async def update(
+        self, schedule_id: str, changes: ScheduleUpdate, *, tenant: str | None = ...
+    ) -> Schedule: ...
+
+    async def delete(self, schedule_id: str, *, tenant: str | None = ...) -> None: ...
 
     async def fire(
         self, schedule_id: str, *, at: datetime | None = ..., tenant: str | None = ...
@@ -430,6 +453,7 @@ class LocalRuns:
                 awaiting=record.awaiting,
                 assignee=_assignee(record),
                 deadline=record.deadline,
+                thread_id=record.thread_id,
                 updated_at=record.updated_at,
             )
 
@@ -558,6 +582,7 @@ class LocalRuns:
                 agent_id=schedule.agent_id,
                 user_id=schedule.on_behalf_of,
                 on_behalf_of=schedule.on_behalf_of,
+                thread_id=_thread(schedule),
                 workspace_id=schedule.workspace_id,
                 input=schedule.input,
                 timeout_seconds=schedule.timeout_seconds,
@@ -638,15 +663,68 @@ class LocalSchedules:
         kept[schedule.schedule_id] = schedule
         return schedule
 
+    async def list(
+        self,
+        *,
+        enabled: bool | None = None,
+        agent_id: str | None = None,
+        on_behalf_of: str | None = None,
+        cursor: str | None = None,
+        limit: int = PAGE_LIMIT,
+        tenant: str | None = None,
+    ) -> Page[Schedule]:
+        """The tenant's schedules, newest first, filtered as agent-runs filters them; the
+        cursor is the offset of the next page."""
+        wanted = {"enabled": enabled, "agent_id": agent_id, "on_behalf_of": on_behalf_of}
+        found = [
+            s
+            for s in reversed(self._runs._schedules.values())
+            if tenant in (None, s.tenant_id)
+            and all(v is None or getattr(s, k) == v for k, v in wanted.items())
+        ]
+        start = int(cursor or 0)
+        after = start + limit
+        return Page[Schedule](
+            items=found[start:after], next_cursor=str(after) if after < len(found) else None
+        )
+
+    async def get(self, schedule_id: str, *, tenant: str | None = None) -> Schedule | None:
+        found = self._runs._schedules.get(schedule_id)
+        return found if found is not None and tenant in (None, found.tenant_id) else None
+
+    async def update(
+        self, schedule_id: str, changes: ScheduleUpdate, *, tenant: str | None = None
+    ) -> Schedule:
+        """Change the fields ``changes`` sets, as agent-runs does: ``metadata`` merged into the
+        schedule's, a new cadence or zone re-arming the next fire."""
+        schedule = self._owned(schedule_id, tenant)
+        changed = changes.model_dump(exclude_unset=True)
+        if "metadata" in changed:
+            changed["metadata"] = {**schedule.metadata, **(changed["metadata"] or {})}
+        updated = Schedule.model_validate({**schedule.model_dump(), **changed})
+        if {"cadence", "timezone"} & changed.keys():
+            updated = updated.model_copy(
+                update={"next_fire_at": _next_fire(updated, datetime.now(UTC))}
+            )
+        self._runs._schedules[schedule_id] = updated
+        return updated
+
+    async def delete(self, schedule_id: str, *, tenant: str | None = None) -> None:
+        del self._runs._schedules[self._owned(schedule_id, tenant).schedule_id]
+
+    def _owned(self, schedule_id: str, tenant: str | None) -> Schedule:
+        schedule = self._runs._schedules.get(schedule_id)
+        if schedule is None or tenant not in (None, schedule.tenant_id):
+            raise NotFoundError(f"no schedule {schedule_id}", code="NOT_FOUND", status=404)
+        return schedule
+
     async def fire(
         self, schedule_id: str, *, at: datetime | None = None, tenant: str | None = None
     ) -> FireResult:
         """Queue the schedule's run now, as agent-runs' ``schedules.fire`` does: for the tick
         ``at`` (a repeat for it answers the same run), else for the tick it is due for, else
         for now — a ``manual`` schedule's only way to run."""
-        schedule = self._runs._schedules.get(schedule_id)
-        if schedule is None or tenant not in (None, schedule.tenant_id):
-            raise NotFoundError(f"no schedule {schedule_id}", code="NOT_FOUND", status=404)
+        schedule = self._owned(schedule_id, tenant)
         current = datetime.now(UTC)
         due = schedule.next_fire_at
         tick = at or (due if due is not None and due <= current else current)
@@ -677,6 +755,16 @@ NAMED_CADENCES: Final = {
     "weekly": "0 0 * * 1",
     "weekdays": "0 0 * * 1-5",
 }
+
+
+#: The schedule metadata key naming the conversation its runs are turns of (agent-runs fires
+#: them with it as their ``thread_id``).
+THREAD: Final = "thread_id"
+
+
+def _thread(schedule: Schedule) -> str | None:
+    thread = schedule.metadata.get(THREAD)
+    return thread if isinstance(thread, str) and thread else None
 
 
 def _next_fire(spec: ScheduleSpec, after: datetime) -> datetime | None:

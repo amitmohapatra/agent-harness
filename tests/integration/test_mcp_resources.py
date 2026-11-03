@@ -78,7 +78,9 @@ async def test_a_server_with_no_resource_has_no_read_tool(harness: Harness) -> N
     async def toolbox(input: str, agent: Runtime) -> list[str]:
         return sorted(agent.toolbox)
 
-    result = await arm(harness.wrap(toolbox, id="none"), [docs(NONE="1")]).run("go", user="u")
+    result = await arm(
+        harness.wrap(toolbox, id="none", without={"schedules"}), [docs(NONE="1")]
+    ).run("go", user="u")
     assert result.answer == ["docs-ping"]
 
 

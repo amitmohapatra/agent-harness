@@ -21,6 +21,7 @@ from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.features import features
 from trellis.harness.governance import Governance
+from trellis.harness.schedules import schedule_tools
 from trellis.harness.tools.sources import as_source
 
 #: The native tool format each framework's agents are built with.
@@ -64,4 +65,6 @@ async def native_tools(
     if h.memory is not None and "memory_pull" not in off:
         scope = h.memory.scoped(tenant)
         tools.extend(t for t in await h._pull_tools(scope) if t.feature not in off)
+    if "schedules" not in off:
+        tools.extend(schedule_tools())
     return convert(FORMATS[framework], tools)  # type: ignore[arg-type]

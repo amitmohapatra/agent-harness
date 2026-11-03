@@ -59,7 +59,9 @@ def http_server() -> Iterator[str]:
 
 
 async def names_and(agent_fn: Any, harness: Harness, *tools: Any, **wrap: Any) -> Any:
-    return await arm(harness.wrap(agent_fn, id="notes", **wrap), list(tools)).run("go", user="u")
+    without = {"schedules", *wrap.pop("without", ())}
+    agent = harness.wrap(agent_fn, id="notes", without=without, **wrap)
+    return await arm(agent, list(tools)).run("go", user="u")
 
 
 async def toolbox(input: str, agent: Runtime) -> list[str]:
@@ -78,7 +80,7 @@ async def test_a_local_servers_tools_are_named_by_it_and_judged_by_their_annotat
         seen.extend([sorted(agent.toolbox), read, added])
         return "done"
 
-    agent = arm(harness.wrap(notes, id="notes"), [local()])
+    agent = arm(harness.wrap(notes, id="notes", without={"schedules"}), [local()])
     events = [e async for e in agent.stream("go", user="u")]
     names, read, added = seen
     assert names == [

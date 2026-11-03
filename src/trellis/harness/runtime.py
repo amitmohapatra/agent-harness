@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from trellis.harness.governance.decision import Decision
     from trellis.harness.prompts import ResolvedPrompt
     from trellis.harness.sandbox.base import Sandbox
+    from trellis.harness.schedules import Fired
     from trellis.harness.tools.base import Tool
     from trellis.memory import MemoryContext
     from trellis.memory.models import ToolHints
@@ -281,6 +282,8 @@ class Runtime:
     stalled: ModelTimeout | None = None
     #: what the run's front end gave it: its tools, context and state (``frontend.py``)
     frontend: Frontend | None = None
+    #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
+    scheduled: Fired | None = None
     _state: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -389,8 +392,9 @@ class Runtime:
         self.events.custom(LOG, message=message, **fields)
 
     def tool_names(self) -> list[str]:
-        """The run's own harness tools (the memory service's pull tools are not candidates)."""
-        return [name for name, found in self.toolbox.items() if found.spec.source != "memory"]
+        """The run's own harness tools (the built-in ones, the memory service's pull tools and
+        the schedule tools, are not candidates)."""
+        return [name for name, found in self.toolbox.items() if not _built_in(found)]
 
     def tool_set(self) -> list[str]:
         """The run's tool set: its harness tools (:meth:`tool_names`) and the framework's own
@@ -408,12 +412,13 @@ class Runtime:
     def offers(self, name: str) -> bool:
         """Whether the model is offered ``name`` now (per turn where the framework allows): a
         tool of the run's tool set the narrowing left out is not; a memory tool always is, and
-        so is a tool outside the set (a graph's own state tools, ``read_file``)."""
+        so is a schedule tool, and a tool outside the set (a graph's own state tools,
+        ``read_file``)."""
         if self.offered is None or name in self.offered or name in self.used:
             return True
         found = self.toolbox.get(name)
         if found is not None:
-            return found.spec.source == "memory"
+            return _built_in(found)
         own = self.native.get(name)
         return own is None or HELPER in own.tags  # a helper: never narrowed away
 
@@ -842,3 +847,9 @@ class Tools:
         hints = await self.runtime.run_memory.tool_hints(task, self.runtime.tool_set())
         self.runtime.offer([t.name for t in hints.tools])
         return hints  # type: ignore[no-any-return]
+
+
+def _built_in(tool: Tool) -> bool:
+    """A tool every run gets: the memory service's pull tools, the schedule tools — never a
+    hint's candidate, never narrowed away."""
+    return tool.spec.source == "memory" or tool.feature == "schedules"

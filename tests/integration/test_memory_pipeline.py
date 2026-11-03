@@ -186,7 +186,10 @@ async def test_from_five_tools_the_hints_narrow_what_react_is_offered_per_call(
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
     model = ScriptedChat([("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done"])
-    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    agent = arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n", without={"schedules"}),
+        many(6),
+    )
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
 
@@ -240,7 +243,10 @@ async def test_hints_below_the_floor_narrow_nothing(
     memory_service.candidates = ["t3"]
     memory_service.top_confidence = 0.1
     model = ScriptedChat(["done"])
-    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    agent = arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n", without={"schedules"}),
+        many(6),
+    )
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
@@ -262,7 +268,10 @@ async def test_a_hint_exactly_at_the_floor_narrows_and_one_just_below_does_not(
     memory_service.top_confidence = top
     memory_service.evidence_status = "INSUFFICIENT"
     model = ScriptedChat(["done"])
-    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    agent = arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n", without={"schedules"}),
+        many(6),
+    )
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
@@ -301,7 +310,10 @@ async def test_the_tools_a_learned_skill_names_are_offered_with_the_hints(
     memory_service.candidates = ["t3"]
     memory_service.learned_skills = "- archive: t3 then t4 (worked 90% of 10 runs)"
     model = ScriptedChat(["done"])
-    agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6))
+    agent = arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n", without={"schedules"}),
+        many(6),
+    )
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
@@ -327,7 +339,7 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     model = ScriptedChatModel(
         turns=[("t3", {"key": "a"}), ("tool_search", {"task": "archive it"}), "done", "plain"]
     )
-    memory_tools = await native_tools(memory_harness, framework="langgraph")
+    memory_tools = await native_tools(memory_harness, framework="langgraph", without={"schedules"})
     tools = [*graph_tools(6), *memory_tools, own]
     graph = create_agent(model, tools=tools)
     agent = memory_harness.wrap(graph, id="graph-hinted")
@@ -392,9 +404,10 @@ async def test_without_candidates_every_tool_is_offered(
     memory_service.omit_candidates = omit
     memory_service.candidates = []
     model = ScriptedChat(["done"])
-    await arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), many(6)).run(
-        "x", user="u"
-    )
+    await arm(
+        memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n", without={"schedules"}),
+        many(6),
+    ).run("x", user="u")
     # all the agent's, memory's (and ReAct's own)
     assert len(model.requests[0]["tools"]) == 6 + len(MEMORY_TOOLS)
 
@@ -451,7 +464,9 @@ async def test_pull_adds_the_memory_tools_and_they_call_the_service(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     model = ScriptedChat([("memory_search", {"query": "preferences"}), "email"])
-    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="prefs")
+    agent = memory_harness.wrap(
+        ReAct(system_prompt="s", model=model), id="prefs", without={"schedules"}
+    )
     result = await agent.run("how do I like to be contacted?", user="u1")
     assert result.answer == "email"
     offered = [t["function"]["name"] for t in model.requests[0]["tools"]]

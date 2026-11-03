@@ -15,6 +15,36 @@
     "tools": [
       {
         "function": {
+          "description": "Cancel one of the user's scheduled tasks.",
+          "name": "cancel_schedule",
+          "parameters": {
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "The user's scheduled tasks.",
+          "name": "list_schedules",
+          "parameters": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
           "description": "Report number 0 of one store.",
           "name": "report_0",
           "parameters": {
@@ -95,6 +125,41 @@
       },
       {
         "function": {
+          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "name": "schedule_task",
+          "parameters": {
+            "properties": {
+              "condition": {
+                "description": "Report only when this holds.",
+                "type": "string"
+              },
+              "once": {
+                "description": "Run once, then end.",
+                "type": "boolean"
+              },
+              "task": {
+                "type": "string"
+              },
+              "timezone": {
+                "description": "The user's IANA zone; default UTC.",
+                "type": "string"
+              },
+              "when": {
+                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "when"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
           "description": "Units of a SKU in stock.",
           "name": "stock",
           "parameters": {
@@ -107,6 +172,37 @@
             },
             "required": [
               "sku"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "name": "update_schedule",
+          "parameters": {
+            "properties": {
+              "condition": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              },
+              "when": {
+                "description": "A new 5-field cron.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
             ],
             "type": "object"
           }
@@ -151,6 +247,36 @@
     "tools": [
       {
         "function": {
+          "description": "Cancel one of the user's scheduled tasks.",
+          "name": "cancel_schedule",
+          "parameters": {
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "The user's scheduled tasks.",
+          "name": "list_schedules",
+          "parameters": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
           "description": "Report number 0 of one store.",
           "name": "report_0",
           "parameters": {
@@ -231,6 +357,41 @@
       },
       {
         "function": {
+          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "name": "schedule_task",
+          "parameters": {
+            "properties": {
+              "condition": {
+                "description": "Report only when this holds.",
+                "type": "string"
+              },
+              "once": {
+                "description": "Run once, then end.",
+                "type": "boolean"
+              },
+              "task": {
+                "type": "string"
+              },
+              "timezone": {
+                "description": "The user's IANA zone; default UTC.",
+                "type": "string"
+              },
+              "when": {
+                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "task",
+              "when"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
           "description": "Units of a SKU in stock.",
           "name": "stock",
           "parameters": {
@@ -243,6 +404,37 @@
             },
             "required": [
               "sku"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "name": "update_schedule",
+          "parameters": {
+            "properties": {
+              "condition": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              },
+              "when": {
+                "description": "A new 5-field cron.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
             ],
             "type": "object"
           }
