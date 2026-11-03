@@ -18,6 +18,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 - Claude's `AskUserQuestion` is the run's question, as Kimi's is.
 - The schedule tools keep only what is theirs: the general asking words are the note's; the
   "update it" choice is recommended by the flag, not by its label.
+- `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
+  hour, for the cache): the model no longer "corrects" 03:53 for "in 2 hours" at 01:53 to 03:00.
 
 ### Schedules set in chat
 

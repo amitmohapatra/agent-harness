@@ -308,9 +308,14 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     condition = (args.get("condition") or "").strip() or None
     zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
     once = bool(args.get("once"))
+    counted = ""
     if minutes := args.get("in_minutes"):  # once, at that minute
-        at = datetime.now(ZoneInfo(zone_of(zone) or "UTC")) + timedelta(minutes=float(minutes))
+        start = datetime.now(ZoneInfo(zone_of(zone) or "UTC"))
+        at = start + timedelta(minutes=float(minutes))
         when, once = f"{at.minute} {at.hour} {at.day} {at.month} *", True
+        # the minute counted from, said where the model reads the time it got: the tool's
+        # text says only the hour (cached), so 03:53 for "in 2 hours" at 01:53 is not an error
+        counted = f" That is {float(minutes):g} minutes from {start:%H:%M} ({zone}), as asked."
     min_interval, max_per_user = await _limits(runtime)
     if (refused := _refused(when, min_interval)) is not None:
         return refused
@@ -342,7 +347,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
         made = await agent.harness.runs.schedules.create(spec)
     except (ValueError, ValidationError, ConflictError) as exc:
         return f"That schedule was refused: {exc}"
-    return f"Scheduled {made.schedule_id}: {_described(made)}"
+    return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
 
 
 async def _twin_asked(
