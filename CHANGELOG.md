@@ -11,6 +11,9 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   runs.md), Langfuse's address is `LANGFUSE_BASE_URL` (README), the governance example binds a
   tenant id it names (there is no `h.tenant()`), and blocks/evaluation.md no longer points at the
   retired `eval_sample` setting.
+- reliability.md: a scheduled run carries its time limit and agent version (agent-runs copies
+  them into each fired run), and a `ReAct` model client makes one attempt only on the `bifrost`
+  route; on the other routes the client keeps its own default retries.
 
 ### Background agents moved to their own branch
 

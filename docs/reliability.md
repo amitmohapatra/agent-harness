@@ -97,10 +97,12 @@ run's own limit still bounds them.
 
 **How.** `ReAct(system_prompt=..., model="provider/model", call_timeout=30)`.
 
-**Automatic.** The model client of a `ReAct` built with a model name makes one attempt: the
-gateway is the one place that retries a model call (a provider's `network_config.max_retries`
-in Bifrost, 0 by default: set it) and falls back (the virtual key's fallbacks), so
-attempts never multiply. All of it happens *inside* `call_timeout`, and what is left of the
+**Automatic.** Who retries a model call depends on the route. On the `bifrost` route the model
+client of a `ReAct` built with a model name makes one attempt: the gateway is the one place
+that retries (a provider's `network_config.max_retries` in Bifrost, 0 by default: set it) and
+falls back (the virtual key's fallbacks), so attempts never multiply. On the
+`openai-compatible` and `provider-sdk` routes the client keeps its own default retries (the
+harness adds none). All of it happens *inside* `call_timeout`, and what is left of the
 run bounds it. A model error left is a `ModelError`, retryable for those causes (a queued run
 is queued again, its graph continuing from its checkpoint).
 
@@ -173,10 +175,10 @@ handle = await agent.start(task, user="ada", run_timeout=600, deadline=tomorrow_
 * agent-runs enforces both itself (its ticker), so a run is bounded even when its worker dies
   and never comes back.
 * Every entry starts an attempt the one way (`pipeline.attempt`, from the run's record), so a
-  chat run, an A2A task and an evaluation item are bounded as `agent.run` is. A scheduled run's
-  record names no limit (agent-runs' schedules carry none yet): the worker that runs it holds
-  it to the agent's `timeout`, but agent-runs' ticker does not, and the run records no agent
-  version.
+  chat run, an A2A task and an evaluation item are bounded as `agent.run` is. A scheduled run
+  is bounded too: `agent.schedule(run_timeout=)` (else the agent's) and the agent's version go
+  into the schedule (`ScheduleSpec.timeout_seconds`, `agent_version`), and agent-runs copies
+  them into every run it fires, so its ticker holds that run to the limit as well.
 
 **On failure.** The run ends `TIMEOUT` with an error `run_timeout` (working time) or
 `run_deadline`, category `TIMEOUT`, `retryable` false — a run out of time is not run again.
@@ -220,7 +222,7 @@ them bounds them.
 | Layer | What it retries | How often, how long | Bounded by |
 |---|---|---|---|
 | Bifrost SDK (the judge's models) | a completion on a dropped connection, `408/409/425/429/5xx` | 3 attempts, 0.5 s jittered backoff, `Retry-After` ≤ 30 s, 60 s per attempt; a circuit breaker opens for 30 s after 5 failed calls | the run's time |
-| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | nothing: the gateway retries | 1 attempt | `call_timeout`, the run's time |
+| `ReAct`'s model client (`ChatOpenAI`, `ChatAnthropic`) | on the `bifrost` route nothing (the gateway retries); on other routes a failed call, per the client's own default | 1 attempt on `bifrost`; the client's default elsewhere | `call_timeout`, the run's time |
 | Bifrost (the gateway) | a model call, per a provider's `network_config.max_retries` (default 0), then the virtual key's fallbacks | its configuration | `call_timeout`, the run's time |
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
