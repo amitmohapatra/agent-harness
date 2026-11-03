@@ -96,7 +96,7 @@ outside a tool (and the model calls) run again on the re-run.
 | A run on a cadence, acting for someone | `await agent.schedule(cron, user=..., input=...)` — idempotent, so it is safe in deployment code |
 | Development and tests | leave `RUNS_URL` unset: runs, the queue and schedules live in the process (`LocalRuns`) and nothing survives a restart |
 | Workers in production: deploys, scaling, stop signals | `python -m trellis.harness.worker module:h --concurrency N` (default the CPU count, 1–8); `SIGTERM` lets held runs finish for 25 s, then releases them for another worker — give the container ~45 s ([runs.md](runs.md#workers)) |
-| A run bounded in time, or stopped | `run`/`stream`/`start(..., timeout=, deadline=)` (working time across attempts; an end time) → `TIMEOUT`; `await agent.cancel(run_id, reason=...)` wherever it is ([reliability.md](reliability.md)) |
+| A run bounded in time, or stopped | `run`/`stream`/`start(..., run_timeout=, deadline=)` (working time across attempts; an end time) → `TIMEOUT`; `await agent.cancel(run_id, reason=...)` wherever it is ([reliability.md](reliability.md)) |
 | Tools that may hang, services that blip, workers that die | `@tool(call_timeout=)` (and `openapi`/`a2a` `timeout=`): reads are retried, writes run once, and a write that timed out or was cut by a crash is told to the model as unknown, never re-run ([reliability.md](reliability.md#unknown-outcomes)) |
 | Memory writes that survive an outage and a restart | `TRELLIS_SPOOL_DIR` on a volume that outlives the process: what could not be delivered is replayed at the next start ([memory.md](memory.md#background-writes-what-is-guaranteed)) |
 
@@ -110,8 +110,8 @@ A run started with `run`/`stream` resumes in the process that calls `resume`; on
 | a tool that may hang to give up | `@tool(call_timeout=20)`, `openapi(spec, call_timeout=)`, `a2a(url, timeout=)` — a read says it timed out, a write is reported as of unknown effect |
 | a model call bounded | `ReAct(..., call_timeout=30)` |
 | a `ReAct` model whose window is not 128k tokens (and whose profile does not say) | `ReAct(..., context_window=32_000)`: older results are cleared and older turns summarized from it |
-| every run of an agent bounded, however it starts (chat, A2A, evaluation, schedules too) | `h.wrap(..., timeout=900)` → `TIMEOUT` |
-| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., timeout=600, deadline=...)` (over the agent's) → `TIMEOUT` |
+| every run of an agent bounded, however it starts (chat, A2A, evaluation, schedules too) | `h.wrap(..., run_timeout=900)` → `TIMEOUT` |
+| a run that may not work longer than N seconds (pauses not counted), or must end by a time | `agent.run/stream/start(..., run_timeout=600, deadline=...)` (over the agent's) → `TIMEOUT` |
 | reads retried, writes never repeated, after a crash too | nothing: automatic ([reliability.md](reliability.md#retries)) |
 | a tool's service to deduplicate | hand it `trellis.current().idempotency_key` (OpenAPI writes send it already) |
 | to stop a run | `await agent.cancel(run_id, reason=...)` (a handle's: `agent.cancel(handle.id)`) — queued, paused, here or on a worker |
@@ -126,7 +126,7 @@ A run started with `run`/`stream` resumes in the process that calls `resume`; on
 | `start` + workers | workers in this process | any worker process, leases, crash recovery |
 | schedules | fire when a worker in this process asks for work (or `h.runs.schedules.fire(id)`) | agent-runs' ticker |
 | deadlines and escalation (`ask(deadline=, escalate_to=)`) | not enforced | the ticker escalates or times the run out |
-| a run's `timeout=` and `deadline=` | each attempt stops on time | each attempt stops on time, and the ticker ends a run past either, its worker dead or not |
+| a run's `run_timeout=` and `deadline=` | each attempt stops on time | each attempt stops on time, and the ticker ends a run past either, its worker dead or not |
 | a queued run that fails with an error that may pass | ends `ERROR` | queued again, up to 3 times, after a backoff |
 | large `ask` payloads | in process | run artifacts (`payload_ref`) |
 | a run's events from another replica | no | agent-runs' event log (`agent.events`, an AG-UI reconnect) |

@@ -379,7 +379,7 @@ run options as `start`, and every fired run gets them — agent-runs and `LocalR
 
 | Run option | `agent.start(...)` keeps it in | `agent.schedule(...)` keeps it in | Each fired run gets |
 |---|---|---|---|
-| `timeout=` (else the agent's `h.wrap(run_timeout=)`) | `RunStart.timeout_seconds` | `ScheduleSpec.timeout_seconds` | `timeout_seconds` |
+| `run_timeout=` (else the agent's `h.wrap(run_timeout=)`) | `RunStart.timeout_seconds` | `ScheduleSpec.timeout_seconds` | `timeout_seconds` |
 | the agent's `version` | `RunStart.agent_version` | `ScheduleSpec.agent_version` | `agent_version` |
 | `without=` | `RunStart.metadata["without"]` | `ScheduleSpec.metadata["without"]` | `metadata["without"]` |
 | `framework_options=` (JSON) | `RunStart.metadata["framework_options"]` | `ScheduleSpec.metadata["framework_options"]` | `metadata["framework_options"]` |
