@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import ConfigurationError, RunUsage
+from trellis.contracts import ConfigurationError
 from trellis.harness.bounded import SAID_ONCE
 
 if TYPE_CHECKING:
@@ -110,10 +110,7 @@ class Budget:
 
 
 #: What a run's end says it spent (``spent``), each counted from 0.
-SPENT_KEYS: Final = ("tokens", "cached_tokens", "cost", "model_calls", "tool_calls", "commands")
-#: The tools that run a command: the harness's sandbox (``sandbox.EXEC``), Deep Agents'
-#: backend (``tools.results.EXECUTE``), Claude's shell — counted as ``commands``.
-COMMANDS: Final = frozenset({"sandbox_exec", "execute", "Bash"})
+SPENT_KEYS: Final = ("tokens", "cached_tokens", "cost", "model_calls", "tool_calls")
 
 
 def spent(runtime: Runtime) -> dict[str, float]:
@@ -183,28 +180,11 @@ def gateway_cost(metadata: dict[str, Any]) -> float | None:
     return float(total) if isinstance(total, int | float) and not isinstance(total, bool) else None
 
 
-def count_tool_call(runtime: Runtime, tool: str = "") -> None:
-    """One harness tool call (a command too when ``tool`` runs one: :data:`COMMANDS`), on the
-    run and every run it works inside."""
-    command = tool in COMMANDS
+def count_tool_call(runtime: Runtime) -> None:
+    """One harness tool call, on the run and every run it works inside."""
     for run in _runs(runtime):
         spent = run.replay.journal.spent
         spent["tool_calls"] = spent.get("tool_calls", 0) + 1
-        spent["commands"] = spent.get("commands", 0) + command
-
-
-def used(runtime: Runtime) -> RunUsage:
-    """What the run has used so far (:func:`spent`), as the run store keeps it
-    (``RunRecord.usage``): the status view's counts."""
-    said = spent(runtime)
-    return RunUsage(
-        model_calls=int(said["model_calls"]),
-        tool_calls=int(said["tool_calls"]),
-        commands=int(said["commands"]),
-        tokens=int(said["tokens"]),
-        cached_tokens=int(said["cached_tokens"]),
-        cost=float(said["cost"]),
-    )
 
 
 def reached(runtime: Runtime) -> str | None:
@@ -241,7 +221,6 @@ def _no_cost(model: str) -> None:
 __all__ = [
     "BUDGET",
     "BUDGET_EXCEEDED",
-    "COMMANDS",
     "LIMIT",
     "SPENT",
     "SPENT_KEYS",
@@ -254,5 +233,4 @@ __all__ = [
     "reached",
     "spent",
     "stopped",
-    "used",
 ]

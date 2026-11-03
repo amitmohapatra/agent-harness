@@ -71,10 +71,9 @@ class Bounded(LocalRuns):
         *,
         checkpoint: dict[str, Any] | None = None,
         worker_id: str | None = None,
-        **kw: Any,
     ) -> RunRecord:
         bounded(checkpoint)
-        return await super().pause(interrupt, checkpoint=checkpoint, worker_id=worker_id, **kw)
+        return await super().pause(interrupt, checkpoint=checkpoint, worker_id=worker_id)
 
 
 def bounded(checkpoint: dict[str, Any] | None) -> None:

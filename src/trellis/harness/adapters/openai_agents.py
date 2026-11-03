@@ -808,7 +808,6 @@ def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
             if inspect.isawaitable(given):
                 given = await given
         items: list[Any] = list(given.input)
-        await runtime.step()  # the run's inbox: its instructions, a person's pause
         kept.extend((len(items), {"role": "user", "content": s.text}) for s in runtime.steered())
         for offset, (at, item) in enumerate(kept):
             items.insert(at + offset, item)
