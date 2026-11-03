@@ -76,6 +76,11 @@ HELPER: Final = "helper"
 #: (Claude Code's and Kimi's built-ins, Deep Agents' own): of the run's tool set, but not of
 #: what the narrowing counts (``adapters.base.BUILTIN``).
 BUILTIN: Final = "builtin"
+#: The first wait, and the longest, between tries to save the start of a call that does more
+#: than read while agent-runs cannot be reached (:meth:`Runtime.saved_start`).
+START_RETRY_SECONDS: Final = (1.0, 8.0)
+#: The sleep those waits take (a test's clock replaces it).
+_pause = asyncio.sleep
 #: How often the journal is saved as progress after calls that only read (or model steps);
 #: after a side-effecting call it is saved at once.
 PROGRESS_SECONDS: Final = 20.0
@@ -270,6 +275,8 @@ class Runtime:
     _saving: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     #: the model calls under way, each with the watchdog that ends the attempt when it stalls
     _watched: dict[str, asyncio.TimerHandle] = field(default_factory=dict, repr=False)
+    #: why the latest progress save failed (``None``: it did not), for :meth:`saved_start`
+    _unsaved_error: Exception | None = field(default=None, repr=False)
     #: the step that stalled (its watchdog cancelled the attempt): the attempt's error
     stalled: ModelTimeout | None = None
     #: what the run's front end gave it: its tools, context and state (``frontend.py``)
@@ -558,9 +565,35 @@ class Runtime:
         except LeaseLostError:
             raise
         except Exception as exc:
+            self._unsaved_error = exc
             self._unsaved(f"{type(exc).__name__}: {exc}")
             return
         self._saved_at = clock
+
+    async def saved_start(self) -> bool:
+        """Save the journal before a call that does more than read runs, so the attempt after a
+        crash knows it was running (:meth:`progress`, ``now``). While agent-runs cannot be
+        reached (a save that may pass later) it tries again, waiting longer each time, for up
+        to half the lease: past the lease another worker may take the run, and finding no start
+        it would run the call again. ``False`` then: the call must not run. A save refused for
+        good (one that will not pass) is a warning, as for any save, and the call runs; an
+        in-process run saves no progress (nobody resumes it elsewhere)."""
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        began, slept = time.monotonic(), 0.0
+        wait, longest = START_RETRY_SECONDS
+        while True:
+            root._unsaved_error = None
+            await self.progress(now=True)
+            error = root._unsaved_error
+            if error is None or not getattr(error, "retryable", False):
+                return True
+            if max(time.monotonic() - began, slept) + wait > (root.lease_seconds or 0) / 2:
+                return False
+            await _pause(wait)
+            slept += wait
+            wait = min(wait * 2, longest)
 
     def _unsaved(self, why: str) -> None:
         message = f"progress of run {self.run_id} not saved: {why}"

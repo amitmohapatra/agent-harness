@@ -120,6 +120,8 @@ TURN_STALLED: Final = (
 MAX_REPEATS: Final = 3
 #: The ``error_class`` of that call, and the warning on the run's stream (once).
 REPEATED: Final = "Repeated"
+#: The error class of a call not run because its start could not be saved (:func:`_unsaved`).
+UNSAVED: Final = "StartUnsaved"
 
 
 async def call(
@@ -349,7 +351,9 @@ async def _ran(
     if not reads:
         # saved before it runs: the attempt after a crash knows it was running
         runtime.replay.start(key)
-        await runtime.progress(now=True)
+        if not await runtime.saved_start():
+            runtime.replay.unstart(key)
+            return _unsaved(tool)
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
@@ -366,6 +370,22 @@ async def _ran(
     outcome = await hooks.done(tool_call, outcome)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     return outcome
+
+
+def _unsaved(tool: Tool) -> ToolOutcome:
+    """A call that does more than read, not run: its start could not be saved (agent-runs could
+    not be reached), so after a crash another worker would not know it ran and could run it
+    again (``Runtime.saved_start``)."""
+    return ToolOutcome(
+        tool=tool.name,
+        status=ToolStatus.ERROR,
+        output=(
+            f"{tool.name} was not run: its start could not be saved (the run store cannot be "
+            "reached), and run unsaved it could be done twice after a crash. Try it again "
+            "later."
+        ),
+        error_class=UNSAVED,
+    )
 
 
 def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
