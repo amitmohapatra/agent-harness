@@ -765,12 +765,15 @@ def cases() -> list[Any]:
         "bf2-cantdo-02", "bf_cantdo", 2,
         (
             Turn("Set this up to run every Monday morning and send me the top 5 SKUs by units.",
-                 expect=cx.judge("Says it cannot schedule or send anything here; offers to give "
-                                 "the list now.", "I can't schedule; here is this week's list.")),
+                 expect=cx.judge("Schedules it for Monday mornings (schedule_task, the top 5 "
+                                 "SKUs by units) and says when it runs; where no schedule tool "
+                                 "is offered (without=['schedules']), says it cannot schedule "
+                                 "and offers the list now.",
+                                 "Scheduled for Mondays at 09:00; the first runs on the 9th.")),
             Turn("Fine: the top 5 SKUs by units for the last week of the data, 24 to 30 "
                  "September 2026.", expect=cx.idset([k for k, _ in wk])),
         ),
-        ("no scheduler, then the list",),
+        ("a schedule asked for, then the list",),
     ))  # fmt: skip
 
     # ---------------------------------------------------------------- clarify

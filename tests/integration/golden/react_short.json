@@ -15,12 +15,20 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks.",
+          "description": "Cancel one of the user's scheduled tasks, or id 'all' (the user is asked to confirm).",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
               "id": {
+                "description": "An id from list_schedules, or 'all'.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -33,7 +41,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -125,33 +133,62 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00, and say so. A schedule like one the user has is asked about here. One schedule a request; ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "choices": {
+                "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
+                "items": {
+                  "properties": {
+                    "condition": {
+                      "description": "Report only when this holds.",
+                      "type": "string"
+                    },
+                    "task": {
+                      "description": "What to do, as the user said it.",
+                      "type": "string"
+                    },
+                    "when": {
+                      "description": "A new 5-field cron.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "when"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "condition": {
                 "description": "Report only when this holds.",
                 "type": "string"
+              },
+              "in_minutes": {
+                "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
+                "type": "number"
               },
               "once": {
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "timezone": {
-                "description": "The user's IANA zone; default UTC.",
+                "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
               },
               "when": {
-                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
             "required": [
-              "task",
-              "when"
+              "task"
             ],
             "type": "object"
           }
@@ -180,7 +217,7 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {
@@ -191,7 +228,15 @@
                 "type": "boolean"
               },
               "id": {
+                "description": "An id from list_schedules.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "task": {
                 "type": "string"
@@ -247,12 +292,20 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks.",
+          "description": "Cancel one of the user's scheduled tasks, or id 'all' (the user is asked to confirm).",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
               "id": {
+                "description": "An id from list_schedules, or 'all'.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -265,7 +318,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -357,33 +410,62 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00, and say so. A schedule like one the user has is asked about here. One schedule a request; ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "choices": {
+                "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
+                "items": {
+                  "properties": {
+                    "condition": {
+                      "description": "Report only when this holds.",
+                      "type": "string"
+                    },
+                    "task": {
+                      "description": "What to do, as the user said it.",
+                      "type": "string"
+                    },
+                    "when": {
+                      "description": "A new 5-field cron.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "when"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "condition": {
                 "description": "Report only when this holds.",
                 "type": "string"
+              },
+              "in_minutes": {
+                "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
+                "type": "number"
               },
               "once": {
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "timezone": {
-                "description": "The user's IANA zone; default UTC.",
+                "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
               },
               "when": {
-                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
             "required": [
-              "task",
-              "when"
+              "task"
             ],
             "type": "object"
           }
@@ -412,7 +494,7 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {
@@ -423,7 +505,15 @@
                 "type": "boolean"
               },
               "id": {
+                "description": "An id from list_schedules.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "task": {
                 "type": "string"

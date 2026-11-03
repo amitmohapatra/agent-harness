@@ -12,15 +12,20 @@ from typing import Any
 
 import pytest
 
+from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, Runtime, Settings
-from trellis.contracts import RunRecord, RunStatus
+from tests.support.planned import PlannedChat
+from trellis import Harness, ReAct, Runtime, Settings, tool
+from trellis.contracts import RunRecord, RunStatus, ScheduleSpec
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
+    BOTH,
+    NEITHER,
     NO_REPORT,
     REPORTED,
     SCHEDULE_TOOLS,
     TASK,
+    UPDATE,
     ScheduleLimits,
 )
 from trellis.harness.tools.convert import text_of
@@ -38,10 +43,13 @@ class Chat:
         self.inputs: list[str] = []
         self.toolboxes: list[set[str]] = []
         self.said: list[str] = []
+        self.described: list[str] = []
 
     async def __call__(self, input: str, agent: Runtime) -> str:
         self.inputs.append(input)
         self.toolboxes.append(set(agent.toolbox))
+        found = agent.toolbox.get("schedule_task")
+        self.described.append(found.spec.description if found is not None else "")
         if input.startswith("Scheduled task:"):
             return self.fired.popleft()
         said = [text_of(await agent.tools.call(n, **a)) for n, a in self.calls]
@@ -88,6 +96,31 @@ async def test_every_run_gets_the_tools_and_without_schedules_turns_them_off() -
         assert not set(SCHEDULE_TOOLS) & chat.toolboxes[-1]
 
 
+async def test_a_fired_run_is_offered_no_schedule_tools_and_a_chat_the_day_and_hour() -> None:
+    """A fired run does its task: it is offered no schedule tool (it made schedules of its
+    own when it was). In chat ``schedule_task`` says the day and the hour, in UTC where the app
+    gave no zone; ``in_minutes`` is once, that many minutes from now."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(
+            agent, chat, "ada", ("schedule_task", {"task": "check stock", "when": "0 8 * * *"})
+        )
+        assert set(SCHEDULE_TOOLS) <= chat.toolboxes[-1]
+        now = datetime.now(UTC)
+        assert f"It is now {now:%a %Y-%m-%d}, {now:%H}:00-{now:%H}:59 (UTC;" in chat.described[-1]
+        assert only(h).timezone == "UTC"
+        chat.fired.append("12 left")
+        await fire(h, agent, only(h).schedule_id)
+        assert not set(SCHEDULE_TOOLS) & chat.toolboxes[-1]
+        local(h)._schedules.clear()
+        await said(agent, chat, "ada", ("schedule_task", {"task": "call SUP-3", "in_minutes": 120}))
+        later = only(h)
+        due = later.next_fire_at
+        assert later.metadata[TASK]["once"] is True and due is not None
+        assert timedelta(minutes=119) <= due - now <= timedelta(minutes=121)
+
+
 async def test_a_task_set_in_chat_is_the_users_in_its_thread_with_the_agents_limits() -> None:
     chat = Chat()
     async with Harness(config=Settings()) as h:
@@ -127,12 +160,10 @@ async def test_the_env_limit_and_the_per_user_hook() -> None:
     settings = Settings(schedule_max_per_user=2, schedule_min_interval=3600)
     async with Harness(config=settings) as h:
         agent = h.wrap(chat, id="desk")
-        for n in range(2):
-            await said(
-                agent, chat, "ada", ("schedule_task", {"task": f"t{n}", "when": "0 9 * * *"})
-            )
+        for task in ("check stock", "send revenue"):
+            await said(agent, chat, "ada", ("schedule_task", {"task": task, "when": "0 9 * * *"}))
         answer = await said(
-            agent, chat, "ada", ("schedule_task", {"task": "t3", "when": "0 9 * * *"})
+            agent, chat, "ada", ("schedule_task", {"task": "list suppliers", "when": "0 9 * * *"})
         )
         assert "You have 2 of 2 schedules" in answer
         answer = await said(
@@ -375,3 +406,135 @@ async def test_a_schedule_gone_or_unwritable_after_its_run_leaves_the_run_as_it_
 async def test_a_graph_built_with_its_tools_takes_them_from_the_harness() -> None:
     async with Harness(config=Settings()) as h:
         assert [t.name for t in h.schedule_tools()] == list(SCHEDULE_TOOLS)
+
+
+# --------------------------------------------------------------------------- asked with options
+
+
+@tool(side_effects="read")
+def stock(sku: str) -> int:
+    """Units of a SKU in stock now.
+
+    Args:
+        sku: The SKU, such as SKU-1.
+    """
+    return 12
+
+
+WATCH = {"task": "check stock of SKU-1", "when": "0 9 * * *", "condition": "SKU-1 under 5"}
+
+
+async def planned(h: Harness, *calls: tuple[str, dict[str, Any]], name: str = "desk") -> Any:
+    """``ReAct`` on a planned model making ``calls`` (the stock check first), with ``stock``."""
+    model = PlannedChat([("stock", {"sku": "SKU-1"}), *calls])
+    return arm(h.wrap(ReAct(system_prompt="Help.", model=model), id=name), [stock])
+
+
+async def seeded(h: Harness, agent: str, *abouts: dict[str, Any]) -> list[str]:
+    """Schedules ``ada`` has with the agent ``agent``, as ``schedule_task`` makes them."""
+    made = []
+    for about in abouts:
+        spec = ScheduleSpec(
+            tenant_id=await h._tenant(None), agent_id=agent, name=about["task"],
+            cadence=about["when"], on_behalf_of="ada",
+            metadata={TASK: {"task": about["task"], "condition": about.get("condition"),
+                             "once": False}},
+        )  # fmt: skip
+        made.append((await h.runs.schedules.create(spec)).schedule_id)
+    return made
+
+
+async def asked(agent: Any) -> Any:
+    result = await agent.run("schedule it", user="ada")
+    assert result.status is RunStatus.PAUSED and result.interrupt is not None, result.answer
+    return result.interrupt
+
+
+async def picked(agent: Any, interrupt: Any, value: str) -> str:
+    done = await agent.resume(interrupt.interrupt_id, "answer", answer=value, reviewer="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    return str(done.answer)
+
+
+@pytest.mark.parametrize(("value", "conditions"), [
+    (UPDATE, ["SKU-1 is 3 or less"]),
+    (BOTH, ["SKU-1 is 3 or less", "SKU-1 under 5"]),
+    (NEITHER, ["SKU-1 under 5"]),
+])  # fmt: skip
+async def test_a_schedule_like_one_the_user_has_is_asked_about_update_first(
+    value: str, conditions: list[str]
+) -> None:
+    """The same thing watched with another value: the user picks — update it (recommended,
+    first), keep both, or neither; the very same again is said to be set already."""
+    async with Harness(config=Settings()) as h:
+        lower = {**WATCH, "condition": "SKU-1 is 3 or less"}
+        agent = await planned(h, ("schedule_task", lower))
+        await seeded(h, "desk", WATCH)
+        interrupt = await asked(agent)
+        labels = [o.label for o in interrupt.options]
+        assert labels[0].startswith("Update it to") and labels[0].endswith("(Recommended)")
+        assert labels[1:] == ["Keep both", "Cancel"]
+        await picked(agent, interrupt, value)
+        found = [s.metadata[TASK]["condition"] for s in local(h)._schedules.values()]
+        assert sorted(found) == sorted(conditions)
+        same = {**WATCH, "condition": "SKU-1 below 5"}
+        again = await planned(h, ("schedule_task", same), name="again")
+        await seeded(h, "again", WATCH)
+        result = await again.run("schedule it", user="ada")
+        assert "Already set, nothing changed" in str(result.answer)
+
+
+async def test_a_task_in_alike_words_at_another_time_is_asked_about() -> None:
+    async with Harness(config=Settings()) as h:
+        later = {"task": "send me the sales summary", "when": "0 9 * * 1"}
+        agent = await planned(h, ("schedule_task", later))
+        await seeded(h, "desk", {"task": "Send the sales summary", "when": "0 8 * * 1"})
+        await picked(agent, await asked(agent), UPDATE)
+        assert [s.cadence for s in local(h)._schedules.values()] == ["0 9 * * 1"]
+
+
+async def test_cancel_all_is_confirmed_and_several_that_fit_are_picked_from() -> None:
+    async with Harness(config=Settings()) as h:
+        keep = await planned(h, ("cancel_schedule", {"id": "all"}), name="keep")
+        await seeded(h, "keep", WATCH, {"task": "sales summary", "when": "0 8 * * 1"})
+        interrupt = await asked(keep)
+        assert interrupt.question == "Cancel all 2 of your schedules?"
+        assert "Nothing cancelled" in await picked(keep, interrupt, NEITHER)
+        assert len(local(h)._schedules) == 2
+        gone = await planned(h, ("cancel_schedule", {"id": "all"}), name="gone")
+        await seeded(h, "gone", WATCH)
+        assert "Cancelled all 1" in await picked(gone, await asked(gone), UPDATE)
+        assert len(local(h)._schedules) == 2  # the other agent's
+        empty = await planned(h, ("cancel_schedule", {"id": "all"}), name="empty")
+        assert "You have no schedules" in str((await empty.run("x", user="ada")).answer)
+        # the user's words fit two: they pick which
+        a, b = await seeded(
+            h, "which", WATCH, {"task": "check stock of SKU-2", "when": "0 6 * * *"}
+        )
+        cancel = {"id": a, "ids": [a, b, "nope"]}
+        which = await planned(h, ("cancel_schedule", cancel), name="which")
+        interrupt = await asked(which)
+        assert [o.value for o in interrupt.options] == [a, b]
+        await picked(which, interrupt, b)
+        assert a in local(h)._schedules and b not in local(h)._schedules
+
+
+async def test_a_vague_ask_is_choices_the_user_picks_one_of() -> None:
+    choices = [
+        {"task": "revenue yesterday", "when": "0 9 * * *"},
+        {"task": "top 5 SKUs", "when": "0 9 * * 1"},
+        {"when": "0 9 * * *"},  # no task: not offered
+    ]
+    async with Harness(config=Settings()) as h:
+        agent = await planned(h, ("schedule_task", {"task": "watch sales", "choices": choices}))
+        interrupt = await asked(agent)
+        assert interrupt.question == "Which should I set up?"
+        assert [o.value for o in interrupt.options] == ["0", "1", NEITHER]
+        assert "Scheduled" in await picked(agent, interrupt, "1")
+        assert [s.cadence for s in local(h)._schedules.values()] == ["0 9 * * 1"]
+        none = await planned(h, ("schedule_task", {"task": "x", "choices": choices}), name="no")
+        assert "none of these" in await picked(none, await asked(none), NEITHER)
+        bad = await planned(
+            h, ("schedule_task", {"task": "x", "choices": [{"when": "x"}]}), name="b"
+        )
+        assert "Each choice needs" in str((await bad.run("x", user="ada")).answer)

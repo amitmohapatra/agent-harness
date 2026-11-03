@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -291,6 +293,36 @@ async def test_the_mode_comes_in_forwarded_props(harness: Harness) -> None:
         )
         assert refused.status_code == 422
         release.set()
+
+
+async def test_the_users_zone_comes_in_forwarded_props_for_their_schedules(
+    harness: Harness,
+) -> None:
+    """The app says the person's zone (``forwardedProps.timezone``, e.g. the browser's): the
+    model reads the day and hour in it, and a schedule set without a zone is in it; a zone that
+    is not one is UTC."""
+    seen: list[str] = []
+
+    async def chat(input: Any, agent: Runtime) -> str:
+        seen.append(agent.toolbox["schedule_task"].spec.description)
+        return str(await agent.tools.call("schedule_task", task=input, when="0 9 * * *"))
+
+    agent = harness.wrap(chat, id="desk")
+    async with served(agent) as http:
+        for n, zone in enumerate(("Asia/Kolkata", "Mars/Olympus")):
+            said = {
+                "messages": _said(("check stock", "send revenue")[n]),
+                "forwardedProps": {"timezone": zone},
+            }
+            body = {"threadId": f"t{n}", **said}
+            response = await http.post(f"{PATH}/run", json=body)
+            assert response.status_code == 200
+    made = harness.runs._schedules.values()  # type: ignore[attr-defined]
+    kolkata, utc = sorted(made, key=lambda s: s.timezone)
+    assert (kolkata.timezone, utc.timezone) == ("Asia/Kolkata", "UTC")
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    assert f"It is now {now:%a %Y-%m-%d}, {now:%H}:00" in seen[0] and "(Asia/Kolkata," in seen[0]
+    assert "(UTC; the user's zone is not known)" in seen[1]
 
 
 def _said(text: str) -> list[dict[str, Any]]:

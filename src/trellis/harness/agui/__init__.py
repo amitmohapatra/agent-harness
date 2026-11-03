@@ -91,6 +91,7 @@ from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import run_of
+from trellis.harness.schedules import zone_of
 from trellis.memory.errors import AuthorizationError, NotFoundError
 from trellis.runs import ConflictError
 
@@ -650,15 +651,18 @@ async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
 
 
 def _frontend(body: RunAgentInput) -> Frontend | None:
-    """What the request's front end gives the run: its tools, context and state."""
+    """What the request's front end gives the run: its tools, context, state and the person's
+    zone (one that is not an IANA zone is left out)."""
     stated = "state" in body.model_fields_set and body.state is not None
-    if not (body.tools or body.context or stated):
+    zone = zone_of(body.forwarded.timezone)
+    if not (body.tools or body.context or stated or zone):
         return None
     return Frontend(
         tools=tuple(t.model_dump(exclude_none=True) for t in body.tools),
         context=tuple(c.model_dump() for c in body.context),
         state=body.state,
         stated=stated,
+        timezone=zone,
     )
 
 

@@ -408,11 +408,31 @@ with its tools bound takes them as it takes the memory tools: `h.schedule_tools(
 
 | Tool | What it does |
 |---|---|
-| `schedule_task(task, when, condition=None, once=False, timezone="UTC")` | `when` is a 5-field cron the model writes (`0 9 * * *` daily at 9, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st), checked with `croniter`; `once=True` ends the schedule after its run |
+| `schedule_task(task, when=None, condition=None, once=False, in_minutes=None, choices=None, timezone=None)` | `when` is a 5-field cron the model writes in the user's zone (`0 9 * * *` daily at 9, `0 9,17 * * *` at 9 and 17, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st, `0 9 4 11 *` with `once` for one day), checked with `croniter`; `in_minutes` instead is once, that many minutes from now ("in 2 hours"); `once=True` ends the schedule after its run; `timezone` only when the user names one; `choices` (a vague ask): 2-3 concrete schedules, the best first, the user picks one with a button |
 | `list_schedules()` | the user's schedules set in chat with this agent: id, task, time, condition, active or paused, next run |
-| `update_schedule(id, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes |
-| `cancel_schedule(id)` | deletes it |
+| `update_schedule(id, ids=None, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes; `ids`: the schedules the user's words fit, when several do: the user picks one |
+| `cancel_schedule(id, ids=None)` | deletes it; `id="all"` deletes them all once the user confirms; `ids` as `update_schedule`'s |
 
+- **When, in whose zone.** A schedule is in the user's zone: the one they name, else the one
+  their app sends (AG-UI `forwardedProps.timezone`, e.g. the browser's
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`: [surfaces.md](surfaces.md)), else UTC.
+  `schedule_task`'s description says the day and the hour in that zone ("It is now Tue
+  2026-11-03, 14:00-14:59 (Asia/Kolkata, the user's zone)"), so "tomorrow at 9" has a date; the
+  hour, not the minute, so the tools' text stays the same for an hour, as a prompt cache keeps
+  it. With no zone known the model may ask for it.
+- **When it schedules.** On a request for something later or on a repeat, not on a question
+  that only mentions a time or a habit ("do we restock every Monday?"); it asks nothing the run
+  can work out itself (which figures a summary has; no time said is 9:00, said in the reply).
+  A condition is checked once now with the agent's own tools and the user hears the value ("12
+  now; I'll tell you when it is 5 or less"); one that holds already is said, and scheduled only
+  if the user wants to hear again. Nothing its tools can check ("when a competitor changes
+  price") is not scheduled: it says so and offers what its tools can watch. A fired run is
+  offered none of the four tools: it does its task (it made schedules of its own when it was).
+- **Asked with buttons.** Where two or more answers change the outcome, the tools ask the user
+  through the run's own question (`Runtime.ask(options=)`, buttons on AG-UI): a schedule like one
+  the user has (the same identifier, or alike words) — "Update it to ... (Recommended)", "Keep
+  both", "Cancel"; the very same again is "Already set" and nothing is asked —, cancel all, a
+  reference that fits several (`ids`), a vague ask (`choices`).
 - **Whose.** A schedule acts for the run's user, in the key's tenant (`on_behalf_of`); each user
   sees and changes only their own, and only those set in chat (a schedule your code makes with
   `agent.schedule` is not listed).

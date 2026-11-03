@@ -80,6 +80,10 @@ messages under ([ADR 0005](adr/0005-conversations-across-runs.md)).
   the request sends (the client holds it, with the changes applied), else the one the run kept.
 - `forwardedProps.mode`: what the message does while another run of the thread works here, as
   `agent.run(mode=)`: `queue` (the default), `interrupt`, `steer`. Any other value is a `422`.
+- `forwardedProps.timezone`: the person's IANA zone (the browser's
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`), kept with the run: the schedules they set
+  in chat are in it, and the model reads the day and hour in it
+  ([runs.md](runs.md#schedules-users-set-in-chat)). A name that is not an IANA zone is left out.
 
 A call that paused the run (a front-end tool, or a tool that asked a person) has no result yet:
 its `TOOL_CALL_RESULT` is not sent until the run resumes and the call ends.

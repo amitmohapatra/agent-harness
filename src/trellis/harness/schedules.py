@@ -2,8 +2,8 @@
 built-in tools every adapter gets while the run store can schedule (off: ``without=
 ["schedules"]``), on agent-runs' schedules (``RUNS_URL``) or ``LocalRuns``'.
 
-* ``schedule_task(task, when, condition=None, once=False, timezone="UTC")``: ``when`` is a
-  5-field cron the model writes, checked with ``croniter`` (agent-runs' own);
+* ``schedule_task(task, when, condition=None, once=False, in_minutes=None, timezone=None)``:
+  ``when`` is a 5-field cron the model writes, checked with ``croniter`` (agent-runs' own);
   ``list_schedules()``; ``update_schedule(id, ...)``; ``cancel_schedule(id)``. Each user sees
   and changes only their own (the run's user and tenant), and only those set in chat.
 * A fired run is the same agent, the same user and the same thread: the schedule's metadata
@@ -15,6 +15,15 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
   conversation, and the thread stream leaves it out. A condition that still holds is reported
   once: the next runs are quiet until it stops holding (:data:`REPORTED`, in the schedule's
   metadata). ``once=True`` deletes the schedule after its run.
+* The user's zone: the one the model names, else the one their app sends
+  (``forwardedProps.timezone``, ``frontend.py``), else UTC. Every run reads the time now in
+  it in ``schedule_task``'s description (:func:`now_said`), so "tomorrow at 9" has a date;
+  "in 2 hours" is ``in_minutes``. A fired run is offered none of these tools: it does its
+  task.
+* Asked with buttons (``Runtime.ask(options=)``) where the answer changes the outcome: a
+  schedule like one the user has (:func:`_twin`: update it, recommended, keep both, or
+  neither; the very same again is "already set"), ``cancel_schedule(id="all")``, several that
+  fit the user's words (``ids``) and a vague ask (``choices``).
 * Limits: ``TRELLIS_SCHEDULE_MIN_INTERVAL`` and ``TRELLIS_SCHEDULE_MAX_PER_USER`` (``Settings``),
   per user ``Harness(schedule_limits=)``; agent-runs' own floor, rate limits and
   ``max_running_per_tenant`` still apply. A limit reached is a sentence the model tells the
@@ -23,17 +32,19 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
-from trellis.contracts import RunStatus, Schedule, ScheduleSpec, ToolSpec
+from trellis.contracts import Option, RunStatus, Schedule, ScheduleSpec, ToolSpec
 from trellis.harness.runs import THREAD
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import Tool
@@ -60,6 +71,16 @@ _PROBE_FROM: Final = datetime(2024, 1, 1, tzinfo=UTC)
 #: A cron's fields: minute, hour, day of month, month, day of week.
 CRON_FIELDS: Final = 5
 MINUTE: Final = 60
+#: The most schedules a vague ask is offered to pick from.
+CHOICES: Final = 3
+#: The values of the options the user is asked with: update it (or cancel all), keep both,
+#: neither.
+UPDATE: Final = "update"
+BOTH: Final = "both"
+NEITHER: Final = "none"
+#: How alike two tasks' words are (``difflib``'s ratio, digits left out) for one to be the
+#: other with a different time or value, where they name no identifier in common.
+ALIKE: Final = 0.8
 
 
 @dataclass(frozen=True)
@@ -103,6 +124,35 @@ class Fired:
         )
 
 
+# --------------------------------------------------------------------------- the user's time
+
+
+def zone_of(name: Any) -> str | None:
+    """``name`` when it is an IANA zone, else ``None``."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        ZoneInfo(name.strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return name.strip()
+
+
+def _zone(runtime: Runtime) -> str | None:
+    """The user's zone, as their app said it."""
+    return runtime.frontend.timezone if runtime.frontend is not None else None
+
+
+def now_said(runtime: Runtime) -> str:
+    """When it is, as ``schedule_task``'s description says it: the day and the hour in the
+    user's zone (not the minute: the tool's text stays the same for an hour, as a prompt cache
+    keeps it; ``in_minutes`` counts from the minute), or in UTC, said as not theirs."""
+    zone = _zone(runtime)
+    now = datetime.now(ZoneInfo(zone or "UTC"))
+    whose = f"{zone}, the user's zone" if zone else "UTC; the user's zone is not known"
+    return f"It is now {now:%a %Y-%m-%d}, {now:%H}:00-{now:%H}:59 ({whose})."
+
+
 # --------------------------------------------------------------------------- fired runs
 
 
@@ -137,15 +187,22 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
 
 # --------------------------------------------------------------------------- the tools
 
-_TASK: Final = {"type": "string"}
+_TASK: Final = {"type": "string", "description": "What to do, as the user said it."}
 _WHEN: Final = {
     "type": "string",
-    "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, "
-    "'0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+    "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' "
+    "9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one "
+    "day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
 }
 _CONDITION: Final = {"type": "string", "description": "Report only when this holds."}
-_ID: Final = {"type": "string"}
-#: ``update_schedule``'s ``when``: as ``schedule_task``'s, said once.
+_ID: Final = {"type": "string", "description": "An id from list_schedules."}
+#: The schedules the user's words fit, when several do: the user picks one.
+_IDS: Final = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "When the user's words fit several: all their ids; the user picks one.",
+}
+#: ``update_schedule``'s and a choice's ``when``: as ``schedule_task``'s, said once.
 _NEW_WHEN: Final = {"type": "string", "description": "A new 5-field cron."}
 
 
@@ -164,23 +221,58 @@ def _spec(name: str, description: str, properties: dict[str, Any], required: lis
 SPECS: Final = (
     _spec(
         "schedule_task",
-        "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+        "Run a task later or on a timetable when the user asks for that ('every Monday...', "
+        "'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a "
+        "habit; the reply comes back to this chat. A condition: first check it once now with "
+        "your tools and tell the user the value; one that holds already: say so, and "
+        "schedule only if they want to hear again. If no tool of yours can check it, do not "
+        "schedule: say so and offer two or three things your tools can watch, by name. A "
+        "vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your "
+        "tools can run, the best first; the user picks one. No time said: "
+        "9:00, and say so. A schedule like one the user has is asked about here. One schedule "
+        "a request; ask nothing the run can work out itself.",
         {
             "task": _TASK,
             "when": _WHEN,
             "condition": _CONDITION,
             "once": {"type": "boolean", "description": "Run once, then end."},
-            "timezone": {"type": "string", "description": "The user's IANA zone; default UTC."},
+            "in_minutes": {
+                "type": "number",
+                "description": "Instead of when: run once this many minutes from now "
+                "('in 2 hours': 120).",
+            },
+            "choices": {
+                "type": "array",
+                "description": "Only for a vague ask: 2-3 concrete schedules, the best first; "
+                "the user picks one, which is made.",
+                "items": {
+                    "type": "object",
+                    "properties": {"task": _TASK, "when": _NEW_WHEN, "condition": _CONDITION},
+                    "required": ["task", "when"],
+                },
+            },
+            "timezone": {
+                "type": "string",
+                "description": "An IANA zone, only when the user names one; default theirs.",
+            },
         },
-        ["task", "when"],
+        ["task"],
     ),
-    _spec("list_schedules", "The user's scheduled tasks.", {}, []),
+    _spec(
+        "list_schedules",
+        "The user's scheduled tasks: read them when the user refers to one ('the stock one', "
+        "'my reports'). A reference that fits one is that one; one that fits several: pass "
+        "all their ids to update_schedule or cancel_schedule, and the user picks.",
+        {},
+        [],
+    ),
     _spec(
         "update_schedule",
-        "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false "
-        "pauses it, true resumes it.",
+        "Change one of the user's scheduled tasks (an id from list_schedules): its time, task "
+        "or condition; enabled=false pauses it, true resumes it.",
         {
             "id": _ID,
+            "ids": _IDS,
             "when": _NEW_WHEN,
             "task": {"type": "string"},
             "condition": {"type": "string"},
@@ -188,28 +280,50 @@ SPECS: Final = (
         },
         ["id"],
     ),
-    _spec("cancel_schedule", "Cancel one of the user's scheduled tasks.", {"id": _ID}, ["id"]),
+    _spec(
+        "cancel_schedule",
+        "Cancel one of the user's scheduled tasks, or id 'all' (the user is asked to confirm).",
+        {
+            "id": {"type": "string", "description": "An id from list_schedules, or 'all'."},
+            "ids": _IDS,
+        },
+        ["id"],
+    ),
 )
 
 
-def schedule_tools() -> list[Tool]:
-    return [Tool(spec, _RUN[spec.name], feature="schedules") for spec in SPECS]
+def schedule_tools(runtime: Runtime | None = None) -> list[Tool]:
+    """The tools; in a run, ``schedule_task``'s description says when it is (:func:`now_said`)."""
+    specs = list(SPECS)
+    if runtime is not None:
+        dated = f"{specs[0].description} {now_said(runtime)}"
+        specs[0] = specs[0].model_copy(update={"description": dated})
+    return [Tool(spec, _RUN[spec.name], feature="schedules") for spec in specs]
 
 
 async def _schedule_task(args: dict[str, Any]) -> Any:
     runtime = _runtime()
-    task, when = str(args["task"]).strip(), str(args["when"]).strip()
+    if choices := args.get("choices"):  # a vague ask: the user picks one of these
+        return await _chosen(runtime, args, list(choices)[:CHOICES])
+    task, when = str(args["task"]).strip(), str(args.get("when") or "").strip()
     condition = (args.get("condition") or "").strip() or None
+    zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
+    once = bool(args.get("once"))
+    if minutes := args.get("in_minutes"):  # once, at that minute
+        at = datetime.now(ZoneInfo(zone_of(zone) or "UTC")) + timedelta(minutes=float(minutes))
+        when, once = f"{at.minute} {at.hour} {at.day} {at.month} *", True
     min_interval, max_per_user = await _limits(runtime)
     if (refused := _refused(when, min_interval)) is not None:
         return refused
     mine = await _mine(runtime)
+    about = {"task": task, "condition": condition, "once": once}
+    if (said := await _twin_asked(runtime, mine, about, when, zone)) is not None:
+        return said
     if len(mine) >= max_per_user:
         return (
             f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
         )
     agent = runtime.agent
-    about = {"task": task, "condition": condition, "once": bool(args.get("once"))}
     metadata = {**agent._metadata(runtime.without, None), TASK: about}
     if runtime.conversation != runtime.run_id:  # the chat it was set in
         metadata[THREAD] = runtime.identity.thread
@@ -219,7 +333,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             agent_id=agent.id,
             name=task[:200],
             cadence=when,
-            timezone=str(args.get("timezone") or "UTC"),
+            timezone=zone,
             on_behalf_of=runtime.user,
             input=_input(task, condition),
             timeout_seconds=agent.timeout,
@@ -232,6 +346,49 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     return f"Scheduled {made.schedule_id}: {_described(made)}"
 
 
+async def _twin_asked(
+    runtime: Runtime, mine: list[Schedule], about: dict[str, Any], when: str, zone: str
+) -> Any:
+    """What a schedule like one the user has comes to: nothing new (the same again), or the one
+    they have updated, or none, as the user picks; ``None``: make it (no twin, or both kept)."""
+    twin = _twin(mine, about)
+    if twin is None:
+        return None
+    if _same(twin, about, when, zone):
+        return f"Already set, nothing changed: {_described(twin)}"
+    said = _said(about, when, zone)
+    choice = await runtime.ask(
+        f"You already have a schedule like this: {_described(twin)} Update it to {said}, "
+        "or keep both?",
+        options=[
+            Option(value=UPDATE, label=f"Update it to {said} (Recommended)"),
+            Option(value=BOTH, label="Keep both"),
+            Option(value=NEITHER, label="Cancel"),
+        ],
+    )
+    if choice == UPDATE:
+        return await _changed(runtime, twin, {"cadence": when, "timezone": zone, **_about(about)})
+    return None if choice == BOTH else "Nothing scheduled: the user keeps the one they have."
+
+
+async def _chosen(runtime: Runtime, args: dict[str, Any], choices: list[Any]) -> Any:
+    """The schedule the user picked among ``choices`` (the best first), made; or none."""
+    zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
+    options = [
+        Option(value=str(n), label=_said(c, str(c.get("when") or ""), zone))
+        for n, c in enumerate(choices)
+        if isinstance(c, dict) and c.get("task")
+    ]
+    if not options:
+        return "Each choice needs a task and a when."
+    picked = await runtime.ask(
+        "Which should I set up?", options=[*options, Option(value=NEITHER, label="None of these")]
+    )
+    if picked == NEITHER:
+        return "Nothing scheduled: the user wants none of these."
+    return await _schedule_task({**args, "choices": None, **choices[int(picked)]})
+
+
 async def _list_schedules(args: dict[str, Any]) -> Any:
     mine = await _mine(_runtime())
     return [_shown(s) for s in mine] if mine else "You have no schedules."
@@ -239,9 +396,9 @@ async def _list_schedules(args: dict[str, Any]) -> Any:
 
 async def _update_schedule(args: dict[str, Any]) -> Any:
     runtime = _runtime()
-    schedule = await _own(runtime, str(args["id"]))
-    if schedule is None:
-        return f"No schedule {args['id']} of yours."
+    schedule = await _which(runtime, args, "change")
+    if isinstance(schedule, str):
+        return schedule
     changes: dict[str, Any] = {}
     if args.get("when"):
         min_interval, _ = await _limits(runtime)
@@ -253,13 +410,13 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
         about["task"] = str(args.get("task") or about["task"]).strip()
         if "condition" in args:
             about["condition"] = (args["condition"] or "").strip() or None
-        changes.update(
-            name=about["task"][:200],
-            input=_input(about["task"], about["condition"]),
-            metadata={TASK: about, REPORTED: False},
-        )
+        changes.update(_about(about))
     if args.get("enabled") is not None:
         changes["enabled"] = bool(args["enabled"])
+    return await _changed(runtime, schedule, changes)
+
+
+async def _changed(runtime: Runtime, schedule: Schedule, changes: dict[str, Any]) -> Any:
     store = runtime.agent.harness.runs.schedules
     try:
         updated = await store.update(
@@ -272,10 +429,27 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
 
 async def _cancel_schedule(args: dict[str, Any]) -> Any:
     runtime = _runtime()
-    schedule = await _own(runtime, str(args["id"]))
-    if schedule is None:
-        return f"No schedule {args['id']} of yours."
-    await runtime.agent.harness.runs.schedules.delete(schedule.schedule_id, tenant=runtime.tenant)
+    store = runtime.agent.harness.runs.schedules
+    if str(args.get("id")).strip().lower() == "all":
+        mine = await _mine(runtime)
+        if not mine:
+            return "You have no schedules."
+        sure = await runtime.ask(
+            f"Cancel all {len(mine)} of your schedules?",
+            options=[
+                Option(value=UPDATE, label=f"Cancel all {len(mine)}"),
+                Option(value=NEITHER, label="Keep them"),
+            ],
+        )
+        if sure != UPDATE:
+            return "Nothing cancelled: the user keeps them."
+        for schedule in mine:
+            await store.delete(schedule.schedule_id, tenant=runtime.tenant)
+        return f"Cancelled all {len(mine)}: " + "; ".join(_label(s) for s in mine)
+    schedule = await _which(runtime, args, "cancel")
+    if isinstance(schedule, str):
+        return schedule
+    await store.delete(schedule.schedule_id, tenant=runtime.tenant)
     return f"Cancelled {schedule.schedule_id}: {schedule.metadata[TASK]['task']}."
 
 
@@ -363,6 +537,87 @@ def _theirs(runtime: Runtime, schedule: Schedule) -> bool:
         and schedule.agent_id == runtime.agent.id
         and isinstance(schedule.metadata.get(TASK), dict)
     )
+
+
+async def _which(runtime: Runtime, args: dict[str, Any], verb: str) -> Schedule | str:
+    """The schedule a call names (``id``), or — the user's words fitting several (``ids``) —
+    the one the user picks; a sentence when there is none."""
+    ids = [str(i) for i in args.get("ids") or [] if i] or [str(args.get("id") or "")]
+    found = [s for i in dict.fromkeys(ids) if (s := await _own(runtime, i)) is not None]
+    if not found:
+        return f"No schedule {', '.join(ids)} of yours."
+    if len(found) == 1:
+        return found[0]
+    picked = await runtime.ask(
+        f"Which one should I {verb}?",
+        options=[Option(value=s.schedule_id, label=_label(s)) for s in found],
+    )
+    return next(s for s in found if s.schedule_id == picked)  # the answer is one of them
+
+
+def _words(about: dict[str, Any]) -> str:
+    return f"{about.get('task') or ''} {about.get('condition') or ''}".lower()
+
+
+def _names(text: str) -> set[str]:
+    """The identifiers a task names (a SKU, an order number): words of letters and digits
+    that are not a time of day."""
+    return {
+        w
+        for w in re.findall(r"[a-z0-9][\w-]*", text)
+        if re.search(r"\d", w) and re.search(r"[a-z]", w) and not re.fullmatch(r"\d+(am|pm|h)", w)
+    }
+
+
+def _twin(mine: list[Schedule], about: dict[str, Any]) -> Schedule | None:
+    """The user's schedule that watches what ``about`` does, perhaps with another time or
+    value: one naming an identifier in common, else one whose words are alike."""
+    words = _words(about)
+    for schedule in mine:
+        theirs = _words(schedule.metadata[TASK])
+        if _names(words) & _names(theirs):
+            return schedule
+    plain = re.sub(r"\d", "", words)
+    for schedule in mine:
+        theirs = re.sub(r"\d", "", _words(schedule.metadata[TASK]))
+        if difflib.SequenceMatcher(None, plain, theirs).ratio() >= ALIKE:
+            return schedule
+    return None
+
+
+def _same(schedule: Schedule, about: dict[str, Any], when: str, zone: str) -> bool:
+    """Whether ``about`` at ``when`` is ``schedule`` again: its time, zone and the figures and
+    presence of its condition."""
+    theirs = schedule.metadata[TASK]
+
+    def figures(condition: Any) -> tuple[bool, list[str]]:
+        found = re.findall(r"(?<![\w-])\d+(?:\.\d+)?(?![\w-])", str(condition or ""))
+        return condition is not None, found
+
+    return (
+        schedule.cadence == when
+        and schedule.timezone == zone
+        and bool(theirs.get("once")) == about["once"]
+        and figures(theirs.get("condition")) == figures(about["condition"])
+    )
+
+
+def _about(about: dict[str, Any]) -> dict[str, Any]:
+    """The changes that make a schedule ``about``'s task and condition."""
+    return {
+        "name": about["task"][:200],
+        "input": _input(about["task"], about["condition"]),
+        "metadata": {TASK: about, REPORTED: False},
+    }
+
+
+def _said(about: dict[str, Any], when: str, zone: str) -> str:
+    said = f"{about.get('task')}, '{when}' ({zone})"
+    return f"{said}, only when {about['condition']}" if about.get("condition") else said
+
+
+def _label(schedule: Schedule) -> str:
+    return _said(schedule.metadata[TASK], schedule.cadence, schedule.timezone)
 
 
 def _shown(schedule: Schedule) -> dict[str, Any]:
