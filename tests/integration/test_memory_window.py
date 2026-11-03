@@ -17,7 +17,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from benchmark.thread.__main__ import own_thread
 from tests.support.arm import arm
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import FakeMemoryService, pushed
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, tool
@@ -191,7 +191,7 @@ async def test_a_function_target_gets_the_window_in_its_context_text(
     await agent.run("hi", user="u1", thread=THREAD)
     [call] = memory_service.named("context")
     assert call.body["window"] is True and "window_format" not in call.body
-    assert seen == [memory_service.context_text]
+    assert seen == [pushed(memory_service.context_text)]
 
 
 async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_items(

@@ -75,27 +75,68 @@ async def test_a_structured_question_renders_and_reads_back(
     assert str(answer if not isinstance(answer, dict) else "2026-11-06") in done["result"]
 
 
-async def test_options_are_a_choice_plain_chat_reads_as_text(harness: Harness) -> None:
+async def test_options_are_a_choice_plain_chat_reads_numbered(harness: Harness) -> None:
+    """A choice with no reason to recommend one: the options as they are (plain strings on the
+    wire), numbered in plain chat, and another answer in words is the "Other"."""
     args = {"question": "Which size?", "options": ["S", "L", "S"]}
     agent = asking(harness, args, "ask-size")
     async with served(agent) as http:
         said = [{"id": "m", "role": "user", "content": "Order a shirt"}]
         paused = (await post(http, {"messages": said}))[-1]
         [entry] = paused["outcome"]["interrupts"]
-        assert entry["reason"] == "choice" and entry["message"] == "Which size? (one of: S, L)"
+        assert entry["reason"] == "choice"
+        assert entry["message"] == "Which size?\n1. S\n2. L\n(Pick one, or say another.)"
         assert entry["metadata"]["options"] == ["S", "L"]
         assert entry["metadata"]["props"] == {"kind": "text", "options": ["S", "L"]}
-        refused = await http.post(
-            f"{PATH}/run",
-            json={
-                "threadId": "t1",
-                "messages": [],
-                "resume": [{"interruptId": entry["id"], "payload": "M"}],
-            },
+        other = [{"interruptId": entry["id"], "payload": "M, if you have it"}]
+        done = (await post(http, {"resume": other}))[-1]
+    assert done["result"] == "Done. M, if you have it"
+
+
+async def test_a_recommended_option_says_why_and_several_may_be_picked(
+    harness: Harness,
+) -> None:
+    args = {
+        "question": "Which regions?",
+        "options": ["north", "south", "east"],
+        "multiple": True,
+        "recommended": "north",
+        "why": "your choice last time",
+    }
+    agent = asking(harness, args, "ask-regions")
+    async with served(agent) as http:
+        said = [{"id": "m", "role": "user", "content": "Set the alert"}]
+        [entry] = (await post(http, {"messages": said}))[-1]["outcome"]["interrupts"]
+        assert entry["message"] == (
+            "Which regions?\n1. north (Recommended: your choice last time)\n2. south\n3. east"
+            "\n(Pick one or more, or say another.)"
         )
-        assert refused.status_code == 409  # not one of the options
-        done = (await post(http, {"resume": [{"interruptId": entry["id"], "payload": "L"}]}))[-1]
-    assert done["result"] == "Done. L"
+        assert entry["metadata"]["options"] == [
+            {"value": "north", "description": "your choice last time", "recommended": True},
+            "south",
+            "east",
+        ]
+        assert entry["metadata"]["multiple"] is True
+        picked = [{"interruptId": entry["id"], "payload": ["north", "east"]}]
+        done = (await post(http, {"resume": picked}))[-1]
+    assert done["result"] == 'Done. ["north", "east"]'
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"recommended": "L"},  # no reason given: nothing is recommended
+        {"recommended": "XL", "why": "it fits most"},  # not one of the options
+    ],
+)
+async def test_no_option_is_recommended_without_a_reason_among_the_options(
+    harness: Harness, args: dict[str, Any]
+) -> None:
+    agent = asking(harness, {"question": "Which size?", "options": ["S", "L"], **args}, "ask-n")
+    async with served(agent) as http:
+        said = [{"id": "m", "role": "user", "content": "Order a shirt"}]
+        [entry] = (await post(http, {"messages": said}))[-1]["outcome"]["interrupts"]
+    assert entry["metadata"]["options"] == ["S", "L"] and "Recommended" not in entry["message"]
 
 
 async def test_ask_user_runs_only_in_a_run() -> None:

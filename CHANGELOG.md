@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### When and how to ask
+
+- One note with every memory context, for every adapter (`agent.ASKING`): ask only when the
+  model cannot find out itself, the choice is the user's and a wrong guess costs; otherwise act
+  and say the assumption, or the remembered rule and its date; values filled from an earlier
+  one are said, or asked about first when costly, old or in conflict; a superseded rule is asked
+  about. The app's own tool when one fits, else the question tool, else the reply.
+- `ask_user(..., multiple=False, recommended=None, why=None)`: several picks, one option
+  recommended (`Option.recommended`, trellis-contracts 0.6.5) only with a why; a choice also
+  takes another answer in words; plain chat reads the options numbered.
+- Claude's `AskUserQuestion` is the run's question, as Kimi's is.
+- The schedule tools keep only what is theirs: the general asking words are the note's; the
+  "update it" choice is recommended by the flag, not by its label.
+
 ### Schedules set in chat
 
 - Every agent has `schedule_task`, `list_schedules`, `update_schedule` and `cancel_schedule`

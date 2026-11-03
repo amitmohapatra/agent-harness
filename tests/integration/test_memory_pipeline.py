@@ -22,6 +22,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
+from tests.support.memory import pushed as with_note
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
 from tests.unit.test_toolbox import Def
@@ -129,7 +130,10 @@ async def test_push_sends_the_context_with_the_question(
     assert question == {
         "role": "user",
         "content": [
-            {"type": "text", "text": ASKED_WITH.format(context=memory_service.context_text)},
+            {
+                "type": "text",
+                "text": ASKED_WITH.format(context=with_note(memory_service.context_text)),
+            },
             {"type": "text", "text": "how many a?"},
         ],
     }

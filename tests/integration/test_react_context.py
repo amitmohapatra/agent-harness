@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from tests.support.arm import arm
-from tests.support.memory import FakeMemoryService
+from tests.support.memory import FakeMemoryService, pushed
 from tests.support.models import Script, ScriptedChat
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
@@ -106,7 +106,7 @@ async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     assert "SESSION INTENT: take notes." in summary["content"]
     # the task, and the memory context pushed with it, stay ahead of the summary
     assert after[1]["content"] == [
-        {"type": "text", "text": ASKED_WITH.format(context="The user prefers email.")},
+        {"type": "text", "text": ASKED_WITH.format(context=pushed("The user prefers email."))},
         {"type": "text", "text": "take five notes"},
     ]
     assert after[2] is summary

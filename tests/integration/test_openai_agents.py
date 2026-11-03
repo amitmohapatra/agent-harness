@@ -11,7 +11,7 @@ from agents import Agent, SQLiteSession, Usage, function_tool
 
 from tests.support.arm import arm, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
-from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
@@ -235,7 +235,7 @@ async def test_the_context_is_marked_off_in_the_question_and_memory_tools_are_ad
     assert (await agent.run("how to reach me?", user="u1")).answer == "email"
     asked = model.inputs[0][-1]
     assert asked["role"] == "user" and [p["text"] for p in asked["content"]] == [
-        ASKED_WITH.format(context=memory_service.context_text),
+        ASKED_WITH.format(context=pushed(memory_service.context_text)),
         "how to reach me?",
     ]
     assert not any(i.get("role") == "system" for i in model.inputs[0])
