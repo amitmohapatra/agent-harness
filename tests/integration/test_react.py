@@ -132,7 +132,7 @@ async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) 
     async with Harness(
         config=Settings(llm_gateway="bifrost", llm_base_url="http://gw.test/v1", llm_api_key="vk")
     ) as h:
-        agent = h.wrap(graph, id="named")
+        agent = h.wrap(graph, id="named", without={"schedules"})  # a model with no tools
         result = await agent.run("x", user="u")
     assert result.answer == "hi"
     request = route.calls[0].request
