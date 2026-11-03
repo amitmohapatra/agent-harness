@@ -73,7 +73,10 @@ async def test_a_query_answers_and_calls_harness_tools(harness: Harness, tmp_pat
         [{"tool": "refund", "args": {"order": "o1"}}, {"text": "refunded o1"}],
         system_prompt="You refund.",
     )
-    agent = arm(harness.wrap(target, id="refunds"), [tool(refund.fn, side_effects="write")])
+    agent = arm(
+        harness.wrap(target, id="refunds", without={"schedules"}),
+        [tool(refund.fn, side_effects="write")],
+    )
     result = await agent.run("refund o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded o1"
     assert refunds == ["o1"]
@@ -453,7 +456,9 @@ async def test_the_hints_narrow_the_tools_for_the_run(
 ) -> None:
     memory_service.candidates = ["t2", "t5"]
     target = options(tmp_path, [{"text": "done"}])
-    await arm(memory_harness.wrap(target, id="n"), lookups(6)).run("x", user="u1")
+    await arm(memory_harness.wrap(target, id="n", without={"schedules"}), lookups(6)).run(
+        "x", user="u1"
+    )
     assert started_with(tmp_path)["tools"] == [
         "t2",
         "t5",

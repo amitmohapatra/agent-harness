@@ -528,7 +528,7 @@ async def test_an_agents_own_tool_keeps_its_own_enabled_rule(harness: Harness) -
         return "offered"
 
     model = ScriptedModel(["done"])
-    await harness.wrap(Agent(name="c", model=model, tools=[hidden, shown]), id="own-rule").run(
-        "x", user="u"
-    )
+    await harness.wrap(
+        Agent(name="c", model=model, tools=[hidden, shown]), id="own-rule", without={"schedules"}
+    ).run("x", user="u")
     assert model.tools[0] == ["shown"]

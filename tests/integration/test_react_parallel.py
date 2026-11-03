@@ -500,7 +500,10 @@ async def test_steps_in_which_every_call_failed_and_no_answer_stop_the_run(
 async def test_the_tools_are_offered_in_a_stable_order(harness: Harness) -> None:
     tools = [tool(lambda: "z", name="zeta"), tool(lambda: "a", name="alpha")]
     model = ScriptedChat([("zeta", {}), "done"])
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="sorted"), tools)
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="sorted", without={"schedules"}),
+        tools,
+    )
     await agent.run("x", user="u")
     names = [[t["function"]["name"] for t in r["tools"]] for r in model.requests]
     assert names == [["alpha", "zeta"]] * 2

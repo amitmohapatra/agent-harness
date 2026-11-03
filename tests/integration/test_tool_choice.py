@@ -121,7 +121,9 @@ async def test_without_hints_no_harness_selector_narrows_the_tools(harness: Harn
     assert not hasattr(automatic, "ToolSelection") and not hasattr(react, "defaults_on")
     found = [tool(lambda q: q, name=f"find_{n}", side_effects="read") for n in range(25)]
     model = ScriptedChatModel(turns=["found"])
-    result = await arm(harness.wrap(ReAct("s", model), id="all"), found).run("find a", user="u")
+    result = await arm(harness.wrap(ReAct("s", model), id="all", without={"schedules"}), found).run(
+        "find a", user="u"
+    )
     assert result.answer == "found", result.error
     [request] = model.requests  # one model call: the answer, no selector call before it
     assert sorted(request["tools"]) == sorted(f"find_{n}" for n in range(25))

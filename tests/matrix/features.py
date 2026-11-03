@@ -63,6 +63,7 @@ from trellis.harness.journal import content_key
 from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.sandbox import sandbox
+from trellis.harness.schedules import TASK
 from trellis.harness.telemetry import DIMENSION_PREFIX as DIMENSION
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.results import MAX_LINE
@@ -587,6 +588,18 @@ async def pull(w: World) -> None:
     assert "the user prefers email" in o.text, o.answer
     [searched] = w.memory_service.named("call_agent_tool")
     assert searched.path["name"] == "memory_search" and searched.body["args"] == search
+
+
+async def chat_schedules(w: World) -> None:
+    """A user schedules a task in chat, and lists it, in every adapter: the built-in tools keep
+    it as the user's, its time checked (``schedules.py``)."""
+    asked = {"task": "check stock of A-1", "when": "0 8 * * 1", "condition": "under 5"}
+    plan: list[Call] = [("schedule_task", asked), ("list_schedules", {})]
+    o = (await w.go([Desk().lookup()], plan)).succeeded()
+    [made] = [s for s in w.store._schedules.values() if TASK in s.metadata]
+    assert made.on_behalf_of == USER and made.cadence == "0 8 * * 1", made
+    assert made.metadata[TASK]["condition"] == "under 5"
+    assert "check stock of A-1" in o.text, o.answer
 
 
 async def forget_said(w: World) -> None:
@@ -1409,6 +1422,14 @@ FEATURES: Final[list[Feature]] = [
         needs=frozenset({"memory"}),
         adapters={"function": NA("a function target calls memory_forget itself, as any tool")},
         way2=NA("the harness's approval path: Way 2 calls the service, which refuses the agent"),
+    ),
+    Feature(
+        "F95",
+        "schedules set in chat: the built-in schedule tools, the user's own",
+        "F95",
+        "built in while the run store schedules (a graph with its tools bound: h.schedule_tools()); off: without=['schedules']",
+        chat_schedules,
+        way2=NA("Way 2 has no run store: your code calls runs.schedules itself"),
     ),
     Feature(
         "F43",

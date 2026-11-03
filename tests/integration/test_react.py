@@ -55,7 +55,7 @@ async def test_react_is_a_create_agent_graph_the_langgraph_adapter_runs(harness:
     model = ScriptedChat([("stock", {"sku": "a"}), "7 units"])
     graph = ReAct(system_prompt="You answer stock questions.", model=model)
     assert isinstance(graph, Pregel) and isinstance(graph.checkpointer, RunCheckpointer)
-    agent = arm(harness.wrap(graph, id="stock"), [stock])
+    agent = arm(harness.wrap(graph, id="stock", without={"schedules"}), [stock])
     assert isinstance(agent.adapter, LangGraphAdapter)
     result = await agent.run("how many a?", user="u1")
     assert result.answer == "7 units"
@@ -440,7 +440,11 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
         [("dump", {}), ("read_file", {"file_path": "/large_tool_results/call_1"}), "done"]
     )
     result = await arm(
-        harness.wrap(ReAct(system_prompt="s", model=model, backend=JournalBackend()), id="dumper"),
+        harness.wrap(
+            ReAct(system_prompt="s", model=model, backend=JournalBackend()),
+            id="dumper",
+            without={"schedules"},
+        ),
         [dump],
     ).run("x", user="u")
     assert result.status is RunStatus.SUCCESS, result.error

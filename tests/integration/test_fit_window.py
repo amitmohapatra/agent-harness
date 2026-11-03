@@ -134,7 +134,7 @@ async def test_react_on_a_small_window_with_many_tools_runs_and_says_what_it_dro
         many.append(tool(look, name=f"look_{n}", description=LONG, side_effects="read"))
     model = ScriptedChatModel(turns=[("look_3", {"query": "a"}), "found it"])
     target = ReAct("s", model, context_window=4096)
-    agent = arm(harness.wrap(target, id="crowded"), many)
+    agent = arm(harness.wrap(target, id="crowded", without={"schedules"}), many)
     events = [e async for e in agent.stream("look a up with look_3", user="u")]
     finished = [e for e in events if e.type is RunEventType.RUN_FINISHED][-1]
     assert finished.data.get("result") == "found it", finished.data

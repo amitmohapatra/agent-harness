@@ -89,7 +89,7 @@ async def test_memory_tools_that_cannot_be_listed_leave_the_run_without_them(
         offered.append(sorted(agent.toolbox))
         return input
 
-    agent = harness.wrap(looks, id="looks")
+    agent = harness.wrap(looks, id="looks", without={"schedules"})
     events = [e async for e in agent.stream("q", user="u")]
     assert events[-1].type is RunEventType.RUN_FINISHED and offered == [[]]
     warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]

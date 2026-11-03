@@ -192,7 +192,10 @@ async def test_a_tool_set_is_converted_once_for_its_runs(
 
     monkeypatch.setattr(converted, "convert", counting)
     model = ScriptedChat(["one", "two", "three"])
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="conv"), [stock])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="conv", without={"schedules"}),
+        [stock],
+    )
     for n in range(3):
         await agent.run(f"run {n}", user="u")
     assert calls == [1]

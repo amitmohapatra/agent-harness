@@ -315,7 +315,10 @@ async def test_a_tool_that_filters_on_its_own_side_answers_small_and_exact(
         return "\n".join(f"{s},{u},{r}" for s, u, r in rows)
 
     model = ScriptedChat([("find_skus", {"top_by_revenue": 5}), "done"])
-    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="filtered"), [find_skus])
+    agent = arm(
+        harness.wrap(ReAct(system_prompt="s", model=model), id="filtered", without={"schedules"}),
+        [find_skus],
+    )
     assert (await agent.run("top 5 by revenue", user="u")).status is RunStatus.SUCCESS
     [offered] = model.requests[0]["tools"]
     described = offered["function"]["parameters"]["properties"]

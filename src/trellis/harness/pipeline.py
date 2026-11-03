@@ -48,7 +48,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox, snapshots
+from trellis.harness import budget, conversation, sandbox, schedules, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -81,6 +81,7 @@ from trellis.harness.journal import Journal, Pending, Replay, content_key, gover
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
+from trellis.harness.schedules import Fired
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.harness.tools import bridge, stored
 from trellis.harness.tools.base import SOURCES
@@ -327,6 +328,7 @@ async def _attempt(
         running_in=asyncio.current_task(),
         continued=continued,
         frontend=Frontend.of(record.metadata),
+        scheduled=None if parent is not None else Fired.of(record.metadata),
     )
     events.trace_run = runtime.trace_run
     _earlier_results(agent, runtime)
@@ -382,6 +384,7 @@ async def _attempt(
     )
     _kept_session(agent, runtime, journal, result)
     _kept_results(agent, runtime, journal, result)
+    await schedules.ended(agent, runtime, result)
     await agent.hooks.ended(runtime, result)
     return result
 
@@ -964,6 +967,9 @@ async def _succeeded(
     answer = extracted.answer
     if runtime.budget_spent is not None:
         return await _partial(agent, runtime, extracted)
+    # a scheduled run with nothing to report (or reported already) is not delivered
+    if quiet := schedules.quiet(runtime, answer):
+        answer = schedules.NO_REPORT
     await runtime.events.settle(
         lambda: runtime.events.finished(
             RunOutcome.SUCCESS, result=jsonable(answer), spent=budget.spent(runtime)
@@ -971,10 +977,12 @@ async def _succeeded(
         lambda: _ended(agent, runtime, RunStatus.SUCCESS, output=jsonable(answer)),
     )
     metrics.run_finished(runtime.agent_id, RunOutcome.SUCCESS.value)
-    await agent.recorded_run(runtime, _transcript(runtime, extracted, RunStatus.SUCCESS))
+    if not quiet:  # in the conversation, checked and judged only when delivered
+        await agent.recorded_run(runtime, _transcript(runtime, extracted, RunStatus.SUCCESS))
     await agent.recorded_outcome(runtime, RunStatus.SUCCESS, None)
-    await agent.grounded(runtime, answer, pushed)
-    await agent.judged(runtime, answer, pushed)
+    if not quiet:
+        await agent.grounded(runtime, answer, pushed)
+        await agent.judged(runtime, answer, pushed)
     if runtime.code_mode_scripts:
         await agent.imported_code_mode_calls(runtime)
     return Result(run_id=runtime.run_id, status=RunStatus.SUCCESS, answer=answer)

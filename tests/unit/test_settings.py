@@ -27,6 +27,8 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "TRELLIS_SPOOL_DIR": "/var/spool/trellis",
         "TRELLIS_JUDGE_VIRTUAL_KEY": "eval-vk",
         "TRELLIS_FILES_URL": "gs://acme/files",
+        "TRELLIS_SCHEDULE_MIN_INTERVAL": "600",
+        "TRELLIS_SCHEDULE_MAX_PER_USER": "5",
     }
     settings = Settings.from_env(env)
     assert settings.model_dump() == {
@@ -40,8 +42,10 @@ def test_every_variable_is_read_from_the_environment() -> None:
         "spool_dir": "/var/spool/trellis",
         "judge_virtual_key": "eval-vk",
         "files_url": "gs://acme/files",
+        "schedule_min_interval": 600.0,
+        "schedule_max_per_user": 5,
     }
-    assert set(env) == set(settings_module.VARIABLES.values())  # the nine, and only them
+    assert set(env) == set(settings_module.VARIABLES.values())  # every one, and only them
     assert sourced(env)["api_key"] == ("tk", "TRELLIS_API_KEY")
 
 

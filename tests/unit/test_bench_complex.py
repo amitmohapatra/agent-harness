@@ -24,6 +24,7 @@ from benchmark.cost import breakfix, judge, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from trellis import Settings
+from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
 
 
@@ -221,7 +222,7 @@ async def test_a_scripted_run_scores_and_keeps_every_request(tmp_path: Path, off
     last = next(q for q in asked if q["case"] == "conversation-01" and q["turn"] == 2)
     said = [m["content"] for m in last["messages"] if m["role"] == "user"]
     assert said[0].startswith("What was the top SKU") and said[-1] == "And what's their lead time?"
-    assert len(last["tools"]) == len(r.TOOLS)
+    assert len(last["tools"]) == len(r.TOOLS) + len(SCHEDULE_TOOLS)  # and the built-in ones
     # cross-chat: the other thread's request holds nothing of the first
     other = next(q for q in asked if q["case"] == "explain-07" and q["turn"] == 1)
     assert [m["role"] for m in other["messages"]] == ["system", "user"]

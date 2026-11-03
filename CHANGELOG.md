@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Schedules set in chat
+
+- Every agent has `schedule_task`, `list_schedules`, `update_schedule` and `cancel_schedule`
+  (`without=["schedules"]` turns them off; `h.schedule_tools()` for a graph built with its
+  tools bound): "every Monday at 8 check stock and tell me if it's under 5". A fired run is
+  the same agent, user and thread, so its reply is saved into that chat; with a condition it
+  answers `NO_REPORT` when the condition does not hold, and a condition that still holds is
+  reported once. Limits: `TRELLIS_SCHEDULE_MIN_INTERVAL` (300 s), `TRELLIS_SCHEDULE_MAX_PER_USER`
+  (20), per user `Harness(schedule_limits=)` ([docs/runs.md](docs/runs.md#schedules-users-set-in-chat)).
+- AG-UI `GET {path}/threads/{thread_id}/events`: every run of a chat thread, scheduled ones
+  included, live and after `Last-Event-ID`, fed by one poller per process.
+- `RunStore.schedules` gains `list`, `get`, `update` and `delete` (`LocalRuns` has them); a
+  `LocalRuns` fire takes the thread the schedule's metadata names. **Requires** agent-runs with
+  `RunSummary.thread_id` and `schedules.list(on_behalf_of=)`.
+
 ### Docs
 
 - Docs name the arguments the code takes: a run's time limit is `run_timeout=` (scenarios.md,

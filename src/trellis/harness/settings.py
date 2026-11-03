@@ -2,10 +2,12 @@
 is in ``.env.example``): where the models are and how they are reached (``LLM_BASE_URL``,
 ``LLM_API_KEY``, ``LLM_GATEWAY``, ``LLM_AUTH``, ``TRELLIS_JUDGE_VIRTUAL_KEY``), where the
 services are and the key they are reached with (``MEMORY_URL``, ``TRELLIS_API_KEY``,
-``RUNS_URL``), where undelivered writes are kept (``TRELLIS_SPOOL_DIR``) and where the files
-runs make for their users are (``TRELLIS_FILES_URL``). Each setting lives in exactly one layer:
+``RUNS_URL``), where undelivered writes are kept (``TRELLIS_SPOOL_DIR``), where the files
+runs make for their users are (``TRELLIS_FILES_URL``) and the two limits of schedules set in
+chat (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``). Each setting
+lives in exactly one layer:
 
-* **the environment** — what differs per deployment: the ten above. The tools' own variables
+* **the environment** — what differs per deployment: the twelve above. The tools' own variables
   are read by their own SDKs, or under their own names, never mirrored here: ``OTEL_*`` (the
   OpenTelemetry SDK; ``service.version`` in ``OTEL_RESOURCE_ATTRIBUTES`` is the agents'
   version), ``LANGFUSE_*`` (its scores, datasets and — with no OpenTelemetry exporter variable
@@ -36,7 +38,7 @@ from pathlib import Path
 from typing import Any, Final
 from urllib.parse import unquote
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 log = logging.getLogger("trellis.settings")
 
@@ -68,6 +70,8 @@ VARIABLES: Final = {
     "judge_virtual_key": "TRELLIS_JUDGE_VIRTUAL_KEY",
     "spool_dir": "TRELLIS_SPOOL_DIR",
     "files_url": "TRELLIS_FILES_URL",
+    "schedule_min_interval": "TRELLIS_SCHEDULE_MIN_INTERVAL",
+    "schedule_max_per_user": "TRELLIS_SCHEDULE_MAX_PER_USER",
 }
 
 
@@ -106,6 +110,13 @@ class Settings(BaseModel):
     #: — ``gs://bucket/prefix``, ``s3://...``, ``az://...``, ``file:///path``; unset, the XDG
     #: data folder (:func:`default_files_url`).
     files_url: str | None = None
+    #: The least time between two runs of a schedule set in chat, in seconds (the schedule
+    #: tools refuse a ``when`` that fires more often); ``Harness(schedule_limits=)`` overrides
+    #: it per user.
+    schedule_min_interval: float = Field(default=300.0, gt=0)
+    #: How many schedules set in chat one user may have, per agent; ``Harness(
+    #: schedule_limits=)`` overrides it per user.
+    schedule_max_per_user: int = Field(default=20, ge=0)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
