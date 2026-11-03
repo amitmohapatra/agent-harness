@@ -14,9 +14,16 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, Permissi
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
-from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
-from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolSpec
+from trellis.contracts import (
+    Option,
+    RunEventType,
+    RunOutcome,
+    RunStatus,
+    ToolCall,
+    ToolSpec,
+)
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     RESUMED,
@@ -210,6 +217,50 @@ async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Leeds", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "ships from Leeds"
     assert started_with(tmp_path)["prompt"] == RESUMED
+
+
+async def test_claudes_question_to_its_user_is_the_runs_question(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude's ``AskUserQuestion`` is asked as the run's (as Kimi's): each question a choice,
+    several picks with ``multiSelect``, the option labelled "(Recommended)" recommended with
+    its description as why; Claude reads the answers by question, as its own UI gives them."""
+    questions = [
+        {
+            "question": "Which regions?",
+            "header": "Regions",
+            "multiSelect": True,
+            "options": [
+                {"label": "north (Recommended)", "description": "your last choice"},
+                {"label": "south", "description": "slower"},
+            ],
+        },
+        {
+            "question": "Which format?",
+            "header": "Format",
+            "multiSelect": False,
+            "options": [{"label": "CSV"}, {"label": "PDF"}],
+        },
+    ]
+    script = [{"builtin": "AskUserQuestion", "args": {"questions": questions}}, {"text": "ok"}]
+    agent = harness.wrap(options(tmp_path, script), id="asker")
+    first = await agent.run("set it up", user="u1")
+    assert first.interrupt is not None and first.interrupt.tool_call is None
+    assert first.interrupt.multiple and first.interrupt.options[0] == Option(
+        value="north (Recommended)", description="your last choice", recommended=True
+    )
+    picked = ["north (Recommended)", "south"]
+    second = await agent.resume(
+        first.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1"
+    )
+    assert second.interrupt is not None and second.interrupt.options == ["CSV", "PDF"]
+    done = await agent.resume(second.interrupt.interrupt_id, "answer", answer="CSV", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    [asked] = built_ins(tmp_path)
+    assert asked["args"]["answers"] == {
+        "Which regions?": "north (Recommended), south",
+        "Which format?": "CSV",
+    }
 
 
 async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
@@ -424,7 +475,7 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
     started = started_with(tmp_path)
     assert started["system_prompt"] == f"You help.\n\n{DELIVERS_HERE}"  # the team's first
     # Claude's built-in tools are the agent's tools too, sorted: the context carries their hints
-    rendered = memory_service.context_text + "\n\n## Tools\n- Agent (confidence 0.90)"
+    rendered = pushed(memory_service.context_text + "\n\n## Tools\n- Agent (confidence 0.90)")
     assert started["context"] == rendered
     [asked] = memory_service.named("context")
     available = asked.body["tools"]["available"]

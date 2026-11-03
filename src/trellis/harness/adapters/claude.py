@@ -93,6 +93,7 @@ from trellis.harness.journal import Pending
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
+from trellis.harness.tools.ask import ask_question
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
@@ -121,6 +122,7 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Task": "read",
     "Skill": "read",
     "ExitPlanMode": "read",
+    "AskUserQuestion": "read",
     "BashOutput": "read",
     "ListMcpResourcesTool": "read",
     "ReadMcpResourceTool": "read",
@@ -132,6 +134,10 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "SlashCommand": "write",
     "Bash": "write",
 }
+#: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
+#: ends a recommended option's label with.
+QUESTION_TOOL: Final = "AskUserQuestion"
+RECOMMENDED: Final = "(Recommended)"
 #: What Claude Code is called when a person is asked about a call it asks about.
 CLAUDE_CODE: Final = "Claude Code"
 #: Claude Code's built-in tools whose work needs the CLI to go on running after the query: a
@@ -782,7 +788,8 @@ def _asked(own: Any, steps: Steps) -> Any:
     permission mode and rules let it through without asking otherwise): the team's own
     callback, when it has one; else a call that only reads runs — a read tool, or a shell
     command :func:`~trellis.harness.governance.shell.read_only` reads as read-only — and any
-    other asks a person (``bridge.asked``). A call not let through ends its step."""
+    other asks a person (``bridge.asked``); Claude's question to its user is the run's
+    (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
     from trellis.harness.governance.shell import read_only
@@ -794,6 +801,11 @@ def _asked(own: Any, steps: Steps) -> Any:
         spec = _spec(runtime, name)
         if own is not None:
             verdict = await own(name, args, context)
+        elif name == QUESTION_TOOL:
+            try:
+                verdict = PermissionResultAllow(updated_input=await _answered(args))
+            except Paused:  # the run pauses: Claude stops here, and the resume goes on
+                verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif spec.side_effects == "read" or read_only(name, args):
             verdict = PermissionResultAllow()
         else:
@@ -812,6 +824,26 @@ def _asked(own: Any, steps: Steps) -> Any:
         return verdict
 
     return can_use_tool
+
+
+async def _answered(args: dict[str, Any]) -> dict[str, Any]:
+    """``AskUserQuestion``'s input with the person's ``answers`` (by question, the label picked,
+    several joined with ", "), each question asked as ``ask_user`` asks it: its options, several
+    picks with ``multiSelect``, the one labelled :data:`RECOMMENDED` recommended (its
+    description why), another answer in words."""
+    answers: dict[str, str] = {}
+    for asked in args.get("questions") or ():
+        options = [o for o in asked.get("options") or () if o.get("label")]
+        best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+        picked = await ask_question(
+            asked["question"],
+            [str(o["label"]) for o in options],
+            multiple=bool(asked.get("multiSelect")),
+            recommended=best.get("label"),
+            why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+        )
+        answers[asked["question"]] = ", ".join(picked) if isinstance(picked, list) else str(picked)
+    return {**args, "answers": answers}
 
 
 def _spec(runtime: Runtime, name: str) -> ToolSpec:

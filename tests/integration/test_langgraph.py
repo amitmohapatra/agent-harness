@@ -14,7 +14,7 @@ from langgraph.types import interrupt
 
 from tests.support.arm import native_tools
 from tests.support.chat_model import ScriptedChatModel
-from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
+from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
 from trellis.harness.harness import LOCAL_TENANT
@@ -192,7 +192,7 @@ async def test_the_memory_context_comes_with_the_question(
     # after the history a prompt cache keeps (audit K1): the question's first part
     assert [m.type for m in sent] == ["system", "human"]
     assert sent[1].content == [
-        {"type": "text", "text": ASKED_WITH.format(context=memory_service.context_text)},
+        {"type": "text", "text": ASKED_WITH.format(context=pushed(memory_service.context_text))},
         {"type": "text", "text": "how to reach me?"},
     ]
 
@@ -213,7 +213,7 @@ async def test_a_checkpointed_thread_keeps_one_context_message_without_the_conve
     systems = [m for m in state.values["messages"] if m.type == "system"]
     # one context message in the checkpointed thread, replaced each turn, asked for without
     # the conversation the checkpointer already holds
-    assert [m.content for m in systems] == [memory_service.context_text]
+    assert [m.content for m in systems] == [pushed(memory_service.context_text)]
     assert [m.type for m in model.seen[1]] == ["system", "human", "ai", "human"]
     assert [c.body["window"] for c in memory_service.named("context")] == [False, False]
 

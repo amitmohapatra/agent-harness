@@ -472,8 +472,10 @@ async def test_a_schedule_like_one_the_user_has_is_asked_about_update_first(
         await seeded(h, "desk", WATCH)
         interrupt = await asked(agent)
         labels = [o.label for o in interrupt.options]
-        assert labels[0].startswith("Update it to") and labels[0].endswith("(Recommended)")
-        assert labels[1:] == ["Keep both", "Cancel"]
+        assert labels[0].startswith("Update it to") and labels[1:] == ["Keep both", "Cancel"]
+        # recommended by the flag, with why: the user's newest request
+        assert [o.recommended for o in interrupt.options] == [True, None, None]
+        assert interrupt.options[0].description == "what you asked for now"
         await picked(agent, interrupt, value)
         found = [s.metadata[TASK]["condition"] for s in local(h)._schedules.values()]
         assert sorted(found) == sorted(conditions)

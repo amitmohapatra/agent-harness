@@ -350,7 +350,11 @@ def asked_in(chat: Chat, turn: int = -1) -> bool:
 
 
 def labels(interrupt: Interrupt) -> list[str]:
-    return [o if isinstance(o, str) else o.label or o.value for o in interrupt.options]
+    """The options as a person reads them, the recommended one marked."""
+    return [
+        o if isinstance(o, str) else (o.label or o.value) + (" (Recommended)" * bool(o.recommended))
+        for o in interrupt.options
+    ]
 
 
 def said_of(text: str) -> str:

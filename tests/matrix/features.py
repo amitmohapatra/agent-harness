@@ -46,6 +46,7 @@ from tests.support.sandbox import PausingSandboxes
 from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, middleware, stdio, stored, tool
 from trellis.contracts import (
     InterruptReason,
+    Option,
     RunEventType,
     RunStatus,
     ToolCall,
@@ -54,7 +55,7 @@ from trellis.contracts import (
 )
 from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
-from trellis.harness.agent import ABSTAIN_NOTES
+from trellis.harness.agent import ABSTAIN_NOTES, ASKING
 from trellis.harness.clients import bifrost
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
@@ -179,6 +180,25 @@ async def ask(w: World) -> None:
     assert asked.question == "Which size of shirt?"
     assert d.ran("size") == [{"item": "shirt", "size": "L"}]
     assert o.answer == "Done. shirt in size L", o.answer
+
+
+async def ask_user_choice(w: World) -> None:
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", ["north", "east"]
+        return approve_all(interrupt)
+
+    args = {"question": "Which regions?", "options": ["north", "east"], "multiple": True,
+            "recommended": "north", "why": "your last choice"}  # fmt: skip
+    o = (await w.go([ask_user()], [("ask_user", args)], answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.multiple and asked.options == [
+        Option(value="north", description="your last choice", recommended=True),
+        "east",
+    ], asked
+    assert o.answer == 'Done. ["north", "east"]', o.answer
 
 
 async def ask_user_tool(w: World) -> None:
@@ -535,6 +555,18 @@ async def abstains(w: World) -> None:
         assert json.dumps(note)[1:-1] in w.said() or note in w.said(), "the note never arrived"
     else:
         assert "## Memory" not in w.said()
+    assert o.answer == "Done. facts about contact"
+
+
+async def asking_note(w: World) -> None:
+    """When and how to ask: the note reaches the model with the memory context, in every
+    adapter, whatever the question."""
+    d = Desk()
+    o = (await w.go([d.lookup()], [("lookup", {"topic": "contact"})])).succeeded()
+    if w.on:
+        assert json.dumps(ASKING)[1:-1] in w.said() or ASKING in w.said(), "no note arrived"
+    else:
+        assert "## Asking the user" not in w.said()
     assert o.answer == "Done. facts about contact"
 
 
@@ -1092,6 +1124,14 @@ FEATURES: Final[list[Feature]] = [
         way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(
+        "F36m",
+        "ask_user: several picks among options, one recommended with why",
+        "F36 (when and how to ask)",
+        "tools=[ask_user()]",
+        ask_user_choice,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
         "F04",
         "a rejected approval: the call never runs and the model reads why",
         "F04, F32",
@@ -1391,6 +1431,16 @@ FEATURES: Final[list[Feature]] = [
             for a in ("react", "langgraph", "deepagents", "openai_agents", "claude", "kimi")
         },
         way2=NA("checked by F41"),
+    ),
+    Feature(
+        "F41q",
+        "when and how to ask: the note reaches the model with the memory context",
+        "F41, F36",
+        "the memory service (always with its context)",
+        asking_note,
+        needs=frozenset({"memory"}),
+        adapters={"function": NA("its code reads agent.context: no model is told anything")},
+        way2=NA("the harness's note: Way 2 builds its own context"),
     ),
     Feature(
         "F41s",

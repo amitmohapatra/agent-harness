@@ -229,8 +229,7 @@ SPECS: Final = (
         "schedule: say so and offer two or three things your tools can watch, by name. A "
         "vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your "
         "tools can run, the best first; the user picks one. No time said: "
-        "9:00, and say so. A schedule like one the user has is asked about here. One schedule "
-        "a request; ask nothing the run can work out itself.",
+        "9:00. A schedule like one the user has is asked about here. One schedule a request.",
         {
             "task": _TASK,
             "when": _WHEN,
@@ -361,7 +360,12 @@ async def _twin_asked(
         f"You already have a schedule like this: {_described(twin)} Update it to {said}, "
         "or keep both?",
         options=[
-            Option(value=UPDATE, label=f"Update it to {said} (Recommended)"),
+            Option(
+                value=UPDATE,
+                label=f"Update it to {said}",
+                description="what you asked for now",
+                recommended=True,
+            ),
             Option(value=BOTH, label="Keep both"),
             Option(value=NEITHER, label="Cancel"),
         ],

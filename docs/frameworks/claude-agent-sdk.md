@@ -81,6 +81,10 @@ the user Claude Code would ask:
   `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`, read with
   `shlex` and `ast`); any other asks a person. Approved (or edited), it runs once; rejected or
   denied, Claude reads why.
+* **Claude's questions** (`AskUserQuestion`) are the run's questions, asked as `ask_user` asks
+  them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
+  recommended with its description as why, another answer in words); Claude reads the answers
+  by question.
 * **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
   `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` write (announced; Claude Code asks
   first where it would). Your in-process server's tool is what its annotations say; any other
