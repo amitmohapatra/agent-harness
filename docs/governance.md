@@ -88,7 +88,7 @@ Set a rule from code (a deploy script) with the memory SDK — the same entry an
 edits:
 
 ```python
-scope = h.memory.client.bind(tenant_id=await h.tenant(), agent_id="refunds")
+scope = h.memory.client.bind(tenant_id="acme", agent_id="refunds")  # your tenant's id
 await scope.advanced.tools.put_catalog([{"name": "refund", "approve_when": "amount > 100"}])
 ```
 

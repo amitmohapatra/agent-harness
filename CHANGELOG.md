@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Docs
+
+- Docs name the arguments the code takes: a run's time limit is `run_timeout=` (scenarios.md,
+  runs.md), Langfuse's address is `LANGFUSE_BASE_URL` (README), the governance example binds a
+  tenant id it names (there is no `h.tenant()`), and blocks/evaluation.md no longer points at the
+  retired `eval_sample` setting.
+
 ### Background agents moved to their own branch
 
 - Background sub-agents (ADR 0008), a run's inbox and a person's pause (ADR 0009) and the
