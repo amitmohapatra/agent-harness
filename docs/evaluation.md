@@ -508,7 +508,7 @@ must still say the data is not there.
 
 ## Scheduling benchmark
 
-`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.3` asks 47 chats
+`python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 61 chats
 whether the agent schedules when asked and only then (`benchmark/cost/schedules.py`; `ReAct`
 with the retail tools, the in-process run store, memory off, the user's zone sent as AG-UI's
 `forwardedProps.timezone`). `schedule`: daily, weekdays, weekly, monthly, twice a day, once
@@ -521,6 +521,13 @@ cancel all (confirmed first), a reference that fits two (asked which), a new con
 `fired`: a seeded schedule fired by the worker: a condition met is reported with the figure,
 one not met is `NO_REPORT`, one met twice is reported once, a fired run makes no schedule.
 `limits`: over the per-user cap or too frequent: the limit said, no more than two tries.
+`check`: a condition checked once with the tools before it is scheduled, its value said; one
+that holds already said, and scheduled once the user wants alerts. `cannot`: nothing the tools
+can check (a competitor's price, the weather): not scheduled, two or more things the tools can
+watch offered; a vague ask: asked back (buttons or a question), scheduled once picked. `manage`
+also covers a schedule like one the user has (asked: update it first, recommended) and the same
+again ("already set"). A question with options the run pauses on is answered by the next turn
+(`@n|words`: option `n`, or the words where nothing waits).
 Writes `<out>.jsonl` (each case's calls, answers, tokens) and `<out>.json` (per category).
 
 ## Load benchmark

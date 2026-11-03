@@ -17,9 +17,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 - Schedules are in the user's zone without asking it: AG-UI `forwardedProps.timezone` (the
   browser's), else UTC; `schedule_task` says the day and hour in it, so "tomorrow at 9" has a
   date, and takes `in_minutes` ("in 2 hours"). It is told when to schedule and when not, to
-  confirm "cancel all" and to ask which of two that fit; a fired run is offered no schedule
-  tool (one made a new schedule from "remind me daily"). The eval set: `python -m
-  benchmark.cost.schedules` (47 cases: schedule, no schedule, manage, fired, limits).
+  check a condition once now and say its value, to say what its tools cannot watch and offer
+  what they can; a fired run is offered no schedule tool (one made a new schedule from "remind
+  me daily"). The tools ask with buttons (`Runtime.ask(options=)`) for a schedule like one the
+  user has (update it, recommended, keep both, cancel; the same again is "already set"),
+  `cancel_schedule(id="all")`, several that fit (`ids`) and a vague ask (`choices`). The eval
+  set: `python -m benchmark.cost.schedules` (61 cases).
 - AG-UI `GET {path}/threads/{thread_id}/events`: every run of a chat thread, scheduled ones
   included, live and after `Last-Event-ID`, fed by one poller per process.
 - `RunStore.schedules` gains `list`, `get`, `update` and `delete` (`LocalRuns` has them); a

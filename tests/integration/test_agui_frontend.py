@@ -310,7 +310,10 @@ async def test_the_users_zone_comes_in_forwarded_props_for_their_schedules(
     agent = harness.wrap(chat, id="desk")
     async with served(agent) as http:
         for n, zone in enumerate(("Asia/Kolkata", "Mars/Olympus")):
-            said = {"messages": _said(f"hi {n}"), "forwardedProps": {"timezone": zone}}
+            said = {
+                "messages": _said(("check stock", "send revenue")[n]),
+                "forwardedProps": {"timezone": zone},
+            }
             body = {"threadId": f"t{n}", **said}
             response = await http.post(f"{PATH}/run", json=body)
             assert response.status_code == 200

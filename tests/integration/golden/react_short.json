@@ -15,12 +15,20 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks. Asked to cancel several or all: list them and have the user confirm first.",
+          "description": "Cancel one of the user's scheduled tasks, or id 'all' (the user is asked to confirm).",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
               "id": {
+                "description": "An id from list_schedules, or 'all'.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -33,7 +41,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; ask which only when several fit.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -125,10 +133,35 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. One schedule a request. Ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00, and say so. A schedule like one the user has is asked about here. One schedule a request; ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "choices": {
+                "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
+                "items": {
+                  "properties": {
+                    "condition": {
+                      "description": "Report only when this holds.",
+                      "type": "string"
+                    },
+                    "task": {
+                      "description": "What to do, as the user said it.",
+                      "type": "string"
+                    },
+                    "when": {
+                      "description": "A new 5-field cron.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "when"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "condition": {
                 "description": "Report only when this holds.",
                 "type": "string"
@@ -195,7 +228,15 @@
                 "type": "boolean"
               },
               "id": {
+                "description": "An id from list_schedules.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "task": {
                 "type": "string"
@@ -251,12 +292,20 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks. Asked to cancel several or all: list them and have the user confirm first.",
+          "description": "Cancel one of the user's scheduled tasks, or id 'all' (the user is asked to confirm).",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
               "id": {
+                "description": "An id from list_schedules, or 'all'.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -269,7 +318,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; ask which only when several fit.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; one that fits several: pass all their ids to update_schedule or cancel_schedule, and the user picks.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -361,10 +410,35 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. One schedule a request. Ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. A condition: first check it once now with your tools and tell the user the value; one that holds already: say so, and schedule only if they want to hear again. If no tool of yours can check it, do not schedule: say so and offer two or three things your tools can watch, by name. A vague ask ('keep an eye on sales'): call with choices, 2-3 concrete schedules your tools can run, the best first; the user picks one. No time said: 9:00, and say so. A schedule like one the user has is asked about here. One schedule a request; ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
+              "choices": {
+                "description": "Only for a vague ask: 2-3 concrete schedules, the best first; the user picks one, which is made.",
+                "items": {
+                  "properties": {
+                    "condition": {
+                      "description": "Report only when this holds.",
+                      "type": "string"
+                    },
+                    "task": {
+                      "description": "What to do, as the user said it.",
+                      "type": "string"
+                    },
+                    "when": {
+                      "description": "A new 5-field cron.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "when"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "condition": {
                 "description": "Report only when this holds.",
                 "type": "string"
@@ -431,7 +505,15 @@
                 "type": "boolean"
               },
               "id": {
+                "description": "An id from list_schedules.",
                 "type": "string"
+              },
+              "ids": {
+                "description": "When the user's words fit several: all their ids; the user picks one.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "task": {
                 "type": "string"

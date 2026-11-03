@@ -90,3 +90,37 @@ def test_the_set_has_every_category() -> None:
     cases = b.cases()
     assert {c.category for c in cases} == set(b.CATEGORIES)
     assert len({c.id for c in cases}) == len(cases) >= 40
+
+
+def test_check_first_cannot_vague_and_a_twin() -> None:
+    first = chat(made("0 9 * * *"), answer="23 now; I'll tell you.",
+                 calls=[("stock_level", {}, ""), ("schedule_task", {}, "")])  # fmt: skip
+    assert b.checked_first(first, ("23",)) == []
+    blind = chat(made("0 9 * * *"), answer="Done.", calls=[("schedule_task", {}, "")])
+    assert b.checked_first(blind, ("23",)) == ["scheduled without checking", "answer lacks '23'"]
+    assert b.checked_first(chat(), ()) == ["no schedule_task call"]
+    offers = "I can't watch competitors. I can watch stock levels or our sales instead."
+    assert b.cannot(chat(answer=offers)) == []
+    assert b.cannot(chat(answer="I can't.")) == ["suggests 0 things the tools can watch, not 2+"]
+    vague = b.Chat(now=NOW, answers=["Which?", "Done."], asked=[["A", "B"], None],
+                   calls=[[], [("schedule_task", {}, "")]], after=[made("0 9 * * *")])  # fmt: skip
+    assert b.clarifies(vague) == []
+    seed = made("0 9 * * *", condition="under 5")
+    twin = b.Chat(now=NOW, answers=["?", "Done."], asked=[["Update it (Recommended)", "Keep both"], None],
+                  seeded=[seed], after=[made("0 9 * * *", condition="under 3")])  # fmt: skip
+    assert b.updated_twin("3")(twin) == []
+    assert b.already_set(chat(answer="That is already set.")) == []
+    assert (
+        b.already_true("23", "50")(chat(made("0 9 * * *", condition="under 50"), answer="23 now"))
+        == []
+    )
+
+
+def test_a_turn_answers_the_question_the_run_waits_on() -> None:
+    from trellis.contracts import Interrupt, InterruptReason, Option
+
+    waits = Interrupt(interrupt_id="i", tenant_id="t", run_id="r", reason=InterruptReason.QUESTION,
+                      question="Which?", options=[Option(value="update", label="Update it"), "both"])  # fmt: skip
+    assert b.picks(waits, "@0|Update it.") == "update" and b.picks(waits, "@5|x") == "both"
+    assert b.picks(waits, "keep both") == "keep both" and b.said_of("@1|Yes.") == "Yes."
+    assert b.labels(waits) == ["Update it", "both"]

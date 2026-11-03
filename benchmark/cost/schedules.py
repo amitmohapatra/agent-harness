@@ -47,14 +47,21 @@ from benchmark.cost import prices
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Hooks
-from trellis.contracts import RunStatus, Schedule, ScheduleSpec, ToolCall, ToolOutcome
+from trellis.contracts import (
+    Interrupt,
+    RunStatus,
+    Schedule,
+    ScheduleSpec,
+    ToolCall,
+    ToolOutcome,
+)
 from trellis.harness import pipeline
 from trellis.harness.frontend import Frontend
 from trellis.harness.runs import THREAD, LocalRuns
 from trellis.harness.schedules import NO_REPORT, SCHEDULE_TOOLS, TASK, ScheduleLimits, _input
 
 #: The categories, in the order they are reported.
-CATEGORIES: Final = ("schedule", "no_schedule", "manage", "fired", "limits")
+CATEGORIES: Final = ("schedule", "no_schedule", "manage", "fired", "limits", "check", "cannot")
 #: How many fire instants of a recurring schedule are compared.
 INSTANTS: Final = 4
 #: The tools that change a schedule (every other schedule tool only reads).
@@ -84,6 +91,8 @@ class Chat:
     #: the user's zone as their app says it
     zone: str | None = None
     answers: list[str] = field(default_factory=list)
+    #: each turn's question with options the run paused on (their labels), else ``None``
+    asked: list[list[str] | None] = field(default_factory=list)
     calls: list[list[tuple[str, dict[str, Any], str]]] = field(default_factory=list)
     seeded: list[Schedule] = field(default_factory=list)
     after: list[Schedule] = field(default_factory=list)
@@ -155,17 +164,21 @@ def scheduled(
     at: Callable[[datetime, str], datetime] | None = None,
     within: tuple[timedelta, timedelta] | None = None,
     weekday: int | None = None,
+    checked: Sequence[str] | None = None,
 ) -> Check:
     """One schedule made: firing at ``cron``'s instants in ``zone`` (else the user's, else
     UTC) — or first at ``at(now, zone)``, or within ``within`` of now, or weekly on
     ``weekday``, any hour —, ``once`` as said, a condition naming each of ``condition``
-    (``None``: no condition)."""
+    (``None``: no condition); ``checked``: the turn that scheduled it checked it first with
+    another tool and told the user what it found (each of ``checked``)."""
 
     def check(chat: Chat) -> list[str]:
         z = zone or chat.zone or "UTC"
         s, problems = one_made(chat)
         if s is None:
             return problems
+        if checked is not None:
+            problems += checked_first(chat, checked)
         about = s.metadata[TASK]
         got = instants(s.cadence, s.timezone, chat.now)
         said = f"'{s.cadence}' {s.timezone}"
@@ -195,13 +208,112 @@ def scheduled(
     return check
 
 
+def checked_first(chat: Chat, says: Sequence[str]) -> list[str]:
+    """The turn that called ``schedule_task`` called another tool before it, and its answer
+    says each of ``says`` (what the check found)."""
+    for answer, turn in zip(chat.answers, chat.calls, strict=True):
+        names = [n for n, _, _ in turn]
+        if "schedule_task" in names:
+            before = names[: names.index("schedule_task")]
+            problems = [] if set(before) - SCHEDULE_NAMES else ["scheduled without checking"]
+            return problems + said_all(answer, says)
+    return ["no schedule_task call"]
+
+
+#: What the retail tools can watch, as an answer names it (the tools' own subjects).
+WATCHABLE: Final = (
+    r"\bstock",
+    r"price[ _]history|our (own )?price",
+    r"\bsales\b|revenue",
+    r"supplier",
+    r"forecast",
+    r"margin",
+    r"warehouse",
+    r"\baudit",
+)
+
+
+def cannot(chat: Chat) -> list[str]:
+    """Nothing scheduled; the answer says it cannot and suggests at least two things the
+    tools can watch."""
+    problems = [f"wrote {n}" for n in chat.written()]
+    if chat.made():
+        problems.append("made a schedule")
+    text = chat.answers[-1].lower()
+    found = [w for w in WATCHABLE if re.search(w, text)]
+    if len(found) < 2:
+        problems.append(f"suggests {len(found)} things the tools can watch, not 2+")
+    return problems
+
+
+def clarifies(chat: Chat) -> list[str]:
+    """A vague ask: asked back (choices to pick, or a question) before anything is
+    scheduled; one schedule once the user picked (a second turn)."""
+    problems = [] if asked_in(chat, 0) else ["did not ask or propose"]
+    if [n for n, a, _ in chat.calls[0] if writes(n, a)]:
+        problems.append("scheduled before asking")
+    want = 1 if len(chat.answers) > 1 else 0
+    if len(chat.made()) != want:
+        problems.append(f"{len(chat.made())} schedules, not {want}")
+    return problems
+
+
+def updated_twin(condition: str) -> Check:
+    """A schedule like the user's: they were asked with options, the recommended one (update)
+    first; picked, the one they had now has ``condition``, and there is no second."""
+
+    def check(chat: Chat) -> list[str]:
+        options = chat.asked[0] or []
+        problems = [] if options else ["no options asked"]
+        if options and "recommended" not in options[0].lower():
+            problems.append(f"first option {options[0]!r} is not the recommended update")
+        problems += ["made a second schedule"] if chat.made() else []
+        kept = seeded_by(chat, 0)
+        if kept is None or condition not in (kept.metadata[TASK].get("condition") or ""):
+            problems.append("the schedule was not updated")
+        return problems
+
+    return check
+
+
+def already_set(chat: Chat) -> list[str]:
+    """The same schedule asked for again: nothing new, nothing asked, said so."""
+    problems = ["made a schedule"] if chat.made() else []
+    problems += ["asked with options"] if any(chat.asked) else []
+    problems += said_all(chat.answers[-1], ("already",))
+    return problems
+
+
+def and_says(check: Check, *says: str) -> Check:
+    def both(chat: Chat) -> list[str]:
+        return check(chat) + said_all(chat.answers[-1], says)
+
+    return both
+
+
+def already_true(says: str, condition: str) -> Check:
+    """The condition holds now: the first answer says so (the figure), and a schedule is
+    there only after the user wants more alerts (the second turn)."""
+
+    def check(chat: Chat) -> list[str]:
+        problems = said_all(chat.answers[0], (says,))
+        made = chat.made()
+        if len(made) != 1:
+            problems.append(f"{len(made)} schedules after the user asked for alerts, not 1")
+        elif condition not in (made[0].metadata[TASK].get("condition") or ""):
+            problems.append(f"condition {made[0].metadata[TASK].get('condition')!r}")
+        return problems
+
+    return check
+
+
 def or_asks_zone(check: Check) -> Check:
     """``check``, or — the user's zone not known — nothing written and their zone asked."""
 
     def either(chat: Chat) -> list[str]:
         problems = check(chat)
         text = chat.answers[-1].lower()
-        asked = asks(text) and ("zone" in text or "utc" in text)
+        asked = asked_in(chat) and ("zone" in text or "utc" in text)
         return [] if problems and asked and not chat.written() else problems
 
     return either
@@ -230,6 +342,30 @@ def said_all(answer: str, says: Sequence[str]) -> list[str]:
 
 def asks(text: str) -> bool:
     return "?" in text
+
+
+def asked_in(chat: Chat, turn: int = -1) -> bool:
+    """Whether the turn asked the user: options to pick (the run paused) or a question."""
+    return bool(chat.asked and chat.asked[turn]) or asks(chat.answers[turn])
+
+
+def labels(interrupt: Interrupt) -> list[str]:
+    return [o if isinstance(o, str) else o.label or o.value for o in interrupt.options]
+
+
+def said_of(text: str) -> str:
+    """What a turn says when no question waits: ``@n|words`` says the words."""
+    return text.split("|", 1)[1] if text.startswith("@") else text
+
+
+def picks(interrupt: Interrupt, text: str) -> Any:
+    """The answer a turn gives the question the run waits on: ``@n|...`` picks option ``n``,
+    other words are the answer as said."""
+    if text.startswith("@") and interrupt.options:
+        n = int(text[1:].split("|", 1)[0])
+        option = interrupt.options[min(n, len(interrupt.options) - 1)]
+        return option if isinstance(option, str) else option.value
+    return said_of(text)
 
 
 def by_task(chat: Chat, words: str) -> Schedule | None:
@@ -276,7 +412,7 @@ def cancelled(*gone: int, kept: Sequence[int] = (), ask_first: bool = False) -> 
         problems += [f"seed {n} cancelled" for n in kept if seeded_by(chat, n) is None]
         if ask_first:
             first = [n for n, a, _ in chat.calls[0] if writes(n, a)]
-            if first or not asks(chat.answers[0]):
+            if first or not asked_in(chat, 0):
                 problems.append("did not confirm before cancelling all")
         return problems
 
@@ -284,9 +420,15 @@ def cancelled(*gone: int, kept: Sequence[int] = (), ask_first: bool = False) -> 
 
 
 def asked_which(chat: Chat) -> list[str]:
-    problems = [f"wrote {n}" for n in chat.written()]
-    if not asks(chat.answers[-1]):
-        problems.append("did not ask which")
+    """Asked which (nothing written before), then the one picked changed: exactly one of the
+    two similar seeds."""
+    problems = [] if asked_in(chat, 0) else ["did not ask which"]
+    if not chat.asked[0] and [n for n, a, _ in chat.calls[0] if writes(n, a)]:
+        problems.append("wrote before asking")
+    gone = [n for n in (0, 1) if seeded_by(chat, n) is None]
+    paused = [n for n in (0, 1) if (s := seeded_by(chat, n)) is not None and not s.enabled]
+    if len(gone) + len(paused) != 1:
+        problems.append(f"{len(gone)} cancelled and {len(paused)} paused, not one")
     return problems
 
 
@@ -373,7 +515,7 @@ def cases() -> list[Case]:
         "value": f"When the user turns on stock watch, schedule a check of {SKU} every Monday "
         "at 9:00 that reports only when its total stock is under 15.",
     }
-    S, N, M, F, L = CATEGORIES
+    S, N, M, F, L, K, C = CATEGORIES
     hour = (timedelta(minutes=118), timedelta(minutes=123))
     return [
         # --- should schedule
@@ -399,19 +541,21 @@ def cases() -> list[Case]:
         Case("once-next-monday", S,
              ("Next Monday at 10am, just once, send me last week's sales summary.",),
              scheduled(once=True, at=_next_weekday_at(0, 10))),
+        Case("default-time", S, (f"Send me the stock of {SKU} every day.",),
+             and_says(scheduled("0 9 * * *"), "9")),
         Case("relative-2h", S, ("In 2 hours, remind me to call supplier SUP-03.",),
              scheduled(once=True, within=hour)),
         Case("cond-hourly", S,
              (f"Check every hour and tell me if the total stock of {SKU} is 5 or below.",),
-             scheduled("0 * * * *", condition=(SKU, "5"))),
+             scheduled("0 * * * *", condition=(SKU, "5"), checked=(str(stock),))),
         Case("cond-monday", S,
              (f"Every Monday at 8, check the stock of {SKU} and tell me if it's under 20.",),
-             scheduled("0 8 * * 1", condition=("20",))),
+             scheduled("0 8 * * 1", condition=("20",), checked=(str(stock),))),
         Case("hinglish-daily", S, ("Har roz subah 9 baje mujhe sales summary bhejna.",),
              scheduled("0 9 * * *")),
         Case("hinglish-cond", S,
              (f"Har Monday 10 baje {SKU} ka stock check karo, agar 10 se kam ho toh batana.",),
-             scheduled("0 10 * * 1", condition=("10",))),
+             scheduled("0 10 * * 1", condition=("10",), checked=(str(stock),))),
         Case("zone-said", S, (f"Every day at 9am IST send me the stock of {SKU}.",),
              scheduled("0 9 * * *", kolkata), zone=new_york),
         Case("zone-app-weekdays", S,
@@ -425,7 +569,7 @@ def cases() -> list[Case]:
              (f"Tomorrow at 9am, just once, send me the stock of {SKU}.",),
              or_asks_zone(scheduled(once=True, at=_tomorrow_at(9))), zone=None),
         Case("skill", S, ("Turn on stock watch.",),
-             scheduled("0 9 * * 1", condition=("15",)), context=(skill,)),
+             scheduled("0 9 * * 1", condition=("15",), checked=(str(stock),)), context=(skill,)),
         # --- should not schedule
         Case("now-stock", N, (f"What is the stock of {SKU} now?",),
              unscheduled(str(stock), tools=("stock_level",))),
@@ -463,10 +607,19 @@ def cases() -> list[Case]:
                     summary_seed)),
         Case("cancel-monday", M, ("Cancel the Monday one.",), cancelled(1, kept=(0,)),
              seeds=(stock_seed, summary_seed)),
-        Case("cancel-all", M, ("Cancel all my schedules.", "Yes, cancel them all."),
+        Case("cancel-all", M, ("Cancel all my schedules.", "@0|Yes, cancel them all."),
              cancelled(0, 1, ask_first=True), seeds=(stock_seed, summary_seed)),
-        Case("ambiguous", M, ("Cancel my stock check.",), asked_which,
+        Case("ambiguous", M, ("Cancel my stock check.", "@0|The first one."), asked_which,
              seeds=(stock_seed, other_seed)),
+        Case("ambiguous-pause", M, ("Pause the stock check.", "@1|The second one."),
+             asked_which, seeds=(stock_seed, other_seed)),
+        Case("dup-similar", M,
+             (f"Tell me when the total stock of {SKU} is 3 or less; check daily at 9.",
+              "@0|Update it."),
+             updated_twin("3"), seeds=(stock_seed,)),
+        Case("dup-exact", M,
+             (f"Check the total stock of {SKU} daily at 9 and tell me if it's under 5.",),
+             already_set, seeds=(stock_seed,)),
         Case("to-tuesday", M, ("Change the Monday summary to Tuesdays.",),
              changed(1, cron="0 8 * * 2", untouched=(0,)), seeds=(stock_seed, summary_seed)),
         Case("new-condition", M,
@@ -489,6 +642,29 @@ def cases() -> list[Case]:
         Case("fired-no-new", F, (), reports("report"), fire=1,
              seeds=(Seed(f"every day remind me to check the stock of {SKU}, and keep "
                          "reminding me daily", "0 9 * * *"),)),
+        # --- checked now, before scheduling
+        Case("check-now", K,
+             (f"Tell me when the total stock of {SKU} is 5 or less; check daily at 9.",),
+             scheduled("0 9 * * *", condition=("5",), checked=(str(stock),))),
+        Case("check-now-price", K,
+             (f"Every Monday at 9, tell me if the price of {SKU} changed.",),
+             scheduled("0 9 * * 1", checked=(), condition=())),
+        Case("already-true", K,
+             (f"Tell me when the total stock of {SKU} is below 50; check daily at 9am.",
+              "Yes, keep alerting me daily while it's below 50."),
+             already_true(str(stock), "50")),
+        # --- cannot be watched, or too vague to schedule
+        Case("cannot-competitor", C,
+             (f"Tell me whenever a competitor changes their price for {SKU}'s product.",),
+             cannot),
+        Case("cannot-weather", C, ("Alert me every morning if it's going to rain in London.",),
+             cannot),
+        Case("cannot-social", C, ("Tell me when someone mentions our brand on Instagram.",),
+             cannot),
+        Case("vague-sales", C, ("Keep an eye on sales for me.",), clarifies),
+        Case("vague-pick", C,
+             ("Keep an eye on our stock for me.", "@0|The first one you suggested."), clarifies),
+        Case("vague-stock", C, ("Watch our stock.",), clarifies),
         # --- limits
         Case("over-cap", L, ("Also every Friday at 5pm send me the sales summary.",),
              limited("cancel", "limit", "maximum", "1 of 1", "already"),
@@ -556,11 +732,24 @@ async def run_case(case: Case, model: str, tag: str, max_steps: int = 12) -> dic
         app = Frontend(context=case.context, timezone=case.zone)
         started = time.monotonic()
         with runner.metered() as meter:
+            waits: Interrupt | None = None
             for text in case.turns:
                 trace.calls = []
-                record = await agent._opened(text, user=user, thread=thread, tenant=None, app=app)
-                result = await pipeline.attempt(agent, record, text)
-                chat.answers.append(str(result.answer or result.error or result.status))
+                if waits is not None:  # this turn answers the question the run waits on
+                    picked = picks(waits, text)
+                    result = await agent.resume(
+                        waits.interrupt_id, "answer", answer=picked, reviewer=user
+                    )
+                else:
+                    said = said_of(text)
+                    record = await agent._opened(
+                        said, user=user, thread=thread, tenant=None, app=app
+                    )
+                    result = await pipeline.attempt(agent, record, said)
+                waits = result.interrupt if result.status is RunStatus.PAUSED else None
+                chat.asked.append(labels(waits) if waits is not None else None)
+                answer = waits.question if waits is not None else result.answer or result.error
+                chat.answers.append(str(answer or result.status))
                 chat.calls.append(trace.calls)
             for _ in range(case.fire):
                 trace.calls = []
