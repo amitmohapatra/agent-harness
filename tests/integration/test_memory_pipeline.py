@@ -30,7 +30,7 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
-from trellis.harness.agent import NARROW_FROM
+from trellis.harness.agent import ASKING, NARROW_FROM, REMEMBERED
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
@@ -144,6 +144,25 @@ async def test_push_sends_the_context_with_the_question(
     assert call.body["window"] is True  # ReAct keeps no conversation of its own
     assert "tools" not in call.body  # no tools of its own: nothing learned to offer
     assert memory_service.named("tool_hints") == []
+
+
+@pytest.mark.parametrize("profile", [False, True])
+async def test_the_note_on_remembered_values_comes_only_with_a_profile(
+    memory_harness: Harness, memory_service: FakeMemoryService, profile: bool
+) -> None:
+    """When to ask comes with every memory context; how to use remembered rules, preferences
+    and values (say them with their date, ask before a costly fill) only with the profile that
+    holds them: no tokens, and no pull to act on an assumption, on a turn with none."""
+    rules = "## Profile\n### standing_rules\n- Always send reports as CSV. (said 2026-10-15)"
+    memory_service.context_text = rules if profile else "## Memory\n- facts"
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="notes")
+    result = await agent.run("send the report", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = pushed(model.requests[0])
+    assert ASKING in sent
+    assert (REMEMBERED in sent) is profile
+    assert with_note(memory_service.context_text) in sent  # the helper the tests share
 
 
 async def test_a_small_toolbox_gets_its_learned_skills_and_every_tool(
