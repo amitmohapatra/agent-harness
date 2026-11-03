@@ -87,7 +87,6 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
-from trellis.harness.conversation import STEERED_SAYS
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.history import Said, Speaker
 from trellis.harness.journal import Pending
@@ -161,6 +160,8 @@ ANTHROPIC_ROUTE: Final = "anthropic"
 TOOL_EVENT: Final = "PreToolUse"
 RAN_EVENT: Final = "PostToolUse"
 FAILED_EVENT: Final = "PostToolUseFailure"
+#: How a message steered into the run reads to Claude, after a tool call's result.
+STEERED_SAYS: Final = "The user adds, while you work: "
 #: The key a query's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "claude_agent_sdk"
 #: The result a query that reached its ``max_turns`` ends with (no answer).
@@ -725,16 +726,9 @@ def _steering() -> Any:
     last tool call (``Runtime.steered``), as the context a hook adds after the call's result."""
     from claude_agent_sdk import HookMatcher
 
-    from trellis.harness.tools.convert.claude import WAITING
-
     async def steered(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         runtime = current()
-        assert runtime is not None  # the CLI calls it inside the run it works for
-        try:
-            await runtime.step()  # the run's inbox: its instructions, a person's pause
-        except Paused:  # a person paused it: Claude stops here, its session kept
-            return {"continue_": False, "stopReason": WAITING}
-        taken = runtime.steered()
+        taken = runtime.steered() if runtime is not None else []
         if not taken:
             return {}
         said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)

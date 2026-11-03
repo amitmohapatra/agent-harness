@@ -54,9 +54,6 @@ ASKED: Final = ANSWERED | {RunStatus.CANCELLED}
 #: The ``RunStart.metadata`` key a run sent with ``mode="steer"`` keeps the run it was given
 #: to under (its answer is that run's: :func:`earlier` keeps it once).
 STEERED_INTO: Final = "steered_into"
-#: How a message steered into a run reads to an agent that is told it as text (Claude after a
-#: tool call's result, an ACP agent as its turn goes on).
-STEERED_SAYS: Final = "The user adds, while you work: "
 
 
 class Mode(StrEnum):
@@ -227,14 +224,11 @@ class Live:
 class Turns:
     """One run of a conversation at a time in this process: the others wait their turn, in
     order (``pipeline.attempt``). The run holding each turn is :class:`Live`, which a message
-    sent with ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches. A run
-    is also reached by its id (:meth:`give`: a background task's instruction)."""
+    sent with ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches."""
 
     def __init__(self) -> None:
         self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
-        #: the messages given to a run by its id, until its framework takes them
-        self.given: dict[str, list[Steer]] = {}
 
     @contextlib.asynccontextmanager
     async def taken(
@@ -264,22 +258,12 @@ class Turns:
         """The run holding ``key``'s turn in this process, if one does."""
         return self._live.get(key)
 
-    def give(self, run_id: str, steer: Steer) -> None:
-        """``steer`` given to run ``run_id`` (wherever it works in this process, whatever its
-        conversation), taken at its framework's next step — its first, when it has not
-        started."""
-        self.given.setdefault(run_id, []).append(steer)
-
     def steered(self, key: str, run_id: str) -> list[Steer]:
-        """The messages given to run ``run_id`` since it last looked, now taken: those sent
-        to its conversation's turn, then those given to it by its id."""
+        """The messages given to run ``run_id`` since it last looked, now taken."""
         live = self._live.get(key)
-        fresh = (
-            [s for s in live.inbox if not s.taken]
-            if live is not None and live.run_id == run_id
-            else []
-        )
-        fresh.extend(self.given.pop(run_id, ()))
+        if live is None or live.run_id != run_id:
+            return []
+        fresh = [s for s in live.inbox if not s.taken]
         for s in fresh:
             s.taken = True
         return fresh
@@ -307,7 +291,6 @@ __all__ = [
     "ASKED",
     "EARLIER_RUNS",
     "STEERED_INTO",
-    "STEERED_SAYS",
     "Live",
     "Mode",
     "Steer",
