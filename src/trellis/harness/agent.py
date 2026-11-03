@@ -879,9 +879,10 @@ class Agent:
                 tools.extend(await self.harness._pull_tools(runtime.run_memory))
             except Exception as exc:
                 runtime.events.warning("memory_unavailable", f"no memory tools: {exc}")
-        if not self.adapter.fixed_tools:  # the agent's own tool of the same name wins
+        # the agent's own tool of the same name wins; a fired run does its task, no more
+        if not self.adapter.fixed_tools and runtime.scheduled is None:
             named = {t.name for t in tools}
-            tools.extend(t for t in schedule_tools() if t.name not in named)
+            tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})

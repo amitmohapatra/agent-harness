@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -44,10 +45,14 @@ def _other(n: int) -> Any:
 TOOLS = [stock, *(_other(n) for n in range(4))]
 
 
+#: ``schedule_task``'s day and hour (``schedules.now_said``): what changes from run to run.
+NOW = re.compile(r"It is now [^(]*\(")
+
+
 def wire(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """What the model was sent, without what changes from run to run (none, today: the
-    scripted model's call ids are numbered)."""
-    return requests
+    """What the model was sent, without what changes from run to run: the day and hour
+    ``schedule_task`` says (the scripted model's call ids are numbered)."""
+    return json.loads(NOW.sub("It is now <day, hour> (", json.dumps(requests)))
 
 
 async def test_a_short_task_sends_the_model_what_react_always_sent(harness: Harness) -> None:

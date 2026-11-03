@@ -38,10 +38,13 @@ class Chat:
         self.inputs: list[str] = []
         self.toolboxes: list[set[str]] = []
         self.said: list[str] = []
+        self.described: list[str] = []
 
     async def __call__(self, input: str, agent: Runtime) -> str:
         self.inputs.append(input)
         self.toolboxes.append(set(agent.toolbox))
+        found = agent.toolbox.get("schedule_task")
+        self.described.append(found.spec.description if found is not None else "")
         if input.startswith("Scheduled task:"):
             return self.fired.popleft()
         said = [text_of(await agent.tools.call(n, **a)) for n, a in self.calls]
@@ -86,6 +89,31 @@ async def test_every_run_gets_the_tools_and_without_schedules_turns_them_off() -
         off = h.wrap(chat, id="off", without={"schedules"})
         await off.run("hi", user="ada")
         assert not set(SCHEDULE_TOOLS) & chat.toolboxes[-1]
+
+
+async def test_a_fired_run_is_offered_no_schedule_tools_and_a_chat_the_day_and_hour() -> None:
+    """A fired run does its task: it is offered no schedule tool (it made schedules of its
+    own when it was). In chat ``schedule_task`` says the day and the hour, in UTC where the app
+    gave no zone; ``in_minutes`` is once, that many minutes from now."""
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(
+            agent, chat, "ada", ("schedule_task", {"task": "check stock", "when": "0 8 * * *"})
+        )
+        assert set(SCHEDULE_TOOLS) <= chat.toolboxes[-1]
+        now = datetime.now(UTC)
+        assert f"It is now {now:%a %Y-%m-%d}, {now:%H}:00-{now:%H}:59 (UTC;" in chat.described[-1]
+        assert only(h).timezone == "UTC"
+        chat.fired.append("12 left")
+        await fire(h, agent, only(h).schedule_id)
+        assert not set(SCHEDULE_TOOLS) & chat.toolboxes[-1]
+        local(h)._schedules.clear()
+        await said(agent, chat, "ada", ("schedule_task", {"task": "call SUP-3", "in_minutes": 120}))
+        later = only(h)
+        due = later.next_fire_at
+        assert later.metadata[TASK]["once"] is True and due is not None
+        assert timedelta(minutes=119) <= due - now <= timedelta(minutes=121)
 
 
 async def test_a_task_set_in_chat_is_the_users_in_its_thread_with_the_agents_limits() -> None:

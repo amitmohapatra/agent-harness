@@ -11,6 +11,8 @@
 * **context**: the ``{description, value}`` entries, which the model reads in the pushed
   context with the state, fitted to :data:`SHARE` of its token budget (the memory context gets
   the rest).
+* **timezone**: the person's IANA zone (``forwardedProps.timezone``, e.g. the browser's): the
+  time the model reads now is in it, and a schedule they set in chat is (``schedules.py``).
 * **state**: the front end's shared state. The run's code reads and sets it
   (``Runtime.state``); each change is streamed as ``STATE_DELTA`` (a JSON Patch, RFC 6902), or
   ``STATE_SNAPSHOT`` where there was no object to patch (``Runtime.state``).
@@ -59,6 +61,8 @@ class Frontend:
     state: Any = None
     #: whether the front end gave a state (``None`` is a state too)
     stated: bool = field(default=False)
+    #: the person's IANA zone, when the app said a valid one
+    timezone: str | None = None
 
     @classmethod
     def of(cls, metadata: Mapping[str, Any]) -> Frontend | None:
@@ -71,6 +75,7 @@ class Frontend:
             context=tuple(kept.get("context") or ()),
             state=kept.get("state"),
             stated="state" in kept,
+            timezone=kept.get("timezone"),
         )
 
     def kept(self) -> dict[str, Any]:
@@ -82,6 +87,8 @@ class Frontend:
             kept["context"] = [dict(c) for c in self.context]
         if self.stated:
             kept["state"] = self.state
+        if self.timezone:
+            kept["timezone"] = self.timezone
         return kept
 
     def offered(self, taken: Collection[str]) -> tuple[list[Tool], list[str]]:

@@ -2,8 +2,8 @@
 built-in tools every adapter gets while the run store can schedule (off: ``without=
 ["schedules"]``), on agent-runs' schedules (``RUNS_URL``) or ``LocalRuns``'.
 
-* ``schedule_task(task, when, condition=None, once=False, timezone="UTC")``: ``when`` is a
-  5-field cron the model writes, checked with ``croniter`` (agent-runs' own);
+* ``schedule_task(task, when, condition=None, once=False, in_minutes=None, timezone=None)``:
+  ``when`` is a 5-field cron the model writes, checked with ``croniter`` (agent-runs' own);
   ``list_schedules()``; ``update_schedule(id, ...)``; ``cancel_schedule(id)``. Each user sees
   and changes only their own (the run's user and tenant), and only those set in chat.
 * A fired run is the same agent, the same user and the same thread: the schedule's metadata
@@ -15,6 +15,11 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
   conversation, and the thread stream leaves it out. A condition that still holds is reported
   once: the next runs are quiet until it stops holding (:data:`REPORTED`, in the schedule's
   metadata). ``once=True`` deletes the schedule after its run.
+* The user's zone: the one the model names, else the one their app sends
+  (``forwardedProps.timezone``, ``frontend.py``), else UTC. Every run reads the time now in
+  it in ``schedule_task``'s description (:func:`now_said`), so "tomorrow at 9" has a date;
+  "in 2 hours" is ``in_minutes``. A fired run is offered none of these tools: it does its
+  task.
 * Limits: ``TRELLIS_SCHEDULE_MIN_INTERVAL`` and ``TRELLIS_SCHEDULE_MAX_PER_USER`` (``Settings``),
   per user ``Harness(schedule_limits=)``; agent-runs' own floor, rate limits and
   ``max_running_per_tenant`` still apply. A limit reached is a sentence the model tells the
@@ -27,9 +32,10 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
@@ -103,6 +109,35 @@ class Fired:
         )
 
 
+# --------------------------------------------------------------------------- the user's time
+
+
+def zone_of(name: Any) -> str | None:
+    """``name`` when it is an IANA zone, else ``None``."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        ZoneInfo(name.strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return name.strip()
+
+
+def _zone(runtime: Runtime) -> str | None:
+    """The user's zone, as their app said it."""
+    return runtime.frontend.timezone if runtime.frontend is not None else None
+
+
+def now_said(runtime: Runtime) -> str:
+    """When it is, as ``schedule_task``'s description says it: the day and the hour in the
+    user's zone (not the minute: the tool's text stays the same for an hour, as a prompt cache
+    keeps it; ``in_minutes`` counts from the minute), or in UTC, said as not theirs."""
+    zone = _zone(runtime)
+    now = datetime.now(ZoneInfo(zone or "UTC"))
+    whose = f"{zone}, the user's zone" if zone else "UTC; the user's zone is not known"
+    return f"It is now {now:%a %Y-%m-%d}, {now:%H}:00-{now:%H}:59 ({whose})."
+
+
 # --------------------------------------------------------------------------- fired runs
 
 
@@ -137,11 +172,12 @@ async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
 
 # --------------------------------------------------------------------------- the tools
 
-_TASK: Final = {"type": "string"}
+_TASK: Final = {"type": "string", "description": "What to do, as the user said it."}
 _WHEN: Final = {
     "type": "string",
-    "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, "
-    "'0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+    "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' "
+    "9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one "
+    "day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
 }
 _CONDITION: Final = {"type": "string", "description": "Report only when this holds."}
 _ID: Final = {"type": "string"}
@@ -164,21 +200,38 @@ def _spec(name: str, description: str, properties: dict[str, Any], required: lis
 SPECS: Final = (
     _spec(
         "schedule_task",
-        "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+        "Run a task later or on a timetable when the user asks for that ('every Monday...', "
+        "'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a "
+        "habit; the reply comes back to this chat. One schedule a request. Ask nothing the run "
+        "can work out itself.",
         {
             "task": _TASK,
             "when": _WHEN,
             "condition": _CONDITION,
             "once": {"type": "boolean", "description": "Run once, then end."},
-            "timezone": {"type": "string", "description": "The user's IANA zone; default UTC."},
+            "in_minutes": {
+                "type": "number",
+                "description": "Instead of when: run once this many minutes from now "
+                "('in 2 hours': 120).",
+            },
+            "timezone": {
+                "type": "string",
+                "description": "An IANA zone, only when the user names one; default theirs.",
+            },
         },
-        ["task", "when"],
+        ["task"],
     ),
-    _spec("list_schedules", "The user's scheduled tasks.", {}, []),
+    _spec(
+        "list_schedules",
+        "The user's scheduled tasks: read them when the user refers to one ('the stock one', "
+        "'my reports'). A reference that fits one is that one; ask which only when several fit.",
+        {},
+        [],
+    ),
     _spec(
         "update_schedule",
-        "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false "
-        "pauses it, true resumes it.",
+        "Change one of the user's scheduled tasks (an id from list_schedules): its time, task "
+        "or condition; enabled=false pauses it, true resumes it.",
         {
             "id": _ID,
             "when": _NEW_WHEN,
@@ -188,18 +241,34 @@ SPECS: Final = (
         },
         ["id"],
     ),
-    _spec("cancel_schedule", "Cancel one of the user's scheduled tasks.", {"id": _ID}, ["id"]),
+    _spec(
+        "cancel_schedule",
+        "Cancel one of the user's scheduled tasks. Asked to cancel several or all: list them "
+        "and have the user confirm first.",
+        {"id": _ID},
+        ["id"],
+    ),
 )
 
 
-def schedule_tools() -> list[Tool]:
-    return [Tool(spec, _RUN[spec.name], feature="schedules") for spec in SPECS]
+def schedule_tools(runtime: Runtime | None = None) -> list[Tool]:
+    """The tools; in a run, ``schedule_task``'s description says when it is (:func:`now_said`)."""
+    specs = list(SPECS)
+    if runtime is not None:
+        dated = f"{specs[0].description} {now_said(runtime)}"
+        specs[0] = specs[0].model_copy(update={"description": dated})
+    return [Tool(spec, _RUN[spec.name], feature="schedules") for spec in specs]
 
 
 async def _schedule_task(args: dict[str, Any]) -> Any:
     runtime = _runtime()
-    task, when = str(args["task"]).strip(), str(args["when"]).strip()
+    task, when = str(args["task"]).strip(), str(args.get("when") or "").strip()
     condition = (args.get("condition") or "").strip() or None
+    zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
+    once = bool(args.get("once"))
+    if minutes := args.get("in_minutes"):  # once, at that minute
+        at = datetime.now(ZoneInfo(zone_of(zone) or "UTC")) + timedelta(minutes=float(minutes))
+        when, once = f"{at.minute} {at.hour} {at.day} {at.month} *", True
     min_interval, max_per_user = await _limits(runtime)
     if (refused := _refused(when, min_interval)) is not None:
         return refused
@@ -209,7 +278,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
         )
     agent = runtime.agent
-    about = {"task": task, "condition": condition, "once": bool(args.get("once"))}
+    about = {"task": task, "condition": condition, "once": once}
     metadata = {**agent._metadata(runtime.without, None), TASK: about}
     if runtime.conversation != runtime.run_id:  # the chat it was set in
         metadata[THREAD] = runtime.identity.thread
@@ -219,7 +288,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             agent_id=agent.id,
             name=task[:200],
             cadence=when,
-            timezone=str(args.get("timezone") or "UTC"),
+            timezone=zone,
             on_behalf_of=runtime.user,
             input=_input(task, condition),
             timeout_seconds=agent.timeout,

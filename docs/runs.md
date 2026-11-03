@@ -408,11 +408,23 @@ with its tools bound takes them as it takes the memory tools: `h.schedule_tools(
 
 | Tool | What it does |
 |---|---|
-| `schedule_task(task, when, condition=None, once=False, timezone="UTC")` | `when` is a 5-field cron the model writes (`0 9 * * *` daily at 9, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st), checked with `croniter`; `once=True` ends the schedule after its run |
+| `schedule_task(task, when=None, condition=None, once=False, in_minutes=None, timezone=None)` | `when` is a 5-field cron the model writes in the user's zone (`0 9 * * *` daily at 9, `0 9,17 * * *` at 9 and 17, `0 9 * * 1-5` weekdays, `0 8 * * 1` Mondays, `0 9 1 * *` the 1st, `0 9 4 11 *` with `once` for one day), checked with `croniter`; `in_minutes` instead is once, that many minutes from now ("in 2 hours"); `once=True` ends the schedule after its run; `timezone` only when the user names one |
 | `list_schedules()` | the user's schedules set in chat with this agent: id, task, time, condition, active or paused, next run |
 | `update_schedule(id, when=None, task=None, condition=None, enabled=None)` | `enabled=False` pauses, `True` resumes |
 | `cancel_schedule(id)` | deletes it |
 
+- **When, in whose zone.** A schedule is in the user's zone: the one they name, else the one
+  their app sends (AG-UI `forwardedProps.timezone`, e.g. the browser's
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`: [surfaces.md](surfaces.md)), else UTC.
+  `schedule_task`'s description says the day and the hour in that zone ("It is now Tue
+  2026-11-03, 14:00-14:59 (Asia/Kolkata, the user's zone)"), so "tomorrow at 9" has a date; the
+  hour, not the minute, so the tools' text stays the same for an hour, as a prompt cache keeps
+  it. With no zone known the model may ask for it.
+- **When it schedules.** On a request for something later or on a repeat, not on a question
+  that only mentions a time or a habit ("do we restock every Monday?"); it asks nothing the run
+  can work out itself (which figures a summary has). "Cancel all" is confirmed first; a
+  reference that fits two schedules is asked about. A fired run is offered none of the four
+  tools: it does its task (it made schedules of its own when it was).
 - **Whose.** A schedule acts for the run's user, in the key's tenant (`on_behalf_of`); each user
   sees and changes only their own, and only those set in chat (a schedule your code makes with
   `agent.schedule` is not listed).

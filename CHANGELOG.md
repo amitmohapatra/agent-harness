@@ -14,6 +14,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   answers `NO_REPORT` when the condition does not hold, and a condition that still holds is
   reported once. Limits: `TRELLIS_SCHEDULE_MIN_INTERVAL` (300 s), `TRELLIS_SCHEDULE_MAX_PER_USER`
   (20), per user `Harness(schedule_limits=)` ([docs/runs.md](docs/runs.md#schedules-users-set-in-chat)).
+- Schedules are in the user's zone without asking it: AG-UI `forwardedProps.timezone` (the
+  browser's), else UTC; `schedule_task` says the day and hour in it, so "tomorrow at 9" has a
+  date, and takes `in_minutes` ("in 2 hours"). It is told when to schedule and when not, to
+  confirm "cancel all" and to ask which of two that fit; a fired run is offered no schedule
+  tool (one made a new schedule from "remind me daily"). The eval set: `python -m
+  benchmark.cost.schedules` (47 cases: schedule, no schedule, manage, fired, limits).
 - AG-UI `GET {path}/threads/{thread_id}/events`: every run of a chat thread, scheduled ones
   included, live and after `Last-Event-ID`, fed by one poller per process.
 - `RunStore.schedules` gains `list`, `get`, `update` and `delete` (`LocalRuns` has them); a

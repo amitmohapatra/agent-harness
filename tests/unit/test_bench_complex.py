@@ -233,14 +233,14 @@ async def test_the_spend_cap_stops_the_run(tmp_path: Path, offline: None) -> Non
     # the scripted model reports each request's own size in and 50 out: the run stops at the
     # call that reaches the cap, so it spends less than the cap and that one call
     report = await cx.bench(
-        _args(out, cases=PICK, price="claude-haiku-5-5", max_usd=0.0005), progress=lambda _: None
+        _args(out, cases=PICK, price="claude-haiku-5-5", max_usd=0.0008), progress=lambda _: None
     )
     assert report["stopped"] and "spend cap" in report["stopped"]
     sent = [json.loads(x) for x in out.with_suffix(".requests.jsonl").read_text().splitlines()]
     price = prices.PRICES["claude-haiku-5-5"]
     calls = [prices.dollars(price, input_tokens=q["input_tokens"], output_tokens=50) for q in sent]
     assert len(set(calls)) > 1  # priced by what each request held, not one constant
-    assert report["usd"] >= 0.0005 and report["usd"] < 0.0005 + 2 * max(calls)
+    assert report["usd"] >= 0.0008 and report["usd"] < 0.0008 + 2 * max(calls)
     kept = out.with_suffix(".jsonl").read_text().splitlines()
     assert len(kept) < 7 and all(not json.loads(x)["stopped"] for x in kept)
 

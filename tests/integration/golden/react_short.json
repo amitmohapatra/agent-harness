@@ -15,7 +15,7 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks.",
+          "description": "Cancel one of the user's scheduled tasks. Asked to cancel several or all: list them and have the user confirm first.",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
@@ -33,7 +33,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; ask which only when several fit.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -125,7 +125,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. One schedule a request. Ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -133,25 +133,29 @@
                 "description": "Report only when this holds.",
                 "type": "string"
               },
+              "in_minutes": {
+                "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
+                "type": "number"
+              },
               "once": {
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "timezone": {
-                "description": "The user's IANA zone; default UTC.",
+                "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
               },
               "when": {
-                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
             "required": [
-              "task",
-              "when"
+              "task"
             ],
             "type": "object"
           }
@@ -180,7 +184,7 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {
@@ -247,7 +251,7 @@
     "tools": [
       {
         "function": {
-          "description": "Cancel one of the user's scheduled tasks.",
+          "description": "Cancel one of the user's scheduled tasks. Asked to cancel several or all: list them and have the user confirm first.",
           "name": "cancel_schedule",
           "parameters": {
             "properties": {
@@ -265,7 +269,7 @@
       },
       {
         "function": {
-          "description": "The user's scheduled tasks.",
+          "description": "The user's scheduled tasks: read them when the user refers to one ('the stock one', 'my reports'). A reference that fits one is that one; ask which only when several fit.",
           "name": "list_schedules",
           "parameters": {
             "properties": {},
@@ -357,7 +361,7 @@
       },
       {
         "function": {
-          "description": "Run a task later or on a timetable for this user; the reply comes back to this chat.",
+          "description": "Run a task later or on a timetable when the user asks for that ('every Monday...', 'tomorrow at 9...', 'tell me when...'), not when a question only mentions a time or a habit; the reply comes back to this chat. One schedule a request. Ask nothing the run can work out itself. It is now <day, hour> (UTC; the user's zone is not known).",
           "name": "schedule_task",
           "parameters": {
             "properties": {
@@ -365,25 +369,29 @@
                 "description": "Report only when this holds.",
                 "type": "string"
               },
+              "in_minutes": {
+                "description": "Instead of when: run once this many minutes from now ('in 2 hours': 120).",
+                "type": "number"
+              },
               "once": {
                 "description": "Run once, then end.",
                 "type": "boolean"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "timezone": {
-                "description": "The user's IANA zone; default UTC.",
+                "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
               },
               "when": {
-                "description": "5-field cron: '0 9 * * *' daily 9:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays 8:00, '0 9 1 * *' the 1st of the month.",
+                "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
               }
             },
             "required": [
-              "task",
-              "when"
+              "task"
             ],
             "type": "object"
           }
@@ -412,7 +420,7 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules); enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {

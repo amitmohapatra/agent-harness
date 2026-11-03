@@ -233,9 +233,12 @@ ModeName = Literal["queue", "interrupt", "steer"]
 
 
 class Forwarded(_Wire):
-    """``forwardedProps`` as the harness reads them: ``mode``. The rest is the client's own."""
+    """``forwardedProps`` as the harness reads them: ``mode`` and ``timezone`` (the person's
+    IANA zone, e.g. the browser's ``Intl.DateTimeFormat().resolvedOptions().timeZone``). The
+    rest is the client's own."""
 
     mode: ModeName = "queue"
+    timezone: str | None = None
 
 
 class RunAgentInput(_Wire):
