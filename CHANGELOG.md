@@ -16,6 +16,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   recommended (`Option.recommended`, trellis-contracts 0.6.5) only with a why; a choice also
   takes another answer in words; plain chat reads the options numbered.
 - Claude's `AskUserQuestion` is the run's question, as Kimi's is.
+- The note asks "which one" when several things fit the user's words (it had made the model
+  pick one or answer for each, against the app's own "ask which one is meant": break-and-fix
+  clarify 17/21 → 21/21); how to use remembered rules, preferences and values
+  (`agent.REMEMBERED`, said with their date) comes only with a context that has a profile, next
+  to the asking note: no tokens on the other turns, and the dated cases 28/36 → 36/36.
 - The schedule tools keep only what is theirs: the general asking words are the note's; the
   "update it" choice is recommended by the flag, not by its label.
 - `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
