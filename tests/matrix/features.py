@@ -18,6 +18,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 
+import httpx
+import respx
 from agents import Agent as OpenAIAgent
 from agents import function_tool
 from bifrost_sdk import NO_GATEWAY_TOOLS
@@ -43,7 +45,19 @@ from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from tests.support.sandbox import PausingSandboxes
-from trellis import Harness, ReAct, Runtime, Settings, a2a, mcp, middleware, stdio, stored, tool
+from trellis import (
+    Harness,
+    ReAct,
+    Runtime,
+    Settings,
+    a2a,
+    mcp,
+    middleware,
+    openapi,
+    stdio,
+    stored,
+    tool,
+)
 from trellis.contracts import (
     InterruptReason,
     Option,
@@ -57,6 +71,7 @@ from trellis.harness import telemetry
 from trellis.harness.a2a import client as a2a_client
 from trellis.harness.agent import ABSTAIN_NOTES, ASKING
 from trellis.harness.clients import bifrost
+from trellis.harness.credentials import Target
 from trellis.harness.events import WARNING
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Ask, Deny, Hooks, Rewrite, Verdict
@@ -767,6 +782,40 @@ async def mcp_servers(w: World) -> None:
     o = (await w.go([d.lookup(), server], [("notes-read_note", {"path": "a.md"})])).succeeded()
     assert "note at a.md" in o.text, o.answer
     assert [r["status"] for r in o.results("notes-read_note")] == ["ok"]
+
+
+#: An OpenAPI document of one read operation, served at ``http://erp.test``.
+ERP_DOC: Final = {
+    "openapi": "3.1.0",
+    "servers": [{"url": "http://erp.test"}],
+    "paths": {"/orders/{id}": {"get": {
+        "operationId": "get_order",
+        "parameters": [{"name": "id", "in": "path", "schema": {"type": "string"}}],
+    }}},
+}  # fmt: skip
+
+
+async def credentials(w: World) -> None:
+    """``Harness(credentials=)``: the run's user's token on an ``openapi(...)`` call (every
+    adapter calls it through the bridge), over the entry's fixed headers; never in the run's
+    record."""
+    sent: list[str] = []
+
+    async def hook(run: Runtime, target: Target) -> dict[str, str]:
+        return {"Authorization": f"Bearer t-{target.name}-{run.user}"}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(request.headers["authorization"])
+        return httpx.Response(200, json={"id": 7, "status": "shipped"})
+
+    for process in (0, 1) if w.mode == "elsewhere" else (0,):
+        w.harness(process).credentials = hook
+    with respx.mock(assert_all_called=False, assert_all_mocked=False) as router:
+        router.get("http://erp.test/orders/7").mock(side_effect=answer)
+        erp = openapi(ERP_DOC, headers={"Authorization": "Bearer fixed"})
+        o = (await w.go([Desk().lookup(), erp], [("get_order", {"id": "7"})])).succeeded()
+    assert sent == [f"Bearer t-erp.test-{o.record.user_id}"], sent
+    assert "t-erp.test" not in json.dumps(o.record.model_dump(mode="json"))
 
 
 async def mcp_asks(w: World) -> None:
@@ -1537,6 +1586,14 @@ FEATURES: Final[list[Feature]] = [
         "ReAct(tools=[mcp(stdio(...))]) or mcp('https://...')",
         mcp_servers,
         way2=NA("Way 2 lists a server's tools with the MCP SDK itself, then calls them as tools"),
+    ),
+    Feature(
+        "F18c",
+        "Credentials for tools: the run's user's token on each call, over the fixed headers",
+        "N2",
+        "Harness(credentials=async (run, target) -> headers)",
+        credentials,
+        way2=NA("Way 2 builds its tools' clients itself, with the headers it chooses"),
     ),
     Feature(
         "F18e",

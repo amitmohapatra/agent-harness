@@ -11,6 +11,9 @@ admin chooses them, per key), Code Mode included where it fits (``tools.toolbox`
 A server the harness reaches itself (HTTP, stdio) is reached with the official MCP SDK
 (``mcp.Client``, the ``mcp`` extra): one connection per server and event loop, opened at the
 first listing and kept — a stdio server is one process — and opened again after it breaks.
+With ``Harness(credentials=)`` an HTTP server's connections are per tenant, user and the hook's
+headers (a session is the identity's that opened it), each closed after
+:data:`~trellis.harness.credentials.IDLE_SECONDS` unused (``credentials.py``).
 Its tools are named ``<server>-<tool>`` (``server`` from ``name=``, else the name the server
 gives itself), their side effects come from their annotations (``readOnlyHint``: ``read``;
 ``destructiveHint``: ``irreversible``; otherwise ``write``; the catalog has the last word), and
@@ -28,8 +31,11 @@ way on the connection, and a question while several are is refused (:data:`WHOSE
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -41,6 +47,7 @@ from urllib.parse import urlsplit
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.asking import RunCancelled
+from trellis.harness.credentials import IDLE_SECONDS, Target, headers_for
 from trellis.harness.runtime import current
 from trellis.harness.tools import resources
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, SideEffects, Tool, data_of
@@ -146,7 +153,9 @@ class MCPSource:
             raise ConfigurationError(f"mcp(name={name!r}) has no letter or digit to name tools")
         #: each listed tool's annotations, as the catalog takes them (``tools.toolbox``)
         self.annotations: dict[str, dict[str, Any]] = {}
-        self._connection = _Connection(self._client)
+        self._connection = _Connection(self._client, headers=self.headers)
+        #: with a credentials hook: an HTTP server's connections per tenant, user and headers
+        self._sessions: dict[tuple[str, str, str], _Connection] = {}
         #: the calls under way, which a server's question is for
         self._calls: set[_Call] = set()
 
@@ -159,7 +168,7 @@ class MCPSource:
 
     async def resolve(self) -> list[Tool]:
         """The server's tools, listed through the connection (every page)."""
-        client = await self._connection.client()
+        client = await (await self._session()).client()
         server = self.server or self._own_name(client)
         listed: list[Any] = []
         cursor = None
@@ -261,7 +270,8 @@ class MCPSource:
         from mcp import MCPError  # noqa: PLC0415 - the mcp extra
         from mcp.types import CONNECTION_CLOSED  # noqa: PLC0415
 
-        client = await self._connection.client()
+        connection = await self._session()
+        client = await connection.client()
         call = _Call()
         self._calls.add(call)
         try:
@@ -271,20 +281,42 @@ class MCPSource:
                 raise  # the server asked, and the person answers later
             if isinstance(exc, MCPError) and exc.code != CONNECTION_CLOSED:
                 raise ToolError(f"{self.server}: {exc}") from exc  # the server's answer
-            self._connection.broken()  # opened again at the next call
+            connection.broken()  # opened again at the next call
             raise ToolError(
                 f"the MCP server {self.server} cannot be reached: {exc}", retryable=True
             ) from exc
         finally:
             self._calls.discard(call)
 
+    async def _session(self) -> _Connection:
+        """The connection this call goes through: the server's one, or with a credentials hook
+        (an HTTP server, in a run) the run's user's, those idle too long closed."""
+        runtime = current()
+        if (
+            self.kind is not McpKind.HTTP
+            or runtime is None
+            or not runtime.agent.harness.credentials
+        ):
+            return self._connection
+        name = self.server or self.transport.fallback_name(self.target) or UNNAMED
+        headers = await headers_for(Target(name, str(self.target), "mcp"), self.headers)
+        digest = hashlib.sha256(json.dumps(headers, sort_keys=True).encode()).hexdigest()
+        key, now = (runtime.tenant, runtime.user, digest), time.monotonic()
+        for other, idle in list(self._sessions.items()):
+            if other != key and now - idle.used > IDLE_SECONDS:
+                del self._sessions[other]
+                await idle.aclose()
+        session = self._sessions.setdefault(key, _Connection(self._client, headers=headers))
+        session.used = now
+        return session
+
     def _own_name(self, client: Client) -> str:
         info = client.server_info
         named = server_name(info.name) if info is not None and info.name else ""
         return named or self.transport.fallback_name(self.target) or UNNAMED
 
-    def _client(self) -> Client:
-        return self.transport.client(self)
+    def _client(self, connection: _Connection) -> Client:
+        return self.transport.client(self, connection)
 
     async def _elicited(self, context: Any, params: Any) -> Any:
         """The SDK's elicitation callback: the server's question, handed to the call it is
@@ -299,8 +331,10 @@ class MCPSource:
         return await answered
 
     async def aclose(self) -> None:
-        """Close the connection (a stdio server's process ends with it)."""
-        await self._connection.aclose()
+        """Close the connections (a stdio server's process ends with it)."""
+        sessions, self._sessions = list(self._sessions.values()), {}
+        for connection in [self._connection, *sessions]:
+            await connection.aclose()
 
 
 class McpKind(StrEnum):
@@ -315,7 +349,7 @@ class Transport:
 
     kind: McpKind
     accepts: Callable[[Any], bool]
-    client: Callable[[MCPSource], Client]
+    client: Callable[[MCPSource, _Connection], Client]
     fallback_name: Callable[[Any], str]
 
 
@@ -332,17 +366,17 @@ def _sdk() -> Any:
     return mcp
 
 
-def _http_client(source: MCPSource) -> Client:
+def _http_client(source: MCPSource, connection: _Connection) -> Client:
     sdk = _sdk()
-    if not source.headers:
+    if not connection.headers:
         return sdk.Client(source.target, elicitation_callback=source._elicited)
-    http = sdk.shared._httpx_utils.create_mcp_http_client(headers=source.headers)
-    source._connection.closing.append(http)
+    http = sdk.shared._httpx_utils.create_mcp_http_client(headers=connection.headers)
+    connection.closing.append(http)
     transport = sdk.client.streamable_http.streamable_http_client(source.target, http_client=http)
     return sdk.Client(transport, elicitation_callback=source._elicited)
 
 
-def _stdio_client(source: MCPSource) -> Client:
+def _stdio_client(source: MCPSource, connection: _Connection) -> Client:
     sdk = _sdk()
     target = source.target
     assert isinstance(target, Stdio)
@@ -458,7 +492,11 @@ class _Connection:
     after :meth:`broken`."""
 
     make: Any
+    #: the headers every HTTP request of it carries
+    headers: dict[str, str] = field(default_factory=dict)
     closing: list[Any] = field(default_factory=list)
+    #: when a call last took it (``time.monotonic``)
+    used: float = 0.0
     _client: Any = None
     _loop: asyncio.AbstractEventLoop | None = None
     _task: asyncio.Task[None] | None = None
@@ -478,7 +516,7 @@ class _Connection:
     async def _open(self, loop: asyncio.AbstractEventLoop) -> Any:
         ready: asyncio.Future[Any] = loop.create_future()
         stop = self._stop = asyncio.Event()
-        client = self.make()
+        client = self.make(self)
         extra = list(self.closing)
         self.closing.clear()
 

@@ -90,6 +90,7 @@ async def test_a_local_servers_tools_are_named_by_it_and_judged_by_their_annotat
         "notes_box-fail",
         "notes_box-read_note",
         "notes_box-served_calls",
+        "notes_box-whoami",
     ]
     assert (read, added) == ("note at a.md", "added hi")
     notices = [

@@ -284,6 +284,8 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: the credentials hook's headers, per target, for this run only (``credentials.py``)
+    credentials: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:

@@ -1,6 +1,6 @@
 """A real MCP server for the tests, on the official SDK: ``python -m tests.support.mcp_server``
 serves it over stdio; ``... http PORT`` over streamable HTTP (``TOKEN`` in the environment: every
-request needs ``Authorization: Bearer <TOKEN>``). ``MARK`` names a file: ``crash`` exits the
+request needs ``Authorization: Bearer <TOKEN>``, one of them when it is a comma-separated list). ``MARK`` names a file: ``crash`` exits the
 process the first time (the file not there yet), then answers."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 
 server = MCPServer("Notes Box")
@@ -47,6 +47,14 @@ def served_calls() -> list[str]:
     return list(served)
 
 
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
+def whoami(ctx: Context) -> str:
+    """Who is calling: the bearer token of this request."""
+    request = ctx.request_context.request
+    headers = request.headers if request is not None else {}
+    return headers.get("authorization", "").removeprefix("Bearer ")
+
+
 @server.tool()
 def fail(why: str) -> str:
     """Fail."""
@@ -71,9 +79,10 @@ def http(port: int) -> None:
     app = server.streamable_http_app()
     token = os.environ.get("TOKEN")
     if token:
+        tokens = token.split(",")
 
         async def guard(request, call_next):  # type: ignore[no-untyped-def]
-            if request.headers.get("authorization") != f"Bearer {token}":
+            if request.headers.get("authorization") not in {f"Bearer {t}" for t in tokens}:
                 return Response(status_code=401)
             return await call_next(request)
 

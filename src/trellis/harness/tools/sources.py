@@ -21,11 +21,13 @@ import typing
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal, get_args, overload
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, TypeAdapter, create_model
 
 from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.harness.credentials import Target, headers_for
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
     DEFAULT_SIDE_EFFECTS,
@@ -406,6 +408,7 @@ class OpenAPISource:
                 base_url=base, headers=self.headers, timeout=self.timeout
             )
         client = self._client
+        target = Target(urlsplit(base).hostname or base, base, "openapi")
         tools: list[Tool] = []
         for path, item in (document.get("paths") or {}).items():
             for method, operation in item.items():
@@ -414,7 +417,9 @@ class OpenAPISource:
                 name = operation.get("operationId")
                 if not name or (self.only is not None and name not in self.only):
                     continue
-                tools.append(_operation_tool(client, path, method, operation, self.timeout))
+                tools.append(
+                    _operation_tool(client, path, method, operation, self.timeout, target=target)
+                )
         return tools
 
     async def _document(self) -> Mapping[str, Any]:
@@ -456,10 +461,13 @@ def _operation_tool(
     method: str,
     operation: Mapping[str, Any],
     timeout: float,
+    *,
+    target: Target,
 ) -> Tool:
     """Path and query parameters and a JSON body, flattened into one argument object. A call
     that does more than read sends the call's idempotency key as ``Idempotency-Key``; an
-    answer that may pass (:data:`RETRYABLE_STATUSES`) is an error that says so."""
+    answer that may pass (:data:`RETRYABLE_STATUSES`) is an error that says so. The run's
+    credentials (``credentials.headers_for``) go over the client's ``headers=``."""
     parameters = [p for p in operation.get("parameters") or [] if isinstance(p, dict)]
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -482,7 +490,9 @@ def _operation_tool(
         query = {k: v for k, v in args.items() if located.get(k) == "query"}
         runtime = current()
         key = runtime.idempotency_key if runtime is not None else None
-        headers = {"Idempotency-Key": key} if key and side_effects != "read" else None
+        headers = await headers_for(target, {})
+        if key and side_effects != "read":
+            headers["Idempotency-Key"] = key
         response = await client.request(
             method.upper(), url, params=query, json=args.get("body"), headers=headers
         )

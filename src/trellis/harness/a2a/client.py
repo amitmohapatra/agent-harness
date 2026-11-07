@@ -40,6 +40,7 @@ from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, TransportProtocol
 from trellis.contracts import ToolError, ToolSpec
 from trellis.harness.a2a.identity import EXTENSION_URI
 from trellis.harness.a2a.translate import TERMINAL_STATES, value_part, values
+from trellis.harness.credentials import Target, headers_for
 from trellis.harness.identity import identity_headers
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS, Tool
@@ -215,7 +216,8 @@ async def remote_agent_tool(
 ) -> Tool:
     """The ``a2a(url)`` tool: the card read once, then each call a :class:`RemoteAgent` as the
     calling run (its tenant, user and thread; ``on_input`` its ``ask``; the call's idempotency
-    key the opening message's id), taking at most ``timeout``."""
+    key the opening message's id, the run's credentials its headers), taking at most
+    ``timeout``."""
     async with _http(timeout) as http:
         card = await _read_card(http, url.rstrip("/"), {})
 
@@ -229,6 +231,7 @@ async def remote_agent_tool(
             user=runtime.user,
             thread=runtime.thread or runtime.run_id,
             on_input=runtime.ask,
+            headers=await headers_for(Target(card.name, url, "a2a"), {}),
             timeout=timeout,
             card=card,
         ) as agent:
