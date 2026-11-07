@@ -455,6 +455,28 @@ with its tools bound takes them as it takes the memory tools: `h.schedule_tools(
   still apply. A limit reached is a sentence the model tells the user ("You have 20 of 20
   schedules: cancel one before adding another."), not an error.
 
+- **Unattended, safely.** Nothing to configure. agent-runs fires a schedule once after an
+  outage (not once per missed tick), skips a tick while its last run is still queued, running
+  or paused (Kubernetes `concurrencyPolicy: Forbid`), and fires each schedule a stable 0 to 59
+  seconds after its tick (a hash of its id: "daily at 9" is still 9:00, and a thousand of them
+  spread over the minute). After 3 failed runs in a row (`ERROR`, `TIMEOUT`) the schedule is
+  paused, and that run's error says so: in the thread, the run's record and its `run.finished`
+  webhook (`trellis_failures` in the schedule's metadata; a success clears it). A schedule the
+  user has not made or changed for 90 days asks at its next run "Still need this?" (Keep,
+  recommended, or Cancel) and is paused until they answer (`trellis_touched`). A run that
+  times out while no worker holds it (agent-runs ends it) is not counted.
+- **A user who left.** Check them in an `on_run_start` hook: a fired run acts as its
+  `on_behalf_of`, and a hook that raises ends the run before any tool is called; cancel the
+  user's schedules there (`h.runs.schedules.list(on_behalf_of=)`, then `delete`) or when your
+  directory says they left.
+
+  ```python
+  class StillHere(Hooks):
+      async def on_run_start(self, run: Runtime) -> None:
+          if run.scheduled is not None and await user_left(run.tenant, run.user):
+              raise PermissionError(f"{run.user} has left: their schedules stop")
+  ```
+
 **Push and email** need nothing in Trellis: agent-runs' signed webhook (`run.finished`) reaches
 your backend, which sends the notification. Its summary names the run's thread; a scheduled
 run carries `schedule_id` in its metadata, and one with nothing to report has the output

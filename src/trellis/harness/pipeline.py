@@ -473,6 +473,8 @@ async def _worked(
     if unresumable is not None:
         raise unresumable
     await agent.hooks.started(runtime)
+    if (cancelled := await schedules.stale(runtime)) is not None:
+        return Extracted(answer=cancelled), pushed
     extracted = await _invoked(
         agent,
         runtime,
@@ -947,6 +949,7 @@ async def _failed(
     status: RunStatus = RunStatus.ERROR,
 ) -> Result:
     """The run ended ``ERROR`` — or ``TIMEOUT``, out of time — with ``error``."""
+    error = await schedules.failed(agent, runtime, error)
     outcome = RunOutcome.TIMEOUT if status is RunStatus.TIMEOUT else RunOutcome.ERROR
     events = runtime.events
 

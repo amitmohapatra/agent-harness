@@ -21,15 +21,20 @@ from trellis.contracts import RunRecord, RunStatus, ScheduleSpec
 from trellis.harness.runs import LocalRuns
 from trellis.harness.schedules import (
     BOTH,
+    FAILURES,
+    MAX_FAILURES,
     NEITHER,
     NO_REPORT,
     REPORTED,
     SCHEDULE_TOOLS,
+    STALE,
     TASK,
+    TOUCHED,
     UPDATE,
     ScheduleLimits,
 )
 from trellis.harness.tools.convert import text_of
+from trellis.runs import ScheduleUpdate
 
 THREAD = "chat-1"
 
@@ -548,3 +553,97 @@ async def test_a_vague_ask_is_choices_the_user_picks_one_of() -> None:
             h, ("schedule_task", {"task": "x", "choices": [{"when": "x"}]}), name="b"
         )
         assert "Each choice needs" in str((await bad.run("x", user="ada")).answer)
+
+
+class Failing(Chat):
+    """A fired run whose next answer is ``x`` fails."""
+
+    async def __call__(self, input: str, agent: Runtime) -> str:
+        if input.startswith("Scheduled task:") and self.fired[0] == "x":
+            self.fired.popleft()
+            raise RuntimeError("upstream down")
+        return await super().__call__(input, agent)
+
+
+async def test_three_failed_runs_in_a_row_pause_the_schedule_and_say_so_in_the_thread() -> None:
+    """A success between failures resets the count; the third failure in a row pauses the
+    schedule, and its error (the thread's reply, the run's record and its webhook) says so."""
+    chat = Failing()
+    async with Harness(config=Settings()) as h:
+        chat_agent = h.wrap(chat, id="desk")
+        args = {"task": "sync", "when": "0 8 * * *"}
+        await said(chat_agent, chat, "ada", ("schedule_task", args))
+        sid = only(h).schedule_id
+        chat.fired.extend(["x", "fine"])  # "x": the run fails
+        assert (await fire(h, chat_agent, sid)).status is RunStatus.ERROR
+        assert local(h)._schedules[sid].metadata[FAILURES] == 1
+        assert (await fire(h, chat_agent, sid)).status is RunStatus.SUCCESS
+        assert local(h)._schedules[sid].metadata[FAILURES] == 0
+        records = []
+        for _ in range(MAX_FAILURES):
+            chat.fired.appendleft("x")
+            records.append(await fire(h, chat_agent, sid))
+        assert [r.status for r in records] == [RunStatus.ERROR] * MAX_FAILURES
+        assert local(h)._schedules[sid].enabled is False
+        assert "paused" not in records[0].error.message
+        assert "failed 3 times in a row" in records[-1].error.message
+        assert "sync" in records[-1].error.message
+
+
+async def test_a_schedule_untouched_for_90_days_asks_once_and_pauses_until_answered() -> None:
+    chat = Chat()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sales", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+        assert TOUCHED in local(h)._schedules[sid].metadata  # set when made
+        old = (datetime.now(UTC) - STALE - timedelta(days=1)).isoformat()
+        for answer, kept in ((UPDATE, True), (NEITHER, False)):
+            await local(h).schedules.update(sid, ScheduleUpdate(metadata={TOUCHED: old}))
+            chat.fired.append("sales: 12")
+            paused = await fire(h, agent, sid)
+            assert paused.status is RunStatus.PAUSED and paused.awaiting is not None
+            assert paused.awaiting.question == "Still need this? sales"
+            assert [bool(getattr(o, "recommended", False)) for o in paused.awaiting.options] == [
+                True,
+                False,
+            ]
+            assert local(h)._schedules[sid].enabled is False  # no answer: stays paused
+            await agent.resume(
+                paused.awaiting.interrupt_id, "answer", answer=answer, reviewer="ada"
+            )
+            assert await h.worker([agent]).run_once() is True
+            done = await h.runs.get(paused.run_id)
+            assert done is not None and done.status is RunStatus.SUCCESS, done
+            if kept:
+                assert done.output == "sales: 12"
+                schedule = local(h)._schedules[sid]
+                assert schedule.enabled is True and schedule.metadata[TOUCHED] > old
+            else:
+                assert "Cancelled" in str(done.output) and sid not in local(h)._schedules
+
+
+async def test_a_failure_not_counted_leaves_the_runs_error_as_it_was(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from trellis.runs import NotFoundError
+
+    chat = Failing()
+    async with Harness(config=Settings()) as h:
+        agent = h.wrap(chat, id="desk")
+        await said(agent, chat, "ada", ("schedule_task", {"task": "sync", "when": "0 8 * * *"}))
+        sid = only(h).schedule_id
+
+        async def gone(*args: Any, **kwargs: Any) -> Any:
+            raise NotFoundError("no schedule", code="NOT_FOUND", status=404)
+
+        async def broken(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("store down")
+
+        for update in (gone, broken):
+            monkeypatch.setattr(h.runs.schedules, "update", update)
+            chat.fired.append("x")
+            record = await fire(h, agent, sid)
+            assert record.status is RunStatus.ERROR and record.error is not None
+            assert "upstream down" in record.error.message
+        assert "failure not counted" in caplog.text
