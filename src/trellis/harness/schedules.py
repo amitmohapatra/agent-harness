@@ -24,6 +24,13 @@ built-in tools every adapter gets while the run store can schedule (off: ``witho
   schedule like one the user has (:func:`_twin`: update it, recommended, keep both, or
   neither; the very same again is "already set"), ``cancel_schedule(id="all")``, several that
   fit the user's words (``ids``) and a vague ask (``choices``).
+* Unattended safety, with no setting: after :data:`MAX_FAILURES` failed runs in a row
+  (``ERROR``, ``TIMEOUT``) the schedule is paused and the last run's error says so (the reply in
+  the thread, the run's record and its ``run.finished`` webhook); a schedule the user has not
+  touched for :data:`STALE` asks at its next run "Still need this?" (Keep, recommended, or
+  Cancel), paused until answered. The count and the touch are in the schedule's metadata
+  (:data:`FAILURES`, :data:`TOUCHED`). agent-runs runs one fire of a schedule at a time and
+  spreads the fires over the minute.
 * Limits: ``TRELLIS_SCHEDULE_MIN_INTERVAL`` and ``TRELLIS_SCHEDULE_MAX_PER_USER`` (``Settings``),
   per user ``Harness(schedule_limits=)``; agent-runs' own floor, rate limits and
   ``max_running_per_tenant`` still apply. A limit reached is a sentence the model tells the
@@ -44,7 +51,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
-from trellis.contracts import Option, RunStatus, Schedule, ScheduleSpec, ToolSpec
+from trellis.contracts import AgentError, Option, RunStatus, Schedule, ScheduleSpec, ToolSpec
 from trellis.harness.runs import THREAD
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import Tool
@@ -63,6 +70,14 @@ NO_REPORT: Final = "NO_REPORT"
 TASK: Final = "trellis_task"
 #: The schedule metadata key of whether the last run found the condition holding (reported).
 REPORTED: Final = "trellis_reported"
+#: The schedule metadata key of its runs' failures in a row.
+FAILURES: Final = "trellis_failures"
+#: Failed runs in a row that pause a schedule (as agent-runs pauses one whose fires fail).
+MAX_FAILURES: Final = 3
+#: The schedule metadata key of when the user last made or changed it (ISO 8601).
+TOUCHED: Final = "trellis_touched"
+#: How long a schedule runs untouched before its next run asks whether it is still needed.
+STALE: Final = timedelta(days=90)
 #: The tools' names.
 SCHEDULE_TOOLS: Final = ("schedule_task", "list_schedules", "update_schedule", "cancel_schedule")
 #: Occurrences measured to find a cron's shortest interval (as agent-runs measures its floor).
@@ -108,6 +123,12 @@ class Fired:
     once: bool
     #: whether the run before this one reported (the condition held)
     reported: bool
+    #: what the user asked, as they said it
+    task: str = ""
+    #: its runs' failures in a row before this one
+    failures: int = 0
+    #: when the user last made or changed it
+    touched: datetime | None = None
     #: whether this run found the condition holding (set when it answers)
     met: bool | None = None
 
@@ -116,11 +137,15 @@ class Fired:
         task, schedule_id = metadata.get(TASK), metadata.get("schedule_id")
         if not isinstance(task, dict) or not isinstance(schedule_id, str):
             return None
+        touched = metadata.get(TOUCHED)
         return cls(
             schedule_id=schedule_id,
             condition=task.get("condition") or None,
             once=bool(task.get("once")),
             reported=bool(metadata.get(REPORTED)),
+            task=str(task.get("task") or ""),
+            failures=int(metadata.get(FAILURES) or 0),
+            touched=datetime.fromisoformat(touched) if isinstance(touched, str) else None,
         )
 
 
@@ -168,21 +193,89 @@ def quiet(runtime: Runtime, answer: Any) -> bool:
 
 async def ended(agent: Agent, runtime: Runtime, result: Result) -> None:
     """After a fired run ended: a ``once`` schedule is deleted; a condition's state is kept
-    when it changed. A failure is logged: the run's own result stands."""
+    when it changed; a success clears the failures in a row. A failure is logged: the run's
+    own result stands."""
     fired = runtime.scheduled
     if fired is None or result.status is RunStatus.PAUSED:
         return
     store = agent.harness.runs.schedules
+    kept: dict[str, Any] = {}
+    if fired.condition is not None and fired.met not in (None, fired.reported):
+        kept[REPORTED] = fired.met
+    if fired.failures and result.status in (RunStatus.SUCCESS, RunStatus.PARTIAL):
+        kept[FAILURES] = 0
     try:
         if fired.once:
             await store.delete(fired.schedule_id, tenant=runtime.tenant)
-        elif fired.condition is not None and fired.met not in (None, fired.reported):
-            changes = ScheduleUpdate(metadata={REPORTED: fired.met})
-            await store.update(fired.schedule_id, changes, tenant=runtime.tenant)
+        elif kept:
+            await store.update(
+                fired.schedule_id, ScheduleUpdate(metadata=kept), tenant=runtime.tenant
+            )
     except NotFoundError:  # cancelled meanwhile
         pass
     except Exception:
         log.warning("schedule %s not updated after its run", fired.schedule_id, exc_info=True)
+
+
+async def failed(agent: Agent, runtime: Runtime, error: AgentError) -> AgentError:
+    """A fired run's failure, counted on its schedule before the run ends: the
+    :data:`MAX_FAILURES`-th in a row pauses the schedule, and the error then says so (the
+    Kubernetes CronJob and Temporal leave a failing schedule running; an unattended one that
+    fails every time only costs)."""
+    fired = runtime.scheduled
+    if fired is None or fired.once:
+        return error
+    fired.failures += 1
+    stop = fired.failures >= MAX_FAILURES
+    counted = {FAILURES: fired.failures}
+    change = (
+        ScheduleUpdate(metadata=counted, enabled=False)
+        if stop
+        else ScheduleUpdate(metadata=counted)
+    )
+    try:
+        await agent.harness.runs.schedules.update(fired.schedule_id, change, tenant=runtime.tenant)
+    except NotFoundError:
+        return error
+    except Exception:
+        log.warning("schedule %s: failure not counted", fired.schedule_id, exc_info=True)
+        return error
+    if not stop:
+        return error
+    said = (
+        f"{error.message} This schedule failed {fired.failures} times in a row and is paused: "
+        f"{fired.task}. Ask me to resume it once the cause is fixed."
+    )
+    return error.model_copy(update={"message": said})
+
+
+async def stale(runtime: Runtime) -> str | None:
+    """Before a fired run works: a schedule the user has not touched for :data:`STALE` asks
+    once whether it is still needed, paused until they answer. Keep (recommended) resumes it
+    and the run does its task (``None``); Cancel deletes it and is the run's answer."""
+    fired = runtime.scheduled
+    if fired is None or fired.touched is None or datetime.now(UTC) - fired.touched < STALE:
+        return None
+    store, tenant = runtime.agent.harness.runs.schedules, runtime.tenant
+    await store.update(fired.schedule_id, ScheduleUpdate(enabled=False), tenant=tenant)
+    keep = await runtime.ask(
+        f"Still need this? {fired.task}",
+        options=[
+            Option(value=UPDATE, label="Keep", recommended=True),
+            Option(value=NEITHER, label="Cancel"),
+        ],
+    )
+    if keep == UPDATE:
+        change = ScheduleUpdate(enabled=True, metadata={TOUCHED: _now()})
+        await store.update(fired.schedule_id, change, tenant=tenant)
+        return None
+    await store.delete(fired.schedule_id, tenant=tenant)
+    runtime.scheduled = None  # gone: nothing of it to keep after the run
+    return f"Cancelled: {fired.task}."
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 # --------------------------------------------------------------------------- the tools
@@ -328,7 +421,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
             f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
         )
     agent = runtime.agent
-    metadata = {**agent._metadata(runtime.without, None), TASK: about}
+    metadata = {**agent._metadata(runtime.without, None), TASK: about, TOUCHED: _now()}
     if runtime.conversation != runtime.run_id:  # the chat it was set in
         metadata[THREAD] = runtime.identity.thread
     try:
@@ -427,6 +520,8 @@ async def _update_schedule(args: dict[str, Any]) -> Any:
 
 async def _changed(runtime: Runtime, schedule: Schedule, changes: dict[str, Any]) -> Any:
     store = runtime.agent.harness.runs.schedules
+    # the user's own change: touched now, failures cleared
+    changes = {**changes, "metadata": {**changes.get("metadata", {}), TOUCHED: _now(), FAILURES: 0}}
     try:
         updated = await store.update(
             schedule.schedule_id, ScheduleUpdate(**changes), tenant=runtime.tenant

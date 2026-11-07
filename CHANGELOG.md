@@ -14,6 +14,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   hook, MCP connections are per server, tenant, user and headers, closed when idle. The token is
   on the request only. No hook: unchanged (`trellis.harness.credentials`, docs/tools.md).
 
+### Schedules that run unattended
+
+- Chat schedules pause themselves after 3 failed runs in a row (`ERROR`, `TIMEOUT`); that
+  run's error says so in the thread, its record and its `run.finished` webhook. One untouched
+  for 90 days asks at its next run "Still need this?" (Keep, recommended, or Cancel), paused
+  until answered. No settings; `trellis_failures` and `trellis_touched` in the metadata.
+  agent-runs #26 adds one run at a time and a stable per-schedule jitter. Docs: a user who left
+  (`on_run_start`); `benchmark.load.threads` (1,000 thread streams, 100 fires).
+
 ### When and how to ask
 
 - One note with every memory context, for every adapter (`agent.ASKING`): ask only when the

@@ -583,3 +583,25 @@ and worker ~2.1–2.3 GB each (their encoders), agent-runs 138 MB, the ticker 11
 slopes are a few MB an hour (0.5–1.5 kB a run: allocator noise at this length, not a growth a
 longer run continues). The one error was agent-runs' tenant request budget (429) answering a
 result poll; `handle.result` now waits what it says and polls again.
+
+### Thread streams under scheduled fires
+
+`python -m benchmark.load.threads` opens `--streams` chat-thread streams (the body of
+`GET {path}/threads/{id}/events`, in process: one poller serves them all) while `--schedules`
+chat schedules fire into as many of those threads, on agent-runs (`RUNS_URL`) with a function
+target that answers at once. It reports this process's CPU and peak memory, agent-runs'
+database statements a second (`pg_stat_statements`, `--dsn`) with the streams open and idle,
+and while firing, and the delay from a fire to its reply on the thread's stream.
+
+Measured 2026-11-07 on a private stack (agent-runs at `main`, its own PostgreSQL 16, a stub key
+registry, its rate limit off), 1,000 streams, 100 schedules fired at once, 10 worker loops:
+
+| Idle CPU (s per s) | Peak RSS | DB statements/s idle / firing | Delivery p50 / p95 / max |
+|---|---|---|---|
+| 0.23 | 124 MB | 52 / 1,049 | 1.10 / 2.26 / 2.59 s |
+
+Idle cost does not grow with the streams: one listing of the tenant's newest runs a second
+(`POLL_SECONDS`) serves them all. Delivery is the poll (up to 1 s) plus the run. With
+agent-runs' default tenant budget (3,000 requests a minute) the same burst got `429`s on the
+run event reads: a tenant that fires many schedules at once into open chats raises
+`RUNS__RATE_LIMIT__PER_MINUTE`.
