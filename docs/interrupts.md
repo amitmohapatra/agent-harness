@@ -84,8 +84,10 @@ multiple=False, recommended=None, why=None)` tool, its answer the call's result.
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be
 picked, `recommended` (with `why`) marks one option `Option.recommended`. The model decides each
 question's shape; when to ask at all is the note sent with every memory context
-(`agent.ASKING`): ask only when it cannot find out itself, the choice is the user's and a wrong
-guess costs; otherwise act and say the assumption or the dated remembered rule used. It is
+(`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
+cannot find out itself, the choice is the user's and a wrong guess costs; otherwise act and say
+the assumption. A context with a profile also gets `agent.REMEMBERED`: a remembered rule,
+preference or value used is said with its date, a costly or old fill asked about first. It is
 `ask` with what every surface needs:
 
 | | `options` | `date` | `date_range` | `number` |

@@ -192,28 +192,23 @@ EARLIER_CHATS: Final = (
     'with kinds ["message"]) before you say a detail is missing.'
 )
 #: When and how the model asks its user, for every adapter and every topic, sent with every
-#: memory context (as the notes above): ask only when the model cannot find out itself, the
-#: choice is the user's and a wrong guess costs; otherwise act and say the assumption or the
-#: remembered rule used (memory dates each one, ``standing_rules``). The shape of each question
-#: is the model's: the app's own tool when one fits (AG-UI front-end tools), else its question
-#: tool (``ask_user``, Claude's and Kimi's ``AskUserQuestion``), else its reply. A risky action
-#: is never asked about here: governance asks for its approval.
+#: memory context (as the notes above): a "which one" is asked, never guessed or answered for
+#: each (as an app's own "ask which one is meant" says); else ask only when the model cannot
+#: find out itself, the choice is the user's and a wrong guess costs; otherwise act and say the
+#: assumption. The shape of each question is the model's: the
+#: app's own tool when one fits (AG-UI front-end tools), else its question tool (``ask_user``,
+#: Claude's and Kimi's ``AskUserQuestion``), else its reply. A risky action is never asked
+#: about here: governance asks for its approval.
 ASKING: Final = (
     "## Asking the user\n"
-    "Most turns ask nothing. Ask only when all three hold: your tools, memory and this chat "
-    "cannot tell you; the choice is the user's (a preference, a trade-off, scope, which one, "
-    "a conflict with something they have or a rule they set, a missing value with no safe "
-    "default); and a wrong guess costs (a different result, money or time, hard to undo). "
-    "Otherwise act, and say the assumption, or the remembered rule you used and the date it "
-    "was said. "
-    "Never ask to confirm what their request or a rule already settles: approvals are asked "
-    "for you.\n"
-    "Values filled from memory or an earlier one: the user's new values win; for something "
-    "cheap to undo, or when they say 'as before', act and name what you filled and from "
-    "when; ask first when a filled value costs (money, a send, a delete, a limit others rely "
-    "on), is old, or conflicts with what they just said.\n"
-    "A rule shown with 'earlier:' replaced that rule by its words, not by the user's say: ask "
-    "which holds (the newer recommended), unless they said to change it.\n"
+    "Most turns ask nothing. When several things fit the user's words and they mean one (a "
+    "product, a person, a period), ask which one: do not pick one or answer for each. "
+    "Otherwise ask only when all three hold: your tools, memory and this chat cannot tell "
+    "you; the choice is the user's (a preference, a trade-off, scope, a conflict with "
+    "something they have or a rule they set, a missing value with no safe default); and a "
+    "wrong guess costs (a different result, money or time, hard to undo). Otherwise act, and "
+    "say the assumption you made. Never ask to confirm what their request or a rule already "
+    "settles: approvals are asked for you.\n"
     "One question (up to 4 related); never what they decided; nothing after 'just do it'. "
     "Ask with the app's tool when one fits, else your question tool, else in your reply. An "
     "open question has no options; options only for a few known choices, several picks only "
@@ -221,6 +216,29 @@ ASKING: Final = (
     "instruction, the safer choice for money, a delete or a send, the best by the data) and "
     "say why."
 )
+#: How to use the remembered rules, preferences and values (memory dates each one,
+#: ``standing_rules``), sent only with a context that has them (the service's profile, the
+#: ``## Profile`` heading it renders): said with their date, filled only when cheap, a
+#: superseded rule asked about.
+REMEMBERED: Final = (
+    "## Using what you remember\n"
+    "When you use a remembered rule, preference or value from the profile, say which one and "
+    'the date it was said ("as CSV, as you said on 2026-10-15").\n'
+    "Values filled from memory or an earlier one: the user's new values win; for something "
+    "cheap to undo, or when they say 'as before', act and name what you filled and from "
+    "when; ask first when a filled value costs (money, a send, a delete, a limit others rely "
+    "on), is old, or conflicts with what they just said.\n"
+    "A rule shown with 'earlier:' replaced that rule by its words, not by the user's say: ask "
+    "which holds (the newer recommended), unless they said to change it."
+)
+#: The heading the memory service renders its profile under (rules, preferences, about the user).
+PROFILE: Final = "## Profile\n"
+
+
+def asking_notes(context: str) -> str:
+    """The notes on asking a memory context gets: when to ask, always; how to use remembered
+    values, only when the context has a profile."""
+    return f"{ASKING}\n\n{REMEMBERED}" if PROFILE in context and ASKING else ASKING
 
 
 def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:
@@ -1081,7 +1099,7 @@ class Agent:
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
         if note is not None and SEARCH_TOOL in runtime.toolbox:
             note = f"{note}\n{EARLIER_CHATS}"
-        parts = (pushed.rendered, note, snapshots.note(stale), ASKING)
+        parts = (pushed.rendered, note, snapshots.note(stale), asking_notes(pushed.rendered))
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.events.emit(

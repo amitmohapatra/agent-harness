@@ -23,7 +23,7 @@ from typing import Any, Final
 import httpx
 
 from tests.support.openapi import MEMORY_OPENAPI, OpenAPI
-from trellis.harness.agent import ASKING
+from trellis.harness.agent import asking_notes
 from trellis.memory import MemoryClient
 
 URL: Final = "http://memory.test"
@@ -83,8 +83,8 @@ ROUTES: Final = [
 
 
 def pushed(context: str) -> str:
-    """The memory context as the harness pushes it: the service's, then the asking note."""
-    return f"{context}\n\n{ASKING}"
+    """The memory context as the harness pushes it: the service's, then the asking notes."""
+    return f"{context}\n\n{asking_notes(context)}"
 
 
 @dataclass(frozen=True)

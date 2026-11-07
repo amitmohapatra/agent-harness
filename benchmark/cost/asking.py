@@ -205,6 +205,16 @@ def both(*checks: Check) -> Check:
     return lambda chat: [p for c in checks for p in c(chat)]
 
 
+def either(*checks: Check) -> Check:
+    """Any one of ``checks`` passes; else the first one's problems."""
+
+    def check(chat: Chat) -> list[str]:
+        found = [c(chat) for c in checks]
+        return [] if any(not p for p in found) else found[0]
+
+    return check
+
+
 @dataclass(frozen=True)
 class Case:
     id: str
@@ -274,8 +284,11 @@ def cases() -> list[Case]:
              asks(recommended="pdf"),
              memory=memory(rules=["Send weekly reports as PDF. (said 2026-11-02; earlier: Send "
                                   "weekly reports as CSV., said 2026-10-01)"])),
+        # a second alert is cheap to undo and does not contradict the first (20 warns early,
+        # 5 late): asking, or acting and naming the one they have, both follow the note
         Case("ask-existing", b, ("Set a low-stock alert for SKU-00012 at 5 units in the north "
-                                 "by email.",), asks(),
+                                 "by email.",),
+             either(asks(), acts("create_alert", args={"threshold": "5"}, says=[r"\b20\b"])),
              memory=memory(about=["You already have a low-stock alert for SKU-00012 at 20 "
                                   "units in the north by email. (said 2026-10-25)"])),
         # ------------------------------------------------------------------ shape
