@@ -5,6 +5,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### `query_result` needs DuckDB
+
+- DuckDB is a required dependency; the SQLite fallback is gone, so the model sees one dialect
+  and the query suites run once ([ADR 0007](docs/adr/0007-query-engine.md)). The `query` extra
+  stays, empty. `trellis doctor` fails its "query engine" check when `duckdb` cannot be imported.
+
 ### Benchmark
 
 - A history set for the complex suite (`--cases history`): earlier chats recalled, compared,

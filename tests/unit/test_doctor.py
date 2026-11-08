@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +103,16 @@ async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     # what needs the key is not asked; readiness and the version need none
     assert "memory key" not in found and "model key" not in found
     assert found["memory ready"].ok and found["memory version"].ok
+
+
+def test_query_result_without_duckdb_fails_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DuckDB is a required dependency (``query_result``'s engine, ADR 0007): an install that
+    cannot import it is said, with how to fix it."""
+    monkeypatch.setitem(sys.modules, "duckdb", None)  # an import of it raises ImportError
+    found = doctor._query_engine()
+    assert not found.ok
+    assert found.said.startswith("duckdb cannot be imported")
+    assert "pip install --force-reinstall duckdb" in found.said
 
 
 @respx.mock
@@ -303,9 +314,10 @@ def test_suggestions_never_apply_anything() -> None:
 def test_main_prints_the_report_and_says_whether_everything_passed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert doctor.main([], {}) == 0  # nothing configured: nothing to fail
+    assert doctor.main([], {}) == 0  # nothing configured: nothing to fail but the install
     out = capsys.readouterr().out
-    assert out.startswith("Settings (value, and where it came from):") and "Checks:\n  none" in out
+    assert out.startswith("Settings (value, and where it came from):")
+    assert "Checks:\n  ok    query engine: DuckDB " in out
     respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(403))
     assert doctor.main([], {"LLM_BASE_URL": "http://gw.test/v1"}) == 1
 
