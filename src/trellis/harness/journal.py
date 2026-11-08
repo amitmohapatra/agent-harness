@@ -222,7 +222,8 @@ class Journal(BaseModel):
     files: list[dict[str, Any]] = Field(default_factory=list)
     pending: Pending | None = None
     #: the segments the run store holds, and the journal they make: what a save adds to
-    _segments: list[PayloadRef] = PrivateAttr(default_factory=list)
+    #: (a constant default: a default factory costs pydantic a signature look-up per journal)
+    _segments: tuple[PayloadRef, ...] = PrivateAttr(default=())
     _saved: dict[str, Any] | None = PrivateAttr(default=None)
 
     # ------------------------------------------------------------------ persistence
@@ -250,7 +251,7 @@ class Journal(BaseModel):
                 dumped = apply(dumped, await adecode(data))
             journal = cls.of(dumped)
             # what the next save compares with: a copy, never the objects the journal holds
-            journal._segments, journal._saved = segments, journal.dump()
+            journal._segments, journal._saved = tuple(segments), journal.dump()
             return journal
         ref = checkpoint.get(JOURNAL_REF)
         if ref is None:
@@ -275,7 +276,7 @@ class Journal(BaseModel):
         node = delta(self._saved, dumped)
         if node is None and self._segments:
             return None
-        segments = self._segments
+        segments: list[PayloadRef] = list(self._segments)
         if node is None or len(segments) >= MAX_SEGMENTS:
             node, segments = {"$r": dumped}, []
         data = await aencode(node)
@@ -289,7 +290,7 @@ class Journal(BaseModel):
 
     def saved(self, save: Save) -> None:
         """The run store took ``save``: the next one adds to it."""
-        self._segments, self._saved = save.segments, save.dumped
+        self._segments, self._saved = tuple(save.segments), save.dumped
 
     async def checkpoint(
         self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str
