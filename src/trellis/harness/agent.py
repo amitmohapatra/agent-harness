@@ -113,6 +113,7 @@ from trellis.runs.answers import answer_problem
 
 if TYPE_CHECKING:
     from trellis.harness.harness import Harness
+    from trellis.harness.runs import RunStore
 
 log = logging.getLogger("trellis.run")
 
@@ -556,8 +557,7 @@ class Agent:
             assert found is not None
             record = found
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
-            # (a journal kept as a run artifact is not read for it: the reaper deletes it)
-            await sandbox.ended(self, (held.checkpoint or {}).get("sandbox"), run_id)
+            await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
             self._unwatched(run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
@@ -1632,3 +1632,14 @@ class RunHandle:
 
 
 __all__ = ["Agent", "RunHandle", "Throttled"]
+
+
+async def _sandbox_of(runs: RunStore, record: RunRecord) -> dict[str, Any] | None:
+    """The sandbox a run's journal names; ``None`` when its journal cannot be read (the
+    sandbox reaper deletes what nothing ended)."""
+    try:
+        journal = await Journal.read(record.checkpoint, runs.artifacts, tenant=record.tenant_id)
+    except HarnessError as exc:
+        log.warning("run %s: its sandbox is left to the reaper: %s", record.run_id, exc)
+        return None
+    return journal.sandbox

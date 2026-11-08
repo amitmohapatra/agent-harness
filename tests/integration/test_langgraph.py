@@ -512,3 +512,25 @@ async def test_the_graphs_context_and_durability_pass_through(harness: Harness) 
     thread = await harness.conversation(user="u1", thread="t1")
     state = await agent.target.aget_state({"configurable": {"thread_id": thread}})
     assert state.values == {"seen": "gold"}
+
+
+def test_a_workers_run_of_a_run_checkpointed_graph_saves_each_step_before_the_next() -> None:
+    """LangGraph saves a step's checkpoint beside the next step by default; a worker's run of
+    a graph checkpointing into its run saves it first (``durability="sync"``), so a write is
+    never made from a step no save holds. A run that names its own durability keeps it; a run
+    in its caller's process, or a graph with a checkpointer of its own, is left as it is."""
+    from types import SimpleNamespace
+
+    from trellis import middleware
+    from trellis.harness.adapters.langgraph import _run_arguments, checkpointing
+
+    graph = checkpointing(create_agent(ScriptedChatModel(turns=["hi"]), middleware=middleware()))
+    own = create_agent(ScriptedChatModel(turns=["hi"]), checkpointer=InMemorySaver())
+
+    def runtime(worker: str | None, **options: Any) -> Any:
+        return SimpleNamespace(worker_id=worker, framework_options=options)
+
+    assert _run_arguments(runtime("w1"), graph) == {"durability": "sync"}  # type: ignore[arg-type]
+    assert _run_arguments(runtime("w1", durability="exit"), graph) == {"durability": "exit"}  # type: ignore[arg-type]
+    assert _run_arguments(runtime(None), graph) == {}  # type: ignore[arg-type]
+    assert _run_arguments(runtime("w1"), own) == {}  # type: ignore[arg-type]

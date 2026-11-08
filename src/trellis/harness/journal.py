@@ -16,10 +16,12 @@ outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs n
 
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
-no question and no side effect. A journal larger than a checkpoint may be is stored as a run
-artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`); a
-checkpoint that lists segments (agent-runs' payload objects, each what changed since the one
-before: :func:`apply`) is read too, all in one request. A
+no question and no side effect. It is saved as segments (agent-runs' payload objects,
+``trellis.runs.payloads``): each save uploads only what changed since the last one the run
+store took (:func:`delta`), nothing at all when nothing did, and the checkpoint lists the
+segments in order (:meth:`Journal.save`); a resume reads them all at once and applies them in
+order (:meth:`Journal.read`). Every :data:`MAX_SEGMENTS` saves, one segment holds the whole
+journal again, so a resume reads a bounded number. A
 sub-agent's run working inside one of the run's tool calls keeps its journal in the run's
 (``children``), so the run's progress saves the child's too; the run's sandbox is named here as
 soon as it exists (``sandbox``), so every later attempt works in that one
@@ -55,7 +57,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from trellis.contracts import (
     ArtifactRef,
@@ -68,25 +70,43 @@ from trellis.contracts import (
 )
 from trellis.harness.events import preview
 from trellis.runs import NotFoundError
-from trellis.runs.payloads import SEGMENTS, PayloadRef, adecode
+from trellis.runs.payloads import SEGMENTS, PayloadRef, adecode, aencode
 
 if TYPE_CHECKING:
     from trellis.harness.runs import RunArtifacts
 
-#: The most a checkpoint may be, as compact JSON (agent-runs' ``MAX_CHECKPOINT_BYTES``: a
-#: larger one is refused with ``413``). A larger journal is stored as a run artifact, and the
-#: checkpoint holds only its reference, under :data:`JOURNAL_REF`.
-MAX_CHECKPOINT_BYTES: Final = 1024 * 1024
+#: A checkpoint the last release saved whole as a run artifact names it under this key; read
+#: until every such run has ended (agent-runs' payload migration).
 JOURNAL_REF: Final = "journal_ref"
+#: Segments a checkpoint lists before a save writes the whole journal as one again: a resume
+#: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
+#: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
+MAX_SEGMENTS: Final = 16
 #: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
 #: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
 OUTCOME: Final = "trellis_outcome"
 
 
+def delta(old: Any, new: Any) -> dict[str, Any] | None:
+    """What turns ``old`` into ``new`` (``None``: nothing): ``{"$r": value}`` replaces,
+    ``{"$a": items}`` appends to a list that kept its start, ``{"$d": {key: delta},
+    "$x": [key, ...]}`` changes an object's keys and drops some. A journal's lists grow at
+    their end and its objects gain keys, so a save's delta is about what the step added."""
+    if old == new:
+        return None
+    if isinstance(old, dict) and isinstance(new, dict):
+        changed = {k: d for k, v in new.items() if (d := delta(old.get(k, _ABSENT), v))}
+        node: dict[str, Any] = {"$d": changed}
+        if gone := [k for k in old if k not in new]:
+            node["$x"] = gone
+        return node
+    if isinstance(old, list) and isinstance(new, list) and new[: len(old)] == old:
+        return {"$a": new[len(old) :]}
+    return {"$r": new}
+
+
 def apply(base: Any, node: dict[str, Any]) -> Any:
-    """``base`` changed by a segment: ``{"$r": value}`` replaces it, ``{"$a": items}`` appends
-    to a list, ``{"$d": {key: segment}, "$x": [key, ...]}`` changes an object's keys and drops
-    some."""
+    """``base`` changed by a :func:`delta`."""
     if "$r" in node:
         return node["$r"]
     if "$a" in node:
@@ -97,6 +117,23 @@ def apply(base: Any, node: dict[str, Any]) -> Any:
     for key, sub in node["$d"].items():
         changed[key] = apply(changed.get(key), sub)
     return changed
+
+
+class _Absent:
+    """A key an object did not have (unequal to any JSON value)."""
+
+
+_ABSENT: Final = _Absent()
+
+
+class Save(BaseModel):
+    """A save made ready: the checkpoint to send, and what the journal was then."""
+
+    model_config = ConfigDict(frozen=True)
+
+    checkpoint: dict[str, Any]
+    segments: list[PayloadRef]
+    dumped: dict[str, Any]
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -184,6 +221,10 @@ class Journal(BaseModel):
     #: what made each — their bytes are in the file store
     files: list[dict[str, Any]] = Field(default_factory=list)
     pending: Pending | None = None
+    #: the segments the run store holds, and the journal they make: what a save adds to
+    #: (a constant default: a default factory costs pydantic a signature look-up per journal)
+    _segments: tuple[PayloadRef, ...] = PrivateAttr(default=())
+    _saved: dict[str, Any] | None = PrivateAttr(default=None)
 
     # ------------------------------------------------------------------ persistence
     @classmethod
@@ -195,11 +236,11 @@ class Journal(BaseModel):
     async def read(
         cls, checkpoint: dict[str, Any] | None, artifacts: RunArtifacts, *, tenant: str
     ) -> Journal:
-        """The journal a run record's checkpoint holds, or names: one stored as a run artifact
-        (:meth:`checkpoint`) is read back from it, one saved as segments is read in one
-        request and the segments applied in order."""
-        if SEGMENTS in (checkpoint or {}):
-            assert checkpoint is not None
+        """The journal a run record's checkpoint holds or names: its segments, read in one
+        request (the store reads them in parallel) and applied in order; a journal the last
+        release stored whole as a run artifact; or the journal itself, inline."""
+        checkpoint = checkpoint or {}
+        if SEGMENTS in checkpoint:
             segments = [PayloadRef.model_validate(ref) for ref in checkpoint[SEGMENTS]]
             try:
                 stored = await artifacts.get_payloads(segments, tenant=tenant)
@@ -208,10 +249,13 @@ class Journal(BaseModel):
             dumped: Any = None
             for data in stored:
                 dumped = apply(dumped, await adecode(data))
-            return cls.of(dumped)
-        ref = (checkpoint or {}).get(JOURNAL_REF)
+            journal = cls.of(dumped)
+            # what the next save compares with: a copy, never the objects the journal holds
+            journal._segments, journal._saved = tuple(segments), journal.dump()
+            return journal
+        ref = checkpoint.get(JOURNAL_REF)
         if ref is None:
-            return cls.of(checkpoint)
+            return cls.of(checkpoint or None)
         artifact_id = ArtifactRef.model_validate(ref).artifact_id
         data = await artifacts.download(artifact_id, tenant=tenant)
         if data is None:
@@ -221,18 +265,43 @@ class Journal(BaseModel):
     def dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
 
+    async def save(
+        self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str
+    ) -> Save | None:
+        """Upload what changed since the last save the run store took, as one segment
+        (named by ``worker_id``, as the store fences a worker's writes): the save to send
+        (and then :meth:`saved`), or ``None`` when nothing changed. O(what the step added)
+        sent, the journal compared in memory."""
+        dumped = self.dump()
+        node = delta(self._saved, dumped)
+        if node is None and self._segments:
+            return None
+        segments: list[PayloadRef] = list(self._segments)
+        if node is None or len(segments) >= MAX_SEGMENTS:
+            node, segments = {"$r": dumped}, []
+        data = await aencode(node)
+        ref = await artifacts.put_payload(run_id, data, worker_id=worker_id, tenant=tenant)
+        segments = [*segments, ref]
+        return Save(
+            checkpoint={SEGMENTS: [r.model_dump() for r in segments]},
+            segments=segments,
+            dumped=dumped,
+        )
+
+    def saved(self, save: Save) -> None:
+        """The run store took ``save``: the next one adds to it."""
+        self._segments, self._saved = tuple(save.segments), save.dumped
+
     async def checkpoint(
         self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str
     ) -> dict[str, Any]:
-        """The run's checkpoint for a pause or a progress save: the journal itself, or — over
-        :data:`MAX_CHECKPOINT_BYTES` — a reference to it, uploaded as a run artifact (named by
-        ``worker_id``, as the store fences a worker's writes)."""
-        dumped = self.dump()
-        data = json.dumps(dumped, default=str, separators=(",", ":")).encode()
-        if len(data) <= MAX_CHECKPOINT_BYTES:
-            return dumped
-        ref = await artifacts.upload(run_id, data, worker_id=worker_id, tenant=tenant)
-        return {JOURNAL_REF: ref.model_dump(mode="json", exclude_none=True)}
+        """The run's checkpoint for a pause: what changed saved (:meth:`save`), and every
+        segment listed."""
+        save = await self.save(artifacts, run_id, worker_id=worker_id, tenant=tenant)
+        if save is None:
+            return {SEGMENTS: [r.model_dump() for r in self._segments]}
+        self.saved(save)
+        return save.checkpoint
 
     def approved_in_framework(self, resolution: InterruptResolution) -> None:
         """The calls the open pause — a framework's own approval gate — approved by

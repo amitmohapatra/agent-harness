@@ -53,6 +53,11 @@ def triage(state: Ticket) -> dict[str, str]:
   replays the thread while the process lives and loses it on a restart: memory's window stays
   on there, in the context's text (`## Recent conversation`), never as messages next to the
   store's own.
+  A durable checkpointer of the graph's own (a Postgres saver, say) is a second copy of what
+  Trellis memory and runs already keep (the conversation, and the run's state in its journal):
+  the harness says so once per process (`trellis.harness` warning), and
+  `trellis doctor --graph module:graph` checks a graph. Compile it without one (or with
+  `InMemorySaver`) to keep one copy.
 * Otherwise memory keeps the conversation, and a framework that replays one as messages gets
   it as its own. LangGraph (`ReAct`, `create_agent`, Deep Agents): `window_format="messages"`,
   and the recent turns follow the context message as `HumanMessage`, `AIMessage` with its

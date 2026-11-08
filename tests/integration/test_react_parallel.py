@@ -11,6 +11,7 @@ import itertools
 from typing import Any
 
 from tests.support.arm import arm
+from tests.support.journals import journal_of
 from tests.support.models import ScriptedChat
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, current, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus, ToolCall, ToolOutcome
@@ -226,7 +227,8 @@ async def test_progress_saved_by_calls_made_at_once_goes_one_save_at_a_time(
     assert await harness.worker([agent]).run_once()
     assert (await handle.result(wait=5)).answer == ["filed a", "filed b", "filed c"]
     assert store.most == 1
-    assert sum(len(v) for v in store.saved[-1]["calls"].values()) == 3  # the last save has all
+    last = await journal_of(store, store.saved[-1], tenant="default")
+    assert sum(len(v) for v in last.calls.values()) == 3  # the last save has all
 
 
 async def test_cancelling_the_run_cancels_the_calls_running_beside_each_other(

@@ -160,7 +160,7 @@ src/trellis/
                        progress checkpoints, tools.call
     asking.py          Question: what ask, an approval and a graph's interrupt() build (Way 2 too)
     journal.py         what a re-run needs: answers and tool outputs keyed by content; the
-                       checkpoint (or an artifact reference past 1 MiB); sub-agents' journals
+                       checkpoint, saved as segments (what changed); sub-agents' journals
     features.py        without=: the features a run or an agent turns off (Feature)
     compat.py          the framework versions this release was tested with; the wrap-time warning
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
@@ -395,8 +395,8 @@ keyed by content (the question; the tool and its arguments) and consumed in orde
 A worker saves it as progress on a heartbeat after every call with side effects (a worker that
 dies repeats none of them), `runs.pause` stores it with the pause, and the attempt that resumes
 the run — in this process or in a worker elsewhere — files `last_resolution` under the pending
-question and replays the rest. A journal over agent-runs' 1 MiB checkpoint bound is uploaded as
-a run artifact and the checkpoint is `{"journal_ref": ArtifactRef}`.
+question and replays the rest. The journal is saved in segments (each save what changed), and
+the checkpoint is `{"trellis_segments": [PayloadRef, ...]}`.
 
 How a run continues: a LangGraph graph with a checkpointer resumes in place (`ask` *is*
 `interrupt`, the resume `Command(resume=...)`); a Claude session is resumed and the journal

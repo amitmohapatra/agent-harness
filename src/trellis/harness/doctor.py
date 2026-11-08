@@ -16,6 +16,7 @@ Exit code ``0`` when every check passes, ``1`` otherwise."""
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import sys
@@ -30,6 +31,7 @@ from typing import Any, Final
 import httpx
 
 from trellis.contracts import ConfigurationError
+from trellis.harness.adapters.langgraph import DUPLICATE_STORAGE, durable_checkpointer
 from trellis.harness.gateways import (
     CAPABILITIES,
     Capability,
@@ -64,6 +66,7 @@ MODEL_KEY_PATH: Final = "/v1/agents/model-key"
 #: Where a gateway with MCP (``Capability.MCP``: Bifrost) answers MCP's JSON-RPC, under its
 #: root: the request ``doctor`` checks a declared route with.
 MCP_PATH: Final = "/mcp"
+USAGE: Final = "trellis doctor [--agent ID ...] [--graph MODULE:NAME ...]"
 MCP_LIST: Final = {"jsonrpc": "2.0", "id": "trellis-doctor", "method": "tools/list"}
 #: The memory service's readiness answers that still serve (``degraded``: an optional
 #: dependency is down).
@@ -529,36 +532,53 @@ def report(
 
 
 def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
-    """``trellis doctor [--agent ID ...]``: ``--agent`` names an agent whose learned approval
-    rules are listed (beside the agents the key may act as)."""
-    agents = _agents(list(argv or ()))
+    """``trellis doctor [--agent ID ...] [--graph MODULE:NAME ...]``: ``--agent`` names an
+    agent whose learned approval rules are listed (beside the agents the key may act as);
+    ``--graph`` a LangGraph graph whose checkpointer is checked (:func:`graph_checks`)."""
+    agents, graphs = _options(list(argv or ()))
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
     found = asyncio.run(checks(settings, agents=agents, docker=bool(env.get("DOCKER_HOST"))))
+    found += graph_checks(graphs)
     said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1
 
 
-def _agents(argv: list[str]) -> list[str]:
-    """The ``--agent ID`` (or ``--agent=ID``) options; anything else is refused."""
-    agents: list[str] = []
+def graph_checks(graphs: Sequence[str]) -> list[Check]:
+    """Each ``module:name`` graph: one that brings a durable checkpointer of its own stores
+    the conversation and the run's state a second time (``DUPLICATE_STORAGE``)."""
+    found = []
+    for spec in graphs:
+        module, _, name = spec.partition(":")
+        graph = getattr(importlib.import_module(module), name)
+        durable = durable_checkpointer(graph)
+        said = DUPLICATE_STORAGE.format(name=durable) if durable else "one copy of its state"
+        found.append(Check(f"graph {spec}", durable is None, said))
+    return found
+
+
+def _options(argv: list[str]) -> tuple[list[str], list[str]]:
+    """The ``--agent ID`` and ``--graph MODULE:NAME`` options (or ``--opt=value``); anything
+    else is refused."""
+    found: dict[str, list[str]] = {"--agent": [], "--graph": []}
     while argv:
         given = argv.pop(0)
-        if given.startswith("--agent="):
-            agents.append(given.removeprefix("--agent="))
-        elif given == "--agent" and argv:
-            agents.append(argv.pop(0))
+        option, eq, value = given.partition("=")
+        if option in found and eq:
+            found[option].append(value)
+        elif given in found and argv:
+            found[given].append(argv.pop(0))
         else:
-            raise SystemExit(f"usage: trellis doctor [--agent ID ...] (not {given!r})")
-    return agents
+            raise SystemExit(f"usage: {USAGE} (not {given!r})")
+    return found["--agent"], found["--graph"]
 
 
 def cli() -> int:
     """``trellis <command>``: ``trellis doctor``."""
     args = sys.argv[1:]
     if args[:1] != ["doctor"]:
-        sys.stderr.write("usage: trellis doctor [--agent ID ...]\n")
+        sys.stderr.write(f"usage: {USAGE}\n")
         return 2
     return main(args[1:])
 

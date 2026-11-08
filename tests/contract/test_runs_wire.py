@@ -24,6 +24,7 @@ import pytest
 from pydantic import BaseModel
 
 from tests.support.arm import arm
+from tests.support.journals import CHECKPOINT_BOUND
 from tests.support.openapi import OpenAPI, runs_contract
 from trellis import Harness, Runtime, tool
 from trellis.contracts import (
@@ -40,7 +41,6 @@ from trellis.contracts import (
     Schedule,
     ScheduleSpec,
 )
-from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
 from trellis.harness.runs import LocalRuns
 from trellis.memory.models import KeyInfo
 from trellis.runs import (
@@ -51,6 +51,7 @@ from trellis.runs import (
     RunsError,
     RunSummary,
 )
+from trellis.runs.payloads import FRAMED_MEDIA_TYPE, SEGMENTS, key_of
 
 TENANT = "default"
 #: the header a call names its tenant with (a platform key's only way to)
@@ -137,14 +138,15 @@ class RunsService:
 
     async def _answer(self, request: httpx.Request) -> tuple[int, Any, dict[str, str]]:
         path = request.url.path
-        body = json.loads(request.content) if request.content else None
+        json_body = request.headers.get("content-type", "").startswith("application/json")
+        body = json.loads(request.content) if request.content and json_body else None
         if path.startswith("/v1/runs/") and path != "/v1/runs/claim":
             run_id, _, action = path.removeprefix("/v1/runs/").partition("/")
             status, answer = await self._run(request, run_id, action, body)
             return status, answer, {}
         return await self._collection(request, body)
 
-    async def _collection(
+    async def _collection(  # noqa: PLR0911 - a return per route
         self, request: httpx.Request, body: Any
     ) -> tuple[int, Any, dict[str, str]]:
         method, path, store = request.method, request.url.path, self.store
@@ -164,6 +166,15 @@ class RunsService:
         if (method, path) == ("POST", "/v1/schedules"):
             made = await store.schedules.create(ScheduleSpec.model_validate(body))
             return 201, made.model_dump(mode="json"), {}
+        if (method, path) == ("POST", "/v1/payloads/read"):  # the tenant's objects, framed
+            tenant = self._tenant(request) or ""
+            files = [store._payload_root / key_of(tenant, sha) for sha in body["sha256"]]
+            if not all(f.exists() for f in files):
+                raise NotFoundError("no such payload object", code="NOT_FOUND", status=404)
+            framed = b"".join(
+                len(d).to_bytes(8, "big") + d for d in (f.read_bytes() for f in files)
+            )
+            return 200, framed, {}
         artifact_id = path.removeprefix("/v1/artifacts/")
         data = await store.artifacts.download(artifact_id, tenant=self._tenant(request))
         if data is None:
@@ -190,7 +201,7 @@ class RunsService:
         link = {"link": f'</v1/runs?cursor={offset + limit}>; rel="next"'} if more else {}
         return 200, [r.model_dump(mode="json") for r in page], link
 
-    async def _run(
+    async def _run(  # noqa: PLR0911 - a return per action
         self, request: httpx.Request, run_id: str, action: str, body: Any
     ) -> tuple[int, Any]:
         store, worker = self.store, request.url.params.get("worker_id")
@@ -219,6 +230,11 @@ class RunsService:
             return 200, done.model_dump(mode="json")
         if action in ("heartbeat", "cancel", "release"):
             return 200, (await self._held(run_id, action, body, tenant)).model_dump(mode="json")
+        if action == "payloads":
+            made = await store.artifacts.put_payload(
+                run_id, request.content, worker_id=worker, tenant=tenant
+            )
+            return 201, made.model_dump(mode="json")
         assert action == "artifacts", action
         ref = await store.artifacts.upload(
             run_id,
@@ -251,7 +267,7 @@ class RunsService:
 def _bounded(checkpoint: dict[str, Any] | None) -> None:
     """agent-runs' ``bounded_checkpoint``: a checkpoint over 1 MiB of compact JSON is ``413``."""
     size = len(json.dumps(checkpoint, separators=(",", ":"), ensure_ascii=False).encode())
-    if size > MAX_CHECKPOINT_BYTES:
+    if size > CHECKPOINT_BOUND:
         raise PayloadTooLargeError(
             f"checkpoint is {size} bytes", code="PAYLOAD_TOO_LARGE", status=413
         )
@@ -274,9 +290,12 @@ def _response(
 ) -> httpx.Response:
     if body is None:
         return httpx.Response(status, request=request)
-    if isinstance(body, bytes):
+    if isinstance(body, bytes):  # an artifact (JSON here) or a payload object, as stored
+        stored = (
+            FRAMED_MEDIA_TYPE if request.url.path == "/v1/payloads/read" else "application/json"
+        )
         return httpx.Response(
-            status, content=body, headers={"content-type": "application/json"}, request=request
+            status, content=body, headers={"content-type": stored}, request=request
         )
     media = "application/problem+json" if status >= 400 else "application/json"
     return httpx.Response(
@@ -288,7 +307,7 @@ def _response(
 
 
 def _template(path: str) -> str:
-    return re.sub(r"/(run_|art_)[^/]+", "/{id}", path)
+    return re.sub(r"/(run_[^/]+|art_[^/]+|[0-9a-f]{64})", "/{id}", path)
 
 
 @pytest.fixture
@@ -389,7 +408,7 @@ async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
 @tool(side_effects="write")
 def export(order: str) -> str:
     """Export an order's history."""
-    return "x" * (MAX_CHECKPOINT_BYTES + 1)  # a journal larger than a checkpoint may be
+    return "x" * (CHECKPOINT_BOUND + 1)  # a journal larger than a checkpoint may be
 
 
 async def test_a_runs_limits_version_and_cancel_speak_the_runs_contract(
@@ -412,7 +431,7 @@ async def test_a_runs_limits_version_and_cancel_speak_the_runs_contract(
     assert ("POST", "/v1/runs/{id}/cancel") in service.seen
 
 
-async def test_a_journal_larger_than_a_checkpoint_travels_as_a_run_artifact(
+async def test_a_journal_larger_than_a_checkpoint_travels_as_payload_segments(
     wired: tuple[Harness, RunsService],
 ) -> None:
     h, service = wired
@@ -425,17 +444,17 @@ async def test_a_journal_larger_than_a_checkpoint_travels_as_a_run_artifact(
     queued = arm(h.wrap(exporting, id="exporting"), [export])
     handle = await queued.start({"order": "o-7"}, user="ada")
     worker = h.worker([queued], concurrency=1)
-    assert await worker.run_once()  # saved as progress, then paused: both by reference
+    assert await worker.run_once()  # saved as progress, then paused: segments by reference
     first = await handle.result(wait=5)
     assert first.interrupt is not None
     record = await h.runs.get(handle.id, tenant=TENANT)
     assert record is not None and record.checkpoint is not None
-    assert set(record.checkpoint) == {JOURNAL_REF}
+    assert set(record.checkpoint) == {SEGMENTS}
     await queued.resume(first.interrupt.interrupt_id, "answer", answer="S", reviewer="ada")
     assert await worker.run_once()
-    assert (await handle.result(wait=5)).answer == f"{MAX_CHECKPOINT_BYTES + 1}; S"
+    assert (await handle.result(wait=5)).answer == f"{CHECKPOINT_BOUND + 1}; S"
     assert service.violations == [], "\n".join(service.violations)
-    assert ("GET", "/v1/artifacts/{id}") in service.seen
+    assert {("POST", "/v1/runs/{id}/payloads"), ("POST", "/v1/payloads/read")} <= set(service.seen)
 
 
 async def test_the_inbox_reads_every_page_and_says_when_it_stops(

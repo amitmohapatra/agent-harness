@@ -7,9 +7,9 @@ import asyncio
 from collections.abc import Callable
 from typing import Any, Final, TypedDict
 
+from tests.support.journals import CHECKPOINT_BOUND
 from trellis import current, tool
 from trellis.contracts import ToolError
-from trellis.harness.journal import MAX_CHECKPOINT_BYTES
 
 #: What a write past its time limit reads as, to the model.
 UNKNOWN: Final = (
@@ -18,8 +18,8 @@ UNKNOWN: Final = (
 )
 EMAIL: Final = "ada@example.com"
 SECRET: Final = "sk-live0123456789abcdefghij"
-#: A tool output larger than a checkpoint may be (the journal goes to an artifact).
-HUGE: Final = MAX_CHECKPOINT_BYTES + 1
+#: A tool output larger than an inline checkpoint may be (the journal goes in segments).
+HUGE: Final = CHECKPOINT_BOUND + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).
 WAIT_SECONDS: Final = 1.0
 #: How long ``hold`` holds at most: the run's time limit, which it lets pass as it starts,

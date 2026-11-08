@@ -21,6 +21,7 @@ from tests.integration.test_progress import Crash, crash_once
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.journals import journal_of
 from tests.support.models import ScriptedChat
 from tests.support.planned import Call
 from tests.support.sandbox import FakeSandboxes, PausingSandboxes
@@ -185,7 +186,7 @@ async def test_a_pause_snapshots_and_pauses_the_sandbox_and_the_resume_attaches_
     name = f"trellis-{waiting.run_id}"
     record = await harness.runs.get(waiting.run_id, tenant="default")
     assert record is not None and record.checkpoint is not None
-    assert record.checkpoint["sandbox"] == {
+    assert (await journal_of(harness.runs, record)).sandbox == {
         "provider": "fake",
         "id": name,
         "labels": {RUN: waiting.run_id, TENANT: "default", "trellis.agent_id": "worker"},
@@ -306,9 +307,8 @@ async def test_a_crash_replays_the_commands_that_ran_and_attaches_for_the_next(
     handle = await agent.start("go", user="u")
     await crash_once(store, agent, handle)
     record = await handle.status()
-    assert record.checkpoint is not None and record.checkpoint["sandbox"]["id"] == (
-        f"trellis-{handle.id}"
-    )
+    sandboxed = (await journal_of(store, record)).sandbox
+    assert sandboxed is not None and sandboxed["id"] == f"trellis-{handle.id}"
     assert await harness.worker([agent]).run_once()
     assert (await handle.result(wait=5)).answer == ["one", "two"]
     assert provider.commands == ["echo one", "echo two"]

@@ -273,6 +273,7 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
         run_memory=None,
         attempt=1,
         pending=None,
+        worker_id=None,
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]

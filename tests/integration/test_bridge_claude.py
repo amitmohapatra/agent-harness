@@ -15,6 +15,7 @@ import pytest
 from claude_agent_sdk import ClaudeAgentOptions, InMemorySessionStore
 
 from tests.support.arm import arm
+from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings, tool
 from trellis.contracts import RunStatus
@@ -85,7 +86,7 @@ async def test_a_paused_session_continues_on_another_machine(tmp_path: Path) -> 
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         record = await runs.get(paused.run_id)
         assert record is not None
-        journal = Journal.of(record.checkpoint)
+        journal = await journal_of(runs, record)
         assert journal.session is not None and journal.transcripts[journal.session]
         done = await there.resume(paused.interrupt.interrupt_id, "approve", reviewer="ada")
     finally:

@@ -33,6 +33,7 @@ from tests.support import resume_worker
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.durable import SharedSaver
+from tests.support.journals import journal_of
 from tests.support.openai_model import ScriptedModel
 from tests.support.shared_runs import FileRuns
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, Settings, current, middleware, tool
@@ -559,13 +560,16 @@ async def test_a_damaged_checkpoint_fails_the_run_clearly_and_writes_nothing_aga
             Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
         )
     record = store._runs[handle.id]
-    assert record.checkpoint is not None
-    graph = record.checkpoint["graph"]
+    journal = await journal_of(store, record)
+    graph = journal.graph
+    assert graph is not None
     if damage == "unreadable":
         graph[""]["checkpoint"] = ["msgpack", "not base64 !"]
     else:
         graph["tools:somewhere"] = graph.pop("")
     held, _ = store._leases[handle.id]
+    damaged = await journal.checkpoint(store.artifacts, handle.id, worker_id=held, tenant="default")
+    store._runs[handle.id] = record.model_copy(update={"checkpoint": damaged})
     store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     assert await second.worker([taking_over]).run_once()
     result = await handle.result(wait=5)
