@@ -1,9 +1,8 @@
-"""The in-process engine's resource safety (``tools.query``), on DuckDB and on the SQLite
-fallback (each test taking ``engine``): each query bounded in time, memory, input and output;
-its database made for it and closed whatever happens — an error, a timeout, a cancelled run; a
-query sees only its own run's saved results, never a file, the network, an extension or a
-setting; parallel runs do not mix; many runs leave memory, open files and threads as they
-were."""
+"""The in-process engine's resource safety (``tools.query``, DuckDB): each query bounded in time,
+memory, input and output; its database made for it and closed whatever happens — an error, a
+timeout, a cancelled run; a query sees only its own run's saved results, never a file, the
+network, an extension or a setting; parallel runs do not mix; many runs leave memory, open files
+and threads as they were."""
 
 from __future__ import annotations
 
@@ -12,7 +11,6 @@ import contextlib
 import gc
 import itertools
 import os
-import sqlite3
 import threading
 import time
 from collections.abc import Iterator
@@ -75,7 +73,7 @@ async def ask(harness: Harness, text: str, sql: str, **wrap: Any) -> str:
 
 # --------------------------------------------------------------------------- limits
 async def test_a_query_past_its_time_is_stopped_and_its_database_closed(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = Opened(monkeypatch)
     monkeypatch.setattr(query, "SECONDS", 0.3)
@@ -86,11 +84,10 @@ async def test_a_query_past_its_time_is_stopped_and_its_database_closed(
 
 
 async def test_a_query_over_25_million_joined_rows_holds_little_memory_and_stops_in_time(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A join of 5,000 rows with themselves, made distinct: SQLite's sort spills past
-    ``TEMP_CACHE_BYTES`` to its temporary files (gone when it closes) and the time cap stops
-    it; DuckDB's is stopped by its ``memory_limit`` (never spilled) or by the time cap."""
+    """A join of 5,000 rows with themselves, made distinct: stopped by the ``memory_limit``
+    (never spilled) or by the time cap."""
     opened = Opened(monkeypatch)
     monkeypatch.setattr(query, "SECONDS", 1.0)
     before = rss_mb()
@@ -101,12 +98,12 @@ async def test_a_query_over_25_million_joined_rows_holds_little_memory_and_stops
     said = await ask(harness, table(5_000), sql)
     grew = rss_mb() - before
     assert "took too long" in said or "memory" in said.lower(), said
-    assert grew < {"sqlite": 100, "duckdb": query.DB_BYTES / 2**20 + 100}[engine]
+    assert grew < query.DB_BYTES / 2**20 + 100
     assert opened.all_closed()
 
 
 async def test_the_input_and_the_answer_are_bounded(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     said = await ask(harness, table(1_000), "SELECT id, tag, v, printf('%0500d', v) FROM rows")
     assert len(said) < query.OUTPUT_CHARS + 100 and said.endswith("aggregate more]")
@@ -116,7 +113,7 @@ async def test_the_input_and_the_answer_are_bounded(
 
 # --------------------------------------------------------------------------- lifecycle
 async def test_a_cancelled_run_interrupts_its_query_and_closes_it(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = Opened(monkeypatch)
     monkeypatch.setattr(query, "SECONDS", 30.0)
@@ -139,7 +136,7 @@ async def test_a_cancelled_run_interrupts_its_query_and_closes_it(
 
 
 async def test_a_failed_query_closes_its_database(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = Opened(monkeypatch)
     said = await ask(harness, table(10), "SELECT missing FROM rows")
@@ -148,7 +145,7 @@ async def test_a_failed_query_closes_its_database(
 
 
 # --------------------------------------------------------------------------- isolation
-async def test_a_query_sees_only_its_own_runs_saved_results(harness: Harness, engine: str) -> None:
+async def test_a_query_sees_only_its_own_runs_saved_results(harness: Harness) -> None:
     @tool(side_effects="read")
     def mine(tag: str) -> str:
         """Rows tagged ``tag``."""
@@ -178,19 +175,9 @@ async def test_a_query_sees_only_its_own_runs_saved_results(harness: Harness, en
 
 
 # --------------------------------------------------------------------------- hostile queries
-def probes(engine: str, folder: Path) -> dict[str, str]:
-    """A query trying more than reading its own tables, as each engine's SQL spells it."""
+def probes(folder: Path) -> dict[str, str]:
+    """A query trying more than reading its own tables."""
     secret = folder / "secret.csv"
-    if engine == "sqlite":
-        return {
-            "read another file": f"ATTACH '{folder}/secret.db' AS s",
-            "write a file": f"ATTACH '{folder}/out.db' AS o",
-            "load an extension": "SELECT load_extension('/nonexistent')",
-            "change a setting": "PRAGMA writable_schema = 1",
-            "write a table": "CREATE TABLE z AS SELECT 1",
-            "delete rows": "DELETE FROM rows",
-            "two statements": "SELECT 1; DELETE FROM rows",
-        }
     return {
         "read another file": f"SELECT * FROM read_csv('{secret}')",
         "read a file as text": f"SELECT * FROM read_text('{secret}')",
@@ -209,28 +196,21 @@ def probes(engine: str, folder: Path) -> dict[str, str]:
     }
 
 
-async def test_a_query_reads_only_its_own_tables(
-    harness: Harness, engine: str, tmp_path: Path
-) -> None:
+async def test_a_query_reads_only_its_own_tables(harness: Harness, tmp_path: Path) -> None:
     """No other file, no network, no extension, no setting, no write: each is refused, and the
     run's own table is whole after."""
     (tmp_path / "secret.csv").write_text("token\nhunter2\n")
-    with contextlib.closing(sqlite3.connect(tmp_path / "secret.db")) as made:
-        made.execute("CREATE TABLE secret (token TEXT)")
-        made.execute("INSERT INTO secret VALUES ('hunter2')")
-        made.commit()
-    for probe, sql in probes(engine, tmp_path).items():
+    for probe, sql in probes(tmp_path).items():
         said = await ask(harness, table(10), sql)
         assert said.startswith("Error: the query failed:") and "hunter2" not in said, (probe, said)
     assert not [p.name for p in os.scandir(tmp_path) if p.name.startswith("out")]
     assert await ask(harness, table(10), "SELECT count(*) AS n FROM rows") == "n\n10"
 
 
-async def test_a_query_building_a_huge_value_is_stopped(harness: Harness, engine: str) -> None:
-    """A query that builds ~200 MB of text in memory: SQLite stops it at its longest value
-    (``VALUE_CHARS``), DuckDB at its ``memory_limit`` (``DB_BYTES``)."""
-    concat = {"sqlite": "group_concat", "duckdb": "string_agg"}[engine]
-    sql = f"SELECT length({concat}(a.tag || printf('%0200d', b.id), ',')) FROM rows a, rows b"
+async def test_a_query_building_a_huge_value_is_stopped(harness: Harness) -> None:
+    """A query that builds ~200 MB of text in memory: stopped at its ``memory_limit``
+    (``DB_BYTES``)."""
+    sql = "SELECT length(string_agg(a.tag || printf('%0200d', b.id), ',')) FROM rows a, rows b"
     before = rss_mb()
     said = await ask(harness, table(1_000, "x" * 1_000), sql)
     assert said.startswith("Error: the query failed:"), said[:200]
@@ -246,7 +226,6 @@ def rss_mb() -> float:
 
 async def test_parallel_runs_each_query_50000_rows_and_none_mixes_with_another(
     harness: Harness,
-    engine: str,
 ) -> None:
     runs = 8
 
@@ -270,7 +249,7 @@ async def test_parallel_runs_each_query_50000_rows_and_none_mixes_with_another(
 
 
 async def test_loading_past_its_time_or_waiting_past_a_turn_says_so(
-    harness: Harness, engine: str, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(query, "LOAD_SECONDS", -1.0)
     assert "took too long" in await ask(harness, table(10), "SELECT 1")
@@ -283,7 +262,7 @@ async def test_loading_past_its_time_or_waiting_past_a_turn_says_so(
             query._RUNNING.release()
 
 
-def test_a_call_cancelled_before_its_turn_does_not_run(engine: str) -> None:
+def test_a_call_cancelled_before_its_turn_does_not_run() -> None:
     call = query._Call()
     call.cancel()
     assert query._answer({"t": "a,b\n1,2"}, "t", "SELECT 1", (), call=call) == "Error: cancelled"
@@ -296,7 +275,6 @@ def fds() -> int:
 
 async def test_many_queries_leave_memory_open_files_and_threads_as_they_were(
     harness: Harness,
-    engine: str,
 ) -> None:
     """50 runs one after another, then 10 at once, each loading 10,000 rows and querying them:
     resident memory and open files end where the warm-up left them (within a small tolerance),

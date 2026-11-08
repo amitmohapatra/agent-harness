@@ -157,4 +157,5 @@ The order is accuracy and coverage, then safety, then latency and memory, then i
 against 67 MB in a core that is otherwise small, and no musl wheel) and by the 10k tie with 8x
 less memory. One tool contract covers both engines: the same table names, the harness's typing
 rules, the documented function names, and the same limits. Details are in
-[ADR 0007](../adr/0007-query-engine.md).
+[ADR 0007](../adr/0007-query-engine.md), whose 2026-11-08 amendment made DuckDB required and
+removed the fallback.

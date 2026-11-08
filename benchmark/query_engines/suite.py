@@ -5,7 +5,7 @@ The data is the shape of the ``query_result`` tests (#66): the SKU ledger of
 of ``tests/integration/test_large_data.py`` (inventory as CSV, sales as a JSON array, lead times
 as a JSON object holding the array, as a paged tool's pages are joined) — at any row count.
 
-Each question is the SQL the harness's tool documents (SQLite, with its statistics aggregates),
+Each question is the SQL the harness's tool documents (its statistics named as DuckDB names them),
 and, where an engine's dialect differs, that engine's own SQL for the same question. The answer
 is computed in Python over every row: integers and text exactly, floating values with
 ``math.fsum`` and ``statistics``."""

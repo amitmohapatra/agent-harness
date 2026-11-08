@@ -2,17 +2,16 @@
 same SQL, as the harness's ``query_result`` would use it: a database made for the call from the
 texts, read-only from then on, closed after.
 
-* ``sqlite`` and ``duckdb`` — the harness's own engines, through their ``load`` and ``execute``:
-  ``tools.query.SQLite``, the fallback (Python's parse, ``executemany``, the statistics
-  aggregates, the authorizer), and ``tools.query.DuckDB``, the engine when the ``query`` extra
-  is installed (DuckDB's own CSV and JSON readers from a private temporary file, the harness's
-  typing rules in one SQL pass, then ``enable_external_access = false``,
-  ``lock_configuration = true``, a ``memory_limit`` and only a single ``SELECT``);
+* ``duckdb`` — the harness's own engine, through its ``load`` and ``execute``:
+  ``tools.query.DuckDB`` (DuckDB's own CSV and JSON readers from a private temporary file, the
+  harness's typing rules in one SQL pass, then ``enable_external_access = false``,
+  ``lock_configuration = true``, a ``memory_limit`` and only a single ``SELECT``). Its SQLite
+  fallback was measured here too, then removed (ADR 0007): ``results/`` keeps its numbers;
 * ``polars`` — ``pl.read_csv`` / ``pl.read_json`` (whole-column type inference) and
   ``pl.SQLContext``;
 * ``pandasql`` — pandas' readers and ``pandasql.sqldf`` (SQLite underneath, a copy per query).
 
-Polars and pandasql are not dependencies of the harness (DuckDB is its ``query`` extra): an
+Polars and pandasql are not dependencies of the harness (DuckDB is a required one): an
 engine that does not import is reported as not installed. ``QUERY_ENGINES_SITE`` names a
 folder they were installed in (``pip install --target``), searched after the harness's own
 packages."""
@@ -57,11 +56,11 @@ def _json(text: str) -> bool:
 
 
 class Harness:
-    """One of the harness's engines (``tools.query.Engine``), as ``query_result`` runs it:
+    """The harness's engine (``tools.query.DuckDB``), as ``query_result`` runs it:
     ``opened``, ``load``, ``execute``, ``fetchmany`` (its limits on time and concurrency are
     ``query._answer``'s, which ``worker.concurrent`` runs)."""
 
-    def __init__(self, engine: query.Engine) -> None:
+    def __init__(self, engine: query.DuckDB) -> None:
         self.engine = engine
         self.name = engine.name.lower()
         self._open: dict[int, contextlib.AbstractContextManager[Any]] = {}
@@ -162,7 +161,6 @@ class PandaSQL:
 
 
 ENGINES: Final[dict[str, Callable[[], Engine]]] = {
-    "sqlite": lambda: Harness(query.SQLite()),
     "duckdb": lambda: Harness(query.DuckDB()),
     "polars": Polars,
     "pandasql": PandaSQL,

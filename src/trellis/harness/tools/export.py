@@ -92,8 +92,8 @@ def _cell(value: Any) -> Any:
 
 
 def _text(value: Any) -> Any:
-    """A value as a CSV cell writes it: a boolean as SQL and JSON write it (DuckDB's; SQLite's
-    are 0 and 1), else as it is (a decimal exact, as the engine computed it)."""
+    """A value as a CSV cell writes it: a boolean as SQL and JSON write it, else as it is (a
+    decimal exact, as the engine computed it)."""
     if isinstance(value, bool):
         return "true" if value else "false"
     return value
