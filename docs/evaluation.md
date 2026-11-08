@@ -485,7 +485,19 @@ a model from the data and applies it: a trend extended to a forecast, a formula 
 join of two tools, a compound growth rate carried forward, a break-even point, a correlation
 and the line that predicts one series from the other — each truth exact (least squares and
 correlation over the world's own rows), each a figure a model must compute with a tool, not by
-hand. The held-out cases (`bfh-…`) run every round and are never fixed against. Each case's chats are one user's, kept to the run and the
+hand. The held-out cases (`bfh-…`) run every round and are never fixed against.
+
+**History set** (`benchmark/cost/history.py`, `--cases history`, run with `--history memory`):
+what a user asks an assistant that remembers them — what it said in an earlier chat, a new
+figure against one it gave, a trend (least-squares slope and correlation) over months fetched
+across chats, two chats' lists merged with each shared item's change, why a figure moved since
+last time, an earlier run's long tool output recalled rather than fetched again, a question
+about something never said, its own figure rather than a colleague's — and how it got an
+answer: which part came from memory and which from a tool, where a figure is from and when it
+was read, what a resumed run did. 10 cases of its own (`hist_past`, `hist_analytics`,
+`hist_explain`) and 12 of the suite's that ask the same kinds of question (`history.REUSED`),
+picked rather than repeated. The chats run minutes apart, so a question names "our earlier
+chat", not a date. Each case's chats are one user's, kept to the run and the
 case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
 before a later chat the harness's writes are drained, as a chat an hour later finds them.
 A shell command that only reads (Claude Code's or Kimi's `Bash`: a program that reads, joined

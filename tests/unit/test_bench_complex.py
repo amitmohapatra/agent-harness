@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from benchmark.cost import breakfix, judge, prices, run
+from benchmark.cost import breakfix, history, judge, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from trellis import Settings
@@ -135,7 +135,7 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    base = [c for c in cases if not c.category.startswith(("adv_", "bf_"))]
+    base = [c for c in cases if not c.category.startswith(("adv_", "bf_", "hist_"))]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
     assert {c.tier for c in cases} == set(cx.TIERS)
@@ -635,6 +635,66 @@ def test_the_rounds_pick_by_round_and_the_held_out_set_apart() -> None:
     derive = cx.picked("round:4", every)
     assert [c.id for c in derive] == [f"bf4-derive-0{n}" for n in range(1, 6)]
     assert {c.category for c in derive} == {"bf_derive"}
+
+
+# --------------------------------------------------------------------------- the history set
+def test_the_history_set_picks_its_own_cases_and_the_suites_of_the_same_kinds() -> None:
+    every = cx.cases()
+    own = [c for c in every if c.category.startswith("hist_")]
+    assert {c.category for c in own} == set(history.CATEGORIES) <= set(cx.CATEGORIES)
+    got = cx.picked("history", every)
+    assert [c.id for c in got if c in own] == [c.id for c in own] and len(own) == 10
+    assert sorted(c.id for c in got if c not in own) == sorted(history.REUSED)
+    assert len(got) == 22 and cx.picked("breakfix", every) == [
+        c for c in every if c.category.startswith("bf_")
+    ]
+
+
+def test_the_history_trends_are_the_least_squares_fits_worked_by_hand() -> None:
+    by = {c.id: c for c in history.cases()}
+    w = r.world()
+
+    def by_hand(ys: list[float]) -> tuple[float, float]:
+        xs = [1, 2, 3, 4]
+        mx, my = sum(xs) / 4, sum(ys) / 4
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        return sxy / sxx, sxy / math.sqrt(sxx * syy)
+
+    for case, category in (("hist-trend-01", "outerwear"), ("hist-trend-02", "knitwear")):
+        months = [
+            r.truth_total(w, "revenue", category=category, start=f"2026-{m:02d}-01",
+                          end=f"2026-{m:02d}-{(date(2026, m + 1, 1) - timedelta(days=1)).day}")
+            for m in (6, 7, 8, 9)
+        ]  # fmt: skip
+        slope, rho = by_hand(months)
+        got = by[case].turns[-1].expect.value
+        assert got["slope"]["value"] == pytest.approx(slope, rel=1e-9)
+        assert got["r"]["value"] == pytest.approx(rho, rel=1e-9)
+
+
+def test_a_long_tool_output_is_recalled_from_the_earlier_run_not_fetched_again() -> None:
+    case = next(c for c in history.cases() if c.id == "hist-long-01")
+    first, later = case.turns
+    assert later.thread != first.thread and not later.calls
+    assert [(p.kind, p.pattern, p.when) for p in later.sent] == [
+        ("uncalled", "sales_summary", "memory")
+    ]
+    # the list the earlier run kept is long: over the size memory stores apart (600 characters)
+    ((name, args),) = first.calls[0]
+    assert len(getattr(r, name).fn(**args)) > 600
+
+
+def test_where_a_figure_is_from_needs_its_source_and_its_read_time() -> None:
+    case = next(c for c in history.cases() if c.id == "histx-02")
+    expect = case.turns[1].expect
+    ctx = case.turns[1].expect.reference
+    assert cx.score(expect, expect.reference, [], case.turns[1].text, ctx)["correct"]
+    sku = case.turns[0].calls[0][0][1]["sku"]
+    on = r.world().on_hand(sku, "east", 0)
+    no_time = f"From a stock_level call for {sku}: {on} on hand."
+    assert not cx.score(expect, no_time, [], case.turns[1].text, ctx)["correct"]
 
 
 def test_the_derive_and_apply_truths_are_the_fits_worked_by_hand() -> None:
