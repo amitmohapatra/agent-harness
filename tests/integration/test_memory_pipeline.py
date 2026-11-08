@@ -1238,3 +1238,31 @@ async def test_a_worker_publishes_the_agents_tools_before_its_first_claim(
         with caplog.at_level("WARNING", logger="trellis.harness"):
             await h._published([h.wrap(fn, id="d")])
         assert "the tools were not published at start" in caplog.text
+
+
+async def test_a_past_result_an_earlier_chat_names_is_queried_in_a_new_chat(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A new chat keeps no result, but its context names an earlier chat's (``result msg_``):
+    ``query_result`` is offered, and loads it as ``t1`` through the memory service."""
+    listed = "sku,units\n" + "\n".join(f"S{n},{100 - n}" for n in range(30))
+    memory_service.threads["thr_old"] = [
+        {"message_id": "msg_old", "thread_id": "thr_old", "session_id": "ses_1", "turn_id": "trn_1",
+         "role": "TOOL", "kind": "INTERNAL", "sequence": 2, "content": listed, "user_id": "u",
+         "author_principal": "agent:a", "archive_status": "STAGED", "attachments": [],
+         "custom_metadata": {}, "occurred_at": "2026-10-26T10:00:00Z"}
+    ]  # fmt: skip
+    memory_service.context_text = (
+        "## Earlier conversations\n- 2026-10-26 Monday, conversation thr_old, the assistant "
+        'said: S0 sold the most.\n  Its steps: For "Top SKUs?" (1 call):\n'
+        '  1. sales_summary(group_by="sku"): ok, result msg_old'
+    )
+    sql = "SELECT sku, units FROM t1 ORDER BY units DESC LIMIT 1 OFFSET 6"
+    model = ScriptedChat([("query_result", {"results": ["msg_old"], "sql": sql}), "done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="past")
+    result = await agent.run("number 7 on that list from our earlier chat?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = [t["function"]["name"] for t in model.requests[0]["tools"]]
+    assert "query_result" in offered
+    said = model.requests[1]["messages"][-1]["content"]
+    assert said == "t1 is past result msg_old, said 2026-10-26.\nsku,units\nS6,94"
