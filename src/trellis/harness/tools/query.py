@@ -44,7 +44,6 @@ import csv
 import importlib
 import io
 import json
-import math
 import os
 import re
 import tempfile
@@ -123,8 +122,6 @@ WHOLE: Final = r"[-+]?(0|[1-9][0-9]*)"
 #: A decimal as written (digits and a point, no exponent: money), and any number.
 DECIMAL: Final = r"[-+]?((0|[1-9][0-9]*)(\.[0-9]*)?|\.[0-9]+)"
 NUMBER: Final = DECIMAL + r"([eE][-+]?[0-9]+)?"
-_WHOLE: Final = re.compile(WHOLE)
-_NUMBER: Final = re.compile(NUMBER)
 #: The most digits a ``DECIMAL`` value has: an answer writes 15 significant digits
 #: (:func:`_shown`), which a float keeps exactly (its text read back is the same).
 DECIMAL_DIGITS: Final = 15
@@ -683,7 +680,7 @@ class DuckDB:
 
     def _typed(self, db: Any, name: str, columns: Sequence[str]) -> None:
         """The table ``name`` from ``raw`` (dropped after), each column typed by the module's
-        rules (:func:`_number`), counted in one pass over every row — only the columns still
+        rules (:func:`_counted`), counted in one pass over every row — only the columns still
         numbers in its first :data:`SAMPLE_ROWS` — then cast."""
         kinds: dict[str, str | None] = dict.fromkeys(columns, "")
         for rows in (f"(SELECT * FROM raw LIMIT {SAMPLE_ROWS})", "raw"):
@@ -721,9 +718,9 @@ class DuckDB:
 
 def _counted(column: str) -> str:
     """In SQL, over a text column: how many values it has, how many are whole numbers, how
-    many decimals (:func:`_decimal`), how many numbers (:func:`_number`'s rules; DuckDB's
-    casts allow the spaces around one), and the decimals' most digits before the point and
-    after it."""
+    many decimals (:data:`DECIMAL`, at most :data:`DECIMAL_DIGITS` digits), how many numbers
+    (:data:`WHOLE` within 64 bits, or :data:`NUMBER` and finite; DuckDB's casts allow the
+    spaces around one), and the decimals' most digits before the point and after it."""
     text = f"trim({_name(column)})"
     whole = f"regexp_full_match({text}, {_quoted(WHOLE)})"
     fits = f"TRY_CAST({text} AS BIGINT) IS NOT NULL"
@@ -808,7 +805,7 @@ def _objects(value: Any, kind: type = dict) -> bool:
 def _cell(value: Any) -> Any:
     """A JSON value as a cell: a number or text as it is (a whole number past 64 bits
     as its digits), anything else its JSON text, compact (as DuckDB writes it)."""
-    if isinstance(value, int) and not isinstance(value, bool) and not _number(value, whole=True):
+    if isinstance(value, int) and not isinstance(value, bool) and not -(2**63) <= value < 2**63:
         return str(value)
     if value is None or (isinstance(value, str | int | float) and not isinstance(value, bool)):
         return value
@@ -828,23 +825,3 @@ def column_names(columns: Sequence[str]) -> list[str]:
         seen[name] = seen.get(name, 0) + 1
         out.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
     return out
-
-
-def _number(value: Any, *, whole: bool) -> bool:
-    """Whether a cell (text, or a JSON number: a JSON true is its text) is a number the
-    engine keeps exactly: a whole one within 64 bits, a finite one — never text a number would
-    change (a code with a leading zero, ``00123``; a run of digits too long for one; an id
-    past 64 bits, which a ``REAL`` would round), nor one SQL would not read as a number
-    (:data:`WHOLE`, :data:`NUMBER`). DuckDB applies the same rules in SQL
-    (``DuckDB._typed``)."""
-    if isinstance(value, int):
-        return -(2**63) <= value < 2**63
-    if isinstance(value, float):
-        return not whole and math.isfinite(value)
-    text = str(value).strip(" ")
-    if len(text) > NUMBER_CHARS:
-        return False
-    # a whole number first: one past 64 bits stays its text, never a rounded REAL
-    if _WHOLE.fullmatch(text):
-        return _number(int(text), whole=whole)
-    return not whole and bool(_NUMBER.fullmatch(text)) and math.isfinite(float(text))
