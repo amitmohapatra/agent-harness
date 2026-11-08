@@ -13,6 +13,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   offered `query_result` once its context names one. "Which tool did you use last time?" is
   answered from those steps. Live history eval: `explain-08` and `hist-long-01` now pass.
 
+### `query_result` needs DuckDB
+
+- DuckDB is a required dependency; the SQLite fallback is gone, so the model sees one dialect
+  and the query suites run once ([ADR 0007](docs/adr/0007-query-engine.md)). The `query` extra
+  stays, empty. `trellis doctor` fails its "query engine" check when `duckdb` cannot be imported.
+
 ### Benchmark
 
 - A history set for the complex suite (`--cases history`): earlier chats recalled, compared,

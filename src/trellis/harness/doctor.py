@@ -462,6 +462,21 @@ async def _asked(
     return Check(name, False, f"{url} answered {response.status_code}"), None
 
 
+def _query_engine() -> Check:
+    """DuckDB, ``query_result``'s engine (``tools.query``, ADR 0007): a required dependency,
+    imported only at the first query, so a broken install is said here, not mid-run."""
+    try:
+        duckdb = importlib.import_module("duckdb")
+    except ImportError as exc:
+        return Check(
+            "query engine",
+            False,
+            f"duckdb cannot be imported ({exc}): query_result needs it; "
+            "pip install --force-reinstall duckdb",
+        )
+    return Check("query engine", True, f"DuckDB {duckdb.__version__} (query_result)")
+
+
 def _spool(folder: str) -> Check:
     try:
         Path(folder).mkdir(parents=True, exist_ok=True)
@@ -539,7 +554,7 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     env = os.environ if environ is None else environ
     settings = Settings.from_env(env)
     found = asyncio.run(checks(settings, agents=agents, docker=bool(env.get("DOCKER_HOST"))))
-    found += graph_checks(graphs)
+    found += [_query_engine(), *graph_checks(graphs)]
     said = report(effective(env), found, suggestions(settings, env), gateway_said(settings, env))
     sys.stdout.write(said + "\n")
     return 0 if all(c.ok for c in found) else 1

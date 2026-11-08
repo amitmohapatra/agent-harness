@@ -26,7 +26,7 @@ from typing import Any
 from benchmark import procstat
 from benchmark.query_engines import suite
 
-ENGINES = ("sqlite", "duckdb", "polars", "pandasql")
+ENGINES = ("duckdb", "polars", "pandasql")
 
 
 def available_mb() -> float:
