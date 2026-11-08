@@ -170,7 +170,7 @@ handle = await agent.start(task, user="ada", run_timeout=600, deadline=tomorrow_
   leaves `RUNNING`, so the clock continues after a pause, a crash and a retry.
 * An attempt works at most what is left: in process, the limit less the time already worked,
   and the deadline; in a worker, what its lease says is left (`Lease.remaining_seconds`: the
-  run's limit or the platform's — `RUNS__RUNS__MAX_RUN_SECONDS` in agent-runs, the lesser —
+  run's limit or the platform's — `RUNS__LIMITS__MAX_RUN_SECONDS` in agent-runs, the lesser —
   less what it worked), so a worker stops on time instead of being cut off.
 * agent-runs enforces both itself (its ticker), so a run is bounded even when its worker dies
   and never comes back.
@@ -453,7 +453,7 @@ line naming both versions.
 | an agent's runs' working time: `h.wrap(run_timeout=)` | none | the agent's author (every entry, scheduled runs too) |
 | a run's working time: `timeout=` | the agent's | the caller of `run`/`stream`/`start` |
 | a run's end: `deadline=` | none | the caller |
-| the platform's longest run | none | operations: `RUNS__RUNS__MAX_RUN_SECONDS` in agent-runs |
+| the platform's longest run | none | operations: `RUNS__LIMITS__MAX_RUN_SECONDS` in agent-runs |
 | an answer: `ask(deadline=, escalate_to=)` | none | the agent's code ([interrupts.md](interrupts.md)) |
 | a lease / its heartbeat | 60 s / every 20 s | constants (`trellis.runs`) |
 | a stopping worker's grace | 25 s | constant (`GRACE_SECONDS`) |
