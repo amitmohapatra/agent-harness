@@ -1,9 +1,30 @@
-# 0007. `query_result` runs on DuckDB when it is installed, with SQLite as the zero-dependency fallback
+# 0007. `query_result` runs on DuckDB
 
-**Status:** Accepted (2026-10-31). Amends [ADR 0006](0006-what-the-model-gets.md), whose list of
-libraries proposed "DuckDB for compute, or stdlib `sqlite3` if it measures as sufficient".
-Implemented in `tools/query.py` (the `query` extra): its numbers are under
-[Implemented](#implemented).
+**Status:** Accepted (2026-10-31); amended 2026-11-08: DuckDB is a required dependency and the
+SQLite fallback is removed ([Amendment](#amendment-2026-11-08-duckdb-is-required)). Amends
+[ADR 0006](0006-what-the-model-gets.md), whose list of libraries proposed "DuckDB for compute,
+or stdlib `sqlite3` if it measures as sufficient". Implemented in `tools/query.py`: its numbers
+are under [Implemented](#implemented).
+
+## Amendment (2026-11-08): DuckDB is required
+
+The fallback was the engine of an install without the extra, and it answered differently there:
+a boolean `1`/`0` where DuckDB says `true`/`false`, its own `total()` and text-as-0 sums, its
+spellings (`group_concat`, `date(d, '+7 days')`). The model saw two dialects, the tests ran
+every query suite twice, and the harness kept a Python parse, Python statistics aggregates and
+exact-sum windows only for that path. So:
+
+- `duckdb>=2.0,<2.1` is a required dependency; the `query` extra stays, empty, so
+  `trellis-harness[query]` still installs.
+- `tools/query.py` has one engine (`ENGINE = DuckDB()`): the `SQLite` class, the `Engine`
+  protocol, `chosen()`, the Python aggregates and exact sums are gone. Every query suite runs
+  on DuckDB, with the answers it gave before.
+- DuckDB is still imported at the first query, so `trellis doctor` can say a broken install:
+  its "query engine" check fails, naming the fix, when `duckdb` cannot be imported.
+- The cost: 67 MB in every install, and no musllinux (Alpine) wheel: there, build it from
+  source or use a glibc image.
+
+The sections below are the original decision; where they describe the fallback, it is history.
 
 ## Context
 
@@ -61,8 +82,8 @@ So:
 
 - The Python statistics aggregates and the Python parse stay only on the fallback path.
 - The tests run the query suites (`test_query`, `test_formulas`, `test_query_safety`,
-  `test_large_data`) on both engines. The fallback stays at 100% coverage.
-- `benchmark/query_engines` is re-run when either engine is upgraded or the loader changes, and
+  `test_large_data`) on DuckDB (on both engines until the amendment).
+- `benchmark/query_engines` is re-run when DuckDB is upgraded or the loader changes, and
   its results go to `benchmark/query_engines/results/`.
 - Still to do: caching a run's loaded database between its queries, instead of loading it
   again on every call. (SQLite's per-value length limit, `setlimit`, came with the switch: a

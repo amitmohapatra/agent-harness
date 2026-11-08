@@ -37,12 +37,13 @@ The providers' own LangChain packages, for a model name on the provider SDK's ro
 | `langchain-google-vertexai` | `vertex` (with `bifrost-sdk[google]`) | `>=3.2,<4` | 3.2.5 |
 | `langchain-aws` | `bedrock` (with `bifrost-sdk[aws]`) | `>=1.9,<2` | 1.9.1 |
 
-The engine `query_result` runs on when it is installed (Python's own SQLite otherwise), pinned
-to the minor range `benchmark/query_engines` measured ([ADR 0007](adr/0007-query-engine.md)):
+The engine `query_result` runs on, a required dependency, pinned to the minor range
+`benchmark/query_engines` measured ([ADR 0007](adr/0007-query-engine.md)); the `query` extra is
+kept, empty, for installs that name it:
 
 | Distribution | Extra | Pinned range | Tested |
 |---|---|---|---|
-| `duckdb` | `query` | `>=2.0,<2.1` | 2.0.0 |
+| `duckdb` | (required) | `>=2.0,<2.1` | 2.0.0 |
 
 | Program | Driven by | Tested range | Tested | |
 |---|---|---|---|---|

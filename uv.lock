@@ -2703,6 +2703,7 @@ source = { editable = "." }
 dependencies = [
     { name = "bifrost-sdk" },
     { name = "croniter" },
+    { name = "duckdb" },
     { name = "fsspec" },
     { name = "httpx" },
     { name = "jsonpatch" },
@@ -2728,7 +2729,6 @@ all = [
     { name = "bifrost-sdk", extra = ["aws", "google"] },
     { name = "claude-agent-sdk" },
     { name = "deepagents" },
-    { name = "duckdb" },
     { name = "fastapi" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -2782,9 +2782,6 @@ otel = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
 ]
-query = [
-    { name = "duckdb" },
-]
 react = [
     { name = "deepagents" },
     { name = "langchain" },
@@ -2825,7 +2822,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=6" },
     { name = "deepagents", marker = "extra == 'deepagents'", specifier = ">=0.7.19,<0.8" },
     { name = "deepagents", marker = "extra == 'react'", specifier = ">=0.7.19,<0.8" },
-    { name = "duckdb", marker = "extra == 'query'", specifier = ">=2.0,<2.1" },
+    { name = "duckdb", specifier = ">=2.0,<2.1" },
     { name = "fastapi", marker = "extra == 'a2a'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'agui'", specifier = ">=0.115" },
     { name = "fsspec", specifier = ">=2024.6" },

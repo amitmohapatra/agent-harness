@@ -2,50 +2,38 @@
 (``tools.results``) — a count, a sum, a filter, a top-N or a group computed in process, exactly,
 instead of the model paging thousands of rows into its context and adding them up itself.
 
-No sandbox and no Code Mode needed. The engine is chosen by what is installed
-(:data:`ENGINE`, `ADR 0007 <docs/adr/0007-query-engine.md>`_): DuckDB (:class:`DuckDB`, the
-``query`` extra) when it can be imported, else Python's own SQLite (:class:`SQLite`, no
-dependency), each in memory, made for one query and closed after it. Both give the model one
-contract: the tool's description names the engine (the model writes its dialect), the tables,
-their typing and the limits are the same.
+No sandbox and no Code Mode needed. The engine is DuckDB (:class:`DuckDB`, a required
+dependency: `ADR 0007 <docs/adr/0007-query-engine.md>`_), in memory, made for one query and
+closed after it; the tool's description names it, so the model writes its dialect.
 
 The kept text becomes the table ``result``: a JSON array of objects (or the first such array a
 JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one row per
-line (``line``). A column whose every value is a whole number is ``INTEGER`` (DuckDB:
-``BIGINT``), a decimal as written of at most :data:`DECIMAL_DIGITS` digits (``12.50``, money)
-``DECIMAL``, another number ``REAL`` (``DOUBLE``), else ``TEXT`` (``VARCHAR``): a code with a
-leading zero, or an id past 64 bits, keeps its exact text; a nested value is its JSON text
-(``json_extract`` reads it). A ``DECIMAL`` column adds up exactly, as written: DuckDB's own
-``DECIMAL(p, s)``; SQLite has none, so it stores the column ``REAL`` and adds it up with
-``sum``, ``total`` and ``avg`` (a window's too) in Python's ``decimal`` (:data:`EXACT`). Every
-number with a fraction an answer holds is written as SQLite writes a ``REAL`` (15 significant
-digits, :func:`_shown`), on both engines: ``32266.15``, never ``32266.149999999998``. A
+line (``line``). A column whose every value is a whole number is ``BIGINT``, a decimal as
+written of at most :data:`DECIMAL_DIGITS` digits (``12.50``, money) ``DECIMAL(p, s)``, another
+number ``DOUBLE``, else ``VARCHAR``: a code with a leading zero, or an id past 64 bits, keeps
+its exact text; a nested value is its JSON text (``json_extract`` reads it). A ``DECIMAL``
+column adds up exactly, as written. Every number with a fraction an answer holds is written
+with 15 significant digits (:func:`_shown`): ``32266.15``, never ``32266.149999999998``. A
 number is written as SQL writes one (:data:`WHOLE`, :data:`DECIMAL`, :data:`NUMBER`): never
 ``1_000``, ``0x10`` or ``٣``.
 
-Only reading is allowed, and only the run's own results are ever loaded. SQLite: an authorizer
-admits ``SELECT`` (``WITH`` included), reading the tables and calling functions — never a write,
-``ATTACH`` (no other file, no network), a ``PRAGMA`` or loading an extension (off, as Python
-leaves it). DuckDB: one ``SELECT`` statement only, and once its tables are loaded no file or
-network access (``enable_external_access``), no extension loaded or installed, and its settings
-locked. A query runs for at most :data:`SECONDS` (then it is interrupted, as a cancelled call
-is), its text is at most :data:`SQL_CHARS`, what it loads at most :data:`LOAD_CHARS`, its
-memory at most :data:`DB_BYTES` (SQLite: its tables' pages, a value :data:`VALUE_CHARS`, its
-sorts and joins :data:`TEMP_CACHE_BYTES` in memory, more in SQLite's temporary files, gone
-when it closes; DuckDB: ``memory_limit``, never spilled to disk), and at most :data:`ROWS` rows
-and :data:`OUTPUT_CHARS` characters come back (said when there were more).
+Only reading is allowed, and only the run's own results are ever loaded: one ``SELECT``
+statement (``WITH`` included), and once its tables are loaded no file or network access
+(``enable_external_access``), no extension loaded or installed, and its settings locked. A
+query runs for at most :data:`SECONDS` (then it is interrupted, as a cancelled call is), its
+text is at most :data:`SQL_CHARS`, what it loads at most :data:`LOAD_CHARS`, its memory at most
+:data:`DB_BYTES` (``memory_limit``, never spilled to disk), and at most :data:`ROWS` rows and
+:data:`OUTPUT_CHARS` characters come back (said when there were more).
 
 Formulas: arithmetic, ``CASE``, math (``sqrt``, ``power``, ``ln``, ``exp``…), dates
-(``julianday``; SQLite's ``strftime``, ``date(…, '+7 days')``) and window functions
+(``julianday``, ``date_diff``, ``d + INTERVAL 7 DAY``) and window functions
 (``avg(x) OVER (ORDER BY d ROWS 6 PRECEDING)`` a moving average, ``lag`` a growth rate,
 ``rank``); and the statistics, named as PostgreSQL and DuckDB name them: ``stddev``/
 ``stddev_samp``, ``stddev_pop``, ``variance``/``var_samp``, ``var_pop``, ``median``,
-``percentile_cont(x, p)`` (``p`` from 0 to 1, interpolated as DuckDB's ``quantile_cont``),
-``corr(y, x)``, ``covar_samp(y, x)``, ``covar_pop(y, x)``, ``regr_slope(y, x)``,
-``regr_intercept(y, x)``, ``regr_r2(y, x)`` — DuckDB's own, and on SQLite aggregates of this
-module (:data:`AGGREGATES`, Python's ``statistics``), ``NULL`` where there are too few values.
-On DuckDB, ``percentile_cont(x, p)`` and ``julianday(d)`` are macros (:data:`MACROS`), so the
-spelling above works on both engines.
+``percentile_cont(x, p)`` (``p`` from 0 to 1, interpolated), ``corr(y, x)``,
+``covar_samp(y, x)``, ``covar_pop(y, x)``, ``regr_slope(y, x)``, ``regr_intercept(y, x)``,
+``regr_r2(y, x)``, ``NULL`` where there are too few values. ``percentile_cont(x, p)`` and
+``julianday(d)`` are macros (:data:`MACROS`), so these spellings work as written.
 """
 
 from __future__ import annotations
@@ -54,14 +42,11 @@ import asyncio
 import contextlib
 import csv
 import importlib
-import importlib.util
 import io
 import json
 import math
 import os
 import re
-import sqlite3
-import statistics
 import tempfile
 import threading
 import time
@@ -69,7 +54,7 @@ from collections import ChainMap
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from decimal import Decimal
 from functools import cached_property
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
 from trellis.contracts import ToolError
 from trellis.harness.files import file_name
@@ -116,14 +101,10 @@ ROWS: Final = 200
 SQL_CHARS: Final = 5_000
 SECONDS: Final = 5.0
 #: What a query may load (the run's saved results, in characters), the memory its database may
-#: take (SQLite: its tables' pages; DuckDB: all of it), the longest value a SQLite query may
-#: build, the memory SQLite's sorts and joins may hold, the most characters it answers with,
-#: how many queries run at once in a process (each in a worker thread) and how long one waits
-#: its turn.
+#: take, the most characters it answers with, how many queries run at once in a process (each
+#: in a worker thread) and how long one waits its turn.
 LOAD_CHARS: Final = 64 * 1024 * 1024
 DB_BYTES: Final = 512 * 1024 * 1024
-VALUE_CHARS: Final = LOAD_CHARS
-TEMP_CACHE_BYTES: Final = 8 * 1024 * 1024
 OUTPUT_CHARS: Final = 20_000
 CONCURRENT: Final = 4
 WAIT_SECONDS: Final = 60.0
@@ -134,10 +115,6 @@ LOAD_SECONDS: Final = 60.0
 INTERRUPT_SECONDS: Final = 0.05
 _RUNNING: Final = threading.BoundedSemaphore(CONCURRENT)
 DELIMITERS: Final = ",\t;|"
-#: What the authorizer admits: a SELECT, reading, a function, a recursive WITH.
-_ALLOWED: Final = frozenset(
-    {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
-)
 _NAME: Final = re.compile(r"[^0-9A-Za-z_]+")
 #: The typing rules (see the module), one text for Python's ``re`` and DuckDB's RE2: a whole
 #: number as SQL writes one, and a number — never with a leading zero before a digit
@@ -147,10 +124,9 @@ WHOLE: Final = r"[-+]?(0|[1-9][0-9]*)"
 DECIMAL: Final = r"[-+]?((0|[1-9][0-9]*)(\.[0-9]*)?|\.[0-9]+)"
 NUMBER: Final = DECIMAL + r"([eE][-+]?[0-9]+)?"
 _WHOLE: Final = re.compile(WHOLE)
-_DECIMAL: Final = re.compile(DECIMAL)
 _NUMBER: Final = re.compile(NUMBER)
-#: The most digits a ``DECIMAL`` value has: a float keeps 15 exactly (its text read back is the
-#: same), so SQLite, which has no decimal type, can store the column ``REAL``.
+#: The most digits a ``DECIMAL`` value has: an answer writes 15 significant digits
+#: (:func:`_shown`), which a float keeps exactly (its text read back is the same).
 DECIMAL_DIGITS: Final = 15
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
@@ -557,7 +533,7 @@ BATCH_ROWS: Final = 1_000
 
 def _saved(kind: str) -> Callable[[Any, list[str]], tuple[bytes, int, str]]:
     """What a query saving its result as a ``kind`` file takes of its rows: every row written
-    as they come (``tools.export.written``; read with ``fetchmany`` on either engine), how
+    as they come (``tools.export.written``; read with ``fetchmany``), how
     many, and the first :data:`SAVED_ROWS` as CSV."""
 
     def take(cursor: Any, names: list[str]) -> tuple[bytes, int, str]:
@@ -584,11 +560,10 @@ def _csv(names: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
 
 
 def _shown(value: Any) -> Any:
-    """A cell of an answer as it is written: a boolean as SQL and JSON write it (DuckDB has
-    them; SQLite's are 0 and 1); a number with a fraction — a float, or DuckDB's decimal — as
-    SQLite writes a ``REAL`` (``%!.15g``: 15 significant digits, a whole one with ``.0``), so
-    the binary tail of a sum, a product or a ratio (``59.970000000000006``) is not read as a
-    figure, and both engines write a figure alike."""
+    """A cell of an answer as it is written: a boolean as SQL and JSON write it; a number with
+    a fraction — a float, or a decimal — with 15 significant digits (``%!.15g``, a whole one
+    with ``.0``), so the binary tail of a sum, a product or a ratio (``59.970000000000006``) is
+    not read as a figure."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, Decimal):
@@ -599,85 +574,16 @@ def _shown(value: Any) -> Any:
     return f"{shown}.0" if shown.lstrip("-").isdigit() else shown
 
 
-class Engine(Protocol):
-    """What runs a query (:data:`ENGINE`): a database made for one call, its tables loaded from
-    the run's saved results and read-only from then on, one ``SELECT`` over them."""
-
-    #: As the tool's description names it, so the model writes its dialect.
-    name: str
-
-    @property
-    def errors(self) -> tuple[type[Exception], ...]:
-        """What a refused or failed query raises (an interrupted one too)."""
-        ...
-
-    def opened(self) -> contextlib.AbstractContextManager[Any]:
-        """A database for one call, closed at the end; its ``interrupt()`` stops what it runs."""
-        ...
-
-    def load(self, db: Any, texts: Mapping[str, str | Table], own: str) -> None:
-        """Each of ``texts`` as a table (by its name), the view :data:`TABLE` on ``own``, then
-        nothing but reading."""
-        ...
-
-    def execute(self, db: Any, sql: str, params: Sequence[Any]) -> Any:
-        """``sql`` run: a cursor (``fetchmany``, ``description``); only one ``SELECT``."""
-        ...
-
-    def said(self, exc: Exception) -> str:
-        """What a failed query says to the model."""
-        ...
-
-
-class SQLite:
-    """The fallback, with no dependency: Python's own ``sqlite3``, the cells typed and loaded
-    in Python, the statistics it lacks as Python aggregates (:data:`AGGREGATES`), an
-    authorizer admitting only reading."""
-
-    name = "SQLite"
-    errors: tuple[type[Exception], ...] = (sqlite3.Error,)
-
-    @contextlib.contextmanager
-    def opened(self) -> Iterator[sqlite3.Connection]:
-        with contextlib.closing(sqlite3.connect(":memory:", check_same_thread=False)) as db:
-            yield db
-
-    def load(self, db: sqlite3.Connection, texts: Mapping[str, str | Table], own: str) -> None:
-        """Its tables' pages at most :data:`DB_BYTES`, a value :data:`VALUE_CHARS`, its sorts'
-        and joins' memory :data:`TEMP_CACHE_BYTES`."""
-        for name, arguments, aggregate in AGGREGATES:
-            db.create_aggregate(name, arguments, aggregate)
-        size = int(db.execute("PRAGMA page_size").fetchone()[0])
-        db.execute(f"PRAGMA main.max_page_count = {DB_BYTES // size}")
-        db.execute(f"PRAGMA temp.cache_size = -{TEMP_CACHE_BYTES // 1024}")
-        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, VALUE_CHARS)
-        decimal = False
-        for name, text in texts.items():
-            decimal = _table(db, name, text) or decimal
-        if decimal:  # its sums exact, as written (a window's too): SQLite has no decimal type
-            for name, made in EXACT:
-                db.create_window_function(name, 1, made)
-        db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
-        db.commit()
-        db.set_authorizer(lambda action, *_: 0 if action in _ALLOWED else 1)  # 1: SQLITE_DENY
-
-    def execute(self, db: sqlite3.Connection, sql: str, params: Sequence[Any]) -> sqlite3.Cursor:
-        return db.execute(sql, tuple(params))
-
-    def said(self, exc: Exception) -> str:
-        return str(exc)
-
-
 #: DuckDB's names for the documented functions it spells otherwise (see the module).
 MACROS: Final = (
     "CREATE MACRO percentile_cont(x, p) AS quantile_cont(x, p)",
-    # SQLite's: days since noon UTC on 24 November 4714 BC, from an ISO date or time
+    # days since noon UTC on 24 November 4714 BC, from an ISO date or time (SQLite's meaning)
     "CREATE MACRO julianday(d) AS epoch(CAST(d AS TIMESTAMP)) / 86400 + 2440587.5",
 )
 
 
 class DuckDB:
-    """The engine when the ``query`` extra is installed: each saved result written to a private
+    """The engine (:data:`ENGINE`): each saved result written to a private
     temporary file and read by DuckDB's own CSV and JSON readers, every column as text, then
     typed by the module's rules in one SQL pass (:meth:`_typed`); then locked (see the
     module). DuckDB itself is imported at the first query."""
@@ -851,214 +757,17 @@ def _name(text: str) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
-def chosen() -> Engine:
-    """The engine this process has: DuckDB when it can be imported (the ``query`` extra),
-    else SQLite."""
-    return DuckDB() if importlib.util.find_spec("duckdb") is not None else SQLite()
+#: What every query runs on.
+ENGINE = DuckDB()
 
-
-#: What every query runs on (:func:`chosen`).
-ENGINE: Engine = chosen()
-
-
-def description(engine: Engine) -> str:
-    """``query_result``'s description on ``engine``: it names the engine, whose SQL the model
-    writes."""
-    return (
-        f"Runs a read-only SQL query ({engine.name}) over every row of a large tool result that "
-        f"was saved to a file: the rows are the table {TABLE} (the tool message names its path; "
-        f"SELECT * FROM {TABLE} LIMIT 3 shows its columns). "
-        "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
-        "instead of reading them page by page: the answer is computed over all of them, exactly."
-    )
-
-
-QUERY_RESULT_DESCRIPTION: Final = description(ENGINE)
-
-
-class _Values:
-    """An aggregate over one column's numbers (``NULL`` and text left out)."""
-
-    def __init__(self) -> None:
-        self.xs: list[float] = []
-
-    def step(self, x: Any) -> None:
-        if isinstance(x, int | float):
-            self.xs.append(float(x))
-
-
-class _Pairs:
-    """An aggregate over pairs ``(y, x)`` of numbers (a pair with a ``NULL`` left out)."""
-
-    def __init__(self) -> None:
-        self.ys: list[float] = []
-        self.xs: list[float] = []
-
-    def step(self, y: Any, x: Any) -> None:
-        if isinstance(y, int | float) and isinstance(x, int | float):
-            self.ys.append(float(y))
-            self.xs.append(float(x))
-
-
-def _of(fn: Callable[[list[float]], float], least: int) -> type:
-    """An aggregate of one column: ``fn`` of its numbers, ``NULL`` with fewer than ``least``."""
-
-    class Aggregate(_Values):
-        def finalize(self) -> float | None:
-            return fn(self.xs) if len(self.xs) >= least else None
-
-    return Aggregate
-
-
-def _paired(fn: Callable[[list[float], list[float]], float]) -> type:
-    """An aggregate of ``(y, x)`` pairs: ``fn(ys, xs)``, ``NULL`` with fewer than two or when
-    it is not defined (no spread)."""
-
-    class Aggregate(_Pairs):
-        def finalize(self) -> float | None:
-            if len(self.xs) < 2:
-                return None
-            try:
-                return fn(self.ys, self.xs)
-            except (statistics.StatisticsError, ZeroDivisionError):
-                return None
-
-    return Aggregate
-
-
-class _Percentile:
-    """``percentile_cont(x, p)``: the ``p`` quantile of ``x``, linearly interpolated."""
-
-    def __init__(self) -> None:
-        self.xs: list[float] = []
-        self.p: float | None = None
-
-    def step(self, x: Any, p: Any) -> None:
-        if isinstance(p, int | float) and 0 <= p <= 1:
-            self.p = float(p)
-        if isinstance(x, int | float):
-            self.xs.append(float(x))
-
-    def finalize(self) -> float | None:
-        if not self.xs or self.p is None:
-            return None
-        xs = sorted(self.xs)
-        at = self.p * (len(xs) - 1)
-        low = math.floor(at)
-        high = min(low + 1, len(xs) - 1)
-        return xs[low] + (xs[high] - xs[low]) * (at - low)
-
-
-def _regression(ys: list[float], xs: list[float]) -> statistics.LinearRegression:
-    return statistics.linear_regression(xs, ys)
-
-
-def _r2(ys: list[float], xs: list[float]) -> float:
-    return statistics.correlation(xs, ys) ** 2
-
-
-def _covar_pop(ys: list[float], xs: list[float]) -> float:
-    return statistics.covariance(xs, ys) * (len(xs) - 1) / len(xs)
-
-
-#: The statistics SQLite lacks, as aggregates (name, arguments, class).
-AGGREGATES: Final[tuple[tuple[str, int, type], ...]] = (
-    ("stddev", 1, _of(statistics.stdev, 2)),
-    ("stddev_samp", 1, _of(statistics.stdev, 2)),
-    ("stddev_pop", 1, _of(statistics.pstdev, 1)),
-    ("variance", 1, _of(statistics.variance, 2)),
-    ("var_samp", 1, _of(statistics.variance, 2)),
-    ("var_pop", 1, _of(statistics.pvariance, 1)),
-    ("median", 1, _of(statistics.median, 1)),
-    ("percentile_cont", 2, _Percentile),
-    ("corr", 2, _paired(lambda ys, xs: statistics.correlation(xs, ys))),
-    ("covar_samp", 2, _paired(lambda ys, xs: statistics.covariance(xs, ys))),
-    ("covar_pop", 2, _paired(_covar_pop)),
-    ("regr_slope", 2, _paired(lambda ys, xs: _regression(ys, xs).slope)),
-    ("regr_intercept", 2, _paired(lambda ys, xs: _regression(ys, xs).intercept)),
-    ("regr_r2", 2, _paired(_r2)),
+#: ``query_result``'s description: it names the engine, whose SQL the model writes.
+QUERY_RESULT_DESCRIPTION: Final = (
+    f"Runs a read-only SQL query ({ENGINE.name}) over every row of a large tool result that "
+    f"was saved to a file: the rows are the table {TABLE} (the tool message names its path; "
+    f"SELECT * FROM {TABLE} LIMIT 3 shows its columns). "
+    "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
+    "instead of reading them page by page: the answer is computed over all of them, exactly."
 )
-
-
-class _ExactSum:
-    """``sum``, ``total`` and ``avg`` as SQLite means them — over the numbers of a group or a
-    window frame — added up in Python's ``decimal``, each ``REAL`` by its shortest text: a
-    ``DECIMAL`` column's values as written, so two-decimal money adds up to its decimal figure
-    (SQLite's own compensated sum still ends ``…149999999998`` or ``…99999992``). A text that
-    is no number counts as 0, as in SQLite."""
-
-    def __init__(self) -> None:
-        self.added = Decimal(0)
-        self.count = 0
-        self.fractional = 0  # the values added that were not whole numbers
-
-    @staticmethod
-    def _of(value: Any) -> Decimal | None:
-        if value is None or isinstance(value, int):
-            return None if value is None else Decimal(value)
-        if isinstance(value, float):
-            return Decimal(repr(value))
-        with contextlib.suppress(ArithmeticError):
-            return Decimal(str(value).strip())
-        return Decimal(0)
-
-    def step(self, value: Any) -> None:
-        found = self._of(value)
-        if found is not None:
-            self.added += found
-            self.count += 1
-            self.fractional += not isinstance(value, int)
-
-    def inverse(self, value: Any) -> None:
-        found = self._of(value)
-        if found is not None:
-            self.added -= found
-            self.count -= 1
-            self.fractional -= not isinstance(value, int)
-
-    def finalize(self) -> Any:
-        return self.value()
-
-    def value(self) -> Any:
-        if not self.count:
-            return None
-        return float(self.added) if self.fractional else int(self.added)
-
-
-class _ExactTotal(_ExactSum):
-    def value(self) -> Any:
-        return float(self.added)
-
-
-class _ExactAvg(_ExactSum):
-    def value(self) -> Any:
-        return float(self.added / self.count) if self.count else None
-
-
-#: The sums a query over a ``DECIMAL`` column computes exactly, in place of SQLite's own.
-EXACT: Final[tuple[tuple[str, type], ...]] = (
-    ("sum", _ExactSum),
-    ("total", _ExactTotal),
-    ("avg", _ExactAvg),
-)
-
-
-#: How a kind is stored in SQLite: it has no decimal type (:data:`EXACT` adds its values up).
-_STORED: Final = {"DECIMAL": "REAL"}
-
-
-def _table(db: sqlite3.Connection, name: str, text: str | Table) -> bool:
-    """``text`` (or a table's rows) as the table ``name`` in SQLite: typed columns (see the
-    module; a ``DECIMAL`` one stored ``REAL``), its rows; whether one of its columns is
-    ``DECIMAL``."""
-    columns, rows = _rows(text)
-    names = column_names(columns)
-    kinds = [_kind([r[n] for r in rows]) for n in range(len(names))]
-    typed = ", ".join(f'"{n}" {_STORED.get(k, k)}' for n, k in zip(names, kinds, strict=True))
-    db.execute(f'CREATE TABLE "{name}" ({typed})')
-    marks = ", ".join("?" for _ in names)
-    db.executemany(f'INSERT INTO "{name}" VALUES ({marks})', [_typed(r, kinds) for r in rows])
-    return "DECIMAL" in kinds
 
 
 def _json_rows(
@@ -1097,7 +806,7 @@ def _objects(value: Any, kind: type = dict) -> bool:
 
 
 def _cell(value: Any) -> Any:
-    """A JSON value as a cell: a number or text as it is (a whole number past SQLite's 64 bits
+    """A JSON value as a cell: a number or text as it is (a whole number past 64 bits
     as its digits), anything else its JSON text, compact (as DuckDB writes it)."""
     if isinstance(value, int) and not isinstance(value, bool) and not _number(value, whole=True):
         return str(value)
@@ -1121,30 +830,6 @@ def column_names(columns: Sequence[str]) -> list[str]:
     return out
 
 
-def _kind(values: Sequence[Any]) -> str:
-    """``INTEGER`` when every value is a whole number, ``DECIMAL`` a decimal as written
-    (:func:`_decimal`), ``REAL`` a number, else ``TEXT``."""
-    present = [v for v in values if v not in (None, "")]
-    if present and all(_number(v, whole=True) for v in present):
-        return "INTEGER"
-    if present and all(_decimal(v) for v in present):
-        return "DECIMAL"
-    if present and all(_number(v, whole=False) for v in present):
-        return "REAL"
-    return "TEXT"
-
-
-def _decimal(value: Any) -> bool:
-    """Whether a cell is a decimal as written (:data:`DECIMAL`: digits and a point, no
-    exponent, a JSON number by its shortest text) of at most :data:`DECIMAL_DIGITS` digits,
-    so a float keeps it exactly and its text reads back the same. DuckDB applies the same rule
-    in SQL (:func:`_counted`)."""
-    text = repr(value) if isinstance(value, float) else str(value).strip(" ")
-    if len(text) > NUMBER_CHARS or not _DECIMAL.fullmatch(text):
-        return False
-    return len(text.lstrip("+-").replace(".", "").lstrip("0")) <= DECIMAL_DIGITS
-
-
 def _number(value: Any, *, whole: bool) -> bool:
     """Whether a cell (text, or a JSON number: a JSON true is its text) is a number the
     engine keeps exactly: a whole one within 64 bits, a finite one — never text a number would
@@ -1163,18 +848,3 @@ def _number(value: Any, *, whole: bool) -> bool:
     if _WHOLE.fullmatch(text):
         return _number(int(text), whole=whole)
     return not whole and bool(_NUMBER.fullmatch(text)) and math.isfinite(float(text))
-
-
-def _typed(row: Sequence[Any], kinds: Sequence[str]) -> list[Any]:
-    """A row's cells as their columns' kinds (an empty cell: ``NULL``)."""
-    out: list[Any] = []
-    for value, kind in zip(row, kinds, strict=True):
-        if value in (None, ""):
-            out.append(None)
-        elif kind == "INTEGER":
-            out.append(int(str(value).strip(" ")))
-        elif kind in ("REAL", "DECIMAL"):
-            out.append(float(str(value).strip(" ")))
-        else:
-            out.append(value)
-    return out
