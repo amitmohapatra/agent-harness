@@ -49,6 +49,7 @@ from tests.support.arm import arm, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.gateway import URL as GATEWAY_URL
 from tests.support.gateway import FakeGateway
+from tests.support.journals import CHECKPOINT_BOUND
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.planned import Call, PlannedChat, PlannedChatModel
 from trellis import Harness, ReAct, Settings, current, tool
@@ -73,7 +74,6 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import identity_headers
-from trellis.harness.journal import MAX_CHECKPOINT_BYTES
 from trellis.harness.middleware import ModelHooks
 from trellis.harness.result import Result
 from trellis.harness.runs import LocalRuns
@@ -179,7 +179,7 @@ class MatrixRuns(LocalRuns):
 
 
 def _bounded(checkpoint: dict[str, Any] | None) -> None:
-    if checkpoint is not None and len(json.dumps(checkpoint)) > MAX_CHECKPOINT_BYTES:
+    if checkpoint is not None and len(json.dumps(checkpoint)) > CHECKPOINT_BOUND:
         raise PayloadTooLargeError("checkpoint too large", code="PAYLOAD_TOO_LARGE", status=413)
 
 

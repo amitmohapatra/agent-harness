@@ -5,7 +5,9 @@ the checkpoint names."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,12 +17,13 @@ from langchain_core.tools import tool as lc_tool
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.journals import CHECKPOINT_BOUND
 from tests.support.models import ScriptedChat
 from trellis import Harness, ReAct, Runtime, Settings, current, middleware, tool
 from trellis.contracts import HarnessError, Interrupt, RunRecord, RunStatus
 from trellis.harness import runtime as runtime_module
 from trellis.harness.events import PREVIEW_CHARS
-from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES, content_key
+from trellis.harness.journal import apply, content_key
 from trellis.harness.runs import LocalRuns
 from trellis.runs import (
     DependencyUnavailableError,
@@ -29,12 +32,15 @@ from trellis.runs import (
     LeaseLostError,
     PayloadTooLargeError,
 )
+from trellis.runs.payloads import SEGMENTS, PayloadRef, decode
 
 paid: list[int] = []
 looked: list[str] = []
 exported: list[int] = []
 #: a tool output larger than a checkpoint may be
-REPORT = "x" * (MAX_CHECKPOINT_BYTES + 1)
+REPORT = "x" * (CHECKPOINT_BOUND + 1)
+#: The least a model call takes here (:class:`Paced`).
+MODEL_SECONDS = 0.01
 
 
 @tool(side_effects="write")
@@ -82,8 +88,34 @@ class Bounded(LocalRuns):
         return await super().pause(interrupt, checkpoint=checkpoint, worker_id=worker_id)
 
 
+class Paced(ScriptedChatModel):
+    """A model that takes as long as the quickest real one (a few milliseconds): LangGraph
+    saves each checkpoint after the previous one, beside the steps, so a step that takes no
+    time at all would outrun saves that write to a store (a file, agent-runs)."""
+
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(MODEL_SECONDS)
+        return await super()._agenerate(*args, **kwargs)
+
+
+async def journals(store: LocalRuns, checkpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The journal each saved checkpoint holds: its segments applied in order, each read once."""
+    nodes: dict[str, Any] = {}
+    held = []
+    for checkpoint in checkpoints:
+        dumped: Any = None
+        for raw in checkpoint[SEGMENTS]:
+            ref = PayloadRef.model_validate(raw)
+            if ref.sha256 not in nodes:
+                [data] = await store.artifacts.get_payloads([ref])
+                nodes[ref.sha256] = decode(data)
+            dumped = apply(dumped, nodes[ref.sha256])
+        held.append(dumped)
+    return held
+
+
 def bounded(checkpoint: dict[str, Any] | None) -> None:
-    if len(json.dumps(checkpoint, separators=(",", ":"))) > MAX_CHECKPOINT_BYTES:
+    if len(json.dumps(checkpoint, separators=(",", ":"))) > CHECKPOINT_BOUND:
         raise PayloadTooLargeError("checkpoint too large", code="PAYLOAD_TOO_LARGE", status=413)
 
 
@@ -188,11 +220,10 @@ async def test_reads_are_saved_at_most_every_progress_interval(
     assert (await handle.result(wait=5)).status is RunStatus.SUCCESS
     # the first read saves, the next two are within the interval, the write saves before it
     # runs (marked started) and after
-    assert len(saved) == 3
-    assert saved[1] is not None and saved[1]["started"] == {
-        content_key("call", "pay", {"amount": 1}): 1
-    }
-    assert saved[-1] is not None and len(saved[-1]["calls"]) == 4
+    assert len(saved) == 3 and None not in saved
+    held = await journals(store, [c for c in saved if c is not None])
+    assert held[1]["started"] == {content_key("call", "pay", {"amount": 1}): 1}
+    assert len(held[-1]["calls"]) == 4
 
 
 async def test_an_in_process_run_saves_no_progress(harness: Harness) -> None:
@@ -339,7 +370,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash() -> None:
         handle = await agent.start("x", user="u")
         await crash_once(store, agent, handle)
         record = await handle.status()
-        assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+        assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
         assert await h.worker([agent]).run_once()
         done = await handle.result(wait=5)
     assert done.answer == len(REPORT) and exported == [3]  # replayed, not exported again
@@ -354,7 +385,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
         paused = await handle.result(wait=5)
         assert paused.interrupt is not None
         record = await handle.status()
-        assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+        assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
         await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
         assert await worker.run_once()
         done = await handle.result(wait=5)
@@ -368,13 +399,13 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_pause() -> None:
     assert done.answer == f"{len(REPORT)} no" and exported == [3, 3]
 
 
-async def test_a_journal_whose_artifact_is_gone_leaves_the_run_waiting(harness: Harness) -> None:
+async def test_a_journal_whose_segments_are_gone_leaves_the_run_waiting(harness: Harness) -> None:
     store = harness.runs
     assert isinstance(store, LocalRuns)
     agent = arm(harness.wrap(reporter, id="reporter"), [export])
     paused = await agent.run("x", user="u")
     assert paused.interrupt is not None
-    store._artifacts.clear()
+    shutil.rmtree(store._payload_root)  # the journal's segments are gone
     with pytest.raises(HarnessError, match="is gone"):
         await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
     record = await store.get(paused.run_id)
@@ -394,6 +425,7 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
     crashes = [Crash()]
     logged: list[int] = []
     saved: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
 
     @lc_tool
     def log_line(n: int) -> str:
@@ -420,12 +452,12 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
             **kw: Any,
         ) -> Lease:
             if checkpoint is not None:
-                saved.append(checkpoint)
+                sent.append(checkpoint)
             return await super().heartbeat(run_id, worker_id, checkpoint=checkpoint, **kw)
 
     turns: list[Any] = [("log_line", {"n": n}) for n in range(steps)]
     turns.insert(crash_at, ("lc_boom", {}))
-    model = ScriptedChatModel(turns=[*turns, "logged"])
+    model = Paced(turns=[*turns, "logged"])
     graph = create_agent(model, tools=[log_line, lc_boom], middleware=middleware(max_steps=200))
     store = Kept()
     async with Harness(config=Settings(), runs=store) as h:
@@ -434,10 +466,10 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
         await crash_once(store, agent, handle)
         assert await h.worker([agent]).run_once()
         done = await handle.result(wait=30)
+    saved.extend(await journals(store, sent))
     assert done.status is RunStatus.SUCCESS and done.answer == "logged", done.error
     assert logged == list(range(steps))  # each write once, across the crash
     assert len(model.seen) == steps + 2  # nothing asked again after the crash
-    assert all(set(c) != {JOURNAL_REF} for c in saved)
     # the replay records: one step's at most, at every save
     assert max(len(c["calls"]) for c in saved) <= 2
     assert max(len(c["steps"]) for c in saved) <= 2

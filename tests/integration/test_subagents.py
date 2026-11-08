@@ -18,6 +18,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -268,8 +269,8 @@ async def test_a_worker_killed_inside_a_child_repeats_none_of_its_side_effects(
     store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
     [kid] = await children(harness, handle.id)
     assert kid.status is RunStatus.RUNNING  # cut by the crash
-    saved = (await handle.status()).checkpoint
-    assert saved is not None and kid.run_id in saved["children"]
+    saved = await journal_of(store, await handle.status())
+    assert kid.run_id in saved.children
     assert await harness.worker([parent]).run_once()
     result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "filed n1", result.error

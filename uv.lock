@@ -2902,6 +2902,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
     { name = "trellis-contracts" },
+    { name = "zstandard" },
 ]
 
 [package.metadata]
@@ -2914,6 +2915,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "trellis-contracts", editable = "../agent-contracts" },
+    { name = "zstandard", specifier = ">=0.23" },
 ]
 provides-extras = ["dev"]
 

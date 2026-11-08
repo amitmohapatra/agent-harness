@@ -157,15 +157,17 @@ tries again; a save refused with `409` (the lease is gone) stops the run without
 anything more. Runs started in process (`run`, `stream`) save no progress: nobody resumes them
 after their process died.
 
-**A journal larger than a checkpoint.** agent-runs keeps at most 1 MiB of compact JSON as a
-run's checkpoint (a larger one is refused with `413`); a run whose tools returned more than
-that still saves its progress and its pause. The journal is then uploaded as a run artifact
-(`POST /v1/runs/{id}/artifacts`, as a large `ask` table is) and the checkpoint holds only its
-reference, `{"journal_ref": <ArtifactRef>}`; the attempt that continues the run — after a
-crash, or after a resume in any process — reads the journal back from it. Nothing to
-configure. Each such save is one more artifact of the run, kept with its others (deleted 7 days
-after the run ends). A resume reads the journal before it answers the run, so a journal that
-cannot be read leaves the run waiting. With no `RUNS_URL` the store is this process's memory:
+**The journal is saved in segments.** Each save uploads only what changed since the last one
+agent-runs took, as one payload object (zstd JSON, `POST /v1/runs/{id}/payloads`), and nothing
+when nothing changed; the checkpoint lists the segments, `{"trellis_segments": [ref, ...]}`.
+The attempt that continues the run (after a crash, or after a resume in any process) reads
+them all at once and applies them in order; every 64 saves one segment holds the whole journal
+again, so a resume reads at most 64. A save's size follows what the step added, not the run's
+length, and the run's database row holds references only. Nothing to configure. A resume
+reads the journal before it answers the run, so a journal that cannot be read leaves the run
+waiting. A run saved by an earlier release (the journal inline, or `{"journal_ref": ...}` as a
+run artifact) is read as before. With no `RUNS_URL` the store is this process's memory, and the
+segments are files in a temporary folder (`LocalRuns(payload_root=)`), in the same format:
 it bounds nothing, and the same reference is kept there with the run.
 
 ## Continuing where a run stopped
@@ -535,7 +537,8 @@ id: `runs.start` (`POST /v1/runs`, `RunStart` + `queue`), `runs.claim`
 (`POST /v1/runs/{id}/finish?worker_id=`), `runs.get` (`GET /v1/runs/{id}`), `runs.list`
 page by page (`GET /v1/runs?status=PAUSED&assignee=&limit=500&cursor=`, the inbox),
 `artifacts.upload` (`POST /v1/runs/{id}/artifacts?worker_id=&checksum=`, an `ask` payload or
-a journal larger than a checkpoint → `ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`),
+→ `ArtifactRef`), `artifacts.download` (`GET /v1/artifacts/{id}`), `artifacts.put_payload` /
+`get_payload` (`POST /v1/runs/{id}/payloads`, `GET /v1/payloads/{sha256}`: a journal's segments),
 `runs.cancel` (`POST /v1/runs/{id}/cancel {reason}`), `runs.release`
 (`POST /v1/runs/{id}/release {worker_id, checkpoint?}`, a stopping worker's runs) and
 `schedules.create` (`POST /v1/schedules`, `ScheduleSpec`).

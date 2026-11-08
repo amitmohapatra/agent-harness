@@ -1,7 +1,34 @@
 from __future__ import annotations
 
-from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution
-from trellis.harness.journal import Journal, Pending, Replay, content_key
+import asyncio
+import json
+import shutil
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from trellis.contracts import (
+    HarnessError,
+    Interrupt,
+    InterruptDecision,
+    InterruptResolution,
+    RunStart,
+    RunStatus,
+)
+from trellis.harness import agent as agent_module
+from trellis.harness import journal as journal_module
+from trellis.harness.journal import (
+    JOURNAL_REF,
+    Journal,
+    Pending,
+    Replay,
+    apply,
+    content_key,
+    delta,
+)
+from trellis.harness.runs import LocalRuns
+from trellis.runs.payloads import SEGMENTS
 
 
 def resolution(answer: str) -> InterruptResolution:
@@ -170,3 +197,187 @@ def test_the_trajectory_keeps_a_long_output_as_the_stream_previews_it() -> None:
     (kept, long), (_, short) = journal.trajectory
     assert kept.task is None and kept.args == {"a": 1}
     assert long.output == "x" * PREVIEW_CHARS + "…" and short.output == {"n": 1}
+
+
+# --------------------------------------------------------------------------- segments
+JOURNAL_SHAPES: list[tuple[Any, Any]] = [
+    (None, {"calls": {"k": [1]}}),
+    ({"calls": {"k": [1]}}, {"calls": {"k": [1, 2], "j": ["x"]}}),
+    ({"a": [1, 2], "b": {"c": 1}}, {"a": [9], "b": {}}),
+    ({"a": 1, "gone": 2}, {"a": 1}),
+    ({"graph": {"v": 1}}, {"graph": None}),
+    ([1, 2], [1, 2, 3]),
+    ("x", "y"),
+]
+
+
+@pytest.mark.parametrize(("old", "new"), JOURNAL_SHAPES)
+def test_a_delta_applied_to_the_old_value_is_the_new_one(old: Any, new: Any) -> None:
+    node = delta(old, new)
+    assert node is not None and apply(old, node) == new
+    assert delta(new, new) is None
+
+
+def test_a_journal_that_grew_sends_only_what_it_added() -> None:
+    old = {"calls": {f"k{n}": [{"rows": list(range(500))}] for n in range(20)}}
+    new = {"calls": {**old["calls"], "k20": [{"rows": [1]}]}}
+    assert delta(old, new) == {"$d": {"calls": {"$d": {"k20": {"$r": [{"rows": [1]}]}}}}}
+
+
+async def _run(runs: LocalRuns) -> str:
+    record = await runs.start(
+        RunStart(run_id="run_seg", tenant_id="acme", agent_id="a", user_id="u", input="x"),
+        queue=False,
+    )
+    return record.run_id
+
+
+async def _saved(journal: Journal, runs: LocalRuns, run_id: str) -> dict[str, Any] | None:
+    save = await journal.save(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    if save is None:
+        return None
+    journal.saved(save)
+    return save.checkpoint
+
+
+async def test_saves_write_what_changed_nothing_when_nothing_did_and_read_back_whole(
+    tmp_path: Path,
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal, replay = Journal(), None
+    replay = Replay(journal)
+    checkpoints = []
+    for n in range(5):
+        replay.record_call(f"k{n}", {"rows": list(range(n * 100))}, tool="t")
+        journal.results[f"/large_tool_results/r{n}"] = "a,b\n" + "1,2\n" * n
+        checkpoints.append(await _saved(journal, runs, run_id))
+        assert await _saved(journal, runs, run_id) is None, "unchanged: nothing is written"
+    files = await asyncio.to_thread(lambda: list(tmp_path.rglob("*.json.zst")))
+    assert len(files) == 5, "one segment per save that changed something"
+    last = checkpoints[-1]
+    assert last is not None and len(last[SEGMENTS]) == 5
+    resumed = await Journal.read(last, runs.artifacts, tenant="acme")
+    assert resumed.dump() == journal.dump()
+    assert resumed.results["/large_tool_results/r4"] == "a,b\n" + "1,2\n" * 4
+    replay = Replay(resumed)
+    replay.record_call("k5", "more", tool="t")
+    after = await _saved(resumed, runs, run_id)
+    assert after is not None and after[SEGMENTS][:5] == last[SEGMENTS], "it adds on"
+
+
+async def test_a_save_the_store_did_not_take_is_sent_again_with_the_next(tmp_path: Path) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal()
+    Replay(journal).record_call("a", 1, tool="t")
+    lost = await journal.save(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    assert lost is not None  # never marked saved: the heartbeat carrying it was refused
+    Replay(journal).record_call("b", 2, tool="t")
+    checkpoint = await _saved(journal, runs, run_id)
+    assert checkpoint is not None and len(checkpoint[SEGMENTS]) == 1
+    resumed = await Journal.read(checkpoint, runs.artifacts, tenant="acme")
+    assert resumed.calls == {"a": [1], "b": [2]}
+
+
+async def test_past_the_most_segments_a_save_holds_the_whole_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(journal_module, "MAX_SEGMENTS", 3)
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal, checkpoint = Journal(), None
+    sizes = []
+    for n in range(7):
+        Replay(journal).record_call(f"k{n}", n, tool="t")
+        checkpoint = await _saved(journal, runs, run_id)
+        assert checkpoint is not None
+        sizes.append(len(checkpoint[SEGMENTS]))
+    assert sizes == [1, 2, 3, 1, 2, 3, 1]
+    resumed = await Journal.read(checkpoint, runs.artifacts, tenant="acme")
+    assert resumed.calls == {f"k{n}": [n] for n in range(7)}
+
+
+async def test_a_resume_reads_its_segments_in_one_request_and_applies_them_in_order(
+    tmp_path: Path,
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal, checkpoint = Journal(), None
+    for n in range(30):
+        Replay(journal).record_call("k", n, tool="t")  # the order matters
+        checkpoint = await _saved(journal, runs, run_id)
+    asked: list[int] = []
+    original = runs.artifacts.get_payloads
+
+    async def counted(refs: Any, *, tenant: str | None = None) -> list[bytes]:
+        asked.append(len(refs))
+        return await original(refs, tenant=tenant)
+
+    runs.artifacts.get_payloads = counted  # type: ignore[method-assign]
+    resumed = await Journal.read(checkpoint, runs.artifacts, tenant="acme")
+    assert resumed.calls == {"k": list(range(30))}
+    assert asked == [30 % journal_module.MAX_SEGMENTS or journal_module.MAX_SEGMENTS]
+
+
+async def test_another_tenants_segment_is_not_read(tmp_path: Path) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal()
+    Replay(journal).record_call("k", 1, tool="t")
+    checkpoint = await _saved(journal, runs, run_id)
+    with pytest.raises(HarnessError, match="is gone"):
+        await Journal.read(checkpoint, runs.artifacts, tenant="globex")
+
+
+async def test_a_journal_an_earlier_release_kept_as_a_run_artifact_still_reads(
+    tmp_path: Path,
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal()
+    Replay(journal).record_call("k", 1, tool="t")
+    ref = await runs.artifacts.upload(run_id, json.dumps(journal.dump()).encode())
+    old = {JOURNAL_REF: ref.model_dump(mode="json")}
+    assert (await Journal.read(old, runs.artifacts, tenant="acme")).calls == {"k": [1]}
+    runs._artifacts.clear()
+    with pytest.raises(HarnessError, match="is gone"):
+        await Journal.read(old, runs.artifacts, tenant="acme")
+
+
+async def test_a_pause_with_nothing_new_lists_the_segments_it_has(tmp_path: Path) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal()
+    Replay(journal).record_call("k", 1, tool="t")
+    first = await journal.checkpoint(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    again = await journal.checkpoint(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    assert again == first and len(first[SEGMENTS]) == 1
+
+
+async def test_a_forgotten_runs_segments_are_deleted_with_it(tmp_path: Path) -> None:
+    runs = LocalRuns(payload_root=tmp_path, keep_finished=0)
+    run_id = await _run(runs)
+    journal = Journal()
+    Replay(journal).record_call("k", 1, tool="t")
+    await _saved(journal, runs, run_id)
+    files = lambda: list(tmp_path.rglob("*.json.zst"))  # noqa: E731
+    assert len(await asyncio.to_thread(files)) == 1
+    await runs.finish(run_id, RunStatus.SUCCESS, output="done")
+    assert await asyncio.to_thread(files) == [], "forgotten with the run"
+
+
+async def test_a_cancel_that_cannot_read_the_journal_leaves_the_sandbox_to_the_reaper(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    run_id = await _run(runs)
+    journal = Journal(sandbox={"provider": "fake", "id": "sbx"})
+    checkpoint = await journal.checkpoint(runs.artifacts, run_id, worker_id=None, tenant="acme")
+    held = await runs.get(run_id)
+    assert held is not None
+    record = held.model_copy(update={"checkpoint": checkpoint})
+    assert await agent_module._sandbox_of(runs, record) == {"provider": "fake", "id": "sbx"}
+    shutil.rmtree(tmp_path)
+    assert await agent_module._sandbox_of(runs, record) is None
+    assert "left to the reaper" in caplog.text

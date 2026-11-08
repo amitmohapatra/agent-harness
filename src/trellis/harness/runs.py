@@ -38,12 +38,15 @@ a ``ConflictError``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import tempfile
 import time
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
@@ -76,7 +79,9 @@ from trellis.runs import (
     ScheduleUpdate,
 )
 from trellis.runs.artifacts import JSON_MIME
+from trellis.runs.blob import BlobExists, BlobNotFound, FilesystemBlobStore, read_whole
 from trellis.runs.client import LEASE_SECONDS
+from trellis.runs.payloads import MEDIA_TYPE, PayloadRef, owned_by, ref_of
 
 #: Items a listing page holds when the caller names no limit (agent-runs' default).
 PAGE_LIMIT: Final = 50
@@ -101,6 +106,23 @@ class RunArtifacts(Protocol):
     ) -> ArtifactRef: ...
 
     async def download(self, artifact_id: str, *, tenant: str | None = ...) -> bytes | None: ...
+
+    async def put_payload(
+        self,
+        run_id: str,
+        data: bytes,
+        *,
+        worker_id: str | None = ...,
+        tenant: str | None = ...,
+    ) -> PayloadRef:
+        """Store a payload object (``trellis.runs.payloads``: a checkpoint's segment)."""
+        ...
+
+    async def get_payloads(
+        self, refs: Sequence[PayloadRef], *, tenant: str | None = ...
+    ) -> list[bytes]:
+        """Several payload objects (a checkpoint's segments) at once, in their order."""
+        ...
 
 
 class RunSchedules(Protocol):
@@ -241,6 +263,7 @@ class LocalRuns:
         *,
         keep_finished: int = KEEP_FINISHED,
         keep_finished_seconds: float = KEEP_FINISHED_SECONDS,
+        payload_root: Path | None = None,
     ) -> None:
         if keep_finished < 0 or keep_finished_seconds < 0:
             raise ConfigurationError("LocalRuns keeps a number of finished runs from 0")
@@ -267,6 +290,10 @@ class LocalRuns:
         self._fired: dict[str, str] = {}
         #: artifact id -> (tenant, bytes)
         self._artifacts: dict[str, tuple[str, bytes]] = {}
+        #: payload objects (a checkpoint's segments), in agent-runs' own filesystem store and
+        #: format (``trellis.runs.payloads``), in ``payload_root`` (a temporary folder unset)
+        self._payload_root = payload_root or Path(tempfile.mkdtemp(prefix="trellis-runs-"))
+        self._payloads = FilesystemBlobStore(self._payload_root)
         self._lock = asyncio.Lock()
         self.artifacts = LocalArtifacts(self)
         self.schedules = LocalSchedules(self)
@@ -547,7 +574,8 @@ class LocalRuns:
             owners.discard(run_id)
             if not owners:
                 self._artifact_runs.pop(artifact_id, None)
-                self._artifacts.pop(artifact_id, None)
+                if self._artifacts.pop(artifact_id, None) is None:  # a payload object's key
+                    (self._payload_root / artifact_id).unlink(missing_ok=True)
 
     def _expire_leases(self, now: datetime) -> None:
         for run_id, (_, until) in list(self._leases.items()):
@@ -643,6 +671,41 @@ class LocalArtifacts:
     async def download(self, artifact_id: str, *, tenant: str | None = None) -> bytes | None:
         found = self._runs._artifacts.get(artifact_id)
         return found[1] if found is not None and tenant in (None, found[0]) else None
+
+    async def put_payload(
+        self,
+        run_id: str,
+        data: bytes,
+        *,
+        worker_id: str | None = None,
+        tenant: str | None = None,
+    ) -> PayloadRef:
+        """The object, stored once (the same bytes are the same key) and whole or not at all;
+        kept while a run that wrote it is."""
+        record = self._runs._fenced(run_id, worker_id, tenant)
+        ref = ref_of(record.tenant_id, data)
+        with contextlib.suppress(BlobExists):
+            await self._runs._payloads.put(ref.ref, data, content_type=MEDIA_TYPE)
+        self._runs._artifact_runs.setdefault(ref.ref, set()).add(run_id)
+        self._runs._run_artifacts.setdefault(run_id, set()).add(ref.ref)
+        return ref
+
+    async def get_payloads(
+        self, refs: Sequence[PayloadRef], *, tenant: str | None = None
+    ) -> list[bytes]:
+        """The objects' bytes, read at once and each checked against its reference;
+        ``NotFoundError`` for another tenant's object or one that is gone."""
+        if tenant is not None and not all(owned_by(ref, tenant) for ref in refs):
+            raise NotFoundError("a payload object is another tenant's")
+        store = self._runs._payloads
+        try:
+            return list(
+                await asyncio.gather(
+                    *(read_whole(store, r.ref, sha256=r.sha256, size=r.size) for r in refs)
+                )
+            )
+        except BlobNotFound as exc:
+            raise NotFoundError(f"no payload object {exc}") from exc
 
 
 class LocalSchedules:
