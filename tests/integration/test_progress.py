@@ -5,7 +5,6 @@ the checkpoint names."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -39,8 +38,6 @@ looked: list[str] = []
 exported: list[int] = []
 #: a tool output larger than a checkpoint may be
 REPORT = "x" * (CHECKPOINT_BOUND + 1)
-#: The least a model call takes here (:class:`Paced`).
-MODEL_SECONDS = 0.01
 
 
 @tool(side_effects="write")
@@ -86,16 +83,6 @@ class Bounded(LocalRuns):
     ) -> RunRecord:
         bounded(checkpoint)
         return await super().pause(interrupt, checkpoint=checkpoint, worker_id=worker_id)
-
-
-class Paced(ScriptedChatModel):
-    """A model that takes as long as the quickest real one (a few milliseconds): LangGraph
-    saves each checkpoint after the previous one, beside the steps, so a step that takes no
-    time at all would outrun saves that write to a store (a file, agent-runs)."""
-
-    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
-        await asyncio.sleep(MODEL_SECONDS)
-        return await super()._agenerate(*args, **kwargs)
 
 
 async def journals(store: LocalRuns, checkpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -457,7 +444,7 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
 
     turns: list[Any] = [("log_line", {"n": n}) for n in range(steps)]
     turns.insert(crash_at, ("lc_boom", {}))
-    model = Paced(turns=[*turns, "logged"])
+    model = ScriptedChatModel(turns=[*turns, "logged"])
     graph = create_agent(model, tools=[log_line, lc_boom], middleware=middleware(max_steps=200))
     store = Kept()
     async with Harness(config=Settings(), runs=store) as h:

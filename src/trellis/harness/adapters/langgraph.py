@@ -189,7 +189,7 @@ class LangGraphAdapter:
                 given,
                 self._config(target, run),
                 version="v2",
-                **_run_arguments(run.runtime),
+                **_run_arguments(run.runtime, target),
             )
         except BaseException as exc:
             error = exc
@@ -212,7 +212,7 @@ class LangGraphAdapter:
                 self._config(target, run),
                 stream_mode=["messages", "values"],
                 version="v2",
-                **_run_arguments(run.runtime),
+                **_run_arguments(run.runtime, target),
             ):
                 if part["type"] == "messages":
                     chunk = part["data"][0]
@@ -366,10 +366,18 @@ def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:
     return builtin(spec) if outside else spec
 
 
-def _run_arguments(runtime: Runtime) -> dict[str, Any]:
-    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
+def _run_arguments(runtime: Runtime, target: Any) -> dict[str, Any]:
+    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`).
+    A worker's run of a graph that checkpoints into its run saves each step's checkpoint
+    before the next step starts (LangGraph's ``durability="sync"``, unless the run asks
+    otherwise): LangGraph's default saves it beside the next step, so a write of that step
+    could run, and its worker die, before the step that planned it is saved, and the worker
+    after it would plan and make the write again."""
     options = runtime.framework_options
-    return {key: options[key] for key in RUN_ARGUMENTS if key in options}
+    arguments = {key: options[key] for key in RUN_ARGUMENTS if key in options}
+    if runtime.worker_id is not None and run_scoped(target):
+        arguments.setdefault("durability", "sync")
+    return arguments
 
 
 def memory_store(target: Any, runtime: Runtime) -> Any | None:
