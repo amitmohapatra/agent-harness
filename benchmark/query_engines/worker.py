@@ -24,8 +24,8 @@ from typing import Any
 from benchmark import procstat
 from benchmark.query_engines import engines, suite
 
-#: The harness's own engines (``tools.query``), run through its own ``_answer``.
-HARNESS = ("sqlite", "duckdb")
+#: The harness's own engine (``tools.query``), run through its own ``_answer``.
+HARNESS = ("duckdb",)
 
 
 def _texts(data: Path, fmt: str) -> dict[str, str]:
@@ -208,7 +208,7 @@ def _refused(exc: Exception) -> str:
 
 
 def _probes(name: str, folder: Path) -> dict[str, str]:
-    if name in ("sqlite", "pandasql"):
+    if name == "pandasql":  # SQLite underneath
         return {
             "read another file": f"ATTACH '{folder}/secret.db' AS s",
             "write a file": f"ATTACH '{folder}/out.db' AS o",
@@ -249,13 +249,11 @@ def _timeout(name: str, engine: Any, db: Any, texts: dict[str, str]) -> str:
 def _memory(name: str, engine: Any, db: Any) -> str:
     """What a query that builds a large value in memory does (about 1 GB of text)."""
     big = (
-        "SELECT length(group_concat(sku || '{pad}', ',')) FROM ledger, "
+        "SELECT length(string_agg(sku || '{pad}', ',')) FROM ledger, "
         "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 200) "
         "SELECT x FROM c)"
     ).format(pad="x" * 90)
-    if name == "duckdb":
-        big = big.replace("group_concat", "string_agg")
-    if name not in ("sqlite", "duckdb"):
+    if name != "duckdb":
         return "no memory limit setting (not run)"
     before = procstat.rss_mb() or 0.0
     start = time.perf_counter()
