@@ -72,6 +72,7 @@ from trellis.harness import telemetry
 from trellis.harness.agui.sse import decode
 from trellis.harness.evals import exact_match, grounding, llm_judge
 from trellis.harness.governance import catalog as governance_catalog
+from trellis.harness.journal import Journal
 from trellis.harness.tools.convert import text_of
 from trellis.harness.tools.sources import FunctionTool
 from trellis.memory import MemoryContext
@@ -622,8 +623,9 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
         working = asyncio.create_task(first.run())
         await asyncio.wait_for(crashed.wait(), 60)
         # the charge was saved as the run's progress before the crash
-        progress = (await stored(h, handle.id)).checkpoint
-        assert progress is not None and progress.get("calls"), progress
+        held = await stored(h, handle.id)
+        progress = await Journal.read(held.checkpoint, h.runs.artifacts, tenant=held.tenant_id)
+        assert progress.calls, progress
         first.stop()
         first.stop()  # at once: the run is released, nothing written, its lease lapses
         await working

@@ -20,6 +20,7 @@ from tests.live.conftest import DOCKER_UDS, DOCKER_URL, needs_docker
 from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import RunStatus
+from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
 from trellis.harness.sandbox import DockerSandbox, SandboxRef, SandboxSpec, reap, sandbox
 from trellis.harness.sandbox.base import RUN, TENANT
@@ -134,7 +135,8 @@ async def test_a_paused_run_keeps_its_container_snapshotted_and_paused_and_resum
     [snapshot] = await images(waiting.run_id)
     record = await harness.runs.get(waiting.run_id, tenant="default")
     assert record is not None and record.checkpoint is not None
-    assert record.checkpoint["sandbox"]["snapshot"] == snapshot
+    journal = await Journal.read(record.checkpoint, harness.runs.artifacts, tenant="default")
+    assert journal.sandbox is not None and journal.sandbox["snapshot"] == snapshot
     done = await agent.resume(waiting.interrupt.interrupt_id, "approve", reviewer="u")
     assert done.answer == {"exit_code": 0, "stdout": "draft\n", "stderr": ""}
     assert await state(name) is None and await images(waiting.run_id) == []
