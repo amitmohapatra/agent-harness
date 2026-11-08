@@ -156,9 +156,13 @@ class LangGraphAdapter:
         return HARNESS_TOOLS in (getattr(target, "channels", None) or {})
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
-        """The graph's checkpointer, unless it checkpoints into its run."""
+        """The graph's checkpointer, unless it checkpoints into its run. A durable one is
+        said once (:data:`DUPLICATE_STORAGE`)."""
         if not _checkpointed(target) or run_scoped(target):
             return None
+        if (name := durable_checkpointer(target)) and name not in _warned:
+            _warned.add(name)
+            log.warning(DUPLICATE_STORAGE.format(name=name))
         return target.checkpointer
 
     def prepare_input(
@@ -185,7 +189,7 @@ class LangGraphAdapter:
                 given,
                 self._config(target, run),
                 version="v2",
-                **_run_arguments(run.runtime),
+                **_run_arguments(run.runtime, target),
             )
         except BaseException as exc:
             error = exc
@@ -208,7 +212,7 @@ class LangGraphAdapter:
                 self._config(target, run),
                 stream_mode=["messages", "values"],
                 version="v2",
-                **_run_arguments(run.runtime),
+                **_run_arguments(run.runtime, target),
             ):
                 if part["type"] == "messages":
                     chunk = part["data"][0]
@@ -362,10 +366,18 @@ def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:
     return builtin(spec) if outside else spec
 
 
-def _run_arguments(runtime: Runtime) -> dict[str, Any]:
-    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`)."""
+def _run_arguments(runtime: Runtime, target: Any) -> dict[str, Any]:
+    """The graph's own run arguments among the run's framework options (:data:`RUN_ARGUMENTS`).
+    A worker's run of a graph that checkpoints into its run saves each step's checkpoint
+    before the next step starts (LangGraph's ``durability="sync"``, unless the run asks
+    otherwise): LangGraph's default saves it beside the next step, so a write of that step
+    could run, and its worker die, before the step that planned it is saved, and the worker
+    after it would plan and make the write again."""
     options = runtime.framework_options
-    return {key: options[key] for key in RUN_ARGUMENTS if key in options}
+    arguments = {key: options[key] for key in RUN_ARGUMENTS if key in options}
+    if runtime.worker_id is not None and run_scoped(target):
+        arguments.setdefault("durability", "sync")
+    return arguments
 
 
 def memory_store(target: Any, runtime: Runtime) -> Any | None:
@@ -436,6 +448,27 @@ async def holds(target: Any, thread: str, native_id: str, journal: Journal) -> b
         return bool(journal.graph)
     state = await target.aget_state({"configurable": {"thread_id": thread}})
     return any(paused.id == native_id for paused in state.interrupts)
+
+
+#: Checkpointers that keep nothing past their process: no second copy of anything.
+EPHEMERAL_CHECKPOINTERS: Final = frozenset({"InMemorySaver", "MemorySaver"})
+#: What is said, once per process and kind, of a graph that brings a durable checkpointer.
+DUPLICATE_STORAGE: Final = (
+    "the graph brings its own durable checkpointer ({name}): Trellis memory and runs already "
+    "keep the conversation and the run's state, so both are stored twice; compile the graph "
+    "without it (or with InMemorySaver) to keep one copy"
+)
+_warned: set[str] = set()
+
+
+def durable_checkpointer(target: Any) -> str | None:
+    """The kind of the durable checkpointer a graph brings of its own (one that keeps state
+    past the process, e.g. a Postgres saver), or ``None``: none, an in-memory one, or the
+    run's own (``RunCheckpointer``)."""
+    if not _checkpointed(target) or run_scoped(target):
+        return None
+    name = type(target.checkpointer).__name__
+    return None if name in EPHEMERAL_CHECKPOINTERS else name
 
 
 def run_scoped(target: Any) -> bool:

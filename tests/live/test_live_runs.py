@@ -20,6 +20,7 @@ import pytest
 from tests.live.conftest import live_harness, needs_memory, needs_runs
 from tests.live.support import eventually, memory_scope
 from tests.support.arm import arm
+from tests.support.journals import CHECKPOINT_BOUND
 from trellis import Harness, Runtime, tool
 from trellis.contracts import (
     ConfigurationError,
@@ -30,8 +31,8 @@ from trellis.contracts import (
     RunStatus,
     new_id,
 )
-from trellis.harness.journal import JOURNAL_REF, MAX_CHECKPOINT_BYTES
 from trellis.runs import Claimed, Job, LeaseLostError, RunsClient, RunSummary
+from trellis.runs.payloads import SEGMENTS
 
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
 
@@ -254,7 +255,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     def export(rows: int) -> str:
         """Export a report."""
         exported.append(rows)
-        return "x" * (MAX_CHECKPOINT_BYTES + 1)
+        return "x" * (CHECKPOINT_BOUND + 1)
 
     async def reporter(input: str, agent: Runtime) -> str:
         report = await agent.tools.call("export", rows=3)
@@ -272,7 +273,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
             Job(record=claimed.run, worker_id="w-dies", lease_seconds=5, store=harness.runs)
         )
     record = await handle.status()
-    assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+    assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
 
     async def requeued() -> bool:
         return (await handle.status()).status is RunStatus.QUEUED
@@ -284,7 +285,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     paused = await handle.result(wait=30)
     assert paused.interrupt is not None and exported == [3]
     record = await handle.status()
-    assert record.checkpoint is not None and set(record.checkpoint) == {JOURNAL_REF}
+    assert record.checkpoint is not None and set(record.checkpoint) == {SEGMENTS}
     asked = paused.interrupt.interrupt_id
     with pytest.raises(ConfigurationError, match="is not one of the options"):
         await agent.resume(asked, "answer", answer="maybe", reviewer="live-user")
@@ -292,7 +293,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     assert await worker.run_once()
     done = await handle.result(wait=30)
     assert done.status is RunStatus.SUCCESS, done.error
-    assert done.answer == f"{MAX_CHECKPOINT_BYTES + 1} yes" and exported == [3]
+    assert done.answer == f"{CHECKPOINT_BOUND + 1} yes" and exported == [3]
 
 
 # longer than the suite's 120 s: the ticker's fire is waited for up to 240 s

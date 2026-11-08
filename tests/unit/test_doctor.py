@@ -6,14 +6,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langgraph.checkpoint.memory import InMemorySaver
 
 from trellis.harness import doctor
+from trellis.harness.adapters import langgraph as langgraph_adapter
+from trellis.harness.adapters.langgraph import LangGraphAdapter
 from trellis.harness.sandbox.docker import DOCKER_SOCKET, DockerSandbox, docker_host
 from trellis.harness.settings import Settings
 
@@ -370,9 +376,45 @@ def test_the_cli_names_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "checks", checks)
     assert doctor.main(["--agent", "a", "--agent=b"], {}) == 0
     assert asked == [["a", "b"]]
-    for wrong in (["--agent"], ["--verbose"]):
+    for wrong in (["--agent"], ["--verbose"], ["--graph"]):
         with pytest.raises(SystemExit, match="usage: trellis doctor"):
             doctor.main(wrong, {})
+
+
+class PostgresSaver(InMemorySaver):
+    """A checkpointer that keeps state past the process (named as LangGraph's Postgres one)."""
+
+
+DURABLE = create_agent(FakeListChatModel(responses=["hi"]), tools=[], checkpointer=PostgresSaver())
+EPHEMERAL = create_agent(
+    FakeListChatModel(responses=["hi"]), tools=[], checkpointer=InMemorySaver()
+)
+
+
+def test_a_graph_with_a_durable_checkpointer_of_its_own_is_said_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(doctor, "checks", lambda *a, **k: _none())
+    here = __name__
+    assert doctor.main([f"--graph={here}:EPHEMERAL"], {}) == 0
+    assert doctor.main(["--graph", f"{here}:DURABLE"], {}) == 1
+    plain = create_agent(FakeListChatModel(responses=["hi"]), tools=[])
+    assert langgraph_adapter.durable_checkpointer(plain) is None, "no checkpointer: one copy"
+    [found] = doctor.graph_checks([f"{here}:DURABLE"])
+    assert not found.ok and "PostgresSaver" in found.said and "stored twice" in found.said
+    adapter = LangGraphAdapter()
+    monkeypatch.setattr(langgraph_adapter, "_warned", set())
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        for _ in range(2):
+            assert adapter.thread_store(DURABLE, {}) is DURABLE.checkpointer
+        assert adapter.thread_store(EPHEMERAL, {}) is EPHEMERAL.checkpointer
+    assert [r.getMessage() for r in caplog.records].count(
+        langgraph_adapter.DUPLICATE_STORAGE.format(name="PostgresSaver")
+    ) == 1, "said once per process, for the durable one only"
+
+
+async def _none() -> list[doctor.Check]:
+    return []
 
 
 def test_records_failing_lists_the_memory_writes_waiting_in_the_spool(tmp_path: Path) -> None:

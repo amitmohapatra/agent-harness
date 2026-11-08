@@ -300,3 +300,42 @@ def test_excel_is_offered_only_with_openpyxl(monkeypatch: pytest.MonkeyPatch) ->
         monkeypatch.undo()
         export.formats.cache_clear()
     assert export.formats() == ("csv", "xlsx")
+
+
+# --------------------------------------------------------------------------- across a resume
+@tool(side_effects="irreversible")
+def reorder(sku: str) -> str:
+    """Reorder a SKU from its supplier."""
+    return f"reordered {sku}"
+
+
+async def test_query_result_over_a_kept_result_is_the_same_after_a_resume(harness: Harness) -> None:
+    """The run's kept result (``/large_tool_results/…``) comes back from the journal's
+    segments when a worker resumes the run after a pause: ``query_result`` loads the same
+    table and answers the same, its scope still the run's own results."""
+    query = ("query_result", {"file_path": KEPT, "sql": LOW})
+    straight = ScriptedChat([("inventory", {}), query, "done"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=straight), id="straight"), [inventory])
+    assert (await agent.run("q", user="u")).status is RunStatus.SUCCESS
+    answered = str(straight.requests[-1]["messages"][-1]["content"])
+    assert "SKU-" in answered
+
+    paused_model = ScriptedChat(
+        [("inventory", {}), ("reorder", {"sku": "SKU-00001"}), query, "done"]
+    )
+    resumed = arm(
+        harness.wrap(ReAct(system_prompt="s", model=paused_model), id="resumed"),
+        [inventory, reorder],
+    )
+    handle = await resumed.start("q", user="u")
+    worker = harness.worker([resumed])
+    assert await worker.run_once()
+    paused = await handle.result(wait=5)
+    assert paused.interrupt is not None
+    record = await harness.runs.get(handle.id, tenant="default")
+    assert record is not None and record.checkpoint is not None
+    assert set(record.checkpoint) == {"trellis_segments"}, "the journal is kept in segments"
+    await resumed.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert await worker.run_once()
+    assert (await handle.result(wait=5)).status is RunStatus.SUCCESS
+    assert str(paused_model.requests[-1]["messages"][-1]["content"]) == answered

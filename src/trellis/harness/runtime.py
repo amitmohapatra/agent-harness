@@ -536,8 +536,9 @@ class Runtime:
         """Save the journal as the run's progress checkpoint, on a heartbeat of the worker's
         lease (a worker's run only: nobody resumes an in-process run after its process died).
         ``now`` after a side-effecting call — the attempt after a crash replays it instead of
-        running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A journal too large
-        for a checkpoint travels as a run artifact (``Journal.checkpoint``). A refused save is a
+        running it again; otherwise at most every :data:`PROGRESS_SECONDS`. A save sends only
+        what changed since the last one (``Journal.save``), and nothing when nothing did; one
+        that waited for a save under way is made whatever the interval. A refused save is a
         warning (the run goes on; the next save tries again); a lost lease stops the run
         (``LeaseLostError``). A sub-agent's run saves its parent's progress, which holds its
         journal. Saves made at once (tools running together) go one at a time."""
@@ -545,8 +546,11 @@ class Runtime:
             if self.parent is not None:
                 await self.parent.progress(now=now)
                 return
+            # a save that waits for one under way is never put off: that one's journal was
+            # taken before this change (a graph checkpoint written during its upload)
+            behind = self._saving.locked()
             async with self._saving:
-                await self._saved(now=now)
+                await self._saved(now=now or behind)
         except LeaseLostError:
             self.lease_lost = True
             raise
@@ -558,17 +562,22 @@ class Runtime:
         if not now and self._saved_at is not None and clock - self._saved_at < PROGRESS_SECONDS:
             return
         runs = self.agent.harness.runs
+        journal = self.replay.journal
         try:
-            checkpoint = await self.replay.journal.checkpoint(
+            save = await journal.save(
                 runs.artifacts, self.run_id, worker_id=self.worker_id, tenant=self.tenant
             )
+            if save is None:  # nothing changed since the last save: nothing to send
+                self._saved_at = clock
+                return
             await runs.heartbeat(
                 self.run_id,
                 self.worker_id,
                 lease_seconds=self.lease_seconds,
-                checkpoint=checkpoint,
+                checkpoint=save.checkpoint,
                 tenant=self.tenant,
             )
+            journal.saved(save)
         except LeaseLostError:
             raise
         except Exception as exc:
