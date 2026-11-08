@@ -76,6 +76,73 @@ replayed on a later turn it is a dated snapshot. The listing is read again with 
 (every `TOOLS_TTL_SECONDS`). A server with a tool of its own named `read_resource` keeps it, and gets
 none.
 
+### Credentials for tools (chat and scheduled runs)
+
+A tool that calls a service as the user needs the user's token on each call, also in a run a
+schedule fires at 3 a.m. with nobody there. `Harness(credentials=hook)` gives it: `async (run,
+target) -> headers | None`, asked before each call of an `mcp(...)` server over HTTP, an
+`openapi(...)` operation and an `a2a(...)` agent (`target.name`, `target.url`, `target.kind`:
+`"mcp"`, `"openapi"`, `"a2a"`). These are the only places a harness tool leaves the process,
+and every adapter calls them through the bridge (Claude and Kimi through the harness's loopback
+MCP server), so it is one hook for all. No hook: every call is as it was.
+
+- Its headers go over the entry's fixed `headers=`; `None` keeps those. The answer is kept for
+  the rest of the run, per target, never longer: each run asks again, so a scheduled run gets a
+  fresh token (your store refreshes it with the refresh token it kept, `offline_access`, or
+  exchanges one, [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)). The token is on the HTTP
+  request only: not in a tool's arguments, the journal, the run's events, memory or traces.
+- `raise NeedsAuth(url)` when the user has not connected: the run pauses with "Connect your
+  <name>: <url>" (a `Runtime.ask`); once they answer, the hook is asked again and the call goes
+  on, once. Any other exception fails that call (the model reads that it failed, not your
+  hook's words), with no other token tried.
+- An MCP server's session may be bound to whoever opened it ([MCP authorization](https://modelcontextprotocol.io/specification/draft/basic/authorization):
+  a token is issued for one user and one server), so with a hook the harness keeps one MCP
+  connection per server, tenant, user and headers, closed after 5 minutes unused; without one,
+  one per server.
+- An MCP server configured inside a framework (an OpenAI Agents `MCPServerStreamableHttp`, a
+  Claude Agent SDK `mcp_servers` entry, LangChain's `MultiServerMCPClient`) is the framework's:
+  its headers are fixed when it is built, and the harness never sees its calls. For per-user
+  auth, give the server as `mcp(...)`.
+
+```python
+from trellis import Deny, Harness, Hooks, ReAct, Runtime, current, mcp
+from trellis.contracts import ToolCall
+from trellis.harness.credentials import NeedsAuth, Target
+
+
+async def credentials(run: Runtime, target: Target) -> dict[str, str] | None:
+    if target.name == "github":  # OAuth, per user: your token store refreshes it
+        token = await access_token(run.tenant, run.user, "github")
+        if token is None:
+            raise NeedsAuth(f"https://app.example/connect/github?user={run.user}")
+        return {"Authorization": f"Bearer {token}"}
+    if target.name == "erp.example.com":  # an API key per tenant
+        return {"X-Api-Key": await tenant_secret(run.tenant, "erp")}
+    if target.kind == "a2a":  # a service account
+        return {"Authorization": f"Bearer {await service_account_token()}"}
+    return None  # the entry's own headers=
+
+
+class Accounts(Hooks):
+    async def before_tool(self, call: ToolCall) -> Deny | None:  # connected before scheduling
+        run = current()
+        if call.tool == "schedule_task" and run and not await connected(run.user, "github"):
+            return Deny("connect GitHub first, then I can watch it for you")
+        return None
+
+    async def on_run_start(self, run: Runtime) -> None:  # the user may still use it
+        if not await still_allowed(run.tenant, run.user):
+            raise PermissionError(f"{run.user} may no longer run this agent")
+
+    async def on_error(self, stage: str, error: Exception) -> None:  # tell someone
+        await alert(f"{stage} failed: {type(error).__name__}")
+
+
+h = Harness(credentials=credentials)
+github = mcp("https://api.githubcopilot.com/mcp/", name="github")
+agent = h.wrap(ReAct("Help.", tools=[github]), id="desk", hooks=[Accounts()])
+```
+
 ## Tool choice: what helps the model pick the right tool
 
 What a model chooses from is each tool's name, description and parameter schema — kept as

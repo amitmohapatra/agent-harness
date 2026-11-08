@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Credentials for tools
+
+- `Harness(credentials=async (run, target) -> headers | None)`: the run's user's headers on each
+  call of an `mcp(...)` server over HTTP, an `openapi(...)` operation and an `a2a(...)` agent,
+  over their fixed `headers=`, asked once per run and target (a scheduled run asks again);
+  `NeedsAuth(url)` pauses with "Connect your <name>"; a failing hook fails that call. With a
+  hook, MCP connections are per server, tenant, user and headers, closed when idle. The token is
+  on the request only. No hook: unchanged (`trellis.harness.credentials`, docs/tools.md).
+
 ### Schedules that run unattended
 
 - Chat schedules pause themselves after 3 failed runs in a row (`ERROR`, `TIMEOUT`); that

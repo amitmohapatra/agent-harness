@@ -35,6 +35,7 @@ from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import FORGET, TOOL_SEARCH, USERS_OWN, Memory, RunMemory
+from trellis.harness.credentials import CredentialsHook
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
 from trellis.harness.features import Feature
@@ -113,7 +114,11 @@ class Harness:
 
     ``schedule_limits``: ``async (user, tenant) -> ScheduleLimits | None``, the limits of the
     schedules a user sets in chat for that user or their plan, over the environment's
-    (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``); ``None``: those."""
+    (``TRELLIS_SCHEDULE_MIN_INTERVAL``, ``TRELLIS_SCHEDULE_MAX_PER_USER``); ``None``: those.
+
+    ``credentials``: ``async (run, target) -> headers | None``, the headers of each call a run
+    makes to an ``mcp(...)`` server over HTTP, an ``openapi(...)`` operation or an ``a2a(...)``
+    agent, over their fixed ``headers=`` (``trellis.harness.credentials``); none: those."""
 
     def __init__(
         self,
@@ -123,9 +128,11 @@ class Harness:
         runs: RunStore | Literal[False] | None = None,
         gateway: Gateway | Literal[False] | None = None,
         schedule_limits: LimitsHook | None = None,
+        credentials: CredentialsHook | None = None,
     ) -> None:
         self.settings = config or Settings.from_env()
         self.schedule_limits = schedule_limits
+        self.credentials = credentials
         s = self.settings
         builds_runs = runs is None and s.runs_url is not None
         builds_memory = memory is None and s.memory_url is not None
