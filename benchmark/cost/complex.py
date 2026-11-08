@@ -104,6 +104,11 @@ CATEGORIES: Final = (
     "bf_cantdo",
     "bf_clarify",
     "bf_derive",
+    # what a user asks an assistant that remembers them (``benchmark.cost.history``):
+    # ``--cases history``
+    "hist_past",
+    "hist_analytics",
+    "hist_explain",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -2595,6 +2600,9 @@ def cases() -> tuple[Case, ...]:
     from benchmark.cost import breakfix
 
     out.extend(breakfix.cases())
+    from benchmark.cost import history
+
+    out.extend(history.cases())
     return tuple(out)
 
 
@@ -3778,12 +3786,13 @@ def _write(path: Path, rows: Sequence[dict[str, Any]], mode: str = "a") -> None:
 def _names(c: Case) -> set[str]:
     """What ``--cases`` picks a case by: its id, its category, its tier, and ``adversarial``
     for every ``adv_*`` category."""
-    from benchmark.cost import breakfix
+    from benchmark.cost import breakfix, history
 
     return (
         {c.id, c.category, f"tier:{c.tier}"}
         | ({ADVERSARIAL} if c.category.startswith("adv_") else set())
         | breakfix.names(c)
+        | history.names(c)
     )
 
 

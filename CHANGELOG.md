@@ -5,6 +5,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Benchmark
+
+- A history set for the complex suite (`--cases history`): earlier chats recalled, compared,
+  trended, merged and explained, and how an answer was got (memory or tool, source and read
+  time, after a resume); 10 new cases and 12 existing ones of those kinds.
+
 ### Credentials for tools
 
 - `Harness(credentials=async (run, target) -> headers | None)`: the run's user's headers on each
