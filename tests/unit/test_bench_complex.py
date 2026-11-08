@@ -334,6 +334,12 @@ def test_a_negative_written_with_the_minus_sign_is_read_as_negative() -> None:
     assert cx.numbers("r \u2248 \u22120.23, and -1.5") == [-0.23, -1.5]
 
 
+def test_a_negative_amount_written_with_its_currency_after_the_minus_is_negative() -> None:
+    # a table's change column, as Haiku writes it (hist-merge-01)
+    assert cx.numbers("| S22 | \u2212\u00a31,917.02 | -$5.5 | \u20ac3 |") == [-1917.02, -5.5, 3.0]
+    assert cx._has_number("Change \u2212\u00a311,714.81", -11714.81, 58.6)
+
+
 async def test_deep_agents_is_an_adapter_of_its_own(tmp_path: Path, offline: None) -> None:
     out = tmp_path / "cx-deep"
     report = await cx.bench(

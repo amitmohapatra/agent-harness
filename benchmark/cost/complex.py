@@ -2607,6 +2607,8 @@ def cases() -> tuple[Case, ...]:
 
 
 # --------------------------------------------------------------------------- scoring
+#: A minus right before a currency sign: "-£1,917.02" is the negative amount.
+_MINUS_CURRENCY: Final = re.compile(r"(?<![\w.])-[£$€](?=\d)")
 _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
 #: A file the run saved for its user, as ``query_result``'s tool message says it (#97): an export
 #: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
@@ -2747,9 +2749,10 @@ _COUNT_WORD: Final = re.compile(
 
 def numbers(answer: str) -> list[float]:
     """Every figure an answer states (thousands separators dropped; the minus sign U+2212, as
-    models often write a negative, read as a minus)."""
+    models often write a negative, read as a minus, and a minus before a currency sign, "-£12",
+    as the negative amount)."""
     out = []
-    for m in _NUMBER.findall(answer.replace("\u2212", "-")):
+    for m in _NUMBER.findall(_MINUS_CURRENCY.sub("-", answer.replace("\u2212", "-"))):
         try:
             found = float(m.replace(",", ""))
         except ValueError:
