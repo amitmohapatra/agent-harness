@@ -89,8 +89,15 @@ QUERY_RESULT_SCHEMA: Final[dict[str, Any]] = {
             "description": f"One SELECT over the table {TABLE}, e.g. "
             f"SELECT count(*) FROM {TABLE} WHERE stock < 10.",
         },
+        "results": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Past tool results to load too, by the id an earlier conversation's "
+            "steps name (result msg_...): the tables t1, t2... in this order (without "
+            f"file_path, t1 is also {TABLE}). This run's own results are tables already.",
+        },
     },
-    "required": ["file_path", "sql"],
+    "required": ["sql"],
     "additionalProperties": False,
 }
 #: The schema of a run that saves a query's result as a file (:func:`saving`): with
@@ -106,6 +113,10 @@ QUERY_RESULT_SAVING_SCHEMA: Final[dict[str, Any]] = {
         "file_name": {"type": "string", "description": "With save_as: the file's name."},
     },
 }
+#: The most past results one query names (``results``), and how the memory context names one:
+#: an earlier conversation's steps list, ``result msg_...`` (the memory service's format).
+PAST_RESULTS: Final = 8
+_PAST: Final = re.compile(r"\bresult (msg_\w+)")
 #: The rows a saved file's answer shows (the file holds them all).
 SAVED_ROWS: Final = 5
 #: The seconds a query saving its whole result may run, writing included.
@@ -267,6 +278,50 @@ def saving(runtime: Any) -> bool:
     return runtime is not None and export.runs_code(runtime) is None
 
 
+def past_refs(text: str) -> tuple[str, ...]:
+    """The past results ``text`` (a memory context) names, each once, in order."""
+    return tuple(dict.fromkeys(_PAST.findall(text)))
+
+
+async def _past(runtime: Any, refs: Sequence[str]) -> tuple[dict[str, str], list[str]] | str:
+    """The past results ``refs`` name, read through the memory service's message read (the
+    audience rules of the thread each was said in: another user's is refused), as the tables
+    ``t1``, ``t2``… and where each came from, dated; or why one cannot be loaded. A ref that
+    is a path this run keeps is that result."""
+    from trellis.memory import AuthorizationError, NotFoundError  # noqa: PLC0415
+
+    memory = getattr(runtime, "run_memory", None)
+    kept = saved(runtime) if runtime is not None else {}
+    texts: dict[str, str] = {}
+    told: list[str] = []
+    for n, ref in enumerate(refs, start=1):
+        path = "/" + ref.lstrip("/")
+        if path in kept:  # a result of this run's, named here too: that table
+            texts[f"t{n}"] = kept[path]
+            told.append(f"t{n} is this run's result {path}")
+            continue
+        if memory is None:
+            return "Error: past results are read from memory, which this run does not have."
+        try:
+            found = await memory.past_result(ref)
+        except AuthorizationError:
+            return (
+                f"Error: past result {ref} is refused: it is not this user's to read. "
+                "Nothing was run."
+            )
+        except NotFoundError:
+            return (
+                f"Error: past result {ref} is no longer kept (deleted, or past its retention): "
+                f"call the tool again. Nothing was run."
+            )
+        if found.role != "TOOL":
+            return f"Error: {ref} is not a tool's result. Nothing was run."
+        texts[f"t{n}"] = found.content
+        when = f", said {found.occurred_at.date().isoformat()}" if found.occurred_at else ""
+        told.append(f"t{n} is past result {ref}{when}")
+    return texts, told
+
+
 def schema(runtime: Any) -> dict[str, Any]:
     """``query_result``'s input schema in ``runtime``'s run (:func:`saving`)."""
     return QUERY_RESULT_SAVING_SCHEMA if saving(runtime) else QUERY_RESULT_SCHEMA
@@ -285,26 +340,43 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     :data:`CONCURRENT` at once in the process, on a database made for it and closed after it
     whatever happens; a cancelled call (the run cancelled, or out of time) interrupts it."""
     runtime = current()
-    problem = arguments_problem(schema(runtime), args)
+    problem = _problem(runtime, args)
     if problem is not None:
-        return not_run(QUERY_RESULT, problem)
+        return problem
     sql = str(args["sql"]).strip().rstrip(";")
-    if len(sql) > SQL_CHARS:
-        return f"Error: the query is longer than {SQL_CHARS} characters"
-    path = "/" + str(args["file_path"]).lstrip("/")
+    past = await _past(runtime, [str(r) for r in args.get("results") or ()])
+    if isinstance(past, str):
+        return past
+    path = None if args.get("file_path") is None else "/" + str(args["file_path"]).lstrip("/")
     record: dict[str, Any] | None = None
     given: str | Table | None = text
-    if text is None and _stored(path):
+    if text is None and path is not None and _stored(path):
         found = await _kept_file(path)
         if isinstance(found, str):
             return found
         given, record = found
     if args.get("save_as") is not None:
-        return await _save(runtime, args, sql, given, record)
-    answer = await run(path, sql, (), given)
-    if record is None or answer.startswith("Error"):
+        return await _save(runtime, args, sql, given, record, past=past[0])
+    answer = await run(path, sql, (), given, past=past[0])
+    if answer.startswith("Error"):
         return answer
-    return f"{_told(runtime, path, record, sql)}\n{answer}"
+    told = [_told(runtime, path, record, sql)] if record is not None and path else []
+    told += past[1]
+    return "; ".join(told) + f".\n{answer}" if told else answer
+
+
+def _problem(runtime: Any, args: dict[str, Any]) -> str | None:
+    """What is wrong with a call's arguments, as the model reads it; ``None`` when nothing."""
+    problem = arguments_problem(schema(runtime), args)
+    if problem is None and args.get("file_path") is None and not args.get("results"):
+        problem = "name file_path, results, or both"
+    if problem is None and len(args.get("results") or ()) > PAST_RESULTS:
+        problem = f"results names at most {PAST_RESULTS} past results"
+    if problem is not None:
+        return not_run(QUERY_RESULT, problem)
+    if len(str(args["sql"]).strip().rstrip(";")) > SQL_CHARS:
+        return f"Error: the query is longer than {SQL_CHARS} characters"
+    return None
 
 
 def _stored(path: str) -> bool:
@@ -333,7 +405,7 @@ def _told(runtime: Any, path: str, record: dict[str, Any], sql: str) -> str:
         for s in _sources(runtime, path, sql)
         if s["table"] != TABLE
     )
-    return "; ".join(said) + "."
+    return "; ".join(said)
 
 
 async def _save(
@@ -342,6 +414,8 @@ async def _save(
     sql: str,
     text: str | Table | None,
     record: dict[str, Any] | None = None,
+    *,
+    past: Mapping[str, str] | None = None,
 ) -> str:
     """``query_result`` with ``save_as``: the query's every row kept as a file for the user
     (``Runtime.save_file``), its name ``file_name`` with the format's extension; what was kept,
@@ -355,11 +429,12 @@ async def _save(
         file_name(name)
     except ToolError as exc:
         return not_run(QUERY_RESULT, exc.message)
-    found = await run(str(args["file_path"]), sql, (), text, save=kind)
+    path = args.get("file_path")
+    found = await run(path, sql, (), text, save=kind, past=past)
     if isinstance(found, str):
         return found
     data, count, shown = found
-    made = {"sql": sql, "from": _sources(runtime, str(args["file_path"]), sql, record)}
+    made = {"sql": sql, "from": _sources(runtime, path, sql, record)}
     stored = await runtime.save_file(name, data, source=QUERY_RESULT, made=made)
     return (
         f"Saved {stored.name} for the user: {count} rows, {stored.size} bytes; the chat shows "
@@ -368,13 +443,13 @@ async def _save(
 
 
 def _sources(
-    runtime: Any, file_path: str, sql: str, record: dict[str, Any] | None = None
+    runtime: Any, file_path: str | None, sql: str, record: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
     """The results a query read — the file asked about, and each other result the run keeps
     whose table the query names — each as its table, the tool it came from and when it was
     fetched (``results.keep``), for how a file it made was made (``FileStore.record``); a file
     kept for the user (its ``record``) as its path and when it was saved."""
-    path = "/" + file_path.lstrip("/")
+    path = None if file_path is None else "/" + file_path.lstrip("/")
     named = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql)
     tools, times = getattr(runtime, "kept_from", {}), getattr(runtime, "kept_at", {})
     found: list[dict[str, Any]] = []
@@ -394,44 +469,50 @@ def _sources(
 
 
 def loadable(
-    file_path: str, text: str | Table | None = None
+    file_path: str | None, text: str | Table | None = None, past: Mapping[str, str] | None = None
 ) -> tuple[dict[str, str | Table], str] | str:
     """What a query of ``file_path`` loads — the run's saved results by table name (the file
     asked about among them, given as ``text`` when it is no result the run keeps: a file Deep
-    Agents saved, a file kept for the user, read from the store) — and the file's own table;
-    or why there is nothing to load."""
-    path = "/" + file_path.lstrip("/")
+    Agents saved, a file kept for the user, read from the store), and the ``past`` results
+    (``t1``…) — and the table :data:`TABLE` is (the file's; with no file, ``t1``); or why
+    there is nothing to load."""
     runtime = current()
     kept = saved(runtime) if runtime is not None else {}
     named = tables(runtime) if runtime is not None else {}
-    if text is None:
-        text = kept.get(path)
-    if text is None or runtime is None:
-        return not_found(path)
-    texts: dict[str, str | Table] = {named[p]: kept[p] for p in named}
-    if path not in named:
-        texts[f"{TABLE}_file"] = text  # a file Deep Agents saved, a kept one: ``result``
+    texts: dict[str, str | Table] = {named[p]: kept[p] for p in named} | dict(past or {})
+    if file_path is None:  # past results only (``query`` asks for one at least)
+        own = next(iter(past or {}), "t1")
+    else:
+        path = "/" + file_path.lstrip("/")
+        if text is None:
+            text = kept.get(path)
+        if text is None or runtime is None:
+            return not_found(path)
+        if path not in named:
+            texts[f"{TABLE}_file"] = text  # a file Deep Agents saved, a kept one: ``result``
+        own = named.get(path, f"{TABLE}_file")
     if sum(map(_size, texts.values())) > LOAD_CHARS:
         return (
             f"Error: this run's saved results are more than {LOAD_CHARS} characters, more than a "
             "query here loads: filter on the tool's side, or compute in a sandbox"
         )
-    return texts, named.get(path, f"{TABLE}_file")
+    return texts, own
 
 
 async def run(
-    file_path: str,
+    file_path: str | None,
     sql: str,
     params: Sequence[Any] = (),
     text: str | Table | None = None,
     *,
     save: str | None = None,
+    past: Mapping[str, str] | None = None,
 ) -> Any:
     """``sql`` (with ``params``) over the run's saved results (:func:`loadable`), in a worker
     thread (see :func:`query`): its rows shown, or — ``save``, a format of ``tools.export`` —
     every row as a file of that format, how many, and the first :data:`SAVED_ROWS` shown; or
     what is wrong, as text."""
-    found = loadable(file_path, text)
+    found = loadable(file_path, text, past)
     if isinstance(found, str):
         return found
     texts, own = found

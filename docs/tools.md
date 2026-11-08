@@ -272,7 +272,12 @@ has to. In order of preference:
    on DuckDB when the `query` extra is installed, else on Python's own SQLite (no dependency):
    chosen by what is installed, never by a setting
    ([ADR 0007](adr/0007-query-engine.md)); the description names the engine, so the model
-   writes its SQL. Every result the run saved is a table named by the tool that returned it
+   writes its SQL. A past result an earlier conversation's steps name (`result msg_...`, in
+   the memory context's "Earlier conversations") loads with `results=["msg_..."]` as `t1`,
+   `t2`…, read through the memory service's message read under that thread's own rules
+   (another user's is refused; a deleted one is said), within the same limits; without
+   `file_path`, `t1` is also `result`, and the run is offered `query_result` once its context
+   names one. Every result the run saved is a table named by the tool that returned it
    (`result` is the file asked about), so one query joins results of several tools; a JSON
    array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
    `|`), else one row per line, with whole-number, decimal, number and text columns typed

@@ -251,6 +251,12 @@ class RunMemory:
         """One memory tool, in this run's scope."""
         return await self.ctx.call_agent_tool(name, args)
 
+    async def past_result(self, message_id: str) -> Any:
+        """A past tool result by its message (an earlier conversation's steps list names it),
+        under its thread's read rules: the service refuses another user's
+        (``AuthorizationError``) and says a deleted one is gone (``NotFoundError``)."""
+        return await self.ctx.history.message(message_id)
+
     async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
         return await self.ctx.tool_hints(task, available=list(available))
 
