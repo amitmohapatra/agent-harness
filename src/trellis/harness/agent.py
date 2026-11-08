@@ -103,6 +103,7 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
+from trellis.harness.tools import query
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
@@ -1102,6 +1103,7 @@ class Agent:
         parts = (pushed.rendered, note, snapshots.note(stale), asking_notes(pushed.rendered))
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
+        runtime.past_results = query.past_refs(pushed.rendered)
         runtime.events.emit(
             RunEventType.CONTEXT_LOADED,
             data={"chars": len(rendered), "evidence_status": status},

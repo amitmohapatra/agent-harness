@@ -79,6 +79,7 @@ ROUTES: Final = [
     ("POST", r"/v1/memories/(?P<memory_id>[^/]+)/supersede", "supersede"),
     ("POST", r"/v1/recall", "recall"),
     ("GET", r"/v1/threads/(?P<thread_id>[^/]+)/messages", "thread_messages"),
+    ("GET", r"/v1/messages/(?P<message_id>[^/]+)", "message"),
 ]
 
 
@@ -588,6 +589,7 @@ class FakeMemoryService:
                         "sequence": len(kept) + 1,
                         "content": message["content"],
                         "author_principal": f"agent:{call.scope.get('agent_id') or 'a'}",
+                        "user_id": call.scope.get("user_id"),
                         "agent_run_id": call.scope.get("agent_run_id"),
                         "occurred_at": NOW,
                         "archive_status": "STAGED",
@@ -608,6 +610,19 @@ class FakeMemoryService:
         limit = int(call.query.get("limit") or 50)
         found = [m for m in self.threads.get(thread, []) if internal or m["kind"] == "VISIBLE"]
         return {"thread_id": thread, "messages": found[-limit:]}
+
+    def _message(self, call: Call) -> dict[str, Any] | httpx.Response:
+        """One message by its id, under its thread's read rule as the service applies it: the
+        thread's own user's agents only (``403``); ``404`` for one no thread holds (deleted)."""
+        ident = call.path["message_id"]
+        path = f"/v1/messages/{ident}"
+        for kept in self.threads.values():
+            for message in kept:
+                if message["message_id"] == ident:
+                    if message.get("user_id") != call.scope.get("user_id"):
+                        return problem(403, path, detail="Not allowed to read this thread")
+                    return {k: v for k, v in message.items() if k != "user_id"}
+        return problem(404, path, detail="Message not found")
 
     # ------------------------------------------------------------------ memories
     def _remember(self, call: Call) -> tuple[int, dict[str, Any]]:

@@ -207,12 +207,17 @@ def coding_tool() -> str | None:
 
 
 def kept() -> bool:
-    """Whether the current run keeps a result to read, or was told of files kept for its user
-    (``tools.stored``): ``read_file`` and ``query_result`` are offered then."""
+    """Whether the current run keeps a result to read, was told of files kept for its user
+    (``tools.stored``), or of past results an earlier conversation's steps name
+    (``Runtime.past_results``): ``read_file`` and ``query_result`` are offered then."""
     runtime = current()
     if runtime is None:
         return False
-    return bool(query.saved(runtime)) or getattr(runtime, "files_note", None) is not None
+    return (
+        bool(query.saved(runtime))
+        or getattr(runtime, "files_note", None) is not None
+        or bool(getattr(runtime, "past_results", ()))
+    )
 
 
 class Conversations:

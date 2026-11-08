@@ -227,6 +227,9 @@ class Runtime:
     #: what the run is told of the files kept for its user (``tools.stored.noted``): its
     #: conversation's, or that other chats have some — ``None`` when there are none
     files_note: str | None = None
+    #: the past tool results the memory context names (an earlier conversation's steps list:
+    #: ``result msg_...``), which ``query_result(results=)`` loads (``tools.query``)
+    past_results: tuple[str, ...] = ()
     #: the results the conversation's earlier turns saved in this process, by path
     #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
     earlier_results: dict[str, str] = field(default_factory=dict)

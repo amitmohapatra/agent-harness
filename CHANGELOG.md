@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Past results by reference
+
+- `query_result(results=["msg_..."])` loads past tool results (the ids an earlier
+  conversation's steps name in the memory context) as `t1`, `t2`… beside the run's own, read
+  through the memory service's existing message read and its audience rules; a new chat is
+  offered `query_result` once its context names one. "Which tool did you use last time?" is
+  answered from those steps. Live history eval: `explain-08` and `hist-long-01` now pass.
+
 ### `query_result` needs DuckDB
 
 - DuckDB is a required dependency; the SQLite fallback is gone, so the model sees one dialect
