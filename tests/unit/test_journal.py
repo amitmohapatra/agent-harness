@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution
-from trellis.harness.journal import Journal, Pending, Replay, content_key
+import contextlib
+import shutil
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from trellis.contracts import HarnessError, Interrupt, InterruptDecision, InterruptResolution
+from trellis.harness.journal import Journal, Pending, Replay, apply, content_key
+from trellis.harness.runs import LocalRuns
+from trellis.runs.blob import BlobExists
+from trellis.runs.payloads import MEDIA_TYPE, SEGMENTS, encode, ref_of
 
 
 def resolution(answer: str) -> InterruptResolution:
@@ -170,3 +180,67 @@ def test_the_trajectory_keeps_a_long_output_as_the_stream_previews_it() -> None:
     (kept, long), (_, short) = journal.trajectory
     assert kept.task is None and kept.args == {"a": 1}
     assert long.output == "x" * PREVIEW_CHARS + "…" and short.output == {"n": 1}
+
+
+# --------------------------------------------------------------------------- segments
+async def _segments(
+    runs: LocalRuns, nodes: list[dict[str, Any]], tenant: str = "acme"
+) -> dict[str, Any]:
+    """A checkpoint of segments as a newer worker saves it: each stored in the run store's
+    payload objects, the checkpoint listing them in order."""
+    refs = []
+    for node in nodes:
+        data = encode(node)
+        ref = ref_of(tenant, data)
+        with contextlib.suppress(BlobExists):
+            await runs._payloads.put(ref.ref, data, content_type=MEDIA_TYPE)
+        refs.append(ref.model_dump())
+    return {SEGMENTS: refs}
+
+
+async def test_a_journal_saved_as_segments_reads_back_in_one_request_in_order(
+    tmp_path: Path,
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    nodes: list[dict[str, Any]] = [{"$r": {"calls": {"k": [0]}}}] + [
+        {"$d": {"calls": {"$d": {"k": {"$a": [n]}}}}} for n in range(1, 20)
+    ]
+    nodes.append({"$d": {"results": {"$r": {"/large_tool_results/r": "a,b\n1,2"}}}, "$x": []})
+    checkpoint = await _segments(runs, nodes)
+    asked: list[int] = []
+    original = runs.artifacts.get_payloads
+
+    async def counted(refs: Any, *, tenant: str | None = None) -> list[bytes]:
+        asked.append(len(refs))
+        return await original(refs, tenant=tenant)
+
+    runs.artifacts.get_payloads = counted  # type: ignore[method-assign]
+    journal = await Journal.read(checkpoint, runs.artifacts, tenant="acme")
+    assert journal.calls == {"k": list(range(20))}
+    assert journal.results == {"/large_tool_results/r": "a,b\n1,2"}
+    assert asked == [21], "every segment in one request"
+
+
+@pytest.mark.parametrize(
+    ("old", "node", "new"),
+    [
+        ({"a": 1, "b": 2}, {"$d": {"c": {"$r": 3}}, "$x": ["a"]}, {"b": 2, "c": 3}),
+        ([1], {"$a": [2, 3]}, [1, 2, 3]),
+        (None, {"$d": {"x": {"$r": 1}}}, {"x": 1}),
+        ({"g": {"v": 1}}, {"$r": None}, None),
+    ],
+)
+def test_a_segment_changes_what_it_names(old: Any, node: dict[str, Any], new: Any) -> None:
+    assert apply(old, node) == new
+
+
+async def test_a_journal_whose_segments_are_gone_or_another_tenants_is_not_read(
+    tmp_path: Path,
+) -> None:
+    runs = LocalRuns(payload_root=tmp_path)
+    checkpoint = await _segments(runs, [{"$r": {"calls": {}}}])
+    with pytest.raises(HarnessError, match="is gone"):
+        await Journal.read(checkpoint, runs.artifacts, tenant="globex")
+    shutil.rmtree(tmp_path)
+    with pytest.raises(HarnessError, match="is gone"):
+        await Journal.read(checkpoint, runs.artifacts, tenant="acme")

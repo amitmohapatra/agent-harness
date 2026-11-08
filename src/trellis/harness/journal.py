@@ -17,7 +17,9 @@ outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs n
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
 no question and no side effect. A journal larger than a checkpoint may be is stored as a run
-artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`). A
+artifact, and the checkpoint names it (:meth:`Journal.checkpoint`, :meth:`Journal.read`); a
+checkpoint that lists segments (agent-runs' payload objects, each what changed since the one
+before: :func:`apply`) is read too, all in one request. A
 sub-agent's run working inside one of the run's tool calls keeps its journal in the run's
 (``children``), so the run's progress saves the child's too; the run's sandbox is named here as
 soon as it exists (``sandbox``), so every later attempt works in that one
@@ -65,6 +67,8 @@ from trellis.contracts import (
     ToolOutcome,
 )
 from trellis.harness.events import preview
+from trellis.runs import NotFoundError
+from trellis.runs.payloads import SEGMENTS, PayloadRef, adecode
 
 if TYPE_CHECKING:
     from trellis.harness.runs import RunArtifacts
@@ -77,6 +81,22 @@ JOURNAL_REF: Final = "journal_ref"
 #: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
 #: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
 OUTCOME: Final = "trellis_outcome"
+
+
+def apply(base: Any, node: dict[str, Any]) -> Any:
+    """``base`` changed by a segment: ``{"$r": value}`` replaces it, ``{"$a": items}`` appends
+    to a list, ``{"$d": {key: segment}, "$x": [key, ...]}`` changes an object's keys and drops
+    some."""
+    if "$r" in node:
+        return node["$r"]
+    if "$a" in node:
+        return [*base, *node["$a"]]
+    changed = dict(base) if isinstance(base, dict) else {}
+    for key in node.get("$x", ()):
+        changed.pop(key, None)
+    for key, sub in node["$d"].items():
+        changed[key] = apply(changed.get(key), sub)
+    return changed
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -176,7 +196,19 @@ class Journal(BaseModel):
         cls, checkpoint: dict[str, Any] | None, artifacts: RunArtifacts, *, tenant: str
     ) -> Journal:
         """The journal a run record's checkpoint holds, or names: one stored as a run artifact
-        (:meth:`checkpoint`) is read back from it."""
+        (:meth:`checkpoint`) is read back from it, one saved as segments is read in one
+        request and the segments applied in order."""
+        if SEGMENTS in (checkpoint or {}):
+            assert checkpoint is not None
+            segments = [PayloadRef.model_validate(ref) for ref in checkpoint[SEGMENTS]]
+            try:
+                stored = await artifacts.get_payloads(segments, tenant=tenant)
+            except NotFoundError as exc:
+                raise HarnessError(f"the run's journal is gone: {exc}") from exc
+            dumped: Any = None
+            for data in stored:
+                dumped = apply(dumped, await adecode(data))
+            return cls.of(dumped)
         ref = (checkpoint or {}).get(JOURNAL_REF)
         if ref is None:
             return cls.of(checkpoint)
