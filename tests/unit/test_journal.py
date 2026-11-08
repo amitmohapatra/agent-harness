@@ -202,7 +202,7 @@ async def test_a_journal_saved_as_segments_reads_back_in_one_request_in_order(
     tmp_path: Path,
 ) -> None:
     runs = LocalRuns(payload_root=tmp_path)
-    nodes = [{"$r": {"calls": {"k": [0]}}}] + [
+    nodes: list[dict[str, Any]] = [{"$r": {"calls": {"k": [0]}}}] + [
         {"$d": {"calls": {"$d": {"k": {"$a": [n]}}}}} for n in range(1, 20)
     ]
     nodes.append({"$d": {"results": {"$r": {"/large_tool_results/r": "a,b\n1,2"}}}, "$x": []})
