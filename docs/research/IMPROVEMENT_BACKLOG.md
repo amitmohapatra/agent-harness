@@ -62,7 +62,7 @@ Sources: [SCENARIO_COVERAGE_AUDIT.md](SCENARIO_COVERAGE_AUDIT.md) (rows A1–M7,
 | `query_result` on DuckDB, a required dependency (the SQLite fallback removed 2026-11-08: one dialect, one test run) | exists (#116: 4 tables of 50k rows load in 0.37 s, was 1.01 s; 8 calls at once over 500k rows 12 s, was 89 s) | [QUERY_ENGINE.md](QUERY_ENGINE.md), [ADR 0007](../adr/0007-query-engine.md): ties SQLite on accuracy (18/18), bounds a query's memory, a call 2x faster at 50k rows and 4.5x at 500k, 8 calls at once 6 to 9.5x faster |
 | An id past 64 bits rounded (CSV) or failing the load (JSON) in `query_result` | exists (#83) | [QUERY_ENGINE.md](QUERY_ENGINE.md) value fidelity |
 | SQLite fallback: a query's own values are not memory-bounded (+370 MB in 0.7 s) | gone with the fallback (2026-11-08); DuckDB's `memory_limit` bounds it | [QUERY_ENGINE.md](QUERY_ENGINE.md) safety; `tests/integration/test_query_safety.py` |
-| A run's results are loaded again on every query (either engine) | later | [QUERY_ENGINE.md](QUERY_ENGINE.md) safety and load |
+| A run's results are loaded again on every query (either engine) | exists: a text's typed tables kept as Parquet by its content (`tools.query.Typed`); five queries of a 10 MB result 3.1 s → 0.8 s (CSV), 5.0 s → 1.3 s (JSON), answers identical | [ADR 0007](../adr/0007-query-engine.md) consequences |
 | Agent-written memories copying a tool value | later | audit C3 |
 
 ## Tools

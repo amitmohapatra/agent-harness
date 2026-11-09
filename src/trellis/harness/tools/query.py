@@ -4,7 +4,9 @@ instead of the model paging thousands of rows into its context and adding them u
 
 No sandbox and no Code Mode needed. The engine is DuckDB (:class:`DuckDB`, a required
 dependency: `ADR 0007 <docs/adr/0007-query-engine.md>`_), in memory, made for one query and
-closed after it; the tool's description names it, so the model writes its dialect.
+closed after it; the tool's description names it, so the model writes its dialect. A text's
+typed tables are kept as Parquet by its content (:class:`Typed`): the next query of it, in
+this run, a later turn or a past-result load, reads them instead of parsing it again.
 
 The kept text becomes the table ``result``: a JSON array of objects, JSON Lines (an object
 a line), or the arrays of objects a JSON object holds, however deep (the shallowest: the
@@ -51,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import hashlib
 import importlib
 import io
 import json
@@ -60,7 +63,7 @@ import tempfile
 import threading
 import time
 import unicodedata
-from collections import ChainMap
+from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from decimal import Decimal
 from functools import cached_property
@@ -164,6 +167,11 @@ _VALUE: Final = re.compile(NUMBER + r"|[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9:.]+(Z
 MISSING: Final = ("NULL", "NONE", "NA", "N/A", "#N/A", "NAN", "-", "--", "\u2014")
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
+#: The Parquet of typed tables a process keeps (:class:`Typed`): as much as the results its
+#: conversations keep (``tools.results.KEPT_CHARS``), whose Parquet is several times smaller.
+TYPED_BYTES: Final = LOAD_CHARS
+#: The table a source's table is loaded as, before it takes its name.
+LOADED: Final = "loaded"
 #: The rows DuckDB first types a table's columns by: a column with a value no number there
 #: is text, not looked at again over every row (:meth:`DuckDB._typed`).
 SAMPLE_ROWS: Final = 2_048
@@ -841,12 +849,12 @@ class DuckDB:
         views: list[tuple[str, str]] = []  # the queried result's parts, as result_<part>
         with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
             for n, (name, text) in enumerate(texts.items()):
-                for key, columns in self._read(db, os.path.join(folder, str(n)), text):
+                for key in self._tables(db, os.path.join(folder, str(n)), text):
                     table = base = name if key is None else part(name, key)
                     while key is not None and table in used:  # a name taken: the next one
                         table = f"{base}_{len(used)}"
                     used.add(table)
-                    self._typed(db, table, columns)
+                    db.execute(f"ALTER TABLE {LOADED} RENAME TO {_name(table)}")
                     if key is not None and name == own:
                         views.append((part(TABLE, key), table))
         for macro in MACROS:
@@ -858,6 +866,33 @@ class DuckDB:
         db.execute("SET TimeZone = 'UTC'")  # a time with a zone is read the same on any host
         db.execute("SET enable_external_access = false")
         db.execute("SET lock_configuration = true")
+
+    def _tables(self, db: Any, path: str, text: Source) -> Iterator[str | None]:
+        """Each table ``text`` is (:meth:`_read`: its own, ``None``, then each part by its
+        key), typed, as the table :data:`LOADED` — taken before the next: read from
+        :data:`TYPED`'s Parquet of the same text when it has it, else read, typed
+        (:meth:`_typed`) and kept there as Parquet (a text's; a workbook's are not)."""
+        digest = TYPED.key(text) if isinstance(text, str) else None
+        kept = TYPED.get(digest) if digest is not None else None
+        if kept is not None:
+            for n, (key, data) in enumerate(kept):
+                file = f"{path}_{n}.parquet"
+                with open(file, "wb") as out:
+                    out.write(data)
+                db.execute(f"CREATE TABLE {LOADED} AS SELECT * FROM read_parquet({_quoted(file)})")
+                yield key
+            return
+        made: list[tuple[str | None, bytes]] = []
+        for n, (key, columns) in enumerate(self._read(db, path, text)):
+            self._typed(db, LOADED, columns)
+            if digest is not None:
+                file = f"{path}_{n}.parquet"
+                db.execute(f"COPY {LOADED} TO {_quoted(file)} (FORMAT parquet, COMPRESSION zstd)")
+                with open(file, "rb") as written:
+                    made.append((key, written.read()))
+            yield key
+        if digest is not None:
+            TYPED.put(digest, made)
 
     def _read(
         self, db: Any, path: str, text: str | Table | Sheets
@@ -1052,8 +1087,46 @@ def _name(text: str) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
-#: What every query runs on.
+class Typed:
+    """The typed tables of the texts this process loaded, as Parquet (zstd), by each text's
+    content: a later query, turn or past-result load of the same text reads its tables from
+    here instead of parsing and typing it again — the same tables, as typed then. The least
+    recently used text's are forgotten past :data:`TYPED_BYTES`. Queries load in worker
+    threads: one lock."""
+
+    def __init__(self, most: int = TYPED_BYTES) -> None:
+        self.most = most
+        self.size = 0
+        self._kept: OrderedDict[bytes, list[tuple[str | None, bytes]]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def key(text: str) -> bytes:
+        """A text's key: its content's hash."""
+        return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
+
+    def get(self, key: bytes) -> list[tuple[str | None, bytes]] | None:
+        """The tables kept for the text of ``key`` (each by its part's key), or ``None``."""
+        with self._lock:
+            found = self._kept.get(key)
+            if found is not None:
+                self._kept.move_to_end(key)
+            return found
+
+    def put(self, key: bytes, tables: list[tuple[str | None, bytes]]) -> None:
+        """The tables of the text of ``key``, kept."""
+        with self._lock:
+            self.size -= sum(len(d) for _, d in self._kept.pop(key, ()))
+            self._kept[key] = tables
+            self.size += sum(len(d) for _, d in tables)
+            while self.size > self.most:
+                _, gone = self._kept.popitem(last=False)
+                self.size -= sum(len(d) for _, d in gone)
+
+
+#: What every query runs on, and the typed tables it keeps.
 ENGINE = DuckDB()
+TYPED = Typed()
 
 #: ``query_result``'s description: it names the engine, whose SQL the model writes.
 QUERY_RESULT_DESCRIPTION: Final = (
