@@ -47,6 +47,7 @@ def test_arrays_inside_rows_missing_keys_and_mixed_types() -> None:
 )
 def test_rows_held_deeper_or_one_per_line_are_a_table(text: str) -> None:
     assert query.columns_of(text) == ["id", "items", "tags", "note"]
+    assert len(query.rows_of(text)[1]) == 3
     assert ask(text, "SELECT count(*) n, count(note) late FROM result") == "n,late\n3,1"
 
 
@@ -69,9 +70,10 @@ def test_each_array_an_object_holds_is_a_table() -> None:
     assert ask(big, f"SELECT count(*) n FROM {name}_refunds") == "n\n1"
 
 
-def test_a_part_whose_name_is_taken_is_left_out() -> None:
+def test_a_part_whose_name_is_taken_takes_another() -> None:
     """A part's table (``<table>_<key>``) or view (``result_<key>``) is never made over a
-    table of the same name: the other result keeps it."""
+    table of the same name: the other result keeps it, the part takes the next name free (its
+    view still names it)."""
     run = runtime_module._current.get()
     run.kept_from = {}  # type: ignore[union-attr]
     results.keep("v\n1\n2", tool="a_b")

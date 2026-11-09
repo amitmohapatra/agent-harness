@@ -272,6 +272,8 @@ async def test_every_sheet_of_a_workbook_is_a_table_under_its_header(run: Run) -
     said = await query.query({"file_path": "/files/r0/q3.xlsx", "sql": sql})
     assert said.endswith("\nRegion,u,net\nNorth,7,5.75"), said
     assert "its sheet Costs 2026 is result_Costs_2026" in said, said
+    texts = stored._sheets(sheet(("a", "b"), ("x", "y")))  # text alone: its first row heads it
+    assert texts == {"Sheet": (["a", "b"], [["x", "y"]])}
     wrong = await query.query({"file_path": "/files/r0/q3.xlsx", "sql": "SELECT nope FROM result"})
     assert "result_file (Region, Rep, Units)" in wrong, wrong
     await run.agent.harness.files.put("t/u/c_1/r0", "c.csv", b"k,v\nx,2\n", source="sandbox_exec")

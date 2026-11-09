@@ -842,10 +842,9 @@ class DuckDB:
         with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
             for n, (name, text) in enumerate(texts.items()):
                 for key, columns in self._read(db, os.path.join(folder, str(n)), text):
-                    table = name if key is None else part(name, key)
-                    if key is not None and table in used:  # a name taken: left out
-                        db.execute("DROP TABLE raw")
-                        continue
+                    table = base = name if key is None else part(name, key)
+                    while key is not None and table in used:  # a name taken: the next one
+                        table = f"{base}_{len(used)}"
                     used.add(table)
                     self._typed(db, table, columns)
                     if key is not None and name == own:
