@@ -2739,6 +2739,11 @@ def _has_rank(answer: str, question: str, value: float) -> bool:
 _ONLY_OF: Final = re.compile(
     r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
 )
+#: A count said as the answer's own first words, its sentence ending there: "Just one."
+_LEAD_COUNT: Final = re.compile(
+    r"^\W*(?:(?:only|just|exactly)\s+)?\**(" + "|".join(_COUNTS) + r")\b\**[.!]",
+    re.IGNORECASE,
+)
 _COUNT_WORD: Final = re.compile(
     r"(?<!\bthe )(?<!\bwhich )(?<!\bthis )(?<!\bthat )(?<!\beach )(?<!\bany )\**\b("
     + "|".join(_COUNTS)
@@ -2788,6 +2793,7 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _ONLY_OF.findall(answer)]
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _LEAD_COUNT.findall(answer)]
     if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
         found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]
     return any(abs(n - value) <= tol + 1e-9 for n in found)

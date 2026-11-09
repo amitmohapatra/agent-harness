@@ -988,6 +988,9 @@ def test_a_count_written_as_a_word_reads_as_the_count() -> None:
     assert _right("bf3-cantdo-02", 1, "You have **one** store in Leeds: S01.")
     assert not _right("bf3-cantdo-02", 1, "Two stores are in Leeds: S01 and S05.")
     assert not _right("bf3-cantdo-02", 1, "Leeds has S01 and S05; tell me the one you mean.")
+    # the 145-turn gate: the count as the answer's own first words, then its sentence ends
+    assert _right("bf3-cantdo-02", 1, "Just one. Store S01 is the only Leeds store.")
+    assert _right("bf3-cantdo-02", 1, "**One.** S01, in the north region.")
 
 
 def test_an_abstention_may_name_what_it_was_told_and_the_dates_it_assumes() -> None:
