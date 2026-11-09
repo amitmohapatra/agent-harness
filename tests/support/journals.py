@@ -7,7 +7,7 @@ from typing import Any, Final
 from trellis.contracts import RunRecord
 from trellis.harness.journal import Journal
 
-#: The most an inline checkpoint may be (agent-runs' ``MAX_CHECKPOINT_BYTES``): what a test's
+#: The most a checkpoint may be (agent-runs' ``RUNS__SERVICE__MAX_PAYLOAD_BYTES``): what a test's
 #: store refuses past, as agent-runs does (413).
 CHECKPOINT_BOUND: Final = 1024 * 1024
 

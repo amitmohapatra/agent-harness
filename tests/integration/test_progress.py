@@ -1,7 +1,7 @@
 """A worker that dies mid-run: the journal saved as a progress checkpoint on the heartbeat
 after each side-effecting tool call means the next attempt replays those calls instead of
-running them again — a journal larger than a checkpoint may be too, stored as a run artifact
-the checkpoint names."""
+running them again — a journal larger than a checkpoint may be too, saved in segments the
+checkpoint lists."""
 
 from __future__ import annotations
 
