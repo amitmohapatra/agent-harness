@@ -149,3 +149,31 @@ def test_a_path_this_run_keeps_given_as_a_result_is_that_table(
     said = ask(sql=sql, results=[ref, path])
     assert said.endswith("gap\n97"), said
     assert f"t2 is this run's result {path}" in said
+
+
+def test_a_table_this_run_keeps_given_by_its_name_as_a_result_is_that_table(
+    run: Run, service: FakeMemoryService
+) -> None:
+    """A model that names this run's own table in ``results`` — the name its tool message gave
+    (``Its rows are the table sales_summary_3``) — gets that result, never memory's "no longer
+    kept: call the tool again" (which sent Haiku back to fetch the same rows again and again
+    until its steps ran out: the gate's ``bf1-analytics-02``)."""
+    run.kept_from = {}  # type: ignore[attr-defined]
+    first = results.keep(MONDAY, tool="sales_summary")
+    second = results.keep(TODAY, tool="sales_summary")
+    assert first is not None and second is not None
+    names = query.tables(run)
+    assert (names[first], names[second]) == ("sales_summary", "sales_summary_2")
+    sql = "SELECT t1.units - t2.stock AS gap FROM t1 JOIN t2 USING (sku) WHERE sku = 'S1'"
+    said = ask(file_path=first, sql=sql, results=["sales_summary", "sales_summary_2"])
+    assert said.endswith("gap\n97"), said
+    assert f"t2 is this run's result {second}" in said
+    # the id its path ends with names it too
+    said = ask(file_path=first, sql=sql, results=["sales_summary", second.rsplit("/", 1)[-1]])
+    assert said.endswith("gap\n97"), said
+    # a name memory does not know either: the run's own tables said, not "call the tool again"
+    said = ask(file_path=first, sql=sql, results=["sku_catalog_2"])
+    assert said == (
+        "Error: sku_catalog_2 is no past result. This run's own results are tables already: "
+        "sales_summary, sales_summary_2; name them in the SQL. Nothing was run."
+    )
