@@ -134,9 +134,20 @@ def readable(output: Any, tool: str | None = None) -> str:
     runtime = current()
     if path is None or runtime is None:
         return text
-    columns = ", ".join(query.columns_of(text))
+    what = query.document(text)
+    if what is not None and what != query.MARKUP:  # no rows: where to compute instead
+        table = f"{query.not_rows(path, what)} {PRIVATE}"
+        return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=None, table=table)
+    parts = query.parts_of(text)
     name = query.tables(runtime)[path]
-    table = QUERY.format(table=name, columns=columns, path=path, private=PRIVATE)
+    table = QUERY.format(
+        table=name,
+        columns=", ".join(parts[0][1]),
+        path=path,
+        private=PRIVATE,
+    ) + query.also(parts, name)
+    if what is not None:  # markup: its lines, said first
+        table = f"{query.MARKED.format(path=path)} {table}"
     return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
 
 
@@ -156,8 +167,11 @@ def tabled(text: str, tool: str | None = None) -> str:
     assert path is not None  # in a run
     name = query.tables(runtime)[path]
     table = QUERY.format(
-        table=name, columns=", ".join(query.column_names(columns)), path=path, private=PRIVATE
-    )
+        table=name,
+        columns=", ".join(query.column_names(columns)),
+        path=path,
+        private=PRIVATE,
+    ) + query.also(query.parts_of(text), name)
     return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
 
 

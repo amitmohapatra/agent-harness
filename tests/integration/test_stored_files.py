@@ -25,7 +25,7 @@ from trellis.harness import runtime as runtime_module
 from trellis.harness import snapshots
 from trellis.harness.files import FileStore
 from trellis.harness.journal import Journal, content_key
-from trellis.harness.tools import results, stored
+from trellis.harness.tools import query, results, stored
 
 #: The SKUs on the first day, and the stock on the second (three of them changed)
 DAY1: Final = {f"SKU-{n:03d}": (n * 7) % 40 for n in range(1, 61)}
@@ -207,6 +207,8 @@ class Run:
             harness=SimpleNamespace(files=store), adapter=SimpleNamespace(name="langgraph")
         )
         self.events = SimpleNamespace(warning=lambda *a: None)
+        self.toolbox: dict[str, Any] = {}
+        self.native: dict[str, Any] = {}
         self.__dict__.update(more)
 
 
@@ -236,6 +238,52 @@ async def test_an_excel_file_reads_as_csv_rows(run: Run) -> None:
         "1  when,c2\n2  2026-01-02T03:04:00,5\n3  x,6"
     ), said
     assert await results.aread({"file_path": "/files/r0/a.xlsx", "offset": 2}) == "3  x,6"
+
+
+def workbook() -> bytes:
+    """A report as people make one: a title over its header, a region merged down its rows,
+    and a second sheet."""
+    book = Workbook()
+    sales = book.active
+    assert sales is not None
+    sales.title = "Sales"
+    for row in (["Q3 sales report"], [], ["Region", "Rep", "Units"], ["North", "Ann", 3]):
+        sales.append(row)
+    sales.append([None, "Bob", 4])
+    sales.append(["South", "Cy", 5])
+    sales.merge_cells("A4:A5")
+    costs = book.create_sheet("Costs 2026")
+    costs.append(["region", "cost"])
+    costs.append(["North", 1.25])
+    out = io.BytesIO()
+    book.save(out)
+    return out.getvalue()
+
+
+async def test_every_sheet_of_a_workbook_is_a_table_under_its_header(run: Run) -> None:
+    """Each sheet is a table (the first ``result``, each other ``result_<sheet>``), read under
+    its header row — the title above it left out — and a merged cell is its value in every row
+    it spans."""
+    await run.agent.harness.files.put("t/u/c_1/r0", "q3.xlsx", workbook(), source="sandbox_exec")
+    sql = (
+        "SELECT s.Region, sum(Units) u, sum(Units) - max(c.cost) net FROM result s "
+        "JOIN result_Costs_2026 c ON c.region = s.Region GROUP BY 1"
+    )
+    said = await query.query({"file_path": "/files/r0/q3.xlsx", "sql": sql})
+    assert said.endswith("\nRegion,u,net\nNorth,7,5.75"), said
+    assert "its sheet Costs 2026 is result_Costs_2026" in said, said
+    texts = stored._sheets(sheet(("a", "b"), ("x", "y")))  # text alone: its first row heads it
+    assert texts == {"Sheet": (["a", "b"], [["x", "y"]])}
+    wrong = await query.query({"file_path": "/files/r0/q3.xlsx", "sql": "SELECT nope FROM result"})
+    assert "result_file (Region, Rep, Units)" in wrong, wrong
+    await run.agent.harness.files.put("t/u/c_1/r0", "c.csv", b"k,v\nx,2\n", source="sandbox_exec")
+    said = await query.query({"file_path": "/files/r0/c.csv", "sql": "SELECT v FROM result"})
+    assert said.startswith("result is /files/r0/c.csv (saved") and said.endswith("\nv\n2"), said
+    read = await results.aread({"file_path": "/files/r0/q3.xlsx"})
+    assert "1  Region,Rep,Units\n2  North,Ann,3\n3  North,Bob,4\n4  South,Cy,5" in read, read
+    assert read.endswith(
+        "6  Sheet Costs 2026 (the table result_Costs_2026):\n7  region,cost\n8  North,1.25"
+    ), read
 
 
 async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None:

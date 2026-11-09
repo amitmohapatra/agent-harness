@@ -6,16 +6,26 @@ No sandbox and no Code Mode needed. The engine is DuckDB (:class:`DuckDB`, a req
 dependency: `ADR 0007 <docs/adr/0007-query-engine.md>`_), in memory, made for one query and
 closed after it; the tool's description names it, so the model writes its dialect.
 
-The kept text becomes the table ``result``: a JSON array of objects (or the first such array a
-JSON object holds), CSV with a header line (comma, tab, semicolon or pipe), else one row per
-line (``line``). A column whose every value is a whole number is ``BIGINT``, a decimal as
-written of at most :data:`DECIMAL_DIGITS` digits (``12.50``, money) ``DECIMAL(p, s)``, another
-number ``DOUBLE``, else ``VARCHAR``: a code with a leading zero, or an id past 64 bits, keeps
-its exact text; a nested value is its JSON text (``json_extract`` reads it). A ``DECIMAL``
-column adds up exactly, as written. Every number with a fraction an answer holds is written
-with 15 significant digits (:func:`_shown`): ``32266.15``, never ``32266.149999999998``. A
-number is written as SQL writes one (:data:`WHOLE`, :data:`DECIMAL`, :data:`NUMBER`): never
-``1_000``, ``0x10`` or ``٣``.
+The kept text becomes the table ``result``: a JSON array of objects, JSON Lines (an object
+a line), or the arrays of objects a JSON object holds, however deep (the shallowest: the
+first is ``result``, each other ``result_<key>``); a markdown table; CSV with a header line
+(comma, tab, semicolon or pipe; one column when its values are numbers or dates); else one
+row per line (``line``). A workbook kept for the user is a table a sheet (``result``, then
+``result_<sheet>``). What is no table — a PDF, an image, binary data — is refused
+(:func:`document`), never counted by its lines; HTML or XML is queried as its lines, the
+answer saying so first (:data:`MARKED`).
+
+A column whose every value (a missing one left out: :data:`MISSING`, ``NULL``, ``N/A``,
+``-``…) is a whole number is ``BIGINT``, a decimal as written of at most
+:data:`DECIMAL_DIGITS` digits (``12.50``, money) ``DECIMAL(p, s)``, another number
+``DOUBLE``, else ``VARCHAR``: a code with a leading zero, or an id past 64 bits, keeps its
+exact text; a nested value is its JSON text (``json_extract`` reads it). A ``DECIMAL`` column
+adds up exactly, as written. Money, percentages and figures with separators stay text, as
+written (one column may hold two currencies): a failed sum says how to convert them. Times
+with a zone are compared and written in UTC, whatever the host's zone. Every number with a
+fraction an answer holds is written with 15 significant digits (:func:`_shown`):
+``32266.15``, never ``32266.149999999998``. A number is written as SQL writes one
+(:data:`WHOLE`, :data:`DECIMAL`, :data:`NUMBER`): never ``1_000``, ``0x10`` or ``٣``.
 
 Only reading is allowed, and only the run's own results are ever loaded: one ``SELECT``
 statement (``WITH`` included), and once its tables are loaded no file or network access
@@ -49,8 +59,9 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import ChainMap
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from decimal import Decimal
 from functools import cached_property
 from typing import Any, Final
@@ -101,6 +112,14 @@ QUERY_RESULT_SAVING_SCHEMA: Final[dict[str, Any]] = {
 #: an earlier conversation's steps list, ``result msg_...`` (the memory service's format).
 PAST_RESULTS: Final = 8
 _PAST: Final = re.compile(r"\bresult (msg_\w+)")
+#: What a failure on a text column used as a number adds (:data:`_TEXT_MISUSED`): money,
+#: separators and percentages are kept as written (``tools.query``'s typing rules).
+TEXT_NUMBERS: Final = (
+    ". The column is text: a figure written with a symbol or a separator ($1,234.50, 12%, "
+    "(5.00)) is kept as written; convert it in the query, e.g. TRY_CAST(replace(replace(v, "
+    "'$', ''), ',', '') AS DECIMAL(18, 2)), for one currency at a time"
+)
+_TEXT_MISUSED: Final = re.compile(r"No function matches|Cannot compare|Could not convert")
 #: The rows a saved file's answer shows (the file holds them all).
 SAVED_ROWS: Final = 5
 #: The seconds a query saving its whole result may run, writing included.
@@ -125,7 +144,10 @@ LOAD_SECONDS: Final = 60.0
 INTERRUPT_SECONDS: Final = 0.05
 _RUNNING: Final = threading.BoundedSemaphore(CONCURRENT)
 DELIMITERS: Final = ",\t;|"
-_NAME: Final = re.compile(r"[^0-9A-Za-z_]+")
+_QUOTED: Final = re.compile(r'"[^"]*"')
+#: A markdown table's rule line (``|---|:--:|``) and a header line that names one column.
+_RULE: Final = re.compile(r"\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?")
+_HEAD: Final = re.compile(r"[^\W\d]\w*")
 #: The typing rules (see the module), one text for Python's ``re`` and DuckDB's RE2: a whole
 #: number as SQL writes one, and a number — never with a leading zero before a digit
 #: (``00123``, ``-007``: a code, not a number); spaces around one are left out.
@@ -136,6 +158,10 @@ NUMBER: Final = DECIMAL + r"([eE][-+]?[0-9]+)?"
 #: The most digits a ``DECIMAL`` value has: an answer writes 15 significant digits
 #: (:func:`_shown`), which a float keeps exactly (its text read back is the same).
 DECIMAL_DIGITS: Final = 15
+#: A value one column of a CSV holds under its header: a number, or an ISO date or time.
+_VALUE: Final = re.compile(NUMBER + r"|[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9:.]+(Z|[+-][0-9:]+)?)?")
+#: What a cell holding no value says: among numbers, it is missing (``NULL``), not text.
+MISSING: Final = ("NULL", "NONE", "NA", "N/A", "#N/A", "NAN", "-", "--", "\u2014")
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
 #: The rows DuckDB first types a table's columns by: a column with a value no number there
@@ -144,12 +170,15 @@ SAMPLE_ROWS: Final = 2_048
 
 
 def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
-    """A kept result as a table: its columns and rows (see the module)."""
+    """A kept result as a table: its columns and rows (see the module) — a JSON object's
+    first array of objects."""
     kind, found = _shape(text)
     if kind == "json":
-        rows = found[0]
+        rows = found[0][1]
         columns = _keys(rows)
-        return columns, [[_cell(row.get(c)) for c in columns] for row in rows]
+        return columns, [[row.get(c) for c in columns] for row in rows]
+    if kind == "table":
+        return found
     if kind == "csv":
         read = list(csv.reader(io.StringIO(text), delimiter=found))
         width = len(read[0])
@@ -158,42 +187,153 @@ def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
 
 
 def _shape(text: str, *, values: bool = True) -> tuple[str, Any]:
-    """What a kept result is, as a table (see the module): ``("json", (rows, key))`` (the key
-    of the object that holds them, ``None`` for an array; without ``values``, each row only
-    its keys: :func:`_json_rows`), ``("csv", delimiter)`` or ``("lines", lines)``."""
+    """What a kept result is, as a table (see the module): ``("json", parts)`` (each array
+    of objects with the keys that reach it, ``()`` for an array or JSON Lines; without
+    ``values``, each row only its keys: :func:`_json_rows`), ``("table", (columns, rows))``
+    (markdown), ``("csv", delimiter)`` or ``("lines", lines)``."""
     found = _json_rows(text, values=values)
     if found is not None:
         return "json", found
     lines = text.splitlines()
-    head = lines[0] if lines else ""
+    table = _markdown(lines)
+    if table is not None:
+        return "table", table
+    head = _QUOTED.sub("", lines[0]) if lines else ""  # a delimiter quoted is a name's
     delimiter = max(DELIMITERS, key=head.count)
-    if head.count(delimiter) > 0 and len(lines) > 1:
+    if len(lines) > 1 and (head.count(delimiter) > 0 or _one_column(lines)):
         return "csv", delimiter
     return "lines", lines
+
+
+def _markdown(lines: Sequence[str]) -> Table | None:
+    """A markdown table (``| a | b |`` over its rule line): its columns and its rows, each
+    cell trimmed, the rule line no row; ``None`` when the text is none."""
+    if len(lines) < 2 or "|" not in lines[0] or not _RULE.fullmatch(lines[1].strip()):
+        return None
+
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().removeprefix("|").removesuffix("|").split("|")]
+
+    columns = cells(lines[0])
+    return columns, [_padded(cells(line), len(columns)) for line in lines[2:] if "|" in line]
+
+
+def _one_column(lines: Sequence[str]) -> bool:
+    """Whether lines with no delimiter are a one-column CSV: a name over numbers or dates."""
+    values = [v for v in map(str.strip, lines[1:]) if v]
+    head = lines[0].strip().lstrip("\ufeff")
+    return bool(values) and bool(_HEAD.fullmatch(head)) and all(map(_VALUE.fullmatch, values))
 
 
 def _keys(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return list(dict.fromkeys(k for row in rows for k in row))
 
 
-#: A table given as rows (a kept Excel file's: ``tools.stored``): its columns and its rows.
+#: A table given as rows (a kept Excel file's sheet: ``tools.stored``): its columns and rows.
 Table = tuple[list[str], list[list[Any]]]
+#: A kept workbook's sheets, by name: the first is the result's table, each other one of its
+#: own (:func:`part`).
+Sheets = Mapping[str, Table]
+#: What a query loads as a result's table (or tables).
+Source = str | Sheets
 
 
-def columns_of(text: str | Table) -> list[str]:
+def columns_of(text: Source) -> list[str]:
     """The columns a kept result's table has (as :func:`query` names them)."""
-    return column_names(_rows(text)[0])
+    return parts_of(text)[0][1]
 
 
-def _rows(text: str | Table) -> Table:
-    return rows_of(text) if isinstance(text, str) else text
+def parts_of(text: Source) -> list[tuple[str | None, list[str]]]:
+    """The tables a kept result is, each with its columns (as :func:`query` names them): its
+    own (``None``), then each other array of objects its JSON holds, or each other sheet, by
+    its key or name (:func:`part` names its table)."""
+    if isinstance(text, Mapping):
+        return [
+            (None if n == 0 else s, column_names(t[0])) for n, (s, t) in enumerate(text.items())
+        ]
+    kind, found = _shape(text)
+    if kind == "json":
+        return [
+            (keys[-1] if n else None, column_names(_keys(rows)))
+            for n, (keys, rows) in enumerate(found)
+        ]
+    return [(None, column_names(rows_of(text)[0]))]
 
 
-def _size(text: str | Table) -> int:
+def part(table: str, name: str) -> str:
+    """The table a result's part (an array its JSON holds, a sheet) is: ``<table>_<name>``."""
+    return column_names([f"{table}_{name}"])[0]
+
+
+def also(parts: Sequence[tuple[str | None, list[str]]], table: str) -> str:
+    """What a result's other parts are (:func:`parts_of`), as tables of ``table``'s query."""
+    said = [
+        f'"{name}" is the table {part(table, name)} (columns: {", ".join(columns)})'
+        for name, columns in parts
+        if name is not None
+    ]
+    return f" Its other rows are tables too: {'; '.join(said)}." if said else ""
+
+
+def _size(text: str | Table | Sheets) -> int:
     """What a table takes to load, in characters (a table given as rows: its cells' text)."""
     if isinstance(text, str):
         return len(text)
+    if isinstance(text, Mapping):
+        return sum(map(_size, text.values()))
     return sum(len(str(v)) for row in text[1] for v in row)
+
+
+#: What markup is (:func:`document`): its lines are a table still, which a query reads with
+#: care — an answer over them says first what they are (:data:`MARKED`).
+MARKUP: Final = "an HTML or XML document"
+MARKED: Final = (
+    "Note: {path} is " + MARKUP + ": the table holds its lines (column line), not its own "
+    "table's rows, so a count of lines is no count of rows; take its cells out with "
+    "regexp_extract_all(line, '<td[^>]*>([^<]*)', 1), or with code in a sandbox."
+)
+#: What a result that is no table is (:func:`document`), and what a query of it answers.
+NOT_ROWS: Final = (
+    "{path} is {what}, not rows: query_result reads JSON or CSV rows, and would only count its "
+    "lines. Read it with read_file{how}"
+)
+
+
+def document(text: str) -> str | None:
+    """What ``text`` is when it is no table — HTML or XML (:data:`MARKUP`: its lines are
+    queried, said so), a PDF, an image (its bytes or their base64), binary data (refused) —
+    else ``None``."""
+    head = text[:2048].lstrip("\ufeff \t\r\n")
+    if head.startswith(("%PDF-", "JVBERi0")):
+        return "a PDF"
+    if head.startswith(("data:image/", "iVBORw0KGgo", "/9j/", "R0lGOD", "\x89PNG", "GIF8")):
+        return "an image"
+    if "\x00" in head:
+        return "binary data"
+    if head.startswith("<") and ("</" in head or "/>" in head or head.startswith("<?xml")):
+        return MARKUP
+    return None
+
+
+def _markup(runtime: Any, path: str, given: Source | None) -> bool:
+    """Whether the result a query read at ``path`` is HTML or XML (:data:`MARKUP`)."""
+    text = given if given is not None else saved(runtime).get(path)
+    return isinstance(text, str) and document(text) == MARKUP
+
+
+def not_rows(path: str, what: str) -> str:
+    """What a query of ``path``, which is ``what`` (:func:`document`), answers: where its
+    tables or text are computed instead — code in the run's sandbox, when it has one."""
+    from trellis.harness.tools.results import coding_tool  # noqa: PLC0415 - it imports this
+
+    tool = coding_tool()
+    how = (
+        f"; to extract its tables or figures, run code over the file {path} with {tool}."
+        if tool is not None
+        else "; extracting its tables or figures takes code, run in a sandbox, which this run "
+        "has not."
+    )
+    return NOT_ROWS.format(path=path, what=what, how=how)
 
 
 #: Where a large result is kept (``tools.results.PREFIX``), and what a path there that no run
@@ -322,7 +462,7 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
         return past
     path = None if args.get("file_path") is None else "/" + str(args["file_path"]).lstrip("/")
     record: dict[str, Any] | None = None
-    given: str | Table | None = text
+    given: Source | None = text
     if text is None and path is not None and _stored(path):
         found = await _kept_file(path)
         if isinstance(found, str):
@@ -333,7 +473,9 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     answer = await run(path, sql, (), given, past=past[0])
     if answer.startswith("Error"):
         return answer
-    told = [_told(runtime, path, record, sql)] if record is not None and path else []
+    if path is not None and _markup(runtime, path, given):
+        answer = f"{MARKED.format(path=path)}\n{answer}"
+    told = [_told(runtime, path, record, sql, given)] if record is not None and path else []
     told += past[1]
     return "; ".join(told) + f".\n{answer}" if told else answer
 
@@ -358,7 +500,7 @@ def _stored(path: str) -> bool:
     return stored.is_stored(path)
 
 
-async def _kept_file(path: str) -> tuple[str | Table, dict[str, Any]] | str:
+async def _kept_file(path: str) -> tuple[Source, dict[str, Any]] | str:
     """A file kept for the user (``tools.stored``), loaded from the store: its table and its
     record, or what is wrong."""
     from trellis.harness.tools import stored  # noqa: PLC0415
@@ -366,13 +508,15 @@ async def _kept_file(path: str) -> tuple[str | Table, dict[str, Any]] | str:
     return await stored.table(path)
 
 
-def _told(runtime: Any, path: str, record: dict[str, Any], sql: str) -> str:
+def _told(runtime: Any, path: str, record: dict[str, Any], sql: str, given: Source | None) -> str:
     """Where a query over a kept file read its rows: the file — when it was saved, by what,
-    from what fetched when (its record) — and each of this run's results it names, fetched
-    when: what a comparison of the two cites."""
+    from what fetched when (its record), each other sheet's table — and each of this run's
+    results it names, fetched when: what a comparison of the two cites."""
     from trellis.harness.tools import stored  # noqa: PLC0415
 
     said = [f"{TABLE} is {path} ({stored.made(record)})"]
+    if isinstance(given, Mapping):
+        said.extend(f"its sheet {s} is {part(TABLE, s)}" for s in list(given)[1:])
     said.extend(
         f"{s['table']} is this run's {s['tool']} result, fetched {stored.when(s['fetched_at'])}"
         for s in _sources(runtime, path, sql)
@@ -385,7 +529,7 @@ async def _save(
     runtime: Any,
     args: dict[str, Any],
     sql: str,
-    text: str | Table | None,
+    text: Source | None,
     record: dict[str, Any] | None = None,
     *,
     past: Mapping[str, str] | None = None,
@@ -442,8 +586,8 @@ def _sources(
 
 
 def loadable(
-    file_path: str | None, text: str | Table | None = None, past: Mapping[str, str] | None = None
-) -> tuple[dict[str, str | Table], str] | str:
+    file_path: str | None, text: Source | None = None, past: Mapping[str, str] | None = None
+) -> tuple[dict[str, Source], str] | str:
     """What a query of ``file_path`` loads — the run's saved results by table name (the file
     asked about among them, given as ``text`` when it is no result the run keeps: a file Deep
     Agents saved, a file kept for the user, read from the store), and the ``past`` results
@@ -452,7 +596,7 @@ def loadable(
     runtime = current()
     kept = saved(runtime) if runtime is not None else {}
     named = tables(runtime) if runtime is not None else {}
-    texts: dict[str, str | Table] = {named[p]: kept[p] for p in named} | dict(past or {})
+    texts: dict[str, Source] = {named[p]: kept[p] for p in named} | dict(past or {})
     if file_path is None:  # past results only (``query`` asks for one at least)
         own = next(iter(past or {}), "t1")
     else:
@@ -461,6 +605,9 @@ def loadable(
             text = kept.get(path)
         if text is None or runtime is None:
             return not_found(path)
+        what = document(text) if isinstance(text, str) else None
+        if what is not None and what != MARKUP:
+            return f"Error: {not_rows(path, what)}"
         if path not in named:
             texts[f"{TABLE}_file"] = text  # a file Deep Agents saved, a kept one: ``result``
         own = named.get(path, f"{TABLE}_file")
@@ -476,7 +623,7 @@ async def run(
     file_path: str | None,
     sql: str,
     params: Sequence[Any] = (),
-    text: str | Table | None = None,
+    text: Source | None = None,
     *,
     save: str | None = None,
     past: Mapping[str, str] | None = None,
@@ -545,7 +692,7 @@ class _Call:
 
 
 def _answer(
-    texts: Mapping[str, str | Table],
+    texts: Mapping[str, Source],
     own: str,
     sql: str,
     params: Sequence[Any],
@@ -581,6 +728,8 @@ def _answer(
                 return f"Error: the query has {exc}: aggregate, or narrow it with WHERE"
             except (*engine.errors, TimeoutError) as exc:
                 said = "took too long" if time.monotonic() > call.ends else engine.said(exc)
+                if "VARCHAR" in said and _TEXT_MISUSED.search(said):
+                    said += TEXT_NUMBERS
                 there = "; ".join(f"{t} ({', '.join(columns_of(x))})" for t, x in texts.items())
                 return (
                     f"Error: the query failed: {said}. Only a SELECT runs, over the table "
@@ -687,77 +836,86 @@ class DuckDB:
         with contextlib.closing(self.duckdb.connect(":memory:", config=config)) as db:
             yield db
 
-    def load(self, db: Any, texts: Mapping[str, str | Table], own: str) -> None:
+    def load(self, db: Any, texts: Mapping[str, Source], own: str) -> None:
+        used = {TABLE, *texts}
+        views: list[tuple[str, str]] = []  # the queried result's parts, as result_<part>
         with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
             for n, (name, text) in enumerate(texts.items()):
-                self._typed(db, name, self._read(db, os.path.join(folder, str(n)), text))
+                for key, columns in self._read(db, os.path.join(folder, str(n)), text):
+                    table = base = name if key is None else part(name, key)
+                    while key is not None and table in used:  # a name taken: the next one
+                        table = f"{base}_{len(used)}"
+                    used.add(table)
+                    self._typed(db, table, columns)
+                    if key is not None and name == own:
+                        views.append((part(TABLE, key), table))
         for macro in MACROS:
             db.execute(macro)
         db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
+        for view, table in views:
+            if view not in used:
+                db.execute(f"CREATE VIEW {_name(view)} AS SELECT * FROM {_name(table)}")
+        db.execute("SET TimeZone = 'UTC'")  # a time with a zone is read the same on any host
         db.execute("SET enable_external_access = false")
         db.execute("SET lock_configuration = true")
 
-    def _read(self, db: Any, path: str, text: str | Table) -> list[str]:
+    def _read(
+        self, db: Any, path: str, text: str | Table | Sheets
+    ) -> Iterator[tuple[str | None, list[str]]]:
         """``text`` as the table ``raw``, every column ``VARCHAR`` (an empty cell ``NULL``),
         read by DuckDB's own reader from ``path`` (written here: the text, or its lines as
-        CSV); its columns (:func:`column_names`). Its shape is :func:`_shape`'s; a table given
-        as rows (a kept Excel file's) is written as CSV under its columns and read as one."""
+        CSV); its columns (:func:`column_names`) — once for each table it is (:func:`parts_of`:
+        its own, ``None``, then each part by its key), ``raw`` taken before the next. Its shape
+        is :func:`_shape`'s; a table given as rows (a sheet, a markdown table) is written as
+        CSV under its columns and read as one."""
         found: Any
-        if not isinstance(text, str):
+        if isinstance(text, Mapping):  # a workbook: a table a sheet
+            for n, (sheet, table) in enumerate(text.items()):
+                for _, names in self._read(db, f"{path}_{n}", table):
+                    yield (sheet if n else None), names
+            return
+        kind, found = _shape(text, values=False) if isinstance(text, str) else ("table", text)
+        body = text if isinstance(text, str) else ""
+        if kind == "table":
             written = io.StringIO()
-            csv.writer(written, lineterminator="\n").writerows([text[0], *text[1]])
-            text, kind, found = written.getvalue(), "csv", ","
-        else:
-            kind, found = _shape(text, values=False)  # DuckDB reads the values
+            csv.writer(written, lineterminator="\n").writerows([found[0], *found[1]])
+            body, kind, found = written.getvalue(), "csv", ","
         file = _quoted(path)
         with open(path, "w", encoding="utf-8", errors="replace", newline="") as out:
             if kind == "lines":
                 csv.writer(out).writerows([["line"], *([line] for line in found)])
             else:
-                out.write(text)
+                out.write(body)
         if kind == "json":  # a string as its text, a number as written, a nested value as JSON
-            rows, key = found
-            keys = _keys(rows)
-            names = column_names(keys)
-            largest = f"maximum_object_size = {len(text) + 1}"
-            if key is None:  # an array of objects: one record each
-                spec = ", ".join(f"{_quoted(k)}: 'VARCHAR'" for k in keys)
-                source = (
-                    f"read_json({file}, format = 'array', records = true, "
-                    f"columns = {{{spec}}}, {largest})"
+            for n, (keys, rows) in enumerate(found):
+                fields = _keys(rows)
+                names = column_names(fields)
+                source, cells = _json_source(file, body, keys, fields)
+                listed = ", ".join(
+                    f"NULLIF({c}, '') AS {_name(n)}" for c, n in zip(cells, names, strict=True)
                 )
-                cells = [_name(k) for k in keys]
-            else:  # an object holding the array: its rows unnested
-                fields = _quoted(f"STRUCT({', '.join(f'{_name(k)} VARCHAR' for k in keys)})[]")
-                source = (
-                    f"(SELECT unnest({_name(key)}) AS r FROM read_json({file}, records = true, "
-                    f"columns = {{{_quoted(key)}: {fields}}}, {largest}))"
-                )
-                cells = [f"struct_extract(r, {_quoted(k)})" for k in keys]
-            listed = ", ".join(
-                f"NULLIF({c}, '') AS {_name(n)}" for c, n in zip(cells, names, strict=True)
-            )
-            db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
-            return names
+                db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
+                yield (keys[-1] if n else None), names
+            return
         if kind == "csv":
-            names = column_names(next(csv.reader(io.StringIO(text), delimiter=found)))
+            names = column_names(next(csv.reader(io.StringIO(body), delimiter=found)))
             spec = ", ".join(f"{_quoted(n)}: 'VARCHAR'" for n in names)
             # as Python's csv reads it: short rows padded, long ones cut, blank lines skipped
             source = (
                 f"read_csv({file}, delim = {_quoted(found)}, header = true, quote = '\"', "
                 f"escape = '\"', columns = {{{spec}}}, auto_detect = false, "
                 f"null_padding = true, strict_mode = false, parallel = false, "
-                f"max_line_size = {max(len(text), 2**21)})"
+                f"max_line_size = {max(len(body), 2**21)})"
             )
         else:  # one row per line
             names = ["line"]
             source = (
                 f"read_csv({file}, header = true, columns = {{'line': 'VARCHAR'}}, "
-                f"auto_detect = false, max_line_size = {max(len(text), 2**21)})"
+                f"auto_detect = false, max_line_size = {max(len(body), 2**21)})"
             )
         listed = ", ".join(f"NULLIF({_name(n)}, '') AS {_name(n)}" for n in names)
         db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
-        return names
+        yield None, names
 
     def _typed(self, db: Any, name: str, columns: Sequence[str]) -> None:
         """The table ``name`` from ``raw`` (dropped after), each column typed by the module's
@@ -780,7 +938,10 @@ class DuckDB:
                 else:
                     kinds[column] = "DOUBLE"
         cast = [
-            f"CAST({_name(c)} AS {kinds[c]}) AS {_name(c)}" if kinds[c] else _name(c)
+            f"CAST(CASE WHEN {_missing(c)} THEN NULL ELSE {_name(c)} END AS {kinds[c]}) "
+            f"AS {_name(c)}"
+            if kinds[c]
+            else _name(c)
             for c in columns
         ]
         db.execute(f"CREATE TABLE {_name(name)} AS SELECT {', '.join(cast)} FROM raw")
@@ -789,16 +950,71 @@ class DuckDB:
     def execute(self, db: Any, sql: str, params: Sequence[Any]) -> Any:
         duckdb = self.duckdb
         statements = duckdb.extract_statements(sql)
+        if len(statements) == 1 and statements[0].type == duckdb.StatementType.MULTI:
+            raise duckdb.PermissionException(PIVOT_VALUES)  # a PIVOT that creates a type first
         if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
             raise duckdb.PermissionException("not authorized: only one SELECT runs")
-        return db.execute(sql, list(params))
+        cursor = db.execute(sql, list(params))
+        described = cursor.description or ()
+        zoned = [str(d[1]) in ZONED for d in described]
+        if not any(zoned):
+            return cursor
+        # a time with a zone as its text in UTC: Python reads it only with pytz
+        shown = ", ".join(
+            f"CAST(#{n} AS VARCHAR) AS {_name(d[0])}" if z else f"#{n} AS {_name(d[0])}"
+            for n, (d, z) in enumerate(zip(described, zoned, strict=True), start=1)
+        )
+        return db.execute(f"SELECT {shown} FROM ({sql}\n)", list(params))
 
     def said(self, exc: Exception) -> str:
-        return str(exc).split("\n\nLINE ")[0]  # its pointer under the SQL left out
+        # its pointer under the SQL, and the functions it lists, left out
+        return re.split(r"\n\nLINE |\n\tCandidate functions", str(exc))[0]
+
+
+#: What a ``PIVOT`` that lists no values is told: DuckDB creates a type for them first.
+PIVOT_VALUES: Final = (
+    "a PIVOT lists the values it makes columns of: PIVOT result ON p IN ('a', 'b') USING "
+    "sum(v) GROUP BY r (or sum(v) FILTER (WHERE p = 'a') per column)"
+)
+#: The types a time with a zone has, written as text in an answer.
+ZONED: Final = frozenset({"TIMESTAMP WITH TIME ZONE", "TIME WITH TIME ZONE"})
+
+
+def _json_source(
+    file: str, text: str, keys: Sequence[str], fields: Sequence[str]
+) -> tuple[str, list[str]]:
+    """Where DuckDB reads the rows of a JSON result's array ``keys`` deep (:func:`_json_rows`),
+    each field as text, and each field's cell there."""
+    largest = f"maximum_object_size = {len(text) + 1}"
+    if not keys:  # an array of objects, or JSON Lines: one record each
+        spec = ", ".join(f"{_quoted(k)}: 'VARCHAR'" for k in fields)
+        form = "array" if text.lstrip().startswith("[") else "newline_delimited"
+        source = (
+            f"read_json({file}, format = '{form}', records = true, columns = {{{spec}}}, {largest})"
+        )
+        return source, [_name(k) for k in fields]
+    held = f"STRUCT({', '.join(f'{_name(k)} VARCHAR' for k in fields)})[]"
+    reach = _name(keys[0])
+    for key in keys[1:]:
+        reach = f"struct_extract({reach}, {_quoted(key)})"
+    for key in reversed(keys[1:]):
+        held = f"STRUCT({_name(key)} {held})"
+    source = (
+        f"(SELECT unnest({reach}) AS r FROM read_json({file}, records = true, "
+        f"columns = {{{_quoted(keys[0])}: {_quoted(held)}}}, {largest}))"
+    )
+    return source, [f"struct_extract(r, {_quoted(k)})" for k in fields]
+
+
+def _missing(column: str) -> str:
+    """In SQL: whether a text cell says it holds no value (:data:`MISSING`)."""
+    said = ", ".join(map(_quoted, MISSING))
+    return f"upper(trim({_name(column)})) IN ({said})"
 
 
 def _counted(column: str) -> str:
-    """In SQL, over a text column: how many values it has, how many are whole numbers, how
+    """In SQL, over a text column: how many values it has (a missing one not counted:
+    :func:`_missing`), how many are whole numbers, how
     many decimals (:data:`DECIMAL`, at most :data:`DECIMAL_DIGITS` digits), how many numbers
     (:data:`WHOLE` within 64 bits, or :data:`NUMBER` and finite; DuckDB's casts allow the
     spaces around one), and the decimals' most digits before the point and after it."""
@@ -817,7 +1033,8 @@ def _counted(column: str) -> str:
     before = f"length(ltrim(split_part(ltrim({text}, '+-'), '.', 1), '0'))"
     after = f"length(split_part({text}, '.', 2))"
     return (
-        f"count({_name(column)}), count(*) FILTER ({short} AND {whole} AND {fits}), "
+        f"count(*) FILTER (WHERE NOT {_missing(column)}), "
+        f"count(*) FILTER ({short} AND {whole} AND {fits}), "
         f"count(*) FILTER ({decimal}), "
         f"count(*) FILTER ({short} AND (CASE WHEN {whole} THEN {fits} ELSE {number} END)), "
         f"coalesce(max({before}) FILTER ({decimal}), 0), "
@@ -850,47 +1067,72 @@ QUERY_RESULT_DESCRIPTION: Final = (
 
 def _json_rows(
     text: str, *, values: bool = True
-) -> tuple[Sequence[Mapping[str, Any]] | Sequence[tuple[str, ...]], str | None] | None:
-    """The rows of a JSON result: an array of objects, or the first such array an object
-    holds (``{"items": [...]}``), with that key (``None`` for an array); ``None`` when it is
-    no such JSON. Without ``values``, each row is only its keys (one tuple for rows alike), for
-    a reader that reads the values itself: a fraction of the memory of the rows as dicts."""
-    last: list[Any] = [None]  # the pairs of the object read last: the outermost one at the end
+) -> list[tuple[tuple[str, ...], Sequence[Any]]] | None:
+    """The rows of a JSON result, each array of objects with the keys that reach it: an array
+    (``()``), JSON Lines (an object a line: ``()``), or the arrays of objects an object holds
+    at the shallowest depth any is (breadth first, in order); ``None`` when it is no such
+    JSON. Without ``values``, each object is only its keys (:class:`_Keys`, one for objects
+    alike), for a reader that reads the values itself: a fraction of the memory of dicts."""
     alike: dict[tuple[str, ...], _Keys] = {}
 
     def keys(pairs: list[tuple[str, Any]]) -> _Keys:
-        last[0] = pairs
         found = _Keys(k for k, _ in pairs)
+        held = {k: v for k, v in pairs if isinstance(v, _Keys | list)}
+        if held:  # where rows may be: never one shared
+            found.held = held
+            return found
         return alike.setdefault(found, found)
 
-    try:
-        found = json.loads(text) if values else json.loads(text, object_pairs_hook=keys)
-    except ValueError:
-        return None
+    hook = None if values else keys
     kind = dict if values else _Keys
-    if isinstance(found, kind):
-        pairs = dict(found if isinstance(found, dict) else last[0])
-        key = next((k for k, v in pairs.items() if _objects(v, kind)), None)
-        return None if key is None else (pairs[key], key)
-    return (found, None) if _objects(found, kind) else None
+    try:
+        found = json.loads(text, object_pairs_hook=hook)
+    except ValueError as exc:
+        if not (str(exc).startswith("Extra data") and text.lstrip().startswith("{")):
+            return None
+        try:  # JSON Lines
+            found = [
+                json.loads(line, object_pairs_hook=hook)
+                for line in text.splitlines()
+                if line.strip()
+            ]
+        except ValueError:
+            return None
+    if _objects(found, kind):
+        return [((), found)]
+    level = [((), found)] if isinstance(found, kind) else []
+    while level:
+        inside = [((*at, k), v) for at, o in level for k, v in _items(o)]
+        arrays = [(at, v) for at, v in inside if _objects(v, kind)]
+        if arrays:
+            return arrays
+        level = [(at, v) for at, v in inside if isinstance(v, kind)]
+    return None
 
 
 class _Keys(tuple[str, ...]):
-    """A JSON object read for its keys only (:func:`_json_rows` without values)."""
+    """A JSON object read for its keys only (:func:`_json_rows` without values), and the
+    objects and arrays it holds (``held``), where rows may be."""
+
+    held: Mapping[str, Any]
+
+
+def _items(value: Any) -> Iterable[tuple[str, Any]]:
+    """What a JSON object holds: a dict's items, or a :class:`_Keys`' objects and arrays."""
+    return value.items() if isinstance(value, dict) else getattr(value, "held", {}).items()
 
 
 def _objects(value: Any, kind: type = dict) -> bool:
     return isinstance(value, list) and bool(value) and all(isinstance(v, kind) for v in value)
 
 
-def _cell(value: Any) -> Any:
-    """A JSON value as a cell: a number or text as it is (a whole number past 64 bits
-    as its digits), anything else its JSON text, compact (as DuckDB writes it)."""
-    if isinstance(value, int) and not isinstance(value, bool) and not -(2**63) <= value < 2**63:
-        return str(value)
-    if value is None or (isinstance(value, str | int | float) and not isinstance(value, bool)):
-        return value
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+def _letter(char: str) -> str:
+    """``char`` as a name keeps it (a letter, a mark, a digit, ``_``), else NUL."""
+    kind = unicodedata.category(char)
+    return char if char == "_" or kind[0] in "LM" or kind == "Nd" else "\0"
+
+
+_NAME: Final = re.compile("\0+")
 
 
 def _padded(row: Sequence[str], width: int) -> list[str | None]:
@@ -898,11 +1140,12 @@ def _padded(row: Sequence[str], width: int) -> list[str | None]:
 
 
 def column_names(columns: Sequence[str]) -> list[str]:
-    """Column names SQL takes as they are: letters, digits and ``_``, each once."""
+    """Column names SQL takes as they are: letters (of any script, their marks too), digits and
+    ``_``, each once; a run of anything else is one ``_``."""
     seen: dict[str, int] = {}
     out = []
     for n, column in enumerate(columns):
-        name = _NAME.sub("_", str(column)).strip("_") or f"c{n + 1}"
+        name = _NAME.sub("_", "".join(map(_letter, str(column)))).strip("_") or f"c{n + 1}"
         seen[name] = seen.get(name, 0) + 1
         out.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
     return out

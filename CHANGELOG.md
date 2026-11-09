@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### `query_result` over complex data
+
+- JSON rows held at any depth, each array an object holds (`result_<key>`), JSON Lines, markdown
+  tables, a one-column CSV, a quoted delimiter in a header, column names in any script.
+- `NULL`, `N/A`, `-` among numbers are missing values; times with a zone are compared and
+  written in UTC; money and percentages stay text, and a failed sum says how to convert them.
+- A PDF, an image or binary data is refused, pointing to the sandbox; HTML or XML is queried as
+  its lines, the answer saying so. A workbook is a table a sheet, under its header, merged
+  cells filled.
+
 ### A journal is read from its segments only
 
 - A run's checkpoint lists its journal's segments (`trellis_segments`); that is the only
