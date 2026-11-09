@@ -2681,7 +2681,7 @@ wheels = [
 
 [[package]]
 name = "trellis-contracts"
-version = "0.6.5"
+version = "0.7.0"
 source = { editable = "../agent-contracts" }
 dependencies = [
     { name = "pydantic" },
@@ -2870,7 +2870,7 @@ dev = [
 
 [[package]]
 name = "trellis-memory"
-version = "0.6.3"
+version = "0.6.4"
 source = { editable = "../agent-memory-service/sdk/python" }
 dependencies = [
     { name = "httpx" },
