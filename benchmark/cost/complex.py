@@ -176,6 +176,8 @@ class Probe:
 #: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
 #: busy-conversation modes (``trellis.harness.conversation.Mode``).
 BUSY: Final = ("queue", "interrupt", "steer")
+#: The most pauses of one ``Turn.approve`` turn approved (one per call it asks about).
+APPROVALS: Final = 5
 #: Who approves a turn's paused call (``Turn.approve``).
 REVIEWER: Final = "trellis-bench-reviewer"
 
@@ -3562,7 +3564,11 @@ async def run_case(
             thread=f"cx-{tag}-{case.id}-{t.thread}",
             mode=t.mode or "queue",
         )
-        if t.approve and result.status is RunStatus.PAUSED and result.interrupt is not None:
+        # every approval the turn asks for is given: a turn may ask once per call (histx-03,
+        # live: two of the user's statements forgotten, two asks), never past APPROVALS
+        for _ in range(APPROVALS):
+            if not (t.approve and result.status is RunStatus.PAUSED and result.interrupt):
+                break
             paused.add(id(t))
             result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
         # a shell command that only reads, or saves only inside the run's own folder, is
