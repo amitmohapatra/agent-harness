@@ -5,6 +5,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### A journal is read from its segments only
+
+- A run's checkpoint lists its journal's segments (`trellis_segments`); that is the only
+  format. A checkpoint holding the journal inline, or naming it as a run artifact
+  (`journal_ref`), is refused (`HarnessError`). No migration: dev databases are reset.
+  `LocalRuns` keeps the same format in its folder.
+
 ### Past results by reference
 
 - `query_result(results=["msg_..."])` loads past tool results (the ids an earlier

@@ -161,12 +161,12 @@ after their process died.
 agent-runs took, as one payload object (zstd JSON, `POST /v1/runs/{id}/payloads`), and nothing
 when nothing changed; the checkpoint lists the segments, `{"trellis_segments": [ref, ...]}`.
 The attempt that continues the run (after a crash, or after a resume in any process) reads
-them all at once and applies them in order; every 64 saves one segment holds the whole journal
-again, so a resume reads at most 64. A save's size follows what the step added, not the run's
+them all at once and applies them in order; every 16 saves one segment holds the whole journal
+again, so a resume reads at most 16. A save's size follows what the step added, not the run's
 length, and the run's database row holds references only. Nothing to configure. A resume
 reads the journal before it answers the run, so a journal that cannot be read leaves the run
-waiting. A run saved by an earlier release (the journal inline, or `{"journal_ref": ...}` as a
-run artifact) is read as before. With no `RUNS_URL` the store is this process's memory, and the
+waiting. A checkpoint that lists no segments is refused: segments are the only format. With
+no `RUNS_URL` the store is this process's memory, and the
 segments are files in a temporary folder (`LocalRuns(payload_root=)`), in the same format:
 it bounds nothing, and the same reference is kept there with the run.
 
