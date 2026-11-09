@@ -7,7 +7,8 @@ The model reads them at ``/files/<run>/<name>`` (a file of this chat), at
 run of a chat that has files is told of them as it starts (:func:`note`: a line each, with
 what made it and when the results it was made from were fetched, from the file's record:
 ``FileStore.record``); a run of a user with files only in other chats is told where to list
-them. ``read_file`` reads one — CSV and Excel as CSV rows (Excel with the ``xlsx`` extra) —
+them. ``read_file`` reads one — CSV and Excel as CSV rows (Excel with the ``xlsx`` extra:
+each sheet under its header row, a merged cell's value in each cell it spans) —
 its first page saying how it was made: the run, the query, its sources and their fetch times,
 the run's tool calls. ``query_result`` loads one from the store as a table (:func:`table`), so
 one query compares an earlier file with this run's results.
@@ -18,16 +19,17 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import re
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from trellis.contracts import ToolError
 from trellis.harness import snapshots
 from trellis.harness.files import FileStore, file_name, part
 from trellis.harness.runtime import Runtime, current
-from trellis.harness.tools import results
+from trellis.harness.tools import query, results
 
 #: Where the model reads the files kept for its user.
 PREFIX: Final = "/files"
@@ -55,8 +57,14 @@ GONE: Final = "Error: {path} was deleted: it is no longer kept. It was {made}."
 #: The extension Excel's files have.
 XLSX: Final = ".xlsx"
 
-#: A table read from a file: its columns and its rows.
-Table = tuple[list[str], list[list[Any]]]
+#: A table read from a file: its columns and its rows; a workbook's, by sheet.
+Table = query.Table
+Sheets = dict[str, Table]
+#: The rows a sheet's header is looked for in (a title may be above it).
+HEAD_ROWS: Final = 20
+#: A sheet's merged cells, as its XML lists them, and how much of it is read at once.
+_MERGED: Final = re.compile(rb'<(?:\w+:)?mergeCell\s+ref="([A-Z]+[0-9]+):([A-Z]+[0-9]+)"')
+CHUNK_BYTES: Final = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,8 +211,8 @@ async def read(path: str, offset: int = 0, limit: int = results.READ_LINES) -> s
     return f"{how(path, record)}\n\n{page}" if offset <= 0 else page
 
 
-async def table(path: str) -> tuple[Table | str, dict[str, Any]] | str:
-    """A kept file as ``query_result`` loads it — a table (Excel's rows), or its text (CSV,
+async def table(path: str) -> tuple[Sheets | str, dict[str, Any]] | str:
+    """A kept file as ``query_result`` loads it — a table a sheet (Excel's), or its text (CSV,
     JSON, lines: ``query.rows_of`` reads it) — and its record; or what is wrong."""
     runtime = current()
     if runtime is None:
@@ -215,25 +223,28 @@ async def table(path: str) -> tuple[Table | str, dict[str, Any]] | str:
     data, name, record = found
     try:
         if name.lower().endswith(XLSX):  # parsed in a thread: the event loop never waits on it
-            return await asyncio.to_thread(_sheet, data), record
+            return await asyncio.to_thread(_sheets, data), record
         return data.decode(), record
     except (ValueError, KeyError, ImportError, OSError, zipfile.BadZipFile) as exc:
         return f"Error: {path} is no table: {type(exc).__name__}: {exc}"
 
 
 async def _text(path: str) -> tuple[str, dict[str, Any]] | str:
-    """A kept file as text: CSV rows for an Excel file."""
+    """A kept file as text: CSV rows for an Excel file, each sheet after the first under its
+    name and its table's in a query."""
     found = await table(path)
     if isinstance(found, str):
         return found
     content, record = found
     if isinstance(content, str):
         return content, record
-    columns, rows = content
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(columns)
-    writer.writerows(rows)
+    for n, (sheet, (columns, rows)) in enumerate(content.items()):
+        if n:
+            out.write(f"\nSheet {sheet} (the table {query.part(query.TABLE, sheet)}):\n")
+        writer.writerow(columns)
+        writer.writerows(rows)
     return out.getvalue(), record
 
 
@@ -260,25 +271,75 @@ async def _loaded(runtime: Runtime, path: str) -> tuple[bytes, str, dict[str, An
     return data, name, record or {}
 
 
-def _sheet(data: bytes) -> Table:
-    """An Excel file's first sheet: its first row the columns, the rest its rows (a time as
-    its ISO text)."""
+def _sheets(data: bytes) -> Sheets:
+    """An Excel file's sheets, by name, each a table (:func:`_sheet`); an empty one left out
+    unless it is the only one."""
     from openpyxl import load_workbook  # noqa: PLC0415 - the xlsx extra
 
     book = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     try:
-        rows = book.worksheets[0].iter_rows(values_only=True)
-        head = next(rows, ())
-        columns = [str(c) if c is not None else f"c{n + 1}" for n, c in enumerate(head)]
-        width = len(columns)
-        found = [
-            [v.isoformat() if isinstance(v, datetime) else v for v in row][:width]
-            for row in rows
-            if any(v is not None for v in row)
-        ]
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            found = {
+                sheet.title: _sheet(sheet, _merged(archive, sheet._worksheet_path))
+                for sheet in cast(list[Any], book.worksheets)
+            }
     finally:
         book.close()
-    return columns, found
+    kept = {name: table for name, table in found.items() if table[0]}
+    return kept or dict(list(found.items())[:1])
+
+
+def _sheet(sheet: Any, merged: list[tuple[int, int, int, int]]) -> Table:
+    """A sheet as a table: a merged cell's value in each cell it spans; its header the row
+    :func:`_head` finds (a title above it left out); the rows after it that hold a value (a
+    time as its ISO text)."""
+    rows = [list(row) for row in sheet.iter_rows(min_row=1, min_col=1, values_only=True)]
+    for top, left, bottom, right in merged:
+        value = rows[top - 1][left - 1] if top <= len(rows) and left <= len(rows[top - 1]) else None
+        for r in range(top - 1, min(bottom, len(rows))):
+            rows[r].extend([None] * (right - len(rows[r])))
+            rows[r][left - 1 : right] = [value] * (right - left + 1)
+    head = _head(rows)
+    found = rows[head] if rows else []
+    columns = [str(c) if c is not None else f"c{n + 1}" for n, c in enumerate(found)]
+    width = len(columns)
+    return columns, [
+        [v.isoformat() if isinstance(v, datetime) else v for v in row][:width]
+        for row in rows[head + 1 :]
+        if any(v is not None for v in row)
+    ]
+
+
+def _head(rows: list[list[Any]]) -> int:
+    """The row a sheet's header is: of its first rows holding text alone (before one with a
+    number or a time), the first with the most distinct values — a title above it has fewer,
+    even merged across the header's width."""
+    texts = []
+    for row in rows[:HEAD_ROWS]:
+        if not all(v is None or isinstance(v, str) for v in row):
+            break
+        texts.append(len({v for v in row if v is not None}))
+    return texts.index(max(texts)) if texts else 0
+
+
+def _merged(archive: zipfile.ZipFile, path: str) -> list[tuple[int, int, int, int]]:
+    """The cells a sheet merges (its XML at ``path``, read a chunk at a time): each as its top
+    row, left column, bottom row and right column, from 1."""
+    from openpyxl.utils.cell import range_boundaries  # noqa: PLC0415 - the xlsx extra
+
+    found: list[tuple[int, int, int, int]] = []
+    tail = b""
+    with archive.open(path.lstrip("/")) as xml:
+        while chunk := xml.read(CHUNK_BYTES):
+            text, end = tail + chunk, 0
+            for match in _MERGED.finditer(text):
+                left, top, right, bottom = range_boundaries(
+                    f"{match[1].decode()}:{match[2].decode()}"
+                )
+                found.append((top, left, bottom, right))  # type: ignore[arg-type]
+                end = match.end()
+            tail = text[max(end, len(text) - 256) :]
+    return found
 
 
 def how(path: str, record: dict[str, Any]) -> str:
