@@ -88,5 +88,13 @@ long tasks; a short task must keep sending exactly that.
   with a window of 32k or more (none of it has been measured yet).
 * Each feature is measured on the benchmark as one variant on and one off before its default
   changes; a feature that measures worse stays off and is documented as such.
+* Measured (2026-11-09, Haiku, memory on, `python -m benchmark.cost.complex --variant main|deep`):
+  on the long set (24 tasks of many steps, `--cases long`), the break-and-fix gate and the
+  history set, `ReAct` as built and `ReAct` on Deep Agents scored the same within noise, and no
+  run called `write_todos`, a scratch file tool or `task` — not even with them offered from the
+  first call (`LONG_AFTER = 0`: 25 of 25 turns offered, 0 used; +10% input tokens). Every case
+  one arm failed and the other passed ran out of steps the same way: `query_result` could not
+  name the run's other results (fixed in `tools/query.py`), not a missing switch. The triggers
+  stay as they are: an earlier or wider trigger only costs tokens.
 * A team that wants a feature always on adds the framework's middleware to a graph of its own;
   `ReAct` refuses one named as a piece of its own (point 4).

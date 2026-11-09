@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from benchmark.cost import breakfix, history, judge, prices, run
+from benchmark.cost import breakfix, history, judge, longtasks, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from trellis import Settings
@@ -135,7 +135,7 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    base = [c for c in cases if not c.category.startswith(("adv_", "bf_", "hist_"))]
+    base = [c for c in cases if not c.category.startswith(("adv_", "bf_", "hist_", "long_"))]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
     assert {c.tier for c in cases} == set(cx.TIERS)
@@ -350,6 +350,27 @@ async def test_deep_agents_is_an_adapter_of_its_own(tmp_path: Path, offline: Non
     rows = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
     assert {x["adapter"] for x in rows} == {"deepagents"}
     assert out.with_suffix(".md").read_text().startswith("# complex: scripted (deepagents")
+
+
+async def test_react_runs_as_any_benchmark_variant_and_its_rows_say_which(
+    tmp_path: Path, offline: None
+) -> None:
+    """``--variant deep``: ``ReAct`` on Deep Agents (a backend given), the automatic ``main``
+    otherwise — the same cases, so the two are compared; a resume keeps each variant's rows."""
+    out = tmp_path / "cx-variant"
+    report = await cx.bench(
+        _args(out, cases="multihop-01", adapter="react", variant="deep"), progress=lambda _: None
+    )
+    assert report["variant"] == "deep" and report["summary"]["all"]["strict"]["mean"] == 1.0
+    again = await cx.bench(
+        _args(out, cases="multihop-01", adapter="react", variant="main"), progress=lambda _: None
+    )
+    rows = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+    assert [x["variant"] for x in rows] == ["deep", "main"] and again["variant"] == "main"
+    deep, _ = cx.target_of("m", "memory", 32_000, 6, adapter="react", variant="deep")
+    main, _ = cx.target_of("m", "memory", 32_000, 6, adapter="react")
+    assert "write_file" in deep.nodes["tools"].bound.tools_by_name
+    assert "write_file" not in main.nodes["tools"].bound.tools_by_name
 
 
 async def test_a_langgraph_graph_without_the_harness_middleware_is_an_adapter_of_its_own(
@@ -678,6 +699,36 @@ def test_the_history_trends_are_the_least_squares_fits_worked_by_hand() -> None:
         got = by[case].turns[-1].expect.value
         assert got["slope"]["value"] == pytest.approx(slope, rel=1e-9)
         assert got["r"]["value"] == pytest.approx(rho, rel=1e-9)
+
+
+# --------------------------------------------------------------------------- the long set
+def test_the_long_set_picks_its_own_cases_of_many_steps() -> None:
+    every = cx.cases()
+    got = cx.picked("long", every)
+    assert len(got) == 24 and {c.category for c in got} == set(longtasks.CATEGORIES)
+    assert set(longtasks.CATEGORIES) <= set(cx.CATEGORIES)
+    assert all(c.tier == 3 for c in got)
+
+
+async def test_the_long_set_scores_its_reference_answers(tmp_path: Path, offline: None) -> None:
+    report = await cx.bench(_args(tmp_path / "cx-long", cases="long"), progress=lambda _: None)
+    assert report["summary"]["all"]["strict"]["mean"] == 1.0
+
+
+def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:
+    """Gross profit and margins from the CSVs the tools return, not from the world's objects."""
+    by = {c.id: c.turns[-1].expect.value for c in longtasks.cases()}
+    catalog = {x["sku"]: x for x in csv.DictReader(io.StringIO(r.sku_catalog.fn()))}
+    rows = csv.DictReader(io.StringIO(r.sales_rows.fn(start="2026-07-01", end="2026-09-30")))
+    profit: collections.defaultdict[str, float] = collections.defaultdict(float)
+    for x in rows:
+        sku = catalog[x["sku"]]
+        profit[sku["category"]] += float(x["revenue"]) - int(x["units"]) * float(sku["unit_cost"])
+    for category, value in sorted(profit.items(), key=lambda kv: -kv[1])[:3]:
+        assert by["long-data-02"][category]["value"] == pytest.approx(value, abs=0.05)
+    margins = [(float(x["price"]) - float(x["unit_cost"])) / float(x["price"]) * 100
+               for x in catalog.values()]  # fmt: skip
+    assert by["long-data-03"]["under_40"]["value"] == sum(m < 40 for m in margins)
 
 
 def test_a_long_tool_output_is_recalled_from_the_earlier_run_not_fetched_again() -> None:
