@@ -472,7 +472,8 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     elif call["name"] == READ_FILE and (request.tool is None or kept):
         said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
-        said = await query.query(args, None if kept else _state_file(request.state, path))
+        with query.graph_results(*_graph_results(request.state)):
+            said = await query.query(args, None if kept else _state_file(request.state, path))
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
@@ -500,6 +501,26 @@ def _state_file(state: Any, path: str) -> str | None:
     found = (state.get("files") if isinstance(state, Mapping) else None) or {}
     content = (found.get(path) or {}).get("content")
     return "\n".join(content) if isinstance(content, list) else content
+
+
+def _graph_results(state: Any) -> tuple[dict[str, str], dict[str, str]]:
+    """The results Deep Agents saved in the graph's state (``/large_tool_results/<call id>``),
+    by path, and the tool whose call returned each (named in the state's messages)."""
+    held: Mapping[str, Any] = state if isinstance(state, Mapping) else {}
+    prefix = results.PREFIX + "/"
+    files = {
+        str(p): text
+        for p in held.get("files") or {}
+        if str(p).startswith(prefix) and (text := _state_file(held, str(p))) is not None
+    }
+    calls = {
+        str(c["id"]): str(c["name"])
+        for m in held.get("messages") or ()
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls
+    }
+    tools = {p: calls[p[len(prefix) :]] for p in files if p[len(prefix) :] in calls}
+    return files, tools
 
 
 def _saved(state: Any) -> bool:

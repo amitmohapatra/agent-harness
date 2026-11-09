@@ -277,7 +277,10 @@ has to. In order of preference:
    user's is refused; a deleted one is said), within the same limits; without `file_path`,
    `t1` is also `result`, and the run is offered `query_result` once its context names one.
    Every result the run saved is a table named by the tool that returned it
-   (`result` is the file asked about), so one query joins results of several tools; a JSON
+   (`result` is the file asked about) — a result Deep Agents saved in the graph's state too —
+   so one query joins results of several tools; one of them named in `results` (by its table,
+   its path or the id the path ends with) is that table, and a name that is neither this run's
+   nor a past result's is answered with the run's own tables, never "call the tool again"; a JSON
    array of objects (or the first one a JSON object holds), CSV with a header (`,` tab `;`
    `|`), else one row per line, with whole-number, decimal, number and text columns typed
    (a code such as `007`, or an id past 64 bits, stays text). A decimal

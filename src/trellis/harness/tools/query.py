@@ -65,6 +65,7 @@ import time
 import unicodedata
 from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from decimal import Decimal
 from functools import cached_property
 from typing import Any, Final
@@ -363,14 +364,34 @@ def not_found(path: str) -> str:
     )
 
 
+#: The results a Deep Agents graph saved in its state (each at its own path,
+#: ``/large_tool_results/<call id>``) and the tool that returned each, while a call of
+#: ``query_result`` reads them (:func:`graph_results`): tables of the query, as the run's own are.
+_GRAPH: ContextVar[tuple[Mapping[str, str], Mapping[str, str]]] = ContextVar(
+    "graph_results", default=({}, {})
+)
+
+
+@contextlib.contextmanager
+def graph_results(files: Mapping[str, str], tools: Mapping[str, str]) -> Iterator[None]:
+    """While it lasts, the graph's saved results ``files`` (by path; ``tools``: the tool that
+    returned each) are results of the run's (:func:`saved`), each a table named by its tool."""
+    token = _GRAPH.set((files, tools))
+    try:
+        yield
+    finally:
+        _GRAPH.reset(token)
+
+
 def saved(runtime: Any) -> Mapping[str, str]:
     """Every result ``runtime``'s run can read, by path: those it saved (its journal), then
     those its conversation's earlier turns saved in this process (``Runtime.earlier_results``:
     ``tools.results.Conversations``) — a follow-up reads or queries the path its history
-    names."""
+    names — then those its Deep Agents graph saved in its state (:func:`graph_results`)."""
     own: dict[str, str] = runtime.replay.journal.results
     earlier: Mapping[str, str] = getattr(runtime, "earlier_results", None) or {}
-    return ChainMap(own, dict(earlier)) if earlier else own
+    more = [dict(m) for m in (earlier, _GRAPH.get()[0]) if m]
+    return ChainMap(own, *more) if more else own
 
 
 def tables(runtime: Any) -> dict[str, str]:
@@ -378,7 +399,7 @@ def tables(runtime: Any) -> dict[str, str]:
     tool that returned it (``results.keep``'s ``tool``, in this attempt), else ``result_<n>``
     in the order kept — each name once, never :data:`TABLE` (the queried file's own)."""
     kept = saved(runtime)
-    tools = getattr(runtime, "kept_from", None) or {}
+    tools = {**_GRAPH.get()[1], **(getattr(runtime, "kept_from", None) or {})}
     used = {TABLE}
     found: dict[str, str] = {}
     for n, path in enumerate(kept, start=1):
@@ -408,15 +429,20 @@ async def _past(runtime: Any, refs: Sequence[str]) -> tuple[dict[str, str], list
     """The past results ``refs`` name, read through the memory service's message read (the
     audience rules of the thread each was said in: another user's is refused), as the tables
     ``t1``, ``t2``… and where each came from, dated; or why one cannot be loaded. A ref that
-    is a path this run keeps is that result."""
+    names a result this run keeps — its path, the id the path ends with, or its table
+    (:func:`tables`: what its tool message calls it) — is that result; one memory does not
+    know is said with the run's own tables, so the model queries them rather than fetching
+    them again."""
     from trellis.memory import AuthorizationError, NotFoundError  # noqa: PLC0415
 
     memory = getattr(runtime, "run_memory", None)
     kept = saved(runtime) if runtime is not None else {}
+    own = tables(runtime) if kept else {}
+    named = {**{p.rsplit("/", 1)[-1]: p for p in own}, **{t: p for p, t in own.items()}}
     texts: dict[str, str] = {}
     told: list[str] = []
     for n, ref in enumerate(refs, start=1):
-        path = "/" + ref.lstrip("/")
+        path = named.get(ref) or "/" + ref.lstrip("/")
         if path in kept:  # a result of this run's, named here too: that table
             texts[f"t{n}"] = kept[path]
             told.append(f"t{n} is this run's result {path}")
@@ -431,6 +457,11 @@ async def _past(runtime: Any, refs: Sequence[str]) -> tuple[dict[str, str], list
                 "Nothing was run."
             )
         except NotFoundError:
+            if own:
+                return (
+                    f"Error: {ref} is no past result. This run's own results are tables "
+                    f"already: {', '.join(own.values())}; name them in the SQL. Nothing was run."
+                )
             return (
                 f"Error: past result {ref} is no longer kept (deleted, or past its retention): "
                 f"call the tool again. Nothing was run."
