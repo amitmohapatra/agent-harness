@@ -720,11 +720,11 @@ def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:
     by = {c.id: c.turns[-1].expect.value for c in longtasks.cases()}
     catalog = {x["sku"]: x for x in csv.DictReader(io.StringIO(r.sku_catalog.fn()))}
     rows = csv.DictReader(io.StringIO(r.sales_rows.fn(start="2026-07-01", end="2026-09-30")))
-    profit: collections.Counter[str] = collections.Counter()
+    profit: collections.defaultdict[str, float] = collections.defaultdict(float)
     for x in rows:
         sku = catalog[x["sku"]]
         profit[sku["category"]] += float(x["revenue"]) - int(x["units"]) * float(sku["unit_cost"])
-    for category, value in profit.most_common(3):
+    for category, value in sorted(profit.items(), key=lambda kv: -kv[1])[:3]:
         assert by["long-data-02"][category]["value"] == pytest.approx(value, abs=0.05)
     margins = [(float(x["price"]) - float(x["unit_cost"])) / float(x["price"]) * 100
                for x in catalog.values()]  # fmt: skip
