@@ -89,7 +89,7 @@ So:
   (`tools.query.Typed`, in process, least recently used forgotten past 64 MiB), so the next
   query of it — in the run, a later turn, a past-result load — reads them instead of parsing
   it again. Five queries of one result: 10 MB 3.1 s → 0.8 s (CSV), 5.0 s → 1.3 s (JSON);
-  50 MB 9.5 s → 2.3 s (CSV), 18.4 s → 3.8 s (JSON); a first load costs 4 to 6% more (the
+  50 MB 7.6 s → 2.1 s (CSV), 17.5 s → 4.4 s (JSON); a first load costs at most 6% more (the
   Parquet written); answers identical. (SQLite's per-value length limit, `setlimit`, came with the switch: a
   query building a 200 MB value now stops at 64 MB.)
 
