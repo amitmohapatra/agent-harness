@@ -300,7 +300,7 @@ async def large_journal(w: World) -> None:
     d = Desk()
     plan: list[Call] = [("export", {"rows": 3}), ("refund", {"order": "o1"})]
     o = (await w.go([d.export(), d.refund()], plan)).succeeded()
-    assert d.ran("export") == [{"rows": 3}], len(d.done)  # kept as an artifact, replayed
+    assert d.ran("export") == [{"rows": 3}], len(d.done)  # kept in segments, replayed
     assert o.answer == "Done. refunded o1"
 
 
@@ -1222,7 +1222,7 @@ FEATURES: Final[list[Feature]] = [
     ),
     Feature(
         "F12",
-        "a journal larger than a checkpoint is kept as an artifact",
+        "a journal larger than a checkpoint is kept in segments",
         "F12",
         "automatic",
         large_journal,

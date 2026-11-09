@@ -246,7 +246,7 @@ async def test_a_journal_larger_than_a_checkpoint_survives_a_crash_and_a_pause(
     harness: Harness,
 ) -> None:
     """agent-runs keeps at most 1 MiB as a checkpoint: a run whose tool returned more saves
-    its journal as a run artifact, and the attempts after a worker crash and after a resume
+    its journal in segments, and the attempts after a worker crash and after a resume
     read it back — the tool runs once. A wrong answer is refused before agent-runs sees it."""
     exported: list[int] = []
     crashes = [Crash()]
