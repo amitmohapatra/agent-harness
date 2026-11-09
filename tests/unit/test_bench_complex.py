@@ -1316,6 +1316,53 @@ async def test_revoking_an_approval_pauses_to_forget_the_users_words_and_goes_on
     assert memory.memories[breakfix.SUP12_APPROVAL]["current"] is False  # forgotten, as the user
 
 
+async def test_a_turn_that_asks_a_person_twice_is_resumed_approved_each_time(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """histx-03, live: Haiku forgot two of the user's statements in one turn (the approval and
+    the revoke request), and the harness asked a person about each, as it should. The bench
+    approved only the first pause, so the turn ended PAUSED. Each approval is given."""
+    import dataclasses
+    import uuid
+
+    from tests.support.memory import NOW, FakeMemoryService
+    from trellis import Harness
+
+    user = f"{run.USER}-abcdef-histx-03"  # the case's user in this run (its tag)
+    memory = FakeMemoryService()
+    for ident, said in {
+        history.SUP07_APPROVAL: "I'm approving the SUP-07 contract renewal.",
+        "mem_revoke": "Revoke my SUP-07 renewal approval: the audit isn't done.",
+    }.items():
+        memory.memories[ident] = {
+            "content": said, "user": user, "visibility": "USER", "memory_type": "SEMANTIC",
+            "current": True, "superseded_by": None, "supersedes": None, "created_at": NOW,
+        }  # fmt: skip
+    every = cx.cases()
+    [case] = [c for c in every if c.id == "histx-03"]
+    revoke = case.turns[1]
+    both = dataclasses.replace(
+        revoke,
+        calls=(
+            (("memory_forget", {"id": history.SUP07_APPROVAL}),
+             ("memory_forget", {"id": "mem_revoke"})),
+        ),
+    )  # fmt: skip
+    twice = dataclasses.replace(case, turns=(case.turns[0], both, *case.turns[2:]))
+    monkeypatch.setattr(cx, "cases", lambda: (*(c for c in every if c is not case), twice))
+    out = tmp_path / "hx"
+    async with Harness(config=Settings(), memory=memory.client()) as h:
+        real, tagged = uuid.uuid4, iter([uuid.UUID(int=0xABCDEF << 104)])
+        monkeypatch.setattr(cx.uuid, "uuid4", lambda: next(tagged, None) or real())  # its tag
+        await cx.bench(
+            _args(out, cases="histx-03", history="memory"), harness=h, progress=lambda _: None
+        )
+    [row] = map(json.loads, out.with_suffix(".jsonl").read_text().splitlines())
+    assert row["turns"][1]["status"] == "SUCCESS", row["turns"][1]
+    assert not memory.memories["mem_revoke"]["current"]
+    assert not memory.memories[history.SUP07_APPROVAL]["current"]
+
+
 def test_the_break_and_fix_cases_are_built_with_few_scans_of_the_sales(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
