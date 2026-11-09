@@ -60,7 +60,6 @@ from typing import TYPE_CHECKING, Any, Final
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from trellis.contracts import (
-    ArtifactRef,
     HarnessError,
     Interrupt,
     InterruptDecision,
@@ -75,9 +74,6 @@ from trellis.runs.payloads import SEGMENTS, PayloadRef, adecode, aencode
 if TYPE_CHECKING:
     from trellis.harness.runs import RunArtifacts
 
-#: A checkpoint the last release saved whole as a run artifact names it under this key; read
-#: until every such run has ended (agent-runs' payload migration).
-JOURNAL_REF: Final = "journal_ref"
 #: Segments a checkpoint lists before a save writes the whole journal as one again: a resume
 #: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
 #: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
@@ -228,39 +224,28 @@ class Journal(BaseModel):
 
     # ------------------------------------------------------------------ persistence
     @classmethod
-    def of(cls, checkpoint: dict[str, Any] | None) -> Journal:
-        """The journal a run record's checkpoint holds (an empty one for a fresh run)."""
-        return cls() if checkpoint is None else cls.model_validate(checkpoint)
-
-    @classmethod
     async def read(
         cls, checkpoint: dict[str, Any] | None, artifacts: RunArtifacts, *, tenant: str
     ) -> Journal:
-        """The journal a run record's checkpoint holds or names: its segments, read in one
-        request (the store reads them in parallel) and applied in order; a journal the last
-        release stored whole as a run artifact; or the journal itself, inline."""
-        checkpoint = checkpoint or {}
-        if SEGMENTS in checkpoint:
-            segments = [PayloadRef.model_validate(ref) for ref in checkpoint[SEGMENTS]]
-            try:
-                stored = await artifacts.get_payloads(segments, tenant=tenant)
-            except NotFoundError as exc:
-                raise HarnessError(f"the run's journal is gone: {exc}") from exc
-            dumped: Any = None
-            for data in stored:
-                dumped = apply(dumped, await adecode(data))
-            journal = cls.of(dumped)
-            # what the next save compares with: a copy, never the objects the journal holds
-            journal._segments, journal._saved = tuple(segments), journal.dump()
-            return journal
-        ref = checkpoint.get(JOURNAL_REF)
-        if ref is None:
-            return cls.of(checkpoint or None)
-        artifact_id = ArtifactRef.model_validate(ref).artifact_id
-        data = await artifacts.download(artifact_id, tenant=tenant)
-        if data is None:
-            raise HarnessError(f"the run's journal (run artifact {artifact_id}) is gone")
-        return cls.of(json.loads(data))
+        """The journal a run record's checkpoint lists (an empty one for a fresh run): its
+        segments, read in one request (the store reads them in parallel) and applied in
+        order."""
+        if not checkpoint:
+            return cls()
+        if SEGMENTS not in checkpoint:
+            raise HarnessError("the run's checkpoint lists no journal segments")
+        segments = [PayloadRef.model_validate(ref) for ref in checkpoint[SEGMENTS]]
+        try:
+            stored = await artifacts.get_payloads(segments, tenant=tenant)
+        except NotFoundError as exc:
+            raise HarnessError(f"the run's journal is gone: {exc}") from exc
+        dumped: Any = None
+        for data in stored:
+            dumped = apply(dumped, await adecode(data))
+        journal = cls.model_validate(dumped)
+        # what the next save compares with: a copy, never the objects the journal holds
+        journal._segments, journal._saved = tuple(segments), journal.dump()
+        return journal
 
     def dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,6 @@ from trellis.contracts import (
 from trellis.harness import agent as agent_module
 from trellis.harness import journal as journal_module
 from trellis.harness.journal import (
-    JOURNAL_REF,
     Journal,
     Pending,
     Replay,
@@ -58,13 +56,15 @@ def test_an_answer_is_filed_under_the_pending_question_and_survives_a_round_trip
     journal = Journal(pending=Pending(key="q", interrupt=interrupt))
     journal.answered(resolution("blue"))
     assert journal.pending is None
-    restored = Journal.of(journal.dump())
+    restored = Journal.model_validate(journal.dump())
     answered = Replay(restored).answer("q")
     assert answered is not None and answered.answer == "blue"
 
 
-def test_a_run_without_a_checkpoint_has_an_empty_journal() -> None:
-    assert Journal.of(None) == Journal()
+async def test_a_run_without_a_checkpoint_has_an_empty_journal(tmp_path: Path) -> None:
+    assert await Journal.read(None, LocalRuns(payload_root=tmp_path).artifacts, tenant="a") == (
+        Journal()
+    )
 
 
 def test_an_answer_with_no_open_question_files_nothing() -> None:
@@ -330,19 +330,15 @@ async def test_another_tenants_segment_is_not_read(tmp_path: Path) -> None:
         await Journal.read(checkpoint, runs.artifacts, tenant="globex")
 
 
-async def test_a_journal_an_earlier_release_kept_as_a_run_artifact_still_reads(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "checkpoint", [{"calls": {"k": [1]}}, {"journal_ref": {"artifact_id": "art_1"}}]
+)
+async def test_a_checkpoint_that_lists_no_segments_is_refused(
+    checkpoint: dict[str, Any], tmp_path: Path
 ) -> None:
     runs = LocalRuns(payload_root=tmp_path)
-    run_id = await _run(runs)
-    journal = Journal()
-    Replay(journal).record_call("k", 1, tool="t")
-    ref = await runs.artifacts.upload(run_id, json.dumps(journal.dump()).encode())
-    old = {JOURNAL_REF: ref.model_dump(mode="json")}
-    assert (await Journal.read(old, runs.artifacts, tenant="acme")).calls == {"k": [1]}
-    runs._artifacts.clear()
-    with pytest.raises(HarnessError, match="is gone"):
-        await Journal.read(old, runs.artifacts, tenant="acme")
+    with pytest.raises(HarnessError, match="lists no journal segments"):
+        await Journal.read(checkpoint, runs.artifacts, tenant="acme")
 
 
 async def test_a_pause_with_nothing_new_lists_the_segments_it_has(tmp_path: Path) -> None:

@@ -265,7 +265,7 @@ class RunsService:
 
 
 def _bounded(checkpoint: dict[str, Any] | None) -> None:
-    """agent-runs' ``bounded_checkpoint``: a checkpoint over 1 MiB of compact JSON is ``413``."""
+    """agent-runs' payload cap: a checkpoint over 1 MiB of compact JSON is ``413``."""
     size = len(json.dumps(checkpoint, separators=(",", ":"), ensure_ascii=False).encode())
     if size > CHECKPOINT_BOUND:
         raise PayloadTooLargeError(

@@ -18,7 +18,7 @@ UNKNOWN: Final = (
 )
 EMAIL: Final = "ada@example.com"
 SECRET: Final = "sk-live0123456789abcdefghij"
-#: A tool output larger than an inline checkpoint may be (the journal goes in segments).
+#: A tool output larger than a checkpoint may be (the journal goes in segments).
 HUGE: Final = CHECKPOINT_BOUND + 1
 #: How long ``wait`` waits at most (a cancel or a time limit ends it sooner).
 WAIT_SECONDS: Final = 1.0

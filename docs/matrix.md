@@ -31,7 +31,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | F04 a rejected approval: the call never runs and the model reads why | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (3) | partly 10 (4, 5) | no (6) | partly 10 (4, 5) | partly 10 (4, 5) | partly 10 (4, 5) | no (7) | no (8) |
 | F23 journal: what ran before a pause is replayed, not run again | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
-| F12 a journal larger than a checkpoint is kept as an artifact | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
+| F12 a journal larger than a checkpoint is kept in segments | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F20 per-tool timeout: a read past its time limit says so | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F24 unknown outcome: a write past its time limit is never run again | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F21 retries: a read is tried again after an error that may pass | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
@@ -126,7 +126,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 | F04 a rejected approval: the call never runs and the model reads why | yes 1 |
 | F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (52) |
 | F23 journal: what ran before a pause is replayed, not run again | no (53) |
-| F12 a journal larger than a checkpoint is kept as an artifact | no (54) |
+| F12 a journal larger than a checkpoint is kept in segments | no (54) |
 | F20 per-tool timeout: a read past its time limit says so | yes 1 |
 | F24 unknown outcome: a write past its time limit is never run again | yes 1 |
 | F21 retries: a read is tried again after an error that may pass | yes 1 |
