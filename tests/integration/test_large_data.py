@@ -292,6 +292,46 @@ async def test_a_result_deep_agents_saved_is_queried_too(harness: Harness) -> No
     assert last(model.requests[2]) == QUESTIONS[0][2]
 
 
+@tool(side_effects="read")
+def prices() -> str:
+    """The first 40 SKUs' prices, as CSV."""
+    return "sku,price\n" + "\n".join(f"SKU-{n:05d},{n}.50" for n in range(1, 41))
+
+
+async def test_a_result_deep_agents_saved_is_a_table_of_every_query(harness: Harness) -> None:
+    """``ReAct`` given a backend: the result Deep Agents saved in the graph's state is a table
+    in a query of another result too — named by its tool, as the run's own results are, and
+    named in ``results`` by its path's id — so a join across the two runs (the gate's
+    ``bf3-analytics-01`` and the long set's ``long-data-02`` ran out of steps without it)."""
+    sql = "SELECT count(*) AS n, sum(stock) AS units FROM result JOIN inventory USING (sku)"
+
+    class Joining(Script):
+        def next(self, body: dict[str, Any]) -> Any:
+            told = " ".join(str(m.get("content")) for m in body["messages"])
+            if len(self.requests) == 1:
+                return [("inventory", {}), ("prices", {})]
+            kept = re.search(r"saved at (/large_tool_results/\S+)\.", told)
+            saved = SAVED.search(told)
+            if len(self.requests) == 2 and kept and saved:
+                return ("query_result", {"file_path": kept.group(1), "sql": sql})
+            if len(self.requests) == 3 and kept and saved:
+                ident = saved.group(1).rsplit("/", 1)[-1]
+                join = "SELECT count(*) AS n FROM result JOIN t1 USING (sku)"
+                return (
+                    "query_result",
+                    {"file_path": kept.group(1), "sql": join, "results": [ident]},
+                )
+            return "done"
+
+    model = ScriptedChat(script=Joining([]))
+    target = ReAct(system_prompt="s", model=model, backend=JournalBackend())
+    result = await arm(harness.wrap(target, id="sql-join"), [inventory, prices]).run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    units = sum(u for s, u, _ in SKUS[:40])
+    assert last(model.requests[2]) == f"n,units\n40,{units}"
+    assert last(model.requests[3]).endswith("n\n40"), last(model.requests[3])
+
+
 async def test_a_tool_that_filters_on_its_own_side_answers_small_and_exact(
     harness: Harness,
 ) -> None:
