@@ -470,7 +470,9 @@ stops the run at a spend (from the usage the replies report), `--cases` and `--r
 pick what runs. `--adapter` picks the framework wrapped: `react`, `langgraph` (`create_agent`),
 `deepagents` (`create_deep_agent`), `openai` (the OpenAI Agents SDK on the endpoint's chat
 completions) or `claude` (the Claude Agent SDK); `--history memory` turns the memory service on
-for any of them. `python -m benchmark.cost.judge` writes each scored turn's judge packet (the
+for any of them. `--variant deep` builds `react` on Deep Agents (a backend given:
+`benchmark.cost.variants`' `deep`), so `ReAct` as built and `ReAct` on Deep Agents run the same
+cases; each row says its variant. `python -m benchmark.cost.judge` writes each scored turn's judge packet (the
 exact model input, the answer, the ground truth) and reports the judge's verdicts as harness
 gaps (the input lacked what the answer needs) and model gaps (it did not).
 
@@ -486,6 +488,12 @@ join of two tools, a compound growth rate carried forward, a break-even point, a
 and the line that predicts one series from the other — each truth exact (least squares and
 correlation over the world's own rows), each a figure a model must compute with a tool, not by
 hand. The held-out cases (`bfh-…`) run every round and are never fixed against.
+
+**Long set** (`benchmark/cost/longtasks.py`, `--cases long`): 24 tasks of many steps, each with
+exact answers — a chain of two or three tools repeated for each of five to eight items
+(`long_chain`), statistics over thousands of rows or a join of two large results (`long_data`),
+and a request of several sub-tasks, one across two turns (`long_multi`): the work Deep Agents'
+planning, files and helpers are for, so `--variant deep` is compared with `ReAct` as built.
 
 **History set** (`benchmark/cost/history.py`, `--cases history`, run with `--history memory`):
 what a user asks an assistant that remembers them — what it said in an earlier chat, a new

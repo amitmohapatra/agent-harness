@@ -109,6 +109,10 @@ CATEGORIES: Final = (
     "hist_past",
     "hist_analytics",
     "hist_explain",
+    # the tasks of many steps (``benchmark.cost.longtasks``): ``--cases long``
+    "long_chain",
+    "long_data",
+    "long_multi",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -2605,6 +2609,9 @@ def cases() -> tuple[Case, ...]:
     from benchmark.cost import history
 
     out.extend(history.cases())
+    from benchmark.cost import longtasks
+
+    out.extend(longtasks.cases())
     return tuple(out)
 
 
@@ -3275,6 +3282,7 @@ def target_of(
     wire: list[dict[str, Any]] | None = None,
     tools: Sequence[Any] = r.TOOLS,
     bound: Sequence[Any] = (),
+    variant: str = "main",
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
@@ -3285,7 +3293,8 @@ def target_of(
     its step limit LangGraph's ``recursion_limit`` (a model call and a tool step a step);
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
-    ``history="memory"`` the memory service is on for every adapter."""
+    ``history="memory"`` the memory service is on for every adapter. ``variant``: the
+    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents)."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     kind = adapter_of(history, adapter)
@@ -3295,7 +3304,7 @@ def target_of(
         setup = Setup(
             system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools)
         )
-        return VARIANTS["main"].build(setup)
+        return VARIANTS[variant].build(setup)
     if kind in ("langgraph", "deepagents"):
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -3509,6 +3518,7 @@ async def run_case(
     tag: str,
     adapter: str | None = None,
     agent_id: str | None = None,
+    variant: str = "main",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One case's conversation: its row and every request it made (``agent_id``: the wrapped
     agent's id, one per case unless given — a learning-over-time run gives one for all). A
@@ -3528,6 +3538,7 @@ async def run_case(
         "edges": list(case.edges),
         "history": history,
         "adapter": kind,
+        "variant": variant,
         "stopped": None,
         "turns": [],
     }
@@ -3537,7 +3548,7 @@ async def run_case(
     target, options = target_of(
         model, history, case.window or window, max_steps, adapter=kind, wire=wire,
         tools=(*r.TOOLS, *case.tools),
-        bound=await h.memory_tools() if kind == "graph" else (),
+        bound=await h.memory_tools() if kind == "graph" else (), variant=variant,
     )  # fmt: skip
     agent = h.wrap(
         target, id=agent_id or f"complex-{kind}-{case.id}", hooks=[trace],
@@ -3801,13 +3812,14 @@ def _write(path: Path, rows: Sequence[dict[str, Any]], mode: str = "a") -> None:
 def _names(c: Case) -> set[str]:
     """What ``--cases`` picks a case by: its id, its category, its tier, and ``adversarial``
     for every ``adv_*`` category."""
-    from benchmark.cost import breakfix, history
+    from benchmark.cost import breakfix, history, longtasks
 
     return (
         {c.id, c.category, f"tier:{c.tier}"}
         | ({ADVERSARIAL} if c.category.startswith("adv_") else set())
         | breakfix.names(c)
         | history.names(c)
+        | longtasks.names(c)
     )
 
 
@@ -3842,6 +3854,7 @@ async def bench(
         if x.get("model") == model_name
         and x.get("history") == args.history
         and adapter_of(x["history"], x.get("adapter")) == adapter_of(args.history, args.adapter)
+        and x.get("variant", "main") == args.variant
     ]
     if args.rerun_failed:
         again = {x["case"] for x in rows if failed(x)}
@@ -3882,6 +3895,7 @@ async def bench(
             found, requests = await run_case(
                 h, case, model=model, history=args.history, window=args.window, max_steps=args.max_steps,
                 run_seconds=args.timeout, spend=spend, tag=tag, adapter=args.adapter,
+                variant=args.variant,
             )  # fmt: skip
             found |= {"model": model_name, "usd": round(spend.usd - before, 6)}
             if found["stopped"]:
@@ -3900,6 +3914,7 @@ async def bench(
         "model": model_name,
         "history": args.history,
         "adapter": adapter_of(args.history, args.adapter),
+        "variant": args.variant,
         "window": args.window,
         "date": datetime.now(UTC).strftime("%Y-%m-%d"),
         "usd": round(spend.usd, 6),
@@ -3938,6 +3953,12 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=ADAPTERS,
         default=None,
         help="the framework wrapped (default: react with memory history, langgraph without)",
+    )
+    p.add_argument(
+        "--variant",
+        choices=("main", "deep"),
+        default="main",
+        help="with --adapter react: ReAct as built (main) or on Deep Agents (deep: a backend)",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(
