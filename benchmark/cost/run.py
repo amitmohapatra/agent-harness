@@ -100,21 +100,63 @@ class Meter(BaseCallbackHandler):
         if refused:
             self.refused_tokens += int(refused.group(1))
 
+    def accounted(self, input_tokens: int, output_tokens: int, cached: int) -> None:
+        """One reply the harness accounted to the run's budget (an adapter not on LangChain)."""
+        self.calls += 1
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.cached_tokens += cached
+
 
 _METER: ContextVar[Meter | None] = ContextVar("trellis_bench_meter", default=None)
 register_configure_hook(_METER, inheritable=True)
+#: The adapters whose model calls are LangChain's (metered by its callbacks); the others are
+#: metered by what the harness accounts to the run's budget (``trellis.harness.budget``).
+LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "graph", "deepagents"})
+_ACCOUNTED: list[Meter] = []
 
 
 @contextmanager
-def metered(meter: Meter | None = None) -> Iterator[Meter]:
+def metered(meter: Meter | None = None, *, adapter: str = "react") -> Iterator[Meter]:
     """A :class:`Meter` (``meter``, or a new one) of every chat model call made in this
-    context (and the tasks it starts) until the block ends."""
+    context (and the tasks it starts) until the block ends: LangChain's callbacks, or, for an
+    ``adapter`` not on LangChain, each reply the harness accounts to a top-level run."""
     meter = meter or Meter()
-    token = _METER.set(meter)
+    if adapter in LANGCHAIN_ADAPTERS:
+        token = _METER.set(meter)
+        try:
+            yield meter
+        finally:
+            _METER.reset(token)
+        return
+    _accounting_hook()
+    _ACCOUNTED.append(meter)
     try:
         yield meter
     finally:
-        _METER.reset(token)
+        _ACCOUNTED.remove(meter)
+
+
+def _accounting_hook() -> None:
+    """``budget.account`` also reports to the innermost :func:`metered` block of an adapter
+    not on LangChain (patched once)."""
+    from trellis.harness import budget
+
+    if getattr(budget.account, "_metered", False):
+        return
+    original = budget.account
+
+    def account(runtime: Any, **kw: Any) -> None:
+        original(runtime, **kw)
+        if _ACCOUNTED and runtime.parent is None:
+            _ACCOUNTED[-1].accounted(
+                int(kw.get("input_tokens") or 0),
+                int(kw.get("output_tokens") or 0),
+                int(kw.get("cached") or 0),
+            )
+
+    account._metered = True  # type: ignore[attr-defined]
+    budget.account = account  # type: ignore[assignment]
 
 
 class Called(Hooks):
