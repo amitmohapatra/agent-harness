@@ -46,6 +46,16 @@ the records of the step under way, however long the run.
 Calls made at once (a framework running several tools together) take their occurrences in the
 order they asked: identical calls run one after another (:meth:`Replay.exclusive`), so each has
 its own occurrence and a re-run hands each the output it got, whatever order they finished in.
+
+A model asked for a step again rarely repeats its call word for word, and a framework that does
+not resume in place has it make the paused call again: run again from its input (OpenAI Agents,
+a graph with no checkpointer), or told to repeat it in the session it kept (Claude, an ACP
+agent). The call a pause came from within (a tool's own question, asked while it ran) is
+therefore kept as the model made it, with its place among the run's tool calls (:class:`Made`,
+``Pending.inside``), and the call of that tool made at that place when the run resumes runs as
+it (:meth:`Replay.made`): the question asked is the one the person answered, and their answer
+is for the arguments they saw. Nothing else is matched by place: any other call with other
+arguments is a new call, and an approval is asked about again.
 """
 
 from __future__ import annotations
@@ -138,6 +148,17 @@ def content_key(kind: str, *parts: Any) -> str:
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
 
 
+class Made(BaseModel):
+    """A tool call as the model made it: its arguments, and its place among the run's tool
+    calls, as a run from its input counts them (0: the first)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool: str
+    args: dict[str, Any]
+    at: int
+
+
 class Pending(BaseModel):
     """The interrupt the run is waiting on, and the key its answer is filed under."""
 
@@ -145,11 +166,23 @@ class Pending(BaseModel):
 
     key: str
     interrupt: Interrupt
+    #: The tool call the pause came from within (a question the tool asked while it ran), on a
+    #: framework that does not resume in place: its model makes the call again.
+    inside: Made | None = None
+
     #: The framework's own handle on the pause (LangGraph's interrupt id), when it has one.
     native_id: str | None = None
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
+
+    @property
+    def call(self) -> ToolCall | None:
+        """The tool call the pause is about: the one waiting for an approval, else the one it
+        came from within — what a session resumed from the pause is told to call again."""
+        if self.interrupt.tool_call is not None or self.inside is None:
+            return self.interrupt.tool_call
+        return ToolCall(tool=self.inside.tool, args=self.inside.args)
 
 
 def governance_held(pending: Pending) -> bool:
@@ -186,6 +219,12 @@ class Journal(BaseModel):
     #: ``needs_approval`` tool), by content: governance counts that approval, once each, and
     #: does not ask again (``approved_in_framework``)
     approved: list[str] = Field(default_factory=list)
+    #: the tool calls the run's answered pauses came from within, which a later attempt's
+    #: model makes again, each at its place (:meth:`Replay.made`)
+    again: list[Made] = Field(default_factory=list)
+    #: how many tool calls the run has made to their end: the place of the next, where an
+    #: attempt goes on from the framework's own state (its session, its serialised run)
+    place: int = 0
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
@@ -314,22 +353,34 @@ class Journal(BaseModel):
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:
-        """File the answer to the open pause, and close it."""
+        """File the answer to the open pause, and close it: the tool call it came from within
+        is one a later attempt's model makes again (:attr:`again`: one call a place)."""
         if self.pending is None:
             return
         self.answers.setdefault(self.pending.key, []).append(resolution.model_dump(mode="json"))
+        inside = self.pending.inside
+        if inside is not None:
+            self.again = [m for m in self.again if m.at != inside.at] + [inside]
+            self.place = min(self.place, inside.at)  # not ended, whatever call after it did
         self.pending = None
 
 
 class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    __slots__ = ("_seen", "_turns", "journal", "resumed", "where")
+    __slots__ = ("_goes_on", "_made", "_seen", "_session", "_turns", "journal", "resumed", "where")
 
-    def __init__(self, journal: Journal) -> None:
+    def __init__(self, journal: Journal, *, goes_on: bool = False) -> None:
         self.journal = journal
         self._seen: dict[str, int] = defaultdict(int)
         self._turns: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        #: the place of the attempt's next tool call (``None``: it has made none yet)
+        self._made: int | None = None
+        #: the attempt goes on from the framework's serialised run (``goes_on``), or from the
+        #: session the journal holds now, while the framework keeps to it: the calls made
+        #: before are not made again
+        self._goes_on = goes_on
+        self._session = journal.session
         #: the step a call is being made in now (its graph's checkpoint id), for a graph that
         #: keeps a checkpoint (``adapters.langgraph``); ``None`` elsewhere
         self.where: Callable[[], str | None] | None = None
@@ -341,6 +392,29 @@ class Replay:
         """What one call of ``key`` holds from its replay to its record: identical calls made
         at once run one after another, in the order they asked."""
         return self._turns[key]
+
+    def made(self, tool: str, args: dict[str, Any]) -> Made:
+        """The call of ``tool`` the attempt makes now, as it runs: with ``args`` — or, at the
+        place of a call of ``tool`` an answered pause came from within (``Journal.again``), as
+        that call: the model made it again, in other words. A call the journal holds a record
+        of is itself. The attempt's first call is the run's first, unless the attempt goes on
+        from the framework's own state: then it is the next after the calls already made
+        (``Journal.place``)."""
+        if self._made is None:
+            kept = self._session is not None and self.journal.session == self._session
+            if not (self._goes_on or kept):
+                self.journal.place = 0  # run again from its input
+            self._made = self.journal.place
+        at, self._made = self._made, self._made + 1
+        key = content_key("call", tool, args)
+        paused = next((m for m in self.journal.again if m.at == at and m.tool == tool), None)
+        if paused is None or self.occurrence(key) < len(self.journal.calls.get(key, ())):
+            return Made(tool=tool, args=args, at=at)
+        return paused
+
+    def ended(self, made: Made) -> None:
+        """``made`` ran to its end (it did not pause): the framework's own state holds it."""
+        self.journal.place = max(self.journal.place, made.at + 1)
 
     def answer(self, key: str) -> InterruptResolution | None:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""

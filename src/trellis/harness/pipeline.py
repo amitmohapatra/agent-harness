@@ -756,15 +756,18 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     """The cursor this attempt reads the journal with, the resolution filed where the
     re-run will ask for it (or left to the framework, when it resumes from its own state)."""
     pending = journal.pending
+    goes_on = False
     if resolution is not None and pending is not None:
         journal.approved_in_framework(resolution)
-        if pending.native_state and not governance_held(pending):
+        # from the framework's serialised run, the attempt goes on where the run paused
+        goes_on = bool(pending.native_state)
+        if goes_on and not governance_held(pending):
             journal.pending = None
         else:
             # a checkpointed graph is handed it by its framework too; filed here, a later
             # question in the same call knows it was this one's (``Runtime.interrupt``)
             journal.answered(resolution)
-    return Replay(journal)
+    return Replay(journal, goes_on=goes_on)
 
 
 async def _invoked(

@@ -16,6 +16,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
+from trellis.harness.adapters.claude import RESUMED_ASKED
 from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
@@ -184,6 +185,43 @@ async def test_ask_inside_a_tool_returns_the_answer_on_resume(harness: Harness) 
     assert finished.answer == "customer said yes"
     tool_output = model.inputs[-1][-1]
     assert tool_output["type"] == "function_call_output" and tool_output["output"] == "yes"
+
+
+class Reconsiders(ScriptedModel):
+    """A model that, run again from the same input, asks in words — unless it is told which
+    call the person answered about, which it then makes again, in other words."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def _next(self, input: Any, system: str | None) -> list[Any]:
+        items = input if isinstance(input, list) else [{"role": "user", "content": input}]
+        results = [i["output"] for i in items if i.get("type") == "function_call_output"]
+        told = any("paused at your call to confirm" in str(i.get("content")) for i in items)
+        if results:
+            self.turns = [f"customer said {results[-1]}"]
+        elif not self.inputs:
+            self.turns = [("confirm", {"order": "o1"})]
+        else:
+            self.turns = [("confirm", {"order": "order o1"})] if told else ["Ship which order?"]
+        return super()._next(input, system)
+
+
+async def test_a_run_resumed_from_its_input_is_told_the_call_the_person_answered_about(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The SDK runs the agent again from its input, and a model may decide otherwise this
+    time (ask in words, make another call): it is told which call the person answered about,
+    as a resumed Claude session is. Only the model reads that: the session keeps the input."""
+    model, session = Reconsiders(), SQLiteSession("s1", tmp_path / "s.db")
+    agent = arm(harness.wrap(Agent(name="c", model=model), id="told-again"), [confirm])
+    paused = await agent.run("check o1", user="u1", framework_options={"session": session})
+    assert paused.interrupt is not None and paused.interrupt.question == "Ship o1?"
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "customer said yes"
+    told = RESUMED_ASKED.format(tool="confirm", args='{"order": "o1"}')
+    assert {"role": "user", "content": told} in model.inputs[-1]
+    assert told not in json.dumps(await session.get_items())
 
 
 async def test_the_sdks_own_approval_pauses_and_resumes_its_run_state(harness: Harness) -> None:
