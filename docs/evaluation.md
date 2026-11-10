@@ -489,11 +489,27 @@ and the line that predicts one series from the other — each truth exact (least
 correlation over the world's own rows), each a figure a model must compute with a tool, not by
 hand. The held-out cases (`bfh-…`) run every round and are never fixed against.
 
-**Long set** (`benchmark/cost/longtasks.py`, `--cases long`): 24 tasks of many steps, each with
+**Long set** (`benchmark/cost/longtasks.py`, `--cases long`): 33 tasks of many steps, each with
 exact answers — a chain of two or three tools repeated for each of five to eight items
 (`long_chain`), statistics over thousands of rows or a join of two large results (`long_data`),
 and a request of several sub-tasks, one across two turns (`long_multi`): the work Deep Agents'
 planning, files and helpers are for, so `--variant deep` is compared with `ReAct` as built.
+The long workflows (`long_flow`, nine cases, any `--adapter`) are what a long run meets: 57
+tool calls in one request and a chain three tools deep for twenty items (the step limit, no
+call made twice); a job on a 32,000-token window whose older results are cleared while it runs
+and whose answer needs the first step's figures (`react`, `langgraph` and `deepagents`: the
+window is the harness's middleware's to keep); a transfer that cannot be undone in the middle
+of 21 calls (the run pauses, is approved and goes on: nothing done before the pause is done
+again, the transfer once); a worker that dies mid-run (`Turn.restart`: the run is queued, a
+tool kills its worker once, and another harness sharing only the run store finishes it once
+the lease lapsed — the tender opened before the crash is not opened again); twelve turns of a
+restock plan whose review days a later turn changes and whose smallest line the next drops;
+and a freight tender one of whose lanes fails once (a read: 503), whose award finds the desk
+busy once (a write: awarded once), or one of whose lanes is down for good (the answer gives
+every quote it got and names the lane it could not quote). Their tools are the set's own
+(`longtasks.TOOLS`), offered only to the cases that call them; what the writes did is kept per
+person, so a write done twice is a second id. Each turn's harness checks say so from the
+run's own calls (`Probe`: `atmost`, `distinct`, `asks`, `restarts`).
 
 **History set** (`benchmark/cost/history.py`, `--cases history`, run with `--history memory`):
 what a user asks an assistant that remembers them — what it said in an earlier chat, a new
@@ -551,6 +567,37 @@ also covers a schedule like one the user has (asked: update it first, recommende
 again ("already set"). A question with options the run pauses on is answered by the next turn
 (`@n|words`: option `n`, or the words where nothing waits).
 Writes `<out>.jsonl` (each case's calls, answers, tokens) and `<out>.json` (per category).
+
+## Skills benchmark
+
+`python -m benchmark.cost.skills --model <name> --adapter <framework> --max-usd 0.3` asks 30
+chats whether a real model uses skills as [skills.md](skills.md) says
+(`benchmark/cost/skills.py`). Each case has a skill store of its own — ten skills alike in name
+and description (three about stock, three about suppliers, two about reorders), each with a
+rule only it states — given to the framework through that framework's own skills slot:
+`ReAct(skills=)`, a Deep Agent's backend route, Claude's plugin, Kimi's skills folder, an
+OpenAI `SandboxAgent`'s `Skills` capability (with its `Shell` on a local sandbox: the SDK's
+default capabilities hold a hosted tool the chat completions API does not take), and
+`list_skills`/`load_skill` where there is no slot (`langgraph`, `graph`). The tools are the
+retail world's, the asking set's writes, two changes that wait for a person (`issue_refund`,
+`set_price`) and `ask_user`; memory is an in-process memory service. `--adapter` is any
+framework the complex suite wraps, `--variant deep` gives `ReAct` a backend.
+
+| Category | Cases |
+|---|---|
+| `pick` | the right skill named, not named, a near miss among the suppliers' and the reorders' three; two questions no skill is for: none read |
+| `follow` | steps in the skill's order; a threshold and a formula only the skill has; the line it fixes; a rule in a second file (`rules.md`, `tiers.md`) that must be read |
+| `tools` | a skill driving a chain of calls for three SKUs, a ranking then a computation, a write, a three-turn chat, a question to the user first (`ask_user`), a schedule (the scheduling set's check) |
+| `scope` | the user's skill over the tenant's, the agent's over the user's, a disabled one hiding the name, an edit seen by the next run, a run resumed after an edit keeping the version it pinned, two users each with their own |
+| `robust` | a skill deleted once the run pinned it, the source down (its last listing stands; never read, it lists nothing), a body over the cap, a skill telling the agent to refund (the refund still waits for a person, who refuses), a skill whose change waits for approval |
+
+Every check is exact, with no judge: the skills a turn read (from its trace: the framework's
+own calls on the run's event stream, or in the requests the model was sent next — Deep Agents'
+`read_file` of `/skills/<name>/…`, `load_skill`, Claude's and Kimi's `Skill`, a shell's `cat`),
+the versions the run pinned (its `skills` event), the calls made, asked about and run, and
+figures computed from the world by the skill's rule, in the line the skill fixes
+(`COVER SKU-01517 21.5 OK @14`). Writes `<out>.jsonl` (each case's answers, calls, reads, pins,
+warnings and tokens) and `<out>.json` (per category).
 
 ## Load benchmark
 

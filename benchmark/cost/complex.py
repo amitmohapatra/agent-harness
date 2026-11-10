@@ -48,13 +48,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import math
 import re
 import sys
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -113,6 +114,7 @@ CATEGORIES: Final = (
     "long_chain",
     "long_data",
     "long_multi",
+    "long_flow",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -165,6 +167,12 @@ class Probe:
     * ``calls`` — the turn made at most ``limit`` model calls;
     * ``called`` — at least ``limit`` calls of the tool ``pattern`` ended ``ok``.
     * ``uncalled`` — no call of the tool ``pattern`` (the wrong source for the question).
+    * ``atmost`` — at most ``limit`` calls of the tool ``pattern`` ended ``ok`` (with
+      ``called``: a write done exactly once);
+    * ``distinct`` — no call of a tool matching ``pattern`` (a regular expression; empty:
+      every tool) that ended ``ok`` was made twice with the same arguments;
+    * ``asks`` — the turn's run paused for a person's approval (``Turn.approve``);
+    * ``restarts`` — its worker died mid-run and another finished the run (``Turn.restart``).
 
     ``when``: the history it holds for (``memory``: what only the memory service can give,
     such as another chat's turns); unset, every one."""
@@ -177,6 +185,11 @@ class Probe:
     when: str | None = None
 
 
+#: The ``asks`` probe of a turn that pauses to forget what the user said: the memory tools are
+#: memory's, so only with memory on.
+ASKS_MEMORY: Final = Probe(
+    "asks", why="the run asks a person, then goes on approved", when="memory"
+)
 #: How a turn may be sent while the turn before it still works (``Turn.mode``): the harness's
 #: busy-conversation modes (``trellis.harness.conversation.Mode``).
 BUSY: Final = ("queue", "interrupt", "steer")
@@ -184,6 +197,9 @@ BUSY: Final = ("queue", "interrupt", "steer")
 APPROVALS: Final = 5
 #: Who approves a turn's paused call (``Turn.approve``).
 REVIEWER: Final = "trellis-bench-reviewer"
+#: The lease, in seconds, of the worker that dies in a ``Turn.restart`` turn: every progress
+#: save renews it, so it outlasts a model call; another worker claims the run once it lapsed.
+RESTART_LEASE: Final = 30
 
 
 @dataclass(frozen=True)
@@ -204,9 +220,14 @@ class Turn:
     #: this busy-conversation mode (:data:`BUSY`); ``None``: after it ended
     mode: str | None = None
     #: its run pauses for a person's approval (a call that asks one: forgetting what the user
-    #: said, ``harness._forgotten``) and is resumed approved; the turn is the resumed run, and
-    #: its ``asks`` check says it paused (with memory on: the memory tools are memory's)
+    #: said, ``harness._forgotten``; a tool that cannot be undone) and is resumed approved; the
+    #: turn is the resumed run, and its ``asks`` probe says it paused
     approve: bool = False
+    #: its run is queued and run by a worker that dies mid-run (a tool of the case's raises
+    #: ``longtasks.WorkerDied``, once); once its lease lapsed, another worker (another harness
+    #: sharing only the run store, as two worker processes share agent-runs) finishes it, and
+    #: its ``restarts`` probe says so
+    restart: bool = False
 
 
 @dataclass(frozen=True)
@@ -3071,9 +3092,12 @@ def checked(
     *,
     calls: Sequence[dict[str, Any]] = (),
     history: str = "thread",
+    happened: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """A turn's harness checks: how its run ended (``Turn.ends``) and each :class:`Probe` on
-    what was sent — each ``{"check", "ok", "why", "found"}``."""
+    what was sent — each ``{"check", "ok", "why", "found"}``. ``happened``: what the turn's
+    run went through (``asks``: it paused for an approval; ``restarts``: another worker
+    finished it)."""
     out = [
         {
             "check": "ends",
@@ -3133,6 +3157,19 @@ def checked(
         elif p.kind == "uncalled":
             n = sum(c["tool"] == p.pattern for c in calls)
             ok, found = n == 0, n
+        elif p.kind == "atmost":
+            n = sum(c["tool"] == p.pattern and c["status"] == "ok" for c in calls)
+            ok, found = n <= (p.limit or 0), n
+        elif p.kind == "distinct":
+            made = collections.Counter(
+                f"{c['tool']}({json.dumps(c.get('args'), sort_keys=True, default=str)})"
+                for c in calls
+                if c["status"] == "ok" and re.fullmatch(p.pattern or ".*", c["tool"])
+            )
+            twice = sorted(k for k, n in made.items() if n > 1)
+            ok, found = not twice, twice[:3]
+        elif p.kind in ("asks", "restarts"):
+            ok, found = p.kind in happened, sorted(happened)
         else:
             raise ValueError(f"no probe kind {p.kind!r}")
         check = f"{p.kind} {p.pattern or p.limit or ''}".strip()
@@ -3310,6 +3347,7 @@ def target_of(
     tools: Sequence[Any] = r.TOOLS,
     bound: Sequence[Any] = (),
     variant: str = "main",
+    skills: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
@@ -3321,7 +3359,13 @@ def target_of(
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter. ``variant``: the
-    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents)."""
+    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents).
+    ``skills``: a skill set (``trellis.skills``) given to each framework in its own skills
+    slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
+    ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
+    the SDK's ``Skills`` capability on a local sandbox, and its ``tools()`` declared where
+    there is no slot (``langgraph``; ``graph`` binds its tools itself: among ``bound``, and
+    declared too, so the harness knows the run has them)."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     kind = adapter_of(history, adapter)
@@ -3329,8 +3373,9 @@ def target_of(
         from benchmark.cost.variants import VARIANTS, Setup
 
         setup = Setup(
-            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools)
-        )
+            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools),
+            skills=skills,
+        )  # fmt: skip
         return VARIANTS[variant].build(setup)
     if kind in ("langgraph", "deepagents"):
         from langgraph.checkpoint.memory import InMemorySaver
@@ -3347,12 +3392,14 @@ def target_of(
                 chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=InMemorySaver(), name="complex",
             )  # fmt: skip
+            tools = [*tools, *([skills.tools()] if skills is not None else [])]
         else:
             from deepagents import create_deep_agent
 
             graph = create_deep_agent(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=InMemorySaver(), name="complex",
+                **(skills.deep_agent() if skills is not None else {}),
             )  # fmt: skip
         setattr(graph, TOOLS_ATTRIBUTE, list(tools))
         return graph, {}
@@ -3369,6 +3416,8 @@ def target_of(
             chat, tools=[*own, *bound], system_prompt=r.SYSTEM,
             checkpointer=InMemorySaver(), name="complex",
         )  # fmt: skip
+        if skills is not None:  # bound by the caller, and declared: the harness knows of them
+            setattr(graph, TOOLS_ATTRIBUTE, [skills.tools()])
         return graph, {"framework_options": {"recursion_limit": 2 * max_steps + 1}}
     if kind == "openai":
         import httpx
@@ -3390,13 +3439,14 @@ def target_of(
             api_key=env.llm_api_key or "none",
             http_client=DefaultAsyncHttpxClient(event_hooks={"request": [sent]}),
         )
-        agent = Agent(
-            name="complex",
-            instructions=r.SYSTEM,
-            model=OpenAIChatCompletionsModel(model=str(model), openai_client=client),
-        )
+        served = OpenAIChatCompletionsModel(model=str(model), openai_client=client)
+        given: dict[str, Any] = {"max_turns": 2 * max_steps}
+        if skills is None:
+            agent = Agent(name="complex", instructions=r.SYSTEM, model=served)
+        else:
+            agent, given["run_config"] = _sandbox_agent(served, skills)
         setattr(agent, TOOLS_ATTRIBUTE, list(tools))
-        return agent, {"framework_options": {"max_turns": 2 * max_steps}}
+        return agent, {"framework_options": given}
     if kind == "claude":
         from claude_agent_sdk import ClaudeAgentOptions
 
@@ -3405,12 +3455,29 @@ def target_of(
         options = ClaudeAgentOptions(
             model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps,
             setting_sources=[], cwd=str(work_folder("claude")),
+            **(skills.claude() if skills is not None else {}),
         )  # fmt: skip
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     if kind == "kimi":
-        return kimi_target(str(model), tools), {}
+        return kimi_target(str(model), tools, skills), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
+
+
+def _sandbox_agent(chat: Any, skills: Any) -> tuple[Any, Any]:
+    """An OpenAI ``SandboxAgent`` with the SDK's own ``Skills`` capability over ``skills`` and
+    its ``Shell`` (how it reads a skill it loaded), and the run configuration that gives it a
+    sandbox on this machine. The SDK's default capabilities are left out: ``Filesystem``'s
+    ``apply_patch`` is a hosted tool, which the chat completions API does not take."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    agent = SandboxAgent(
+        name="complex", instructions=r.SYSTEM, model=chat, capabilities=[Shell(), skills.openai()]
+    )
+    return agent, RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
 
 
 def work_folder(kind: str) -> Path | None:
@@ -3428,10 +3495,11 @@ def _working(variable: str, default: str) -> Path:
     return folder
 
 
-def kimi_target(model: str, tools: Sequence[Any]) -> Any:
+def kimi_target(model: str, tools: Sequence[Any], skills: Any = None) -> Any:
     """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
     Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one. No system prompt
-    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own."""
+    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own.
+    ``skills``: a skill set, in Kimi's own skills folder (``kimi(**skills.kimi())``)."""
     import os
     from urllib.parse import urlsplit
 
@@ -3454,7 +3522,10 @@ def kimi_target(model: str, tools: Sequence[Any]) -> Any:
         "KIMI_CODE_HOME": str(root / "home"),
         "KIMI_CODE_NO_AUTO_UPDATE": "1",
     }
-    agent = kimi(model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"))
+    agent = kimi(
+        model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"),
+        **(skills.kimi() if skills is not None else {}),
+    )  # fmt: skip
     object.__setattr__(agent, TOOLS_ATTRIBUTE, list(tools))  # a frozen dataclass
     return agent
 
@@ -3526,7 +3597,7 @@ async def run_case(
     their requests (the model is one), and each keeps its own run's calls."""
     w = r.world()
     w.reset()
-    from benchmark.cost import adversarial
+    from benchmark.cost import adversarial, longtasks
 
     adversarial.FILES.clear()  # the suite's file store starts empty for each case
     trace = Trace()
@@ -3564,27 +3635,68 @@ async def run_case(
         remembers, and no other case's (nor an earlier run's) leak into it."""
         return f"{t.user or runner.USER}-{tag}-{case.id}"
 
-    paused: set[int] = set()  # the turns (by id) whose run paused for an approval
+    #: what each turn's run (by id) went through: ``asks`` (it paused for an approval),
+    #: ``restarts`` (its worker died and another finished it)
+    happened: dict[int, set[str]] = {}
     #: the read-only commands each turn (by id) was resumed past, approved
     approved: dict[int, list[str]] = {}
 
     def conversation(t: Turn) -> str:
         return f"cx-{tag}-{case.id}-{t.thread}"
 
+    async def taken_over(t: Turn) -> Any:
+        """The turn's run queued and run by a worker that dies mid-run (a tool raises
+        ``longtasks.WorkerDied``: nothing more is written), then finished by another worker —
+        another harness sharing only the run store, which claims the run once the dead
+        worker's lease has lapsed."""
+        from trellis.runs import Job
+
+        handle = await agent.start(t.text, user=user_of(t), thread=conversation(t))
+        worker = h.worker([agent])
+        claimed = await h.runs.claim(worker.worker_id, [agent.id], lease_seconds=RESTART_LEASE)
+        assert claimed is not None
+        job = Job(
+            record=claimed.run, worker_id=worker.worker_id, lease_seconds=RESTART_LEASE,
+            store=h.runs,
+        )  # fmt: skip
+        try:
+            await agent.execute(job)
+        except BaseException as exc:
+            if not longtasks.WorkerDied.within(exc):
+                raise
+            other = Harness(
+                config=h.settings, memory=None if history == "memory" else False, runs=h.runs,
+                gateway=False,
+            )  # fmt: skip
+            try:
+                again = other.wrap(
+                    target, id=agent.id, hooks=[trace], run_timeout=run_seconds, **options
+                )
+                await asyncio.sleep(RESTART_LEASE)  # the dead worker's lease lapses
+                if await other.worker([again]).run_once():
+                    happened.setdefault(id(t), set()).add("restarts")
+            finally:
+                await other.aclose()
+        return await handle.result(wait=run_seconds)
+
     async def asked(t: Turn) -> Any:
-        result = await agent.run(
-            t.text,
-            user=user_of(t),
-            thread=conversation(t),
-            mode=t.mode or "queue",
-        )
+        if t.restart:
+            result = await taken_over(t)
+        else:
+            result = await agent.run(
+                t.text,
+                user=user_of(t),
+                thread=conversation(t),
+                mode=t.mode or "queue",
+            )
         # every approval the turn asks for is given: a turn may ask once per call (histx-03,
         # live: two of the user's statements forgotten, two asks), never past APPROVALS
         for _ in range(APPROVALS):
             if not (t.approve and result.status is RunStatus.PAUSED and result.interrupt):
                 break
-            paused.add(id(t))
-            result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=REVIEWER)
+            happened.setdefault(id(t), set()).add("asks")
+            asked_about = result.interrupt.interrupt_id
+            result = await agent.resume(asked_about, "approve", reviewer=REVIEWER)
         # a shell command that only reads, or saves only inside the run's own folder, is
         # approved, as a user reading it would; any other pause stays one
         result, approved[id(t)] = await approvals.approved_reads(
@@ -3669,19 +3781,13 @@ async def run_case(
                 "model_calls": captured.calls if n == 0 else 0,
                 "seconds": seconds,
                 "checks": checked(
-                    turn, status, captured.requests, captured.calls, calls=calls, history=history
-                )
-                + (
-                    [
-                        {
-                            "check": "asks",
-                            "ok": id(turn) in paused,
-                            "why": "the run asks a person, then goes on approved",
-                            "found": "paused" if id(turn) in paused else "no pause",
-                        }
-                    ]
-                    if turn.approve and history == "memory"
-                    else []
+                    turn,
+                    status,
+                    captured.requests,
+                    captured.calls,
+                    calls=calls,
+                    history=history,
+                    happened=happened.get(id(turn), ()),
                 ),
             }
             if turn.expect is not None:

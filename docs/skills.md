@@ -43,12 +43,31 @@ the harness's two tools.
 | Claude Agent SDK | `ClaudeAgentOptions(**src.claude())` | a local plugin (`plugins=`, `skills="all"`): the harness writes the run's skills into a folder of the run's own before each query and removes it after; the CLI finds them as `trellis:<name>` |
 | Kimi Code | `kimi(**src.kimi())` | Kimi's own skills folder (`$KIMI_CODE_HOME/skills`): the harness writes the run's skills there, in a home of the run's own, before each attempt; Kimi lists them and loads one with its `Skill` tool ([frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |
 | OpenAI Agents SDK, `SandboxAgent` | `capabilities=[..., src.openai()]` | the SDK's `Skills` capability, lazily loaded: listed in its instructions, copied into the sandbox by its `load_skill` |
-| OpenAI `Agent`, LangGraph, a function | `src.tools()` (`agent.tools.use(...)`) | none: `list_skills` and `load_skill(name, path=None)`, harness tools (governed, journaled, recorded) |
+| OpenAI `Agent`, LangGraph, a function | `src.tools()` (`agent.tools.use(...)`) | none: `list_skills` and `load_skill(name, path=None)`, harness tools (governed, journaled, recorded); a run that starts with them is told its skills with its context (below) |
 
 The OpenAI Agents SDK has a skills slot only on a `SandboxAgent` (which needs
 `framework_options={"run_config": RunConfig(sandbox=...)}`); a plain `Agent` has none. The
 Claude Agent SDK's `skills=` only filters what its CLI found on disk: the plugin is how skills
 reach it.
+
+**Where there is no slot, the run is told its skills.** A framework's own slot puts each
+skill's name and description in the model's instructions, so a task a skill covers finds it.
+The two tools alone do not: a model has to think of calling `list_skills` first (measured on
+`benchmark.cost.skills`, Haiku: 13 of 30 chats on a `create_agent` graph, against 30 of 30 on
+`ReAct`). So a run whose tools include the harness's `load_skill` gets the same listing with
+its context, after its memory context:
+
+```text
+## Skills
+Instructions kept for kinds of task, by name. Before you work on a task one of them covers, read it with load_skill(name) and follow it.
+- sql-review: Reviews SQL.
+- tone: How we write.
+```
+
+The skills are the run's own (its scope, pinned), a line each, at most 8,000 characters of
+them (then `- and N more: list_skills() lists them all`); both tools stay offered where the
+run's tools are narrowed. A function that adds the tools in its own code
+(`agent.tools.use(src.tools())`) reads the listing with `list_skills`, as before.
 
 ## Per run
 

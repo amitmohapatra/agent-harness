@@ -68,7 +68,7 @@ from collections.abc import (
 )
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, Final, NotRequired, cast, get_args
+from typing import Annotated, Any, Final, NotRequired, TypeGuard, cast, get_args
 
 from bifrost_sdk import RETRYABLE
 from langchain.agents.factory import _chain_async_model_call_handlers
@@ -1610,16 +1610,17 @@ def _failing(history: Sequence[AnyMessage]) -> int:
 # --------------------------------------------------------------------------- results
 class ReadTools(AgentMiddleware):
     """``read_file``, the one tool that reads back what was put aside, offered once there is
-    something to read: once a result reads as ``placeholder`` (cleared by LangChain's
-    ``ClearToolUsesEdit``: ``read_file`` pages it from the graph's state by its call's id, the
-    harness's own when the graph has none), once the graph's state holds a file (a large result
-    saved, a summarized history) or the run keeps a result — a small model offered it from the
-    start reads nothing, again and again. ``files=True``: ``read_file`` always offered (its
-    files are outside the graph's state: a disk, a store, a sandbox, the skills)."""
+    something to read: once a result was cleared (``cleared``: the graph clears older results,
+    LangChain's ``ClearToolUsesEdit``; ``read_file`` pages one from the graph's state by the
+    path its placeholder names, the harness's own when the graph has none), once the graph's
+    state holds a file (a large result saved, a summarized history) or the run keeps a result
+    — a small model offered it from the start reads nothing, again and again. ``files=True``:
+    ``read_file`` always offered (its files are outside the graph's state: a disk, a store, a
+    sandbox, the skills)."""
 
-    def __init__(self, placeholder: str | None, *, files: bool = False) -> None:
+    def __init__(self, *, cleared: bool, files: bool = False) -> None:
         super().__init__()
-        self.placeholder = placeholder
+        self.cleared = cleared
         self.files = files
 
     async def awrap_model_call(
@@ -1629,9 +1630,7 @@ class ReadTools(AgentMiddleware):
     ) -> ModelResponse[Any]:
         tools = list(request.tools)
         has = any(_named(t) == READ_FILE for t in tools)
-        if self.placeholder is not None and any(
-            isinstance(m, ToolMessage) and m.content == self.placeholder for m in request.messages
-        ):
+        if self.cleared and any(_cleared(m) for m in request.messages):
             if not has:  # a result was cleared: read_file reads it back
                 tools.append(READ_FILE_TOOL)
         elif has and not (self.files or request.state.get("files") or results.kept()):
@@ -1693,7 +1692,11 @@ class ThisTurnsResults(ClearToolUsesEdit):
     conversation the memory service replays was sized for the request it goes into (its
     budget is what the window leaves: ``Agent.conversation_budget``), so clearing its results
     at the turn's start would only undo that; a request still over the window is fitted by
-    :class:`FitWindow`, which leaves older turns out first."""
+    :class:`FitWindow`, which leaves older turns out first. Each cleared result's
+    ``placeholder`` names where it is read again (``{path}``: Deep Agents' path for its call,
+    ``/large_tool_results/<call id>``, which :func:`_cleared_result` reads) — a model is not
+    shown the ids of its calls, so a placeholder that left the id to it sent it to fetch the
+    result again."""
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
         start = next(
@@ -1705,7 +1708,20 @@ class ThisTurnsResults(ClearToolUsesEdit):
         ClearToolUsesEdit.apply(
             replace(self, trigger=self.trigger - earlier), turn, count_tokens=count_tokens
         )
+        for n, message in enumerate(turn):
+            if _cleared(message) and message.content == self.placeholder:
+                path = f"{results.PREFIX}/{message.tool_call_id}"
+                said = self.placeholder.replace("{path}", path)
+                turn[n] = message.model_copy(update={"content": said})
         messages[start:] = turn
+
+
+def _cleared(message: AnyMessage) -> TypeGuard[ToolMessage]:
+    """Whether LangChain's ``ClearToolUsesEdit`` cleared this result from the request (its
+    own mark on the message)."""
+    return isinstance(message, ToolMessage) and bool(
+        message.response_metadata.get("context_editing", {}).get("cleared")
+    )
 
 
 class FitWindow(AgentMiddleware):

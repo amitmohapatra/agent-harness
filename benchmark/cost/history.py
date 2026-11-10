@@ -261,7 +261,7 @@ def cases() -> list[Any]:
             Turn("Revoke my SUP-07 renewal approval: the audit isn't done.",
                  ((("memory_forget", {"id": SUP07_APPROVAL}),),),
                  reply="Done: I've removed your SUP-07 renewal approval.", thread="b",
-                 approve=True),
+                 approve=True, sent=(cx.ASKS_MEMORY,)),
             Turn("What exactly did you do for that just now, with which tool, and did it go "
                  "through?",
                  expect=cx.Expect("tools", of_turn=1,
