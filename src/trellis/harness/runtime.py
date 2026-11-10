@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.budget import Budget
-    from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.clients.memory import Permissions, RunMemory
     from trellis.harness.conversation import Steer
     from trellis.harness.frontend import Frontend
     from trellis.harness.governance.decision import Decision
@@ -294,7 +294,7 @@ class Runtime:
     allowed: frozenset[str] | None = field(default=None, repr=False)
     #: what its user allowed always (the memory service's tool permissions:
     #: ``tools.bridge._always``), once read in this attempt
-    always: frozenset[str] | None = field(default=None, repr=False)
+    always: Permissions | None = field(default=None, repr=False)
     #: the credentials hook's headers, per target, for this run only (``credentials.py``)
     credentials: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, init=False, repr=False)

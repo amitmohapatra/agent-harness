@@ -57,6 +57,13 @@ def wire(amount: int) -> str:
     return f"wired {amount}"
 
 
+class OverHundred(Hooks):
+    """A team's rule in code: a payment over 100 asks its own question."""
+
+    async def before_tool(self, call: ToolCall) -> Ask | None:
+        return Ask("Over 100: pay it?") if call.args.get("amount", 0) > 100 else None
+
+
 @pytest.fixture(autouse=True)
 def _reset() -> None:
     done.clear()
@@ -299,11 +306,6 @@ async def test_a_hooks_ask_decides_before_always(
 ) -> None:
     """A ``before_tool`` hook's ``Ask`` is your rule in code: it asks whatever the user allowed
     always, and never offers Always allow."""
-
-    class OverHundred(Hooks):
-        async def before_tool(self, call: ToolCall) -> Ask | None:
-            return Ask("Over 100: pay it?") if call.args.get("amount", 0) > 100 else None
-
     agent = arm(memory_harness.wrap(calling(("pay", 1)), id="payer"), [pay])
     first = await agent.run("go", user="ada", thread=THREAD)
     assert first.interrupt is not None
@@ -313,6 +315,95 @@ async def test_a_hooks_ask_decides_before_always(
     asked = await big.run("go", user="ada", thread="chat-2")
     assert asked.interrupt is not None and "Over 100: pay it?" in asked.interrupt.question
     assert ALWAYS not in asked.interrupt.options and done == ["pay 1"], asked
+
+
+async def test_a_hooks_ask_beats_what_was_allowed_for_the_conversation(harness: Harness) -> None:
+    """As a PreToolUse "ask" in Claude Code: the hook's question is asked though the tool was
+    allowed for this conversation — in the same run and in a later one."""
+    agent = arm(
+        harness.wrap(calling(("pay", 1), ("pay", 500)), id="payer", hooks=[OverHundred()]), [pay]
+    )
+    first = await agent.run("go", user="ada", thread=THREAD)
+    hooked = await approved(agent, first, "run")  # pay allowed for the conversation
+    assert hooked.interrupt is not None and "Over 100" in hooked.interrupt.question, hooked
+    assert done == ["pay 1"]
+    finished = await approved(agent, hooked)
+    assert finished.status is RunStatus.SUCCESS and done == ["pay 1", "pay 500"], finished
+    later = await agent.run("go", user="ada", thread=THREAD)  # pay 1 covered; pay 500 asks
+    assert later.interrupt is not None and "Over 100" in later.interrupt.question, later
+    assert done == ["pay 1", "pay 500", "pay 1"]
+
+
+async def test_a_hooks_ask_beats_what_a_schedule_allowed() -> None:
+    async with Harness(config=Settings()) as h:
+        chat = Chat(("pay", 1), ("pay", 500))
+        agent = arm(h.wrap(chat, id="desk", hooks=[OverHundred()]), [pay])
+        asked = await agent.run("pay my rent monthly", user="ada", thread=THREAD)
+        assert asked.interrupt is not None, asked
+        await agent.resume(asked.interrupt.interrupt_id, "answer", answer=ALLOW, reviewer="ada")
+        run = await fired(h, agent)
+        assert run.status is RunStatus.PAUSED and done == ["pay 1"], run  # allowed, then hooked
+        assert "Over 100" in run.awaiting.question
+
+
+async def test_always_is_not_offered_when_the_permissions_cannot_be_read_or_kept(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A grant is never offered where it would be lost: the permissions could not be read in
+    this attempt (the service away, a refusal), or the key cannot grant (an issuer's token)."""
+    agent = arm(memory_harness.wrap(calling(("pay", 1)), id="payer"), [pay])
+    memory_service.fail.add("permissions")
+    unread = await agent.run("go", user="ada", thread=THREAD)
+    assert unread.interrupt is not None and list(unread.interrupt.options) == [
+        ONCE,
+        CONVERSATION,
+        DENY,
+    ], unread
+    assert THREE in unread.interrupt.question
+    memory_service.fail.clear()
+    memory_service.failures["permissions"] = 403
+    refused = await agent.run("go", user="ada", thread="chat-2")
+    assert refused.interrupt is not None and ALWAYS not in refused.interrupt.options
+
+
+async def test_a_key_that_cannot_grant_is_offered_three_choices_and_still_honours_permissions(
+    memory_service: FakeMemoryService,
+) -> None:
+    memory_service.role = "jwt"  # an issuer's token: the service refuses its grants
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        agent = arm(h.wrap(calling(("pay", 1)), id="payer"), [pay])
+        asked = await agent.run("go", user="ada", thread=THREAD)
+        assert asked.interrupt is not None and ALWAYS not in asked.interrupt.options, asked
+        memory_service.permissions["tpm_x"] = {
+            "permission_id": "tpm_x",
+            "tenant": "acme",
+            "user": "ada",
+            "tool": "pay",
+            "assignee": None,
+            "allowed_by": "ada",
+            "created_at": "2026-10-01T00:00:00Z",
+        }  # granted before, by the service key
+        kept = await agent.run("go", user="ada", thread="chat-2")
+        assert kept.status is RunStatus.SUCCESS and done == ["pay 1"], kept
+
+
+async def test_a_grant_whose_write_fails_is_kept_in_the_spool(
+    memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """The permissions were read (Always allow offered), the write fails: spooled, not lost."""
+    memory_service.fail.add("allow_tool")
+    settings = Settings(spool_dir=str(tmp_path))
+    async with Harness(config=settings, memory=memory_service.client()) as h:
+        agent = arm(h.wrap(calling(("pay", 1)), id="payer"), [pay])
+        first = await agent.run("go", user="ada", thread=THREAD)
+        assert first.interrupt is not None and ALWAYS in first.interrupt.options
+        await agent.resume(
+            first.interrupt.interrupt_id, "answer", answer=ALWAYS.value, reviewer="ada"
+        )
+        await h.writes.drain()
+        assert h.writes.spooled == 1 and h.writes.failed == 0
+    spooled = (tmp_path / "trellis-writes.jsonl").read_text()
+    assert '"op": "allow_always"' in spooled and '"tool": "pay"' in spooled
 
 
 async def test_a_permission_store_that_cannot_be_read_asks_and_warns_once(

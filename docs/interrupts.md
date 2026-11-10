@@ -203,8 +203,9 @@ whose `approve_when` holds, is always asked about. A tool a rule governs is decl
 so it runs (announced) when the rule does not hold.
 
 **Automatic.** The hook's verdict is journaled with the call: a resumed run reads it instead of
-asking the hook again. An approval remembered for the run (`remember="run"`, below) covers the
-later calls a hook asks of the same `assignee`.
+asking the hook again. A hook's question is asked whatever was allowed beyond one call (for
+this conversation, always, or by a schedule: [governance.md](governance.md#what-the-person-picks)),
+as a PreToolUse "ask" is in Claude Code.
 
 **On failure.** A hook that raises fails the call (the framework sees the error).
 
