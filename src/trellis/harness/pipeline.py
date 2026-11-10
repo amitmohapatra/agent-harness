@@ -48,7 +48,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox, schedules, snapshots
+from trellis.harness import budget, conversation, sandbox, schedules, skills, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -468,6 +468,7 @@ async def _worked(
         stored.told(runtime, files)
     else:
         pushed = await agent.push(runtime)
+    await skills.told(runtime)
     if observe is not None:
         observe(pushed)
     if unresumable is not None:
