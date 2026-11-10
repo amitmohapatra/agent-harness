@@ -309,11 +309,15 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
     window = int((counted - 40) / 0.95)  # over the window by the estimate
     seen: list[ModelRequest[Any]] = []
     said: list[int] = [int(counted * 0.5), int(counted * 0.9)]
+    hooks = ours.ModelHooks()  # where the model is called: what it counted is learned there
+
+    async def replied(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        usage = UsageMetadata(input_tokens=said.pop(0), output_tokens=1, total_tokens=1)
+        return ModelResponse(result=[AIMessage(content="ok", usage_metadata=usage)])
 
     async def handler(r: ModelRequest[Any]) -> ModelResponse[Any]:
         seen.append(r)
-        usage = UsageMetadata(input_tokens=said.pop(0), output_tokens=1, total_tokens=1)
-        return ModelResponse(result=[AIMessage(content="ok", usage_metadata=usage)])
+        return await hooks.awrap_model_call(r, replied)
 
     fit = FitWindow(window)
     await fit.awrap_model_call(given, handler)
@@ -334,6 +338,13 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
     await fit.awrap_model_call(given, silent)  # a reply that says nothing teaches nothing
     assert ours._RATIOS.get(name) == before
     ours._RATIOS._data.clear()
+
+    async def summarized(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        return await handler(r.override(tools=r.tools[:1]))  # a summarization after it
+
+    said.append(_size(given.override(tools=tools[:1])))  # the model counts as estimated
+    await FitWindow(window * 10).awrap_model_call(given, summarized)
+    assert ours._RATIOS.get(name) == pytest.approx(1.0, 0.05)  # of the request it was sent
 
 
 def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:

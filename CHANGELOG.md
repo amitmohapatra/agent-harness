@@ -236,6 +236,19 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` on Deep Agents on a very small window no longer sends a request over it, nor ends
+  in an error for its size (adversarial `advconv-05`, a 6,000-token window: one of 14 turns
+  ended ERROR). Deep Agents' summarization counted tokens by the estimate, which undercounts
+  dense JSON, so it summarized too late; `FitWindow` learned the model's tokens per counted
+  token from a request the summarization after it had already made smaller, so it learned a
+  ratio too low; and Deep Agents summarized every evicted message in one request, itself over
+  a small window. Now the ratio is learned where the model is called, of the request it was
+  sent (`ModelHooks`); Deep Agents' summarization counts with it (its `token_counter`,
+  `middleware.served`) and summarizes at most what the window holds beside its prompt and the
+  reply (its `trim_tokens_to_summarize`, `middleware.summarized_at_most`: nothing it evicts is
+  trimmed on a large window); and `FitWindow`, with that summarization after it, fits the
+  latest turn and leaves the older ones to it, so no tool is dropped for turns a summary
+  replaces.
 - A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
   tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
   graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell

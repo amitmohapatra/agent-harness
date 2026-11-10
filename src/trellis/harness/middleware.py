@@ -62,6 +62,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -1098,6 +1099,9 @@ class ModelHooks(AgentMiddleware):
                     raise
                 raise error from exc
             _replied(span, reply)
+        # what the model counted of the request it was sent: what the middleware before this
+        # one sent (a summary made by one after ``FitWindow``) is what the ratio is of
+        _calibrated(name or "", _size(request), reply)
         return reply
 
     def _in_order(self, request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
@@ -1810,9 +1814,7 @@ class FitWindow(AgentMiddleware):
         ratio = _RATIOS.get(name) or 1.0
         sent, counted = self._within(request, int(budget / ratio))
         try:
-            reply = await handler(sent)
-            _calibrated(name, counted, reply)
-            return reply
+            return await handler(sent)
         except Exception as exc:
             real = _refused_size(exc)
             if real is None:
@@ -1830,11 +1832,17 @@ class FitWindow(AgentMiddleware):
 
     def _within(self, request: ModelRequest[Any], budget: int) -> tuple[ModelRequest[Any], int]:
         """The request fitted to ``budget`` (counted tokens), and its count."""
-        size = _size(request)
-        if size <= budget:
-            return request, size
+        if self._size(request) <= budget:
+            return request, _size(request)
         fitted = self._fitted(request, budget)
         return fitted, _size(fitted)
+
+    def _size(self, request: ModelRequest[Any]) -> int:
+        """What of the request must fit: all of it — or, with a summarization after it
+        (``turns=False``), its latest turn: the older turns are the summarization's to make
+        fit, counting as the model's server does (:func:`served`), so a tool is not dropped
+        for the size of turns the summary replaces."""
+        return _size(request if self.turns else _latest(request))
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
         profile = getattr(request.model, "profile", None)
@@ -1843,11 +1851,7 @@ class FitWindow(AgentMiddleware):
         )
         if not isinstance(window, int) or isinstance(window, bool):
             return None
-        reply = 0
-        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-            value = request.model_settings.get(key, getattr(request.model, key, None))
-            if isinstance(value, int) and not isinstance(value, bool):
-                reply = max(reply, value)
+        reply = _reply_tokens(request.model, request.model_settings)
         return max(0, int(window * FIT_SHARE) - reply)
 
     def _results(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
@@ -1867,16 +1871,14 @@ class FitWindow(AgentMiddleware):
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
-            if name == "memory" and not self.turns and _size(_latest(request)) <= budget:
-                break  # the summarization after it makes it fit: memory stays whole
             smaller = step(request, budget)
             if smaller is not request:
                 taken.append(name)
                 FITTED[name] += 1
                 request = smaller
-            if _size(request) <= budget:
+            if self._size(request) <= budget:
                 break
-        size = _size(request if self.turns else _latest(request))
+        size = self._size(request)
         if size > budget and _size(_bare(request)) > budget:
             raise ContextTooLarge(
                 f"the instructions and the user's message alone are about "
@@ -1910,6 +1912,40 @@ def _calibrated(name: str, counted: int, reply: Any) -> None:
     observed = min(high, max(low, real / counted))
     known = _RATIOS.get(name)
     _RATIOS[name] = observed if known is None else (known + observed) / 2
+
+
+def _reply_tokens(model: Any, settings: Mapping[str, Any]) -> int:
+    """The tokens a reply of ``model`` may take, as its call's settings or the model say."""
+    reply = 0
+    for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        value = settings.get(key, getattr(model, key, None))
+        if isinstance(value, int) and not isinstance(value, bool):
+            reply = max(reply, value)
+    return reply
+
+
+def summarized_at_most(model: Any, window: int, prompt: str) -> int:
+    """The most tokens of messages one summary request of Deep Agents' summarization holds
+    (its ``trim_tokens_to_summarize``): what the window holds for a request beside the summary
+    ``prompt`` (counted at the highest ratio, :data:`FIT_RATIOS`) and the reply. Deep Agents
+    summarizes every message it evicts in one request (``None``): on a small window that
+    request is over the window itself; on a large one this trims nothing it evicts."""
+    beside = count_tokens_approximately([HumanMessage(prompt)]) * FIT_RATIOS[1]
+    return max(1, int(window * FIT_SHARE - _reply_tokens(model, {}) - beside))
+
+
+def served(model: Any) -> Callable[..., int]:
+    """A token counter for ``model``: the estimate (Deep Agents') by the ratio learned of its
+    replies (:func:`_calibrated`), read at each count — for a middleware with a count of its own
+    (Deep Agents' summarization), so it decides by the tokens the model's server counts, as
+    ``FitWindow`` does: dense JSON is more tokens than the estimate says."""
+    name = _model_name(model) or ""
+
+    def count(messages: Iterable[Any], tools: list[Any] | None = None) -> int:
+        estimate = count_tokens_approximately(messages, tools=tools)
+        return int(estimate * (_RATIOS.get(name) or 1.0))
+
+    return count
 
 
 def _refused_size(exc: BaseException) -> int | None:

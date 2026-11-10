@@ -311,7 +311,10 @@ def ReAct(
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-        from deepagents.middleware.summarization import create_summarization_middleware
+        from deepagents.middleware.summarization import (
+            DEEPAGENTS_DEFAULT_SUMMARY_PROMPT,
+            create_summarization_middleware,
+        )
         from langchain.agents import create_agent
 
         from trellis.harness import automatic
@@ -404,7 +407,17 @@ def ReAct(
         system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
-        summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        summarization=_placed(
+            create_summarization_middleware(
+                profiled,
+                graph_backend,
+                token_counter=ours.served(profiled),
+                trim_tokens_to_summarize=None
+                if window is None
+                else ours.summarized_at_most(profiled, window, DEEPAGENTS_DEFAULT_SUMMARY_PROMPT),
+            ),
+            PLACED,
+        ),
         card=_card(files_backend),
         scoped=True,
     )
