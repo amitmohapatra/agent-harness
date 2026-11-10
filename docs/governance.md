@@ -80,6 +80,29 @@ call. The approval's interrupt carries them as `options` (`governance.decision.C
 values: `once`, `run` — the contracts' `remember="run"` —, `reject`), and plain chat reads them
 after the question ("Allow once, allow for this conversation, or deny.").
 
+With a memory service there is a fourth choice, **always allow** (value `always`, the
+contracts' `remember="always"`; `governance.decision.KEPT`; plain chat reads "Allow once, allow
+for this conversation, always allow, or deny."): the tool's later calls asked of the same
+person or role, in every conversation of that user, until the permission is revoked. The
+harness keeps it in the memory service's tool permissions (`PUT /v1/tool-permissions`, with its
+service key: an agent's or a user's own key is refused, so no agent allows itself a tool),
+once, in the background (spooled like its other writes when the write fails), and reads the
+user's permissions once per attempt, when a call first asks — so a revoke
+(`DELETE /v1/tool-permissions/{id}`, `ctx.advanced.tool_permissions.revoke`) counts from the
+user's next run. A call it covers runs announced ("pay is always allowed for you."). It is never
+offered, and a kept permission never honoured, for an `irreversible` tool, where the tool's
+`approve_when` decides the call (an administrator's rule, or an accepted suggestion) or where a
+`before_tool` hook's `Ask` asks (your rule in code). It is offered only where a pick would be
+kept: when the run's attempt could not read the user's permissions (the service away, a
+refusal) or the key cannot grant (an issuer's token, a key restricted to some principals), the
+person gets the three choices; while they cannot be read, the call asks (failing closed) and a
+warning is logged once. Without a memory service the three choices stay. A framework's own
+tools keep their own flow.
+
+A `before_tool` hook's `Ask` is asked whatever was allowed beyond one call — for this
+conversation, always, or by the schedule that fired the run — as a PreToolUse "ask" is in
+Claude Code: it is your rule in code.
+
 What the person allowed is read from the run store's history of every answered interrupt
 (agent-runs' `resolutions`, append-only; `LocalRuns` keeps the same): the runs of the tenant,
 user and thread, whichever agent or worker ran them, once per attempt and only when a call

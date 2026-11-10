@@ -130,25 +130,28 @@ class Escalating(Hooks):
 
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
-async def test_remembering_a_hooks_ask_covers_later_asks_of_the_same_assignee_on_every_adapter(
+async def test_a_hooks_ask_is_asked_whatever_was_remembered_on_every_adapter(
     harness: Harness, framework: str, tmp_path: Path
 ) -> None:
-    plan: list[Call] = [("pay", {"amount": a}) for a in (50, 60, 900, 950)]
+    """A hook's ``Ask`` is your rule in code: an approval remembered beyond its call
+    (``remember="run"``) never skips it, as a PreToolUse "ask" in Claude Code."""
+    plan: list[Call] = [("pay", {"amount": a}) for a in (50, 60, 900)]
     target, tools = await BUILDERS[framework](harness, [pay], tmp_path, plan)
     agent = arm(harness.wrap(target, id=f"remembering-{framework}", hooks=[Escalating()]), tools)
-    first = await agent.run("pay four", user="ada")
+    first = await agent.run("pay three", user="ada")
     assert first.interrupt is not None and first.interrupt.assignee is None, first
-    finance = await agent.resume(
+    again = await agent.resume(
         first.interrupt.interrupt_id, "approve", reviewer="lee", remember="run"
     )
-    asked = finance.interrupt  # 60 was not asked; 900 is finance's: still asked
+    asked = again.interrupt  # 60: the hook asks again, remembered or not
+    assert asked is not None and asked.question == f"Approve pay? Pay 60? {THREE}", again
+    assert paid == [50]
+    finance = await agent.resume(asked.interrupt_id, "approve", reviewer="lee", remember="run")
+    asked = finance.interrupt  # 900 is finance's
     assert asked is not None and asked.assignee == "role:finance", finance
-    assert asked.question == f"Approve pay? Pay 900? {THREE}" and paid == [50, 60]
-    done = await agent.resume(asked.interrupt_id, "approve", reviewer="cfo", remember="run")
-    assert done.status is RunStatus.SUCCESS and done.answer == "Done. paid 950", done
-    assert paid == [50, 60, 900, 950]  # 950: finance's again, remembered
-    other = await agent.run("pay four", user="ada")  # never across runs
-    assert other.status is RunStatus.PAUSED
+    done = await agent.resume(asked.interrupt_id, "approve", reviewer="cfo")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. paid 900", done
+    assert paid == [50, 60, 900]
 
 
 async def test_governed_asks_by_arguments_with_a_hook() -> None:

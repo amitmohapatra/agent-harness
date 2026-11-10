@@ -5,6 +5,26 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: "Always allow", kept in the memory service
+
+With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,
+`remember="always"`; trellis-contracts 0.7.1): the tool's later calls asked of the same person
+or role run without asking in every conversation of that user until the permission is revoked.
+
+- Kept in the memory service's tool permissions (`PUT /v1/tool-permissions`, trellis-memory
+  0.6.5) with the harness's service key, once, in the background (spooled when the service is
+  down); read once per attempt when a call first asks, so a revoke counts from the next run.
+- Never for an `irreversible` tool (neither offered nor honoured), nor where the tool's
+  `approve_when` or a `before_tool` hook's `Ask` decides the call; a framework's own tools keep
+  their own flow.
+- Offered only where a pick is kept: an attempt that could not read the permissions, or a key
+  that cannot grant (an issuer's token), offers the three choices. Permissions that cannot be
+  read fail closed: the call asks, and a warning is logged once.
+- **A hook's `Ask` beats every allowance:** a `before_tool` hook's question is asked whatever
+  was allowed for this conversation, always, or by the run's schedule (as a PreToolUse "ask"
+  in Claude Code). Before, an approval for the conversation or a schedule's covered it.
+- Without a memory service nothing changes: three choices.
+
 ### Changed: a write asks, once a conversation, as in Claude Code
 
 A tool the harness runs that says it writes now asks the person before it runs (it ran,

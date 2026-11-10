@@ -51,8 +51,8 @@ kept, empty, for installs that name it:
 
 | Sibling | Pinned | Tested | Service |
 |---|---|---|---|
-| `trellis-contracts` | `>=0.6.5,<0.8` | 0.7.0 | — |
-| `trellis-memory` | `>=0.6.0` | 0.6.0 | agent-memory-service 0.4.0 with agents' model endpoints (`PUT /v1/agents/model-key` takes an `Endpoint`, `docs/openapi.json`) |
+| `trellis-contracts` | `>=0.7.1,<0.8` | 0.7.1 | — |
+| `trellis-memory` | `>=0.6.5` | 0.6.5 | agent-memory-service 0.4.0 with agents' model endpoints (`PUT /v1/agents/model-key` takes an `Endpoint`) and tool permissions (`/v1/tool-permissions`, `docs/openapi.json`) |
 | `trellis-runs` | `>=0.4.0` | 0.4.1 | agent-runs 0.4.0 (`docs/openapi.json`) |
 | `bifrost-sdk` | `>=0.4` | 0.4.0 | any OpenAI-compatible endpoint; Bifrost's extras with `gateway="bifrost"` |
 

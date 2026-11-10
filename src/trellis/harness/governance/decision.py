@@ -15,8 +15,9 @@ A write that asks only because it writes is announced instead where something el
 answers for it (:meth:`Decision.unasked`): a framework's own tool under its own permission flow,
 or a harness built-in that keeps to what the run owns. A person asked about a call of a tool the
 harness runs picks one of :data:`CHOICES`, as in Claude Code — allow once, allow for this
-conversation, deny — and about an ``irreversible`` one of :data:`EVERY_TIME`: it asks every
-call (:func:`choices`, :func:`chosen`).
+conversation, deny; with a memory service, which keeps it, always allow too (:data:`KEPT`) —
+and about an ``irreversible`` one of :data:`EVERY_TIME`: it asks every call (:func:`choices`,
+:func:`chosen`).
 """
 
 from __future__ import annotations
@@ -73,19 +74,28 @@ ACTIONS: Final[dict[str, Action]] = {
 ONCE: Final = Option(value="once", label="Allow once")
 CONVERSATION: Final = Option(value="run", label="Allow for this conversation")
 DENY: Final = Option(value="reject", label="Deny")
+#: "Always allow" is the contracts' ``remember="always"``: the tool's calls in every
+#: conversation of the user, until the permission the memory service keeps is revoked.
+ALWAYS: Final = Option(value="always", label="Always allow")
 CHOICES: Final = (ONCE, CONVERSATION, DENY)
+#: The choices where what a person allows always is kept (a memory service).
+KEPT: Final = (ONCE, CONVERSATION, ALWAYS, DENY)
 #: An ``irreversible`` tool's: never allowed beyond the call asked about.
 EVERY_TIME: Final = (ONCE, DENY)
 #: What plain chat reads after the question, for each set of choices.
 SAID: Final[dict[tuple[Option, ...], str]] = {
     CHOICES: "Allow once, allow for this conversation, or deny.",
+    KEPT: "Allow once, allow for this conversation, always allow, or deny.",
     EVERY_TIME: "Allow once, or deny.",
 }
 
 
-def choices(risk: str) -> tuple[Option, ...]:
-    """The choices offered on a call of a tool with ``risk``."""
-    return EVERY_TIME if risk == "irreversible" else CHOICES
+def choices(risk: str, *, always: bool = False) -> tuple[Option, ...]:
+    """The choices offered on a call of a tool with ``risk``; ``always``: what a person allows
+    always can be kept (and no rule decides the call), so Always allow is offered too."""
+    if risk == "irreversible":
+        return EVERY_TIME
+    return KEPT if always else CHOICES
 
 
 def reach(tool: str, assignee: str | None) -> str:
@@ -100,6 +110,7 @@ def chosen(value: Any) -> tuple[InterruptDecision, InterruptRemember] | None:
     picks: dict[Any, tuple[InterruptDecision, InterruptRemember]] = {
         ONCE.value: (InterruptDecision.APPROVE, "once"),
         CONVERSATION.value: (InterruptDecision.APPROVE, "run"),
+        ALWAYS.value: (InterruptDecision.APPROVE, "always"),
         DENY.value: (InterruptDecision.REJECT, "once"),
     }
     return picks.get(value) if isinstance(value, str) else None

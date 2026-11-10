@@ -146,8 +146,8 @@ declares no `side_effects` gets (it asks).
 
 An approval (a `write` or `irreversible` tool, a catalog `approve_when` that holds, a hook's
 `Ask`) is the same pause with `reason=APPROVAL`, the tool call attached and the person's
-choices as its `options`: allow once, allow for this conversation, deny
-([governance.md](governance.md#what-the-person-picks)).
+choices as its `options`: allow once, allow for this conversation, deny — and, with a memory
+service, always allow ([governance.md](governance.md#what-the-person-picks)).
 
 ## Who reviews, on which screen: a `before_tool` hook
 
@@ -203,8 +203,9 @@ whose `approve_when` holds, is always asked about. A tool a rule governs is decl
 so it runs (announced) when the rule does not hold.
 
 **Automatic.** The hook's verdict is journaled with the call: a resumed run reads it instead of
-asking the hook again. An approval remembered for the run (`remember="run"`, below) covers the
-later calls a hook asks of the same `assignee`.
+asking the hook again. A hook's question is asked whatever was allowed beyond one call (for
+this conversation, always, or by a schedule: [governance.md](governance.md#what-the-person-picks)),
+as a PreToolUse "ask" is in Claude Code.
 
 **On failure.** A hook that raises fails the call (the framework sees the error).
 
@@ -214,14 +215,16 @@ later calls a hook asks of the same `assignee`.
 reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call (the
 choice "allow for this conversation") approves that tool's later calls in this run and in
 every later run of the same thread for the same user without asking — never an
-`irreversible` tool's, which asks at every call.
+`irreversible` tool's, which asks at every call. With a memory service, `remember="always"`
+(the choice "always allow") approves them in every conversation of the user until the
+permission is revoked ([governance.md](governance.md#what-the-person-picks)).
 
 **When.** A comment whenever a decision needs its why (it reaches the feedback approval
 patterns are learned from). "For this conversation" when the person trusts the chat with the
 tool (a batch of refunds of one customer).
 
 **Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`, or the picked
-option's value as `payload`: `"once"`, `"run"`, `"reject"`), an A2A answer (a data part
+option's value as `payload`: `"once"`, `"run"`, `"always"`, `"reject"`), an A2A answer (a data part
 `{"comment": ..., "remember": "run"}`, or the choice in words, as plain chat said it), an inbox
 of your own; every adapter and `ReAct`. `agent.resume(id, "answer", answer="run")` picks an
 option too. Way 2: `InterruptResolution(comment=, remember=)`.

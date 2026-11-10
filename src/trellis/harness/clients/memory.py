@@ -13,6 +13,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
 
@@ -39,6 +40,7 @@ from trellis.memory.models import (
     Feedback,
     KeyInfo,
     PromptContext,
+    ToolPermission,
 )
 
 #: Prompt budget for the pushed context, in tokens, when the model's context window is not
@@ -79,6 +81,26 @@ CITED_MAX: Final = 50
 #: cannot be reached, the last listing is kept and asked for again after the retry interval.
 AGENT_TOOLS_TTL_SECONDS: Final = 600.0
 AGENT_TOOLS_RETRY_SECONDS: Final = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class Permissions:
+    """What a run's user allowed always (the memory service's tool permissions), as one attempt
+    read them."""
+
+    #: the tools allowed, each as ``governance.decision.reach`` names it; none when unread
+    tools: frozenset[str] = frozenset()
+    #: whether a grant made now is kept: read, and the key may grant (``True``); the key may
+    #: not (``False``); not known, the permissions could not be read (``None``)
+    grants: bool | None = None
+
+
+def grants(key: KeyInfo) -> bool:
+    """Whether the memory service keeps a grant this key sends: the credential that acts for
+    everyone in its tenant — a service key whose ``may_act_as`` is unrestricted, or a
+    development key (the service's own rule: ``PUT /v1/tool-permissions``) — never an
+    issuer's token, an administrator's key or one restricted to some principals."""
+    return key.role == "trusted_dev" or (key.role == "service" and "*" in key.may_act_as)
 
 
 class Window(StrEnum):
@@ -165,8 +187,8 @@ class Memory:
                 call = ToolCall.model_validate(args["call"])
                 outcome = ToolOutcome.model_validate(args["outcome"])
                 return lambda: run.record_tool(call, outcome)
-            case "run_feedback":
-                return lambda: run.run_feedback(**args)
+            case "run_feedback" | "allow_always":  # the method of that name, its keywords
+                return lambda: getattr(run, record["op"])(**args)
             case "feedback":
                 decision = Decision.model_validate(args["record"])
                 return lambda: run.feedback(decision)
@@ -259,6 +281,17 @@ class RunMemory:
 
     async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
         return await self.ctx.tool_hints(task, available=list(available))
+
+    # ------------------------------------------------------------------ tool permissions
+    async def always_allowed(self) -> list[ToolPermission]:
+        """The tools this scope's user allowed always ("Always allow")."""
+        return await self.ctx.advanced.tool_permissions.list()
+
+    async def allow_always(self, tool: str, assignee: str | None, allowed_by: str) -> None:
+        """Keep the user's Always allow for ``tool`` asked of ``assignee`` (idempotent)."""
+        await self.ctx.advanced.tool_permissions.allow(
+            tool, assignee=assignee, allowed_by=allowed_by
+        )
 
     # ------------------------------------------------------------------ records
     async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:

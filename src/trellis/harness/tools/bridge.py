@@ -53,6 +53,7 @@ from opentelemetry.trace import StatusCode
 
 from trellis.contracts import (
     InterruptDecision,
+    Option,
     RunEventType,
     ToolCall,
     ToolError,
@@ -63,6 +64,8 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.asking import RunCancelled, answer_of
+from trellis.harness.bounded import SAID_ONCE, LRUSet
+from trellis.harness.clients.memory import Permissions, grants
 from trellis.harness.conversation import allowed, result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision, choices, reach
@@ -82,6 +85,8 @@ from trellis.harness.tools.base import (
 )
 
 log = logging.getLogger("trellis.run")
+#: The tenants whose tool permissions could not be read, said once each (of the most recent).
+_UNREAD: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 
 #: Why a person is asked about a call its framework asks about (:func:`asked`).
 FRAMEWORK_ASKS: Final = "{framework} asks before it runs this call."
@@ -233,7 +238,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     try:
-        await runtime.approve(call, decision, choices(decision.risk))
+        await runtime.approve(call, decision, await _offered(runtime, decision))
     except Paused:
         return True
     raise AssertionError("an approval not answered yet pauses")  # pragma: no cover
@@ -520,9 +525,10 @@ async def _decided(
     when the tool was allowed beyond one call (:func:`_allowed`) — and what came of it: the
     call (with an approver's edited arguments), announced when it is to be, or the outcome of a
     call the approver rejected. ``tool``: a call the harness runs — a write asks (unless the
-    tool is ``confined``), and the person picks one of ``governance.decision.choices``; none:
-    a call its framework runs under its own permission flow — a write is announced, and an
-    approval reaches the rest of the run only (``remember="run"``)."""
+    tool is ``confined``), and the person picks one of ``governance.decision.choices`` (Always
+    allow kept in the memory service: :func:`_kept_always`); none: a call its framework runs
+    under its own permission flow — a write is announced, and an approval reaches the rest of
+    the run only (``remember="run"``)."""
     governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
@@ -541,7 +547,8 @@ async def _decided(
     if (
         decision.asks
         and not answered
-        and (why := await _allowed(runtime, decision, ours=ours)) is not None
+        and (why := await _allowed(runtime, decision, ours=ours, hooked=asked is not None))
+        is not None
     ):
         decision = decision.approved(why)
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
@@ -552,16 +559,23 @@ async def _decided(
         decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
-        resolution = await runtime.approve(call, decision, choices(decision.risk) if ours else ())
+        hooked = asked is not None
+        offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
+        resolution = await runtime.approve(call, decision, offered)
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
         remembered = runtime.replay.journal.remembered
         covered = reach(spec.name, decision.assignee)
-        if (
-            resolution.remember == "run"
-            and decision.risk != "irreversible"
-            and covered not in remembered
-        ):
+        always = (
+            resolution.remember == "always"
+            and ours
+            and _keeps(runtime, decision, hooked=hooked)
+            and (await _always(runtime)).grants is not False  # unread: kept, or spooled
+        )
+        beyond = always or (resolution.remember == "run" and decision.risk != "irreversible")
+        if beyond and covered not in remembered:
             remembered.append(covered)  # in the journal: later calls of it are not asked
+            if always:  # once: a replayed answer finds it remembered
+                await _kept_always(runtime, decision, resolution.reviewer)
         if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             rejected = ToolOutcome(
@@ -579,19 +593,28 @@ async def _decided(
     return decision, call, None
 
 
-async def _allowed(runtime: Runtime, decision: Decision, *, ours: bool) -> str | None:
+async def _allowed(
+    runtime: Runtime, decision: Decision, *, ours: bool, hooked: bool = False
+) -> str | None:
     """Why a call that asks runs without asking, or ``None``: its tool was allowed beyond one
     call — in this run (the journal), and, for a call the harness runs (``ours``), by the
     schedule that fired the run (``schedules.ALLOWED``) or in an earlier run of the conversation
-    (``conversation.allowed``). Never an ``irreversible`` tool: it asks every call."""
-    if decision.risk == "irreversible":
+    (``conversation.allowed``), or always, by its user (:func:`_always`) unless its
+    ``approve_when`` decides the call. Never an ``irreversible`` tool: it asks every call; and
+    never a call a hook's ``Ask`` asks about (``hooked``): your rule in code is asked whatever
+    was allowed, as a PreToolUse "ask" is in Claude Code."""
+    if decision.risk == "irreversible" or hooked:
         return None
     covered = reach(decision.tool, decision.assignee)
     if covered in runtime.replay.journal.remembered:
         reached = "this conversation" if ours else "the rest of the run"
         return f"{decision.tool} was approved for {reached}."
-    if not ours:
-        return None
+    return await _allowed_beyond(runtime, decision, covered) if ours else None
+
+
+async def _allowed_beyond(runtime: Runtime, decision: Decision, covered: str) -> str | None:
+    """Why a call the harness runs is allowed beyond this run: by its schedule, for its
+    conversation, or always."""
     root = runtime
     while root.parent is not None:  # a child run works for its parent's schedule
         root = root.parent
@@ -599,7 +622,81 @@ async def _allowed(runtime: Runtime, decision: Decision, *, ours: bool) -> str |
         return f"{decision.tool} was allowed for this schedule."
     if covered in await allowed(runtime):
         return f"{decision.tool} was approved for this conversation."
+    if decision.rule is None and covered in (await _always(runtime)).tools:
+        return f"{decision.tool} is always allowed for you."
     return None
+
+
+def _keeps(runtime: Runtime, decision: Decision, *, hooked: bool) -> bool:
+    """Whether Always allow applies to the call: a memory service keeps it, the tool is not
+    ``irreversible`` and no rule decides the call (its ``approve_when``, or a hook's ``Ask``:
+    ``hooked``)."""
+    return (
+        runtime.run_memory is not None
+        and decision.risk != "irreversible"
+        and decision.rule is None
+        and not hooked
+    )
+
+
+async def _offered(
+    runtime: Runtime, decision: Decision, *, hooked: bool = False
+) -> tuple[Option, ...]:
+    """What a person asked about a call the harness runs picks from: Always allow too where it
+    applies (:func:`_keeps`) and a grant would be kept — this attempt read the user's
+    permissions, and the key may grant — so a pick is never silently lost."""
+    keeps = _keeps(runtime, decision, hooked=hooked) and (await _always(runtime)).grants is True
+    return choices(decision.risk, always=keeps)
+
+
+async def _kept_always(runtime: Runtime, decision: Decision, reviewer: str | None) -> None:
+    """The person's Always allow for the call's tool (asked of the same person or role), kept
+    in the memory service's tool permissions for the run's user — in the background, spooled
+    when it cannot be delivered, and stored once however often it is sent."""
+    memory = runtime.run_memory
+    assert memory is not None  # offered only with one
+    args = {
+        "tool": decision.tool,
+        "assignee": decision.assignee,
+        "allowed_by": reviewer or runtime.user,
+    }
+    await runtime.agent.harness.writes.submit(
+        "memory.tool_permission",
+        lambda: memory.allow_always(**args),
+        events=runtime.events,
+        record=memory.record("allow_always", **args),
+    )
+
+
+async def _always(runtime: Runtime) -> Permissions:
+    """What the run's user allowed always (``reach`` of each kept permission) and whether a
+    grant is kept: read once per attempt, and only when a call asks, so a revoke counts from
+    the next run; none without a memory service, and none while it cannot be read — the call
+    asks (failing closed), Always allow is not offered, and a warning is logged once."""
+    if runtime.always is None:
+        runtime.always = await _always_read(runtime)
+    return runtime.always
+
+
+async def _always_read(runtime: Runtime) -> Permissions:
+    memory = runtime.run_memory
+    if memory is None:
+        return Permissions(grants=False)
+    try:
+        kept = await memory.always_allowed()
+        key = await runtime.agent.harness._key_info()
+    except Exception as exc:
+        if runtime.tenant not in _UNREAD:
+            _UNREAD.add(runtime.tenant)
+            log.warning(
+                "the tool permissions could not be read (%s): until they can, a tool allowed "
+                "always asks again",
+                type(exc).__name__,
+                extra={"tenant": runtime.tenant, "run_id": runtime.run_id},
+            )
+        return Permissions()
+    _UNREAD.discard(runtime.tenant)  # a later outage is said again
+    return Permissions(frozenset(reach(p.tool, p.assignee) for p in kept), grants(key))
 
 
 async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> ToolOutcome:
