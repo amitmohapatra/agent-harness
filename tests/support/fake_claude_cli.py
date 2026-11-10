@@ -588,10 +588,17 @@ def prompts(session: str) -> list[str]:
 def assistant(
     session: str, content: list[dict[str, Any]], parent: str | None = None
 ) -> dict[str, Any]:
-    """An assistant message (``parent``: a subagent's, the ``Agent`` call that runs it)."""
+    """An assistant message (``parent``: a subagent's, the ``Agent`` call that runs it): one
+    step's reply, with its id and usage as the real CLI sends them."""
     return {
         "type": "assistant",
-        "message": {"role": "assistant", "model": "fake", "content": content},
+        "message": {
+            "id": f"msg_{uuid.uuid4().hex}",
+            "role": "assistant",
+            "model": "fake",
+            "content": content,
+            "usage": {"input_tokens": STEP_TOKENS[0], "output_tokens": STEP_TOKENS[1]},
+        },
         "parent_tool_use_id": parent,
         "session_id": session,
     }
