@@ -8,6 +8,15 @@ reviewer approves "save this file" there: ``benchmark.cost.approvals``). A comma
 deletes or moves anything, installs, reaches the network or cannot be read for certain is not
 read-only: the framework's own permission check decides it, and governance on top.
 
+A read is read-only where it may be read: inside the folder the command runs in (``cwd``: the
+run's working folder) or one the harness says the run may read (``reads``: the skills it wrote
+for the run). A file anywhere else (``/etc/passwd``, ``~/.ssh/id_rsa``, ``/proc/self/environ``)
+changes nothing, but puts what the machine keeps into the model's context: a pause. With no
+folder given nothing can be placed, so every read of a file pauses. The folder is also where a
+command could have been changed: a program is one of the system's, not a file of the folder;
+a ``*`` that names a file like an option, or a module of the folder Python would import in
+place of its own, is a pause.
+
 Read with the standard library only: ``shlex`` splits the command (its quoting, its operators),
 ``ast`` reads the Python it runs. Read-only is what the text proves: Python may use only the
 modules, functions, methods and built-in names listed here (:func:`python_reads`), each one that
@@ -19,10 +28,14 @@ from __future__ import annotations
 
 import ast
 import builtins
+import dataclasses
+import glob
 import os
 import re
 import shlex
-from collections.abc import Callable, Mapping
+import shutil
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -46,27 +59,28 @@ PY_SAVES: Final = frozenset(
 )  # fmt: skip
 #: Python calls that write to a file already opened (checked where it was opened).
 PY_HANDLES: Final = frozenset({"write", "writelines", "dump"})
-#: Programs that only read, each with the arguments that would make it write or run a program
-#: (any argument starting so; a one-letter one also among other letters: ``sort -no``). ``sed``
-#: and ``awk`` run a script: read by :func:`_sed` and :func:`_awk`.
+#: Programs that only read, each with the arguments that would make it write, run a program or
+#: read files the command does not name (a list of them, links followed): any argument starting
+#: so (ending ``=``: or that word itself); a one-letter one also among other letters (``sort
+#: -no``). ``sed``, ``awk`` and ``jq`` run a script: read by :data:`_SCRIPTED`.
 READERS: Final[Mapping[str, tuple[str, ...]]] = {
     "cat": (),
     "head": (),
     "tail": (),
     "ls": (),
-    "wc": (),
-    "grep": (),
-    "egrep": (),
+    "wc": ("--files0-from",),
+    "grep": ("-f", "--file=", "-R", "--dereference-recursive"),
+    "egrep": ("-f", "--file=", "-R", "--dereference-recursive"),
     "cut": (),
     "tr": (),
     "nl": (),
     "column": (),
-    "jq": (),
+    "jq": ("-f", "--from-file", "-L"),
     "echo": (),
     "printf": (),
     "pwd": (),
     "stat": (),
-    "du": (),
+    "du": ("--files0-from",),
     "df": (),
     "diff": (),
     "cmp": (),
@@ -75,16 +89,59 @@ READERS: Final[Mapping[str, tuple[str, ...]]] = {
     "realpath": (),
     "which": (),
     "true": (),
-    "sort": ("-o", "--output", "--compress-program"),
+    "sort": ("-o", "--output", "--compress-program", "--files0-from"),
     "uniq": (),
-    "rg": ("--pre", "--hostname-bin", "-z", "--search-zip"),
-    "file": ("-C", "--compile", "-z", "-Z", "--uncompress"),
-    "date": ("-s", "--set"),
-    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"),
+    "rg": ("--pre", "--hostname-bin", "-z", "--search-zip", "-f", "--file=", "-L", "--follow"),
+    "file": ("-C", "--compile", "-z", "-Z", "--uncompress", "-f", "--files-from"),
+    "date": ("-s", "--set", "-f", "--file"),
+    "find": ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls", "-files0-from"),
     "sed": (),
     "awk": (),
 }
 PYTHONS: Final = frozenset({"python", "python3"})
+#: The readers that read no file: their words are texts.
+_NO_FILES: Final = frozenset(
+    {"echo", "printf", "true", "pwd", "which", "basename", "dirname", "date", "tr"}
+)
+#: The readers whose first word is a script or a pattern, not a file - unless an option gives
+#: it (``sed -e``, ``grep -e``; ``rg --files`` takes none): then every word may name a file.
+_GREPS: Final = re.compile(r"-(?!-).*e.*|--regexp.*")
+_SCRIPTS: Final[Mapping[str, re.Pattern[str] | None]] = {
+    "awk": None,
+    "jq": None,
+    "sed": re.compile(r"-[nEr]*e"),
+    "grep": _GREPS,
+    "egrep": _GREPS,
+    "rg": re.compile(_GREPS.pattern + r"|--files.*"),
+}
+#: The options whose next word is theirs: a script, a separator, a variable - no file.
+_VALUED: Final[Mapping[str, re.Pattern[str]]] = {
+    "awk": re.compile(r"-F|-v"),
+    "sed": re.compile(r"-[nEr]*e"),
+}
+#: Where the system keeps its programs, and this Python its own: a program is trusted there.
+SYSTEM: Final = frozenset(
+    {"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/opt/homebrew/bin"}
+    | {
+        os.path.dirname(sys.executable),
+        *(os.path.join(p, "bin") for p in (sys.prefix, sys.base_prefix)),
+    }
+)
+#: The variables that put a folder on Python's path, or run a file as it starts.
+_PYTHON_ENV: Final = ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME")
+#: The commands that change the folder a shell is in: ``cd`` and its kin, a builtin reached by
+#: another name, code the shell runs as its own (``eval``, ``source``, ``.``), its replacement.
+MOVES: Final = frozenset(
+    {"cd", "pushd", "popd", "builtin", "command", "eval", "source", ".", "exec"}
+)
+#: One of :data:`MOVES` as a word anywhere in a line not read word by word.
+_MOVED: Final = re.compile(
+    r"(?:^|[\s;&|(){}`!])(?:cd|pushd|popd|builtin|command|eval|source|exec|\.)(?=$|[\s;&|()])"
+)
+#: The words a command of a compound line may start with before its program: none is one.
+_KEYWORDS: Final = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "time"})
+#: The folders a shell that keeps its folder may be in, past which it is not known.
+PLACES_MAX: Final = 4
 #: The shell's operators a read-only command may hold: pipes and sequences (no redirect to a
 #: file, no background job).
 JOINS: Final = frozenset({"|", "||", "&&", ";"})
@@ -158,8 +215,8 @@ PY_MODULES: Final[Mapping[str, frozenset[str]]] = {
         "openpyxl.utils": "get_column_letter column_index_from_string",
         "operator": "itemgetter add sub mul truediv floordiv mod neg lt le eq ne gt ge and_ or_ "
         "not_ contains",
-        "os": "listdir getcwd walk scandir stat lstat getenv sep linesep name cpu_count getpid "
-        "makedirs mkdir",
+        "os": "listdir getcwd walk scandir stat lstat sep linesep name cpu_count getpid makedirs "
+        "mkdir",
         "os.path": "join exists isfile isdir basename dirname splitext getsize getmtime getctime "
         "abspath realpath expanduser relpath normpath split isabs commonpath sep",
         "pandas": "read_csv read_excel read_json read_table read_parquet read_fwf ExcelFile "
@@ -167,7 +224,7 @@ PY_MODULES: Final[Mapping[str, frozenset[str]]] = {
         "to_numeric to_timedelta pivot_table crosstab cut qcut isna notna isnull notnull "
         "date_range Timestamp Timedelta NA NaT unique get_dummies melt json_normalize "
         "set_option option_context",
-        "pathlib": "Path PurePath",
+        "pathlib": "Path",
         "platform": "python_version machine",
         "pprint": "pprint pformat",
         "random": "random randint choice choices sample shuffle uniform seed gauss randrange",
@@ -240,10 +297,8 @@ PY_METHODS: Final = _listed(
     "total_seconds days seconds tzinfo astimezone utc combine min max week quarter dayofweek "
     "day_name month_name days_in_month normalize tz_localize tz_convert "
     # paths, read only
-    "exists is_file is_dir is_absolute is_symlink iterdir glob rglob read_text read_bytes stat "
-    "lstat stem suffix suffixes parent parents parts resolve absolute expanduser joinpath "
-    "with_suffix with_name with_stem relative_to as_posix cwd home samefile st_size st_mtime "
-    "st_ctime st_mode path "
+    "exists is_file is_dir is_absolute is_symlink read_text read_bytes stat lstat stem suffix "
+    "suffixes parts as_posix st_size st_mtime st_ctime st_mode path "
     # tables and arrays (pandas, numpy)
     "shape size ndim dtype dtypes columns T empty loc iloc at iat str dt cat names levels axes "
     "nbytes itemsize flat head tail sample sum mean median std var sem nunique unique "
@@ -278,11 +333,14 @@ PY_PATHS: Final = frozenset({"write_text", "write_bytes", "mkdir", "touch", "ope
 #: read-only called with neither.
 PY_TEXTS: Final = frozenset({"to_string", "to_markdown", "to_html", "to_latex"})
 #: Readers that also fetch an address (``https://...``): read-only on a path written out
-#: with no ``://`` in it, or an opened file.
+#: with no ``://`` in it that the run may read, or an opened file.
 PY_LOCAL: Final = frozenset(
     {"read_csv", "read_excel", "read_json", "read_table", "read_parquet", "read_fwf", "ExcelFile",
      "loadtxt", "genfromtxt"}
 )  # fmt: skip
+#: Functions that read or list the path they are given first (none given: the working folder):
+#: read-only on one written out that the run may read.
+PY_PLACES: Final = frozenset({"listdir", "walk", "scandir", "glob", "iglob", "load_workbook"})
 #: pandas' options, named by a text: only how a table is shown (``display.``) may be set.
 PY_OPTIONS: Final = frozenset({"set_option", "option_context"})
 #: Methods that call the function they are given - or, given a text, the method of that name
@@ -293,7 +351,8 @@ PY_AGGREGATES: Final = _listed(
     "sum mean median min max count std var first last nunique size prod any all cumsum cumprod "
     "cummax cummin rank idxmax idxmin sem"
 )
-#: Arguments that name a module to load or a program to run (Matplotlib's): never read-only.
+#: Arguments that name a module to load or a program to run (Matplotlib's): never read-only,
+#: given by name or as a key of a dict written out (``fontdict={"usetex": True}``).
 PY_KEYWORDS: Final = frozenset({"backend", "usetex"})
 #: Methods that are a text's unless the code can hold what the module makes: a ``Path`` (its
 #: ``replace`` moves a file).
@@ -315,33 +374,121 @@ _HEREDOC: Final = re.compile(
 )
 
 
-def read_only(tool: str, args: Mapping[str, Any]) -> bool:
+def read_only(
+    tool: str,
+    args: Mapping[str, Any],
+    cwd: str | Path | None = None,
+    reads: Sequence[str | Path] = (),
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Whether a call is a shell command (:data:`SHELLS`) that only reads: each of its
     commands a program of :data:`READERS` with none of its writing arguments, or Python whose
     code writes nothing (:func:`python_reads`), joined by pipes and sequences only (an output
-    may be joined to another, ``2>&1``, or thrown away, ``2>/dev/null``)."""
-    return approvable(tool, args)
+    may be joined to another, ``2>&1``, or thrown away, ``2>/dev/null``) - and every file it
+    reads inside ``cwd`` (the folder the command runs in) or one of ``reads`` (the other
+    folders the run may read). With no ``cwd``, a command that reads a file is not read-only.
+    ``env``: the environment the command runs with (this process's if not given): the ``PATH``
+    its programs are found on, what puts a folder on Python's path (:data:`_PYTHON_ENV`), the
+    ``CDPATH`` a ``cd`` searches."""
+    return approvable(tool, args, cwd=cwd, reads=reads, env=env)
 
 
-def approvable(tool: str, args: Mapping[str, Any], folder: str | Path | None = None) -> bool:
+def approvable(
+    tool: str,
+    args: Mapping[str, Any],
+    folder: str | Path | None = None,
+    *,
+    cwd: str | Path | None = None,
+    reads: Sequence[str | Path] = (),
+    env: Mapping[str, str] | None = None,
+) -> bool:
     """Whether a call only reads (:func:`read_only`), or - given a working ``folder`` (the
-    benchmark's reviewer's "save this file there") - every path it writes resolves inside it: the
-    framework's file tool (:data:`EDITORS`) on such a path, or a shell command whose writes
-    (:data:`WRITERS`, a redirect to a file, Python's :data:`PY_SAVES` and ``open`` for writing,
-    each on a path written out) all land there, after a ``cd`` into it if any. Deleting,
-    moving, installing and the network stay pauses."""
+    benchmark's reviewer's "save this file there": also where the command runs, unless ``cwd``
+    says) - every path it writes resolves inside it: the framework's file tool
+    (:data:`EDITORS`) on such a path, or a shell command whose writes (:data:`WRITERS`, a
+    redirect to a file, Python's :data:`PY_SAVES` and ``open`` for writing, each on a path
+    written out) all land there, after a ``cd`` into it if any. Deleting, moving, installing
+    and the network stay pauses."""
     home = Path(folder).resolve() if folder is not None else None
+    at = Path(cwd).resolve() if cwd is not None else home
+    places = [f for f in (at, home) if f is not None] + [Path(r).resolve() for r in reads]
+    given = os.environ if env is None else env
+    return _judged(tool, args, _Folders(at, home, tuple(places), given))
+
+
+def _judged(tool: str, args: Mapping[str, Any], where: _Folders) -> bool:
+    """:func:`approvable`, where the command runs (``where``) known. A shell tool that takes the
+    folder a command runs in (Kimi Code's ``Bash``: its ``cwd``) runs it there, as after a
+    ``cd``: into a folder the run may read only."""
     if tool in EDITORS:
-        return home is not None and _inside(file_of(args), home, home)
-    command = args.get("command")
+        return where.inside(file_of(args))
+    command, given = args.get("command"), args.get("cwd")
     if tool not in SHELLS or not isinstance(command, str) or not command.strip():
         return False
+    if given is not None:
+        if not isinstance(given, str) or not where.readable(given):
+            return False
+        where = where.moved(given)
+        if where.at is None or not where.at.is_dir():
+            return False  # not a folder: the command is not run, and nothing is placed
     heredoc = _HEREDOC.match(command.strip())
     text, stdin = (heredoc["head"], heredoc["body"]) if heredoc is not None else (command, None)
     if heredoc is not None and not _verbatim(heredoc["body"], heredoc["tag"], heredoc["q"]):
         return False
-    commands = _commands(text, home)
-    return commands is not None and _approved(commands, stdin, home)
+    commands = _commands(text, where.home)
+    return commands is not None and _approved(commands, stdin, where)
+
+
+@dataclass(frozen=True)
+class _Folders:
+    """Where a command runs, and what it may touch there."""
+
+    #: Its working directory, as the line's ``cd`` left it; ``None``: not known.
+    at: Path | None
+    #: The folder it may write (the benchmark's reviewer's), if any.
+    home: Path | None
+    #: The folders it may read: the one it starts in, ``home``, the harness's own.
+    reads: tuple[Path, ...]
+    #: The environment it runs with.
+    env: Mapping[str, str] = dataclasses.field(default_factory=lambda: os.environ)
+
+    def resolved(self, path: str) -> Path | None:
+        """Where ``path`` (relative: to :attr:`at`) leads, its ``..`` and links followed;
+        ``None`` when that is not known (no working directory, a ``~`` of the shell's)."""
+        if not path or self.at is None or path.startswith("~"):
+            return None
+        return Path(os.path.realpath(self.at / path))
+
+    @property
+    def here(self) -> bool:
+        """Whether the folder it runs in is known, and one it may read: what a command that
+        names no file reads (``ls``, ``grep -r x``, ``os.listdir()``, Python's own path)."""
+        return self.at is not None and self.readable(str(self.at))
+
+    def inside(self, path: str) -> bool:
+        """Whether ``path`` is one the command may write: inside :attr:`home`."""
+        where, home = self.resolved(path), self.home
+        return where is not None and home is not None and (where == home or home in where.parents)
+
+    def readable(self, path: str) -> bool:
+        """Whether ``path`` is one the command may read: inside one of :attr:`reads`."""
+        where = self.resolved(path)
+        return where is not None and any(where == r or r in where.parents for r in self.reads)
+
+    def named(self, word: str) -> list[str] | None:
+        """What the shell makes of a word: the files a ``*``, ``?`` or ``[`` in it matches
+        (none: the word as it is); ``None`` when one of them would be read as an option
+        (a file named ``-delete``) or the folder to look in is not known."""
+        if not set(word) & set("*?["):
+            return [word]
+        if self.at is None:
+            return None
+        found = glob.glob(word, root_dir=self.at)
+        return None if any(f.startswith("-") for f in found) else found or [word]
+
+    def moved(self, to: str) -> _Folders:
+        return dataclasses.replace(self, at=self.resolved(to))
 
 
 def _verbatim(body: str, tag: str, quoted: str) -> bool:
@@ -353,8 +500,9 @@ def _verbatim(body: str, tag: str, quoted: str) -> bool:
     return not ends and (bool(quoted) or not set(body) & set("$`\\"))
 
 
-#: One command of a shell line: its words, and the files it redirects its output to.
-_Command = tuple[list[str], list[str]]
+#: One command of a shell line: its words, the files it redirects its output to, and the
+#: operator after it (``""``: the last).
+_Command = tuple[list[str], list[str], list[str]]
 
 
 def _commands(text: str, home: Path | None) -> list[_Command] | None:
@@ -366,12 +514,13 @@ def _commands(text: str, home: Path | None) -> list[_Command] | None:
     words = _words(text)
     if not words or text.strip().count("\n") != sum(w.count("\n") for w in words):
         return None  # a newline between commands (one inside a quoted argument is read)
-    commands: list[_Command] = [([], [])]
+    commands: list[_Command] = [([], [], [])]
     joined = _joined(words)
     redirect = home is not None
     for n, word in enumerate(joined):
         if word in JOINS:
-            commands.append(([], []))
+            commands[-1][2].append(word)
+            commands.append(([], [], []))
         elif redirect and word in (">", ">>") and n + 1 < len(joined):
             commands[-1][1].append(joined[n + 1])  # a redirect to a file: a write to check
         elif set(word) <= set("<>&|;()"):
@@ -409,26 +558,166 @@ def _literal(text: str) -> bool:
     return True
 
 
-def _approved(commands: list[_Command], stdin: str | None, home: Path | None) -> bool:
-    """Whether every command reads, or writes only inside ``home`` from where the line's
-    ``cd`` (into it, if any) left it; the last one runs ``stdin`` (a heredoc) if given. With no
-    ``home`` (only reads), a ``cd`` into any one folder writes nothing."""
-    at = home
-    for n, (said, written) in enumerate(commands):
-        if written and not all(_inside(w, at, home) for w in written):
+def _approved(commands: list[_Command], stdin: str | None, where: _Folders) -> bool:
+    """Whether every command reads what it may (:meth:`_Folders.readable`), or writes only
+    inside the folder it may write, from every folder the line's ``cd`` (to one folder written
+    out, that it may read) may have left it in: the new one after ``&&``; after ``;``, ``||`` or
+    ``|`` (the ``cd`` failed, or ran in a pipe's own shell) the one before too. The last
+    command runs ``stdin`` (a heredoc) if given."""
+    places = [where]
+    for n, (said, written, after) in enumerate(commands):
+        if written and not all(at.inside(w) for at in places for w in written):
             return False
         if said[:1] == ["cd"]:
-            if len(said) != 2 or (home is not None and not _inside(said[1], at, home)):
-                return False
-            at = Path(os.path.normpath(at / said[1])) if at is not None else None
+            to = said[1] if len(said) == 2 else ""
+            plain = _cd(to, where.env) and _written_out(to)
+            if not plain or not all(w.readable(to) for w in places):
+                return False  # `cd -`: wherever the shell was before
+            moved = [w.moved(to) for w in places]
+            places = moved if after == ["&&"] else [*places, *moved]
             continue
-        if stdin is not None and n == len(commands) - 1:
-            ok = _python(said, stdin=stdin, at=at, home=home)
-        else:
-            ok = _reads(said, at=at, home=home) or _writes(said, at, home)
-        if not ok:
-            return False
+        for at in places:
+            if stdin is not None and n == len(commands) - 1:
+                ok = _python(said, stdin=stdin, where=at)
+            else:
+                ok = _reads(said, at) or _writes(said, at)
+            if not ok:
+                return False
     return True
+
+
+class Shell:
+    """A framework's shell across a run's commands, as the harness sees them: where it works
+    (``cwd``: the run's folder), what else the run may read (``reads``), the environment its
+    commands get (``env``), and every folder its commands may have left it in. Claude Code's
+    ``Bash`` keeps its folder from one command to the next (a ``cd`` holds until the CLI puts it
+    back); Kimi Code's starts each one in its working folder (or the call's ``cwd``) and is
+    never told :meth:`ran`.
+
+    A command is read-only (:meth:`read_only`) when it is so from every folder the shell may be
+    in: a ``cd`` a person approved out of the folder does not leave a later ``cat s.csv``
+    judged from the run's folder. Where the shell went cannot be followed (``cd $DIR``, ``cd
+    -``, ``pushd``, ``eval``, a ``cd`` behind a condition, one in the background, more than
+    :data:`PLACES_MAX` folders) - or a command that may move it is under way (``moving``) -
+    the folder is not known, and nothing is placed: every read of a file asks."""
+
+    __slots__ = ("cwd", "env", "places", "reads")
+
+    def __init__(
+        self,
+        cwd: str | Path | None,
+        reads: Sequence[str | Path] = (),
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        start = Path(cwd).resolve() if cwd is not None else None
+        #: the folders the run may read: where it works, and ``reads``
+        self.reads = (*([start] if start else []), *(Path(r).resolve() for r in reads))
+        self.cwd = start
+        self.env: Mapping[str, str] = os.environ if env is None else env
+        #: every folder the shell may be in now; ``None``: not known
+        self.places: frozenset[Path] | None = frozenset({start}) if start else None
+
+    def read_only(self, tool: str, args: Mapping[str, Any], *, moving: bool = False) -> bool:
+        """Whether the call only reads (:func:`read_only`) from every folder the shell may be
+        in; with none known (or ``moving``: a command that may move the shell is under way),
+        as with no folder."""
+        places = None if moving else self.places
+        if not places:
+            return _judged(tool, args, _Folders(None, None, self.reads, self.env))
+        return all(_judged(tool, args, _Folders(at, None, self.reads, self.env)) for at in places)
+
+    def ran(self, args: Mapping[str, Any]) -> None:
+        """A command of this shell ran (``args``: the call's): the folders it may have left it
+        in, besides those it was in (whether it ended well is not known: its ``cd`` holds only
+        then). A line that moves it only by the ``cd``s it starts with, each a folder written
+        out, is followed; any other that may move it (:func:`moves`) leaves it not known."""
+        command = args.get("command")
+        if self.places is None or not isinstance(command, str) or not moves(args):
+            return
+        led = None if args.get("run_in_background") else _led(command, self.env)
+        if led is None:
+            self.places = None
+            return
+        places = set(self.places)
+        for start in self.places:
+            at = start
+            for target in led:
+                went = Path(os.path.realpath(at / target))
+                if not went.is_dir():
+                    break  # the cd fails: the line stops there (`&&`)
+                at = went
+            places.add(at)
+        self.places = frozenset(places) if len(places) <= PLACES_MAX else None
+
+
+def moves(args: Mapping[str, Any]) -> bool:
+    """Whether a shell call may change the folder its shell is in: a command of it is one of
+    :data:`MOVES` (after the variables set for it and the words of a compound command); in a
+    line not read word by word, any such word."""
+    command = args.get("command")
+    if not isinstance(command, str):
+        return False
+    heredoc = _HEREDOC.match(command.strip())
+    text = heredoc["head"] if heredoc is not None else command
+    words = _words(text)
+    if words is None or "\n" in text.strip() or "`" in text or "$(" in text:
+        return _MOVED.search(text) is not None
+    return any(_program_word(said) in MOVES for said, _ in _split(words))
+
+
+def _split(words: list[str]) -> list[tuple[list[str], str]]:
+    """A line's commands, each with the operator after it (``""`` at the end): split at its
+    pipes and sequences, and at its other operators (a subshell's, a background job's)."""
+    found: list[tuple[list[str], str]] = []
+    said: list[str] = []
+    for word in words:
+        if set(word) <= set("();<>|&{}"):
+            found.append((said, word))
+            said = []
+        else:
+            said.append(word)
+    return [*found, (said, "")]
+
+
+def _program_word(said: list[str]) -> str:
+    """The word a command runs: past the variables set for it and a compound command's
+    keywords (``then cd /etc``)."""
+    rest = [w for w in said if not (re.match(r"\w+=", w) or w in _KEYWORDS)]
+    return rest[0] if rest else ""
+
+
+def _led(command: str, env: Mapping[str, str]) -> list[str] | None:
+    """The folders a line moves its shell to, when it does so only with the plain ``cd``s it
+    starts with (joined by ``&&``: the first that fails stops them), each to a folder written
+    out (:func:`_cd`); ``None`` for any other line that may move it."""
+    heredoc = _HEREDOC.match(command.strip())
+    text = heredoc["head"] if heredoc is not None else command
+    words = _words(text) if "`" not in text and "$(" not in text and _literal(text) else None
+    if words is None or "\n" in text.strip():
+        return None
+    commands = _split(words)
+    led: list[str] = []
+    while len(led) < len(commands) and commands[len(led)][0][:1] == ["cd"]:
+        said, after = commands[len(led)]
+        if len(said) != 2 or not _cd(said[1], env) or not _written_out(said[1]):
+            return None  # `cd`, `cd -P x`, `cd ~`, `cd s*`: not one folder written out
+        led.append(said[1])
+        if after != "&&":
+            break
+    rest = commands[len(led) :]
+    return None if any(_program_word(said) in MOVES for said, _ in rest) else led
+
+
+def _written_out(word: str) -> bool:
+    return not word.startswith("~") and not set(word) & set("*?[")
+
+
+def _cd(word: str, env: Mapping[str, str]) -> bool:
+    """Whether ``cd word`` goes to ``word`` itself: no option (``cd -`` is wherever the shell
+    was before), no folder of ``CDPATH`` searched first (a name that starts with no ``/``,
+    ``.`` or ``..``, while it is set)."""
+    plain = word.startswith(("/", "./", "../")) or word in (".", "..")
+    return not word.startswith("-") and (plain or not env.get("CDPATH"))
 
 
 def file_of(args: Mapping[str, Any]) -> str:
@@ -436,25 +725,22 @@ def file_of(args: Mapping[str, Any]) -> str:
     return str(args.get("file_path") or args.get("path") or "")
 
 
-def _inside(path: str, at: Path | None, home: Path | None) -> bool:
-    """Whether ``path`` (relative: to ``at``) resolves inside ``home``."""
-    if not path or at is None or home is None:
-        return False
-    where = Path(path).expanduser()
-    where = Path(os.path.realpath(where if where.is_absolute() else at / where))
-    return where == home or home in where.parents
-
-
-def _writes(words: list[str], at: Path | None, home: Path | None) -> bool:
-    """A program of :data:`WRITERS` whose every path (``cp``: its target) is inside ``home``."""
-    if not words or home is None or words[0] not in WRITERS:
+def _writes(words: list[str], where: _Folders) -> bool:
+    """A program of :data:`WRITERS` whose every path (``cp``: its target) is inside the folder
+    it may write, what ``cp`` copies there one it may read."""
+    if not words or where.home is None or _program(words[0], where) not in WRITERS:
         return False
     flags = [w for w in words[1:] if w.startswith("-")]
-    paths = [w for w in words[1:] if not w.startswith("-")]
-    if not paths or any(f not in WRITERS[words[0]] for f in flags):
+    named = [where.named(w) for w in words[1:] if not w.startswith("-")]
+    paths = [p for found in named for p in found or ()]
+    if not paths or None in named or any(f not in WRITERS[words[0]] for f in flags):
         return False
-    written = paths[-1:] if words[0] == "cp" else paths
-    return (words[0] != "cp" or len(paths) > 1) and all(_inside(p, at, home) for p in written)
+    copied, written = (paths[:-1], paths[-1:]) if words[0] == "cp" else ([], paths)
+    return (
+        (words[0] != "cp" or len(paths) > 1)
+        and all(where.inside(p) for p in written)
+        and all(where.readable(p) for p in copied)
+    )
 
 
 #: Where an output may go and nothing is written: thrown away.
@@ -479,29 +765,74 @@ def _joined(words: list[str]) -> list[str]:
     return kept
 
 
-def python_reads(code: str, *, at: Path | None = None, home: Path | None = None) -> bool:
+def python_reads(
+    code: str,
+    *,
+    at: Path | None = None,
+    home: Path | None = None,
+    reads: Sequence[Path] = (),
+) -> bool:
     """Whether Python ``code`` only reads, proven from its text: it parses; it imports only
     :data:`PY_MODULES` and takes only their listed names, a module never held as a value; every
     other name it reads is one it set itself or of :data:`PY_BUILTINS`; every attribute it
     reads of a value is of :data:`PY_METHODS`; and each call that could write is one that here
     does not (:data:`_CHECKS`: ``open`` to read, a text's ``replace``, a reader of a local path).
     So the code reaches no function that writes, deletes, moves, runs a program or sends: by a
-    name, an alias, a container, a string or an object's insides. Given the run's folder
-    (``home``; ``at`` its working directory), a :data:`PY_SAVES` call, ``open`` for writing and
-    a write to an opened file (:data:`PY_HANDLES`) are allowed too when the path is written out
-    and inside it."""
+    name, an alias, a container, a string or an object's insides. It runs in ``at``, and reads
+    there or in ``reads``: each file it opens or lists is named by a path written out that
+    leads there, and Python itself is the installed one (:func:`_installed`). Given the run's
+    folder (``home``), a :data:`PY_SAVES` call, ``open`` for writing and a write to an opened
+    file (:data:`PY_HANDLES`) are allowed too when the path is written out and inside it."""
+    places = [f for f in (at, home) if f is not None] + list(reads)
+    return _proven(code, _Folders(at, home, tuple(places)))
+
+
+def _proven(code: str, where: _Folders) -> bool:
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return False
-    names = _names(tree, home)
-    return names is not None and all(_allowed(node, names, at, home) for node in ast.walk(tree))
+    names = _names(tree, where)
+    return (
+        names is not None
+        and _installed({m.split(".")[0] for _, _, _, m in _imports(tree)}, where)
+        and all(_allowed(node, names) for node in ast.walk(tree))
+    )
+
+
+def _installed(imported: set[str], where: _Folders) -> bool:
+    """Whether the Python that runs is the installed one, its modules its own. The folder it
+    starts in is first on its path: a module there (``json.py``, a package, a compiled one)
+    is imported in place of the standard library's of that name - by the code or by what it
+    imports - and, when the code imports a library, of anything that library looks for; a
+    ``.pth`` or ``matplotlibrc`` there is read too. Nor does the environment put a folder of
+    the run's (or a relative one) on its path (:data:`_PYTHON_ENV`). With no working directory
+    known, none of this is."""
+    if where.at is None or not where.here:
+        return False
+    given = [e for v in _PYTHON_ENV for e in where.env.get(v, "").split(os.pathsep) if e]
+    if any(not os.path.isabs(e) or where.readable(e) for e in given):
+        return False
+    held = os.listdir(where.at) if where.at.is_dir() else []
+    local = {
+        name.split(".")[0]
+        for name in held
+        if name.endswith((".py", ".pyc", ".so", ".pyd"))
+        or (where.at / name / "__init__.py").exists()
+    }
+    if any(name.endswith(".pth") or name == "matplotlibrc" for name in held):
+        return False
+    if imported - sys.stdlib_module_names:
+        return not local
+    return not local & (sys.stdlib_module_names | {"sitecustomize", "usercustomize", "tzdata"})
 
 
 @dataclass(frozen=True)
 class _Names:
     """What the names of a piece of Python stand for."""
 
+    #: Where the code runs, and what it may read and write there.
+    where: _Folders
     #: The modules it may use (:data:`PY_MODULES`; :data:`PY_DRAWS` only with a folder).
     known: Mapping[str, frozenset[str]]
     #: The name a module goes by -> the module (``import numpy as np``, ``from os import path``).
@@ -534,11 +865,11 @@ class _Names:
         return None
 
 
-def _names(tree: ast.AST, home: Path | None) -> _Names | None:
+def _names(tree: ast.AST, where: _Folders) -> _Names | None:
     """What the code's names stand for; ``None`` when an import is not of :data:`PY_MODULES`
     (a module, or a name in it, not listed; ``import *``), or a name an import gives is also
     set another way or is a built-in's (so what it stands for is not certain)."""
-    known = {m: v for m, v in PY_MODULES.items() if home is not None or m not in PY_DRAWS}
+    known = {m: v for m, v in PY_MODULES.items() if where.home is not None or m not in PY_DRAWS}
     bound, defined = _set(tree)
     modules: dict[str, str] = {}
     values: dict[str, tuple[str, str]] = {}
@@ -555,7 +886,8 @@ def _names(tree: ast.AST, home: Path | None) -> _Names | None:
             or values.setdefault(name, (module, attr)) != (module, attr)
         ):
             return None
-    return _Names(known, modules, values, bound, defined, *_places(tree, "print" not in bound))
+    places = _places(tree, "print" not in bound)
+    return _Names(where, known, modules, values, bound, defined, *places)
 
 
 def _imports(tree: ast.AST) -> list[tuple[str, str, str | None, str]]:
@@ -607,15 +939,18 @@ def _places(tree: ast.AST, printing: bool) -> tuple[frozenset[int], ...]:
     return frozenset(called), frozenset(owners), frozenset(shown)
 
 
-def _allowed(node: ast.AST, names: _Names, at: Path | None, home: Path | None) -> bool:
-    """Whether one node of the code is read-only: a name, an attribute, a call (a ``match``
-    reads attributes by a name the text does not show as one: not read here)."""
+def _allowed(node: ast.AST, names: _Names) -> bool:
+    """Whether one node of the code is read-only: a name, an attribute, a call, a dict (none
+    of :data:`PY_KEYWORDS` its key; a ``match`` reads attributes by a name the text does not
+    show as one: not read here)."""
     if isinstance(node, ast.Name):
         return _name(node, names)
     if isinstance(node, ast.Attribute):
         return _attribute(node, names)
     if isinstance(node, ast.Call):
-        return _calls(node, names, at, home)
+        return _calls(node, names)
+    if isinstance(node, ast.Dict):
+        return not any(isinstance(k, ast.Constant) and k.value in PY_KEYWORDS for k in node.keys)
     return not isinstance(node, ast.Match)
 
 
@@ -654,7 +989,7 @@ def _attribute(node: ast.Attribute, names: _Names) -> bool:
     )
 
 
-def _calls(call: ast.Call, names: _Names, at: Path | None, home: Path | None) -> bool:
+def _calls(call: ast.Call, names: _Names) -> bool:
     """Whether a call is read-only where its name alone does not say so (:data:`_CHECKS`).
     Arguments spread from a dict (``**``) or naming a module to load (:data:`PY_KEYWORDS`) are
     not read; nor, for a checked name, arguments spread from a list (which is which is not
@@ -671,8 +1006,8 @@ def _calls(call: ast.Call, names: _Names, at: Path | None, home: Path | None) ->
     check = _CHECKS.get(name)
     if check is None or any(isinstance(a, ast.Starred) for a in call.args):
         return check is None
-    saved = home is not None and _inside(_written(call, name, method, names) or "", at, home)
-    return check(_Call(call, method, names, home is not None, saved))
+    saved = names.where.inside(_written(call, name, method, names) or "")
+    return check(_Call(call, method, names, names.where.home is not None, saved))
 
 
 @dataclass(frozen=True)
@@ -696,6 +1031,10 @@ class _Call:
     def keywords(self) -> list[str | None]:
         return [k.arg for k in self.call.keywords]
 
+    def readable(self, node: ast.AST) -> bool:
+        """Whether ``node`` writes out a path the run may read."""
+        return self.names.where.readable(_text(node))
+
 
 def _saves(c: _Call) -> bool:
     return c.saved
@@ -706,8 +1045,12 @@ def _in_folder(c: _Call) -> bool:
 
 
 def _opens(c: _Call) -> bool:
+    """``open`` to read a file the run may read (a ``Path``'s: checked where the ``Path`` is
+    made), or - with a folder - to write one inside it."""
     mode = _mode(c.call, c.method)
-    return mode in ("r", "rb", "rt") or (mode is not None and c.saved)
+    if mode in ("r", "rb", "rt"):
+        return c.method or (bool(c.args) and c.readable(c.args[0]))
+    return mode is not None and c.saved
 
 
 def _replaces(c: _Call) -> bool:
@@ -722,12 +1065,32 @@ def _prints(c: _Call) -> bool:
 
 
 def _fetches(c: _Call) -> bool:
-    """A reader given a path written out that is no address, or a file opened by ``open``."""
+    """A reader given a path written out that is no address and that the run may read, or a
+    file opened by ``open``."""
     first = c.args[0] if c.args else None
     func = first.func if isinstance(first, ast.Call) else None
     if isinstance(func, ast.Name) and func.id == "open":
         return "open" not in c.names.bound
-    return bool(_text(first)) and "://" not in _text(first)
+    return first is not None and "://" not in _text(first) and c.readable(first)
+
+
+def _lists(c: _Call) -> bool:
+    """A function that reads or lists a folder (:data:`PY_PLACES`): the one written out, that
+    the run may read - or, given none, the working folder. No other argument says where."""
+    plain = set(c.keywords) <= {"recursive", "topdown", "read_only", "data_only"}
+    return plain and (c.readable(c.args[0]) if c.args else c.names.where.here)
+
+
+def _path(c: _Call) -> bool:
+    """``Path("a.csv")``: made of one path written out that the run may read, and only to
+    read or write that file (``Path("a.csv").read_text()``): kept, it could lead anywhere
+    (``p.parent.parent / "etc"``)."""
+    return (
+        len(c.args) == 1
+        and not c.keywords
+        and c.readable(c.args[0])
+        and id(c.call) in c.names.owners
+    )
 
 
 def _displays(c: _Call) -> bool:
@@ -766,10 +1129,12 @@ _CHECKS: Final[Mapping[str, Callable[[_Call], bool]]] = {
     **dict.fromkeys(PY_HANDLES | {"plot"}, _in_folder),
     **dict.fromkeys(PY_TEXTS, _prints),
     **dict.fromkeys(PY_LOCAL, _fetches),
+    **dict.fromkeys(PY_PLACES, _lists),
     **dict.fromkeys(PY_OPTIONS, _displays),
     **dict.fromkeys(PY_APPLIES, _applies),
     **dict.fromkeys(PY_UNLESS, _replaces),
     "open": _opens,
+    "Path": _path,
     "use": _renders,
     "Workbook": _empty,
     "type": _shows,
@@ -831,40 +1196,80 @@ def _words(command: str) -> list[str] | None:
         return None
 
 
-def _reads(words: list[str], *, at: Path | None = None, home: Path | None = None) -> bool:
+def _reads(words: list[str], where: _Folders) -> bool:
     if not words or "=" in words[0]:
         return False  # empty, or a variable set for it
-    program, rest = _program(words[0]), words[1:]
+    program, rest = _program(words[0], where), words[1:]
     if program in PYTHONS:
-        return _python(words, at=at, home=home)
+        return _python(words, where=where)
     writes = READERS.get(program)
-    if writes is None:
+    if writes is None or not _placed(program, rest, where):
         return False
-    if program in _SCRIPTED:
-        return _SCRIPTED[program](rest)
+    if program in _SCRIPTED and not _SCRIPTED[program](rest):
+        return False
     if program == "uniq" and len([w for w in rest if not w.startswith("-")]) > 1:
         return False  # its second file is the one it writes
     return not any(
-        w.startswith(flag) or (len(flag) == 2 and w[:1] == "-" and w[1:2] != "-" and flag[1] in w)
+        w.startswith(flag)
+        or w == flag.rstrip("=")
+        or (len(flag) == 2 and w[:1] == "-" and w[1:2] != "-" and flag[1] in w)
         for w in rest  # `-o`, also among other letters (`sort -no out.csv`)
         for flag in writes
     )
 
 
-def _program(word: str) -> str:
-    """The program a command's first word runs: by its name, or its full path (``./cat`` is
-    a file of the folder, not the program)."""
-    return word.rsplit("/", 1)[-1] if word.startswith("/") else word
+def _program(word: str, where: _Folders) -> str:
+    """The program a command's first word runs, when it is one of the system's
+    (:data:`SYSTEM`): named by its full path there, or by a name found there (``PATH``). A
+    file of the folder (``./cat``), of one the run may read or write, or anywhere else
+    (``/tmp/ls``) is not the program its name says: none."""
+    found = word if word.startswith("/") else None if "/" in word else _found(word, where)
+    folder = os.path.dirname(found or "")
+    return os.path.basename(word) if folder in SYSTEM and not where.readable(folder) else ""
+
+
+def _found(word: str, where: _Folders) -> str | None:
+    """Where the shell finds a program by its name: on its ``PATH``, a relative folder there
+    (``bin``, an empty entry: ``.``) taken from the folder the shell is in."""
+    entries = where.env.get("PATH", os.defpath).split(os.pathsep)
+    relative = [e for e in entries if not os.path.isabs(e)]
+    if relative and where.at is None:
+        return None
+    at = where.at or Path("/")
+    return shutil.which(word, path=os.pathsep.join(str(at / (e or ".")) for e in entries))
+
+
+def _placed(program: str, rest: list[str], where: _Folders) -> bool:
+    """Whether every file a reader's command names is one it may read: each word that is no
+    option (a ``*`` in it as the shell fills it in), less the script or pattern of one that
+    takes one (:data:`_SCRIPTS`), and what an option is given after ``=``; naming none, the
+    folder it is in. A reader of files with no working directory known reads one that cannot
+    be placed."""
+    if program in _NO_FILES:
+        return True
+    valued, given = _VALUED.get(program), _SCRIPTS.get(program)
+    words = [w for n, w in enumerate(rest) if not (n and valued and valued.fullmatch(rest[n - 1]))]
+    files = [w for w in words if not w.startswith("-")]
+    scripted = program in _SCRIPTS and not (given and any(given.fullmatch(w) for w in rest))
+    values = [w.split("=", 1)[1] for w in words if w.startswith("-") and "=" in w]
+    named, read = [where.named(w) for w in [*rest, *values]], files[scripted:] + values
+    return (
+        where.at is not None
+        and (bool(read) or where.here)  # naming no file, it reads the folder it is in (`ls`)
+        and None not in named
+        and all(where.readable(f) for w in read for f in where.named(w) or ())
+    )
 
 
 def _awk(rest: list[str]) -> bool:
     """An ``awk`` program that prints: no file or program it writes to or runs (``>``, ``|``,
-    ``system``, ``getline``, a library loaded by ``@``), its only options a separator and
+    ``system``, ``getline``, a library loaded by ``@``), nor reads the environment or another
+    file than it is given (``ENVIRON``, ``ARGV``), its only options a separator and
     variables (``-F``, ``-v``: none that reads the program from a file, ``-f``, or edits one in
     place, ``-i``)."""
     options = [w for n, w in enumerate(rest) if w.startswith("-") and rest[n - 1 : n] != ["-v"]]
     return all(w.startswith(("-F", "-v")) for w in options) and not any(
-        mark in w for w in rest for mark in ("system", "getline", ">", "|", "@")
+        mark in w for w in rest for mark in ("system", "getline", ">", "|", "@", "ENVIRON", "ARGV")
     )
 
 
@@ -881,23 +1286,27 @@ def _sed(rest: list[str]) -> bool:
     )
 
 
+def _jq(rest: list[str]) -> bool:
+    """A ``jq`` filter that reads only the files it is given: not the environment (``env``,
+    ``$ENV``), nor a module it finds by a path of its own (``import``, ``include``)."""
+    return not any(mark in w for w in rest for mark in ("env", "ENV", "import", "include"))
+
+
 #: The readers that run a script of their own: what it may hold.
-_SCRIPTED: Final[Mapping[str, Callable[[list[str]], bool]]] = {"awk": _awk, "sed": _sed}
+_SCRIPTED: Final[Mapping[str, Callable[[list[str]], bool]]] = {
+    "awk": _awk,
+    "sed": _sed,
+    "jq": _jq,
+}
 
 
-def _python(
-    words: list[str],
-    *,
-    stdin: str | None = None,
-    at: Path | None = None,
-    home: Path | None = None,
-) -> bool:
+def _python(words: list[str], *, stdin: str | None = None, where: _Folders) -> bool:
     """``python3 -c CODE``, or ``python3 [-]`` reading ``stdin`` (a heredoc), whose code only
-    reads (or saves inside ``home``: :func:`python_reads`); a script file is not read here,
-    so it is not approved."""
-    if not words or _program(words[0]) not in PYTHONS:
+    reads (or saves inside the folder it may write: :func:`python_reads`); a script file is
+    not read here, so it is not approved."""
+    if not words or _program(words[0], where) not in PYTHONS:
         return False
     rest = words[1:]
     if stdin is not None:
-        return rest in ([], ["-"]) and python_reads(stdin, at=at, home=home)
-    return len(rest) == 2 and rest[0] == "-c" and python_reads(rest[1], at=at, home=home)
+        return rest in ([], ["-"]) and _proven(stdin, where)
+    return len(rest) == 2 and rest[0] == "-c" and _proven(rest[1], where)

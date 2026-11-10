@@ -141,7 +141,7 @@ class Governance:
     ) -> Decision:
         """The decision for a call of ``tool`` with ``args``. ``side_effects`` is what the tool
         says it does (``read``, ``write``, ``irreversible``; not given, nothing is known of it:
-        the call asks); the catalog's word overrides it,
+        the call asks); the catalog's risk, where someone declared one there, overrides it,
         and while the catalog cannot be read every tool that does more than read asks.
         ``agent_id`` is the agent making the call (else this governance's own): the approval
         rules learned from people's decisions on its calls are accepted for it."""
@@ -151,7 +151,7 @@ class Governance:
                 if side_effects != "read":
                     return decide(tool, side_effects, CATALOG_UNREAD, args)
             elif (rule := rules.get(tool)) is not None:
-                return decide(tool, rule.risk, rule.approve_when, args)
+                return decide(tool, rule.risk or side_effects, rule.approve_when, args)
         return decide(tool, side_effects, None, args)
 
     async def rules(
@@ -367,4 +367,4 @@ def _may_ask(rule: Rule | None, side_effects: str) -> bool:
     """Whether a tool with the catalog's ``rule`` (none: its own ``side_effects``) may ask."""
     if rule is None:
         return action_of(side_effects) is Action.ASK
-    return rule.approve_when is not None or action_of(rule.risk) is Action.ASK
+    return rule.approve_when is not None or action_of(rule.risk or side_effects) is Action.ASK
