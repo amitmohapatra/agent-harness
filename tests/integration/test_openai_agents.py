@@ -189,13 +189,14 @@ async def test_a_queued_run_allowed_for_the_conversation_does_not_ask_again() ->
         run = await agent.start("ship o1 and o2", user="u1")
         assert await h.worker([agent]).run_once() is True
         paused = await h.runs.get(run.id)
-        assert paused.awaiting is not None
+        assert paused is not None and paused.awaiting is not None
         queued = await agent.resume(
             paused.awaiting.interrupt_id, "approve", reviewer="u1", remember="run"
         )
         assert queued.status is RunStatus.QUEUED
         assert await h.worker([agent]).run_once() is True
         finished = await h.runs.get(run.id)
+    assert finished is not None
     assert finished.status is RunStatus.SUCCESS and done == ["o1", "o2"]
 
 
