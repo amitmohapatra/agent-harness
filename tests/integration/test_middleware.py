@@ -770,3 +770,29 @@ def test_the_helpers_read_what_they_are_given() -> None:
     kept = request([summary], [SystemMessage("context", id="c"), HumanMessage("task", id="t")])
     assert [m.content for m in _with_task(kept).messages] == ["context", "task", "the summary"]
     _replied(None, ModelResponse(result=[]))  # nothing the model said: nothing on the span
+
+
+def test_the_task_kept_ahead_of_a_summary_is_the_runs_own_question() -> None:
+    """Earlier turns replayed before the run's question (memory's window, or the run store's
+    turns with memory off) are the summary's: what is put back before it is the run's question
+    — not the oldest replayed one, which the model then answered again in its place (Deep
+    Agents on a 6,000-token window: the first turn's figure given for each later question) —
+    and not a message steered into the run."""
+    from langchain.agents.middleware import ModelRequest
+
+    from trellis.harness.middleware import STEERED, _with_task
+
+    summary = HumanMessage("the summary", additional_kwargs={"lc_source": "summarization"})
+    state = [
+        SystemMessage("context", id="c"),
+        HumanMessage("the first question", id="q0"),
+        AIMessage("its answer", id="a0"),
+        HumanMessage("the run's question", id="q1"),
+        AIMessage("", id="a1"),
+        HumanMessage("steered in", id="s", response_metadata={STEERED: "run-2"}),
+    ]
+    given = ModelRequest(
+        model=ScriptedChatModel(turns=[]), messages=[summary], state={"messages": state}
+    )
+    said = [m.content for m in _with_task(given).messages]
+    assert said == ["context", "the run's question", "the summary"]
