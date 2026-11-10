@@ -31,7 +31,7 @@ existing project and its limits: [LangGraph and LangChain](frameworks/langgraph.
 
 | The tool is | Use | Notes |
 |---|---|---|
-| A Python function in this process | `@tool(side_effects=...)` or `tool(fn, side_effects=...)` | Schema from the signature, description from the docstring. Declare `side_effects`: `read` runs, `write` runs and is announced, `irreversible` asks a person — and so does a tool that declares nothing (`tools=[fn]`). |
+| A Python function in this process | `@tool(side_effects=...)` or `tool(fn, side_effects=...)` | Schema from the signature, description from the docstring. Declare `side_effects`: `read` runs, `write` asks a person (allow once, for this conversation, deny), `irreversible` asks at every call; a tool that declares nothing (`tools=[fn]`) asks too. |
 | An HTTP API with an OpenAPI 3 document | `openapi(spec, only=[...])` | One tool per `operationId`; the method decides the side effects (GET read, POST/PUT/PATCH write, DELETE irreversible). |
 | Another agent | `a2a(url)` | One `write` tool; its questions become this run's questions. |
 | Another agent this harness wraps (a specialist the model delegates to) | the agent itself in a `ReAct`'s `subagents=[...]` (any code inside a run: `await specialist.run(...)`) | Each call is a child run: its questions pause this run, its crash is continued, it is cancelled with this run; read-only children run at once ([subagents.md](subagents.md)). |
