@@ -27,6 +27,7 @@ from trellis.harness.middleware import (
     RunCheckpointer,
     _size,
 )
+from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
 LONG = "Looks something up in one of the many systems this company runs. " * 6
 
@@ -309,11 +310,15 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
     window = int((counted - 40) / 0.95)  # over the window by the estimate
     seen: list[ModelRequest[Any]] = []
     said: list[int] = [int(counted * 0.5), int(counted * 0.9)]
+    hooks = ours.ModelHooks()  # where the model is called: what it counted is learned there
+
+    async def replied(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        usage = UsageMetadata(input_tokens=said.pop(0), output_tokens=1, total_tokens=1)
+        return ModelResponse(result=[AIMessage(content="ok", usage_metadata=usage)])
 
     async def handler(r: ModelRequest[Any]) -> ModelResponse[Any]:
         seen.append(r)
-        usage = UsageMetadata(input_tokens=said.pop(0), output_tokens=1, total_tokens=1)
-        return ModelResponse(result=[AIMessage(content="ok", usage_metadata=usage)])
+        return await hooks.awrap_model_call(r, replied)
 
     fit = FitWindow(window)
     await fit.awrap_model_call(given, handler)
@@ -335,6 +340,13 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
     assert ours._RATIOS.get(name) == before
     ours._RATIOS._data.clear()
 
+    async def summarized(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        return await handler(r.override(tools=r.tools[:1]))  # a summarization after it
+
+    said.append(_size(given.override(tools=tools[:1])))  # the model counts as estimated
+    await FitWindow(window * 10).awrap_model_call(given, summarized)
+    assert ours._RATIOS.get(name) == pytest.approx(1.0, 0.05)  # of the request it was sent
+
 
 def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:
     calls = [
@@ -353,3 +365,58 @@ def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:
     assert "characters cut to fit the window" in out.messages[4].text
     small = request([HumanMessage("go"), calls[0], ToolMessage("z" * 50, tool_call_id="c1")], [])
     assert ours._cut(small, 1) is small  # too short to cut
+
+
+async def test_a_refusal_after_a_summarization_cuts_the_latest_turns_results() -> None:
+    """With a summarization after it (Deep Agents'), the results are its to offload — but it
+    keeps a ``read_file`` page whole, and on a small window that page and its summary did not
+    fit (its own check refused the request, saying no size): fitted again, the latest turn's
+    longest results are cut too, the older turns' left for the summary, every message where
+    it was (the summary's cut point counts them)."""
+    from langchain_core.exceptions import ContextOverflowError
+
+    calls = [
+        AIMessage(content="", tool_calls=[{"id": f"c{n}", "name": "a", "args": {}}]) for n in (1, 2)
+    ]
+    messages = [
+        HumanMessage("the first question"),
+        calls[0],
+        ToolMessage("y" * 8_000, tool_call_id="c1"),
+        AIMessage(content="its answer"),
+        HumanMessage("the run's question"),
+        calls[1],
+        ToolMessage("x" * 8_000, tool_call_id="c2"),
+    ]
+    given = request(messages, [])
+    seen: list[ModelRequest[Any]] = []
+
+    async def handler(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        seen.append(r)
+        if len(seen) == 1:
+            raise ContextOverflowError("Context remains above the input budget after compaction")
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    window = int((_size(ours._latest(given)) + 50) / 0.95)  # the latest turn alone fits
+    await FitWindow(window, turns=False).awrap_model_call(given, handler)
+    assert seen[0].messages == messages  # the results were the summarization's
+    again = seen[1].messages
+    assert len(again) == len(messages) and again[2].text == "y" * 8_000  # older: as they were
+    assert "characters cut to fit the window" in again[6].text
+
+
+def test_the_readers_of_a_kept_result_stay_offered_when_the_tools_are_narrowed() -> None:
+    """A result the run keeps is previewed with the call that reads it (``query_result``,
+    ``read_file``): narrowing the tools never drops those — a small window left the model a
+    preview saying to call ``query_result`` and no ``query_result``, so it paged 250 rows with
+    ``read_file`` and could not count them."""
+    from trellis.harness.tools.query import QUERY_RESULT
+    from trellis.harness.tools.results import READ_FILE
+
+    tools = [lc(f"tool_{n}") for n in range(12)] + [lc(QUERY_RESULT), lc(READ_FILE)]
+    given = request([HumanMessage("how many over 100?")], tools)
+    kept: Any = {"messages": given.messages, "files": {f"{READ_PREFIX}/r1": {}}}  # Deep Agents'
+    given = given.override(state=kept)
+    out = ours._narrowed(given, 1, None, least=0)
+    assert {ours._named(t) for t in out.tools} == {QUERY_RESULT, READ_FILE}
+    bare = ours._narrowed(given.override(state={"messages": given.messages}), 1, None, least=0)
+    assert QUERY_RESULT not in {ours._named(t) for t in bare.tools}  # nothing kept to read

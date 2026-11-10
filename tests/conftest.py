@@ -33,6 +33,17 @@ def no_spool_on_this_machine(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_ratio_learned_before() -> Iterator[None]:
+    """A test's model calls start from no learned tokens-per-counted-token ratio
+    (``middleware._RATIOS``, learned in the process from every reply): another test's scripted
+    replies are not this one's model."""
+    from trellis.harness import middleware
+
+    yield
+    middleware._RATIOS._data.clear()
+
+
+@pytest.fixture(autouse=True)
 def files_of_this_test(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: Any) -> None:
     """The files a test's runs keep with no ``TRELLIS_FILES_URL`` (the XDG data folder) are in
     a folder of the test's own, never this machine's: a run is told of the files kept for its
