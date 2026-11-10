@@ -135,9 +135,68 @@ async def test_two_governance_approvals_in_one_reply_are_asked_one_at_a_time(
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="u1")
     assert second.interrupt is not None and second.interrupt.tool_call is not None
     assert second.interrupt.tool_call.args == {"order": "o2"}
-    assert second.interrupt.question.startswith("Approve ship?")
+    # governance's question and choices, as the first call's: not the SDK's bare approval
+    assert second.interrupt.question == first.interrupt.question
+    assert second.interrupt.options == first.interrupt.options
     done_ = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done_.answer == "both" and sorted(done) == ["o1", "o2"] and len(model.inputs) == 2
+
+
+async def test_a_write_allowed_for_the_conversation_runs_its_other_calls_of_the_reply(
+    harness: Harness,
+) -> None:
+    """Calls made at once wait at the SDK's gate together, and the SDK keeps each one's
+    pending approval when the run resumes: the person's "allow for this conversation" on the
+    first lets the others run too, without asking again."""
+    model = ScriptedModel([[("ship", {"order": "o1"}), ("ship", {"order": "o2"})], "both"])
+    agent = arm(
+        harness.wrap(Agent(name="shipper", model=model), id="shipper"),
+        [tool(ship.fn, side_effects="write")],
+    )
+    first = await agent.run("ship o1 and o2", user="u1")
+    assert first.interrupt is not None and done == []
+    finished = await agent.resume(
+        first.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
+    )
+    assert finished.status is RunStatus.SUCCESS, finished.interrupt
+    assert finished.answer == "both" and done == ["o1", "o2"] and len(model.inputs) == 2
+
+
+async def test_a_streamed_reply_allowed_for_the_conversation_does_not_ask_again(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel([[("ship", {"order": "o1"}), ("ship", {"order": "o2"})], "both"])
+    agent = arm(
+        harness.wrap(Agent(name="shipper", model=model), id="shipper"),
+        [tool(ship.fn, side_effects="write")],
+    )
+    events = [e async for e in agent.stream("ship o1 and o2", user="u1")]
+    asked = next(e for e in events if e.type is RunEventType.INTERRUPT)
+    finished = await agent.resume(
+        asked.data["interrupt_id"], "approve", reviewer="u1", remember="run"
+    )
+    assert finished.status is RunStatus.SUCCESS and done == ["o1", "o2"]
+
+
+async def test_a_queued_run_allowed_for_the_conversation_does_not_ask_again() -> None:
+    """A worker runs it and another attempt continues the SDK's state from the checkpoint."""
+    model = ScriptedModel([[("ship", {"order": "o1"}), ("ship", {"order": "o2"})], "both"])
+    async with Harness(config=Settings()) as h:
+        agent = arm(
+            h.wrap(Agent(name="shipper", model=model), id="shipper"),
+            [tool(ship.fn, side_effects="write")],
+        )
+        run = await agent.start("ship o1 and o2", user="u1")
+        assert await h.worker([agent]).run_once() is True
+        paused = await h.runs.get(run.id)
+        assert paused.awaiting is not None
+        queued = await agent.resume(
+            paused.awaiting.interrupt_id, "approve", reviewer="u1", remember="run"
+        )
+        assert queued.status is RunStatus.QUEUED
+        assert await h.worker([agent]).run_once() is True
+        finished = await h.runs.get(run.id)
+    assert finished.status is RunStatus.SUCCESS and done == ["o1", "o2"]
 
 
 async def test_your_own_gate_on_a_tool_the_catalog_asks_about_is_the_one_asked() -> None:
@@ -554,6 +613,27 @@ async def test_a_deny_all_rule_blocks_the_tool_of_an_agent_handed_off_to(
     result = await agent.run("refund o1", user="u1")
     assert result.answer == "gave up" and done == []  # the specialist's tool did not run
     assert billing.tools == [refund] and triage.handoffs == [billing]  # yours, unchanged
+
+
+async def test_an_agent_handed_off_to_runs_its_calls_allowed_for_the_conversation(
+    harness: Harness,
+) -> None:
+    model = ScriptedModel(
+        [
+            ("transfer_to_billing", {}),
+            [("refund", {"order": "o1"}), ("refund", {"order": "o2"})],
+            "refunded both",
+        ]
+    )
+    triage, _, _ = _desk(model)
+    agent = declaring(harness, refund="write").wrap(triage, id="desk")
+    first = await agent.run("refund o1 and o2", user="u1")
+    assert first.interrupt is not None and first.interrupt.tool_call is not None
+    finished = await agent.resume(
+        first.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
+    )
+    assert finished.status is RunStatus.SUCCESS, finished.interrupt
+    assert done == ["refund o1", "refund o2"] and len(model.inputs) == 3
 
 
 async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
