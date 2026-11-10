@@ -744,9 +744,12 @@ def test_the_history_trends_are_the_least_squares_fits_worked_by_hand() -> None:
 def test_the_long_set_picks_its_own_cases_of_many_steps() -> None:
     every = cx.cases()
     got = cx.picked("long", every)
-    assert len(got) == 24 and {c.category for c in got} == set(longtasks.CATEGORIES)
+    assert len(got) == 33 and {c.category for c in got} == set(longtasks.CATEGORIES)
     assert set(longtasks.CATEGORIES) <= set(cx.CATEGORIES)
     assert all(c.tier == 3 for c in got)
+    assert [c.id for c in cx.picked("long_flow", every)] == [
+        f"long-flow-{n:02d}" for n in range(1, 10)
+    ]
 
 
 async def test_the_long_set_scores_its_reference_answers(tmp_path: Path, offline: None) -> None:
@@ -768,6 +771,181 @@ def test_the_long_set_truths_are_worked_from_the_tools_own_output() -> None:
     margins = [(float(x["price"]) - float(x["unit_cost"])) / float(x["price"]) * 100
                for x in catalog.values()]  # fmt: skip
     assert by["long-data-03"]["under_40"]["value"] == sum(m < 40 for m in margins)
+
+
+# --------------------------------------------------------------------------- long workflows
+def _flow(n: int) -> Any:
+    return next(c for c in longtasks.flow_cases() if c.id == f"long-flow-{n:02d}")
+
+
+def test_the_long_workflows_are_as_long_as_they_say() -> None:
+    def steps(n: int) -> int:
+        return sum(len(rnd) for t in _flow(n).turns for rnd in t.calls)
+
+    assert steps(1) == 57 and steps(9) >= 50  # fifty and more tool calls in one request
+    assert len(_flow(5).turns) == 12
+    assert _flow(2).window == longtasks.SMALL_WINDOW
+    assert _flow(3).turns[0].approve and _flow(4).turns[0].restart
+    # each tool the set adds is offered only to the cases that call it
+    for case in longtasks.flow_cases():
+        called = {name for t in case.turns for rnd in t.calls for name, _ in rnd}
+        assert {t.spec.name for t in case.tools} == called - {t.spec.name for t in r.TOOLS}, case.id
+
+
+def test_the_long_workflow_truths_are_worked_from_the_tools_own_output() -> None:
+    """The sweep's gaps from the audits' own JSON, the freight job's winner from the quotes
+    and the portal's own answers: not from the functions the cases were built with."""
+    sweep = _flow(1).turns[0]
+    gaps: collections.Counter[str] = collections.Counter()
+    for _, args in (c for rnd in sweep.calls[1:] for c in rnd):
+        told = json.loads(longtasks.shelf_audit.fn(**args))
+        assert len(told["bays"]) == longtasks.BAYS
+        assert told["planned"] == sum(b["planned"] for b in told["bays"])
+        gaps[args["store"]] += sum(b["planned"] - b["found"] for b in told["bays"])
+    want = sweep.expect.value
+    assert {s: want[s]["value"] for s in gaps} == dict(gaps) and len(gaps) == 7
+    assert want["worst3"]["value"] == sum(v for _, v in gaps.most_common(3))
+    assert len(set(gaps.values())) == 7  # no two stores tie: the ranking is one
+
+    for n, group in ((6, 0), (7, 1), (4, 3)):
+        longtasks.TENDERS.clear()
+        longtasks.FAILED.clear()
+        tender = json.loads(longtasks.open_tender.fn(pallets=longtasks.PALLETS))["tender"]
+        quoted = {}
+        for lane in longtasks.LANES[group]:
+            for _ in range(2):  # a lane that fails once is quoted the second time
+                try:
+                    told = json.loads(longtasks.carrier_quote.fn(supplier=lane, tender=tender))
+                except (RuntimeError, longtasks.WorkerDied):
+                    continue
+                quoted[lane] = told["per_pallet"]
+            portal = json.loads(r.supplier_portal.fn(supplier=lane))
+            if portal["quoted_lead_time_days"] > longtasks.LEAD_LIMITS[group]:
+                del quoted[lane]
+        best = min(quoted, key=quoted.__getitem__)
+        want = _flow(n).turns[0].expect.value
+        assert (want["tender"]["value"], want["supplier"]["value"]) == (tender, best)
+        assert want["total"]["value"] == pytest.approx(quoted[best] * longtasks.PALLETS, abs=0.01)
+        assert sorted(quoted.values())[1] - quoted[best] > 1  # the cheapest is clearly one
+
+
+def test_the_restock_plan_is_the_same_from_the_averages_as_shown_and_as_fetched() -> None:
+    """An earlier turn shows the average daily units to 2 decimals; a later one computes with
+    them. The plan's review days are ones where the rounded averages give the same quantities:
+    a model that carries either is right. The change of review days changes every quantity."""
+    w = r.world()
+    turns = _flow(5).turns
+    plans = [
+        t.expect.value for t in turns if str(t.text).startswith(("Use this", "Change of plan"))
+    ]
+    assert len(plans) == 2
+    for days, plan in zip(longtasks.REVIEW_DAYS, plans, strict=True):
+        for sku, spec in plan.items():
+            sold = sum(s.units for s in r.selected(w, sku=sku, region="north", **longtasks.Q3))
+            lead = w.suppliers[w.skus[sku].supplier].lead_time_days
+            for avg in (sold / 92, round(sold / 92, 2)):
+                qty = max(0, math.ceil(avg * (lead + days) - w.on_hand(sku, "north")))
+                assert qty == spec["value"], (sku, days)
+    assert all(plans[0][k]["value"] != plans[1][k]["value"] for k in plans[0])
+    # the item dropped at the end is the one with the smallest quantity, and only one is
+    least = min(plans[1], key=lambda k: plans[1][k]["value"])
+    assert least not in turns[-1].expect.value and len(turns[-1].expect.value) == 4
+    assert (
+        sorted(v["value"] for v in plans[1].values())[0]
+        < sorted(v["value"] for v in plans[1].values())[1]
+    )
+
+
+def test_a_lane_fails_once_or_for_good_and_a_write_is_kept_per_person() -> None:
+    longtasks.TENDERS.clear()
+    longtasks.FAILED.clear()
+    fails = longtasks.broken()
+    tender = json.loads(longtasks.open_tender.fn(pallets=3))["tender"]
+    assert tender == "TN-0001"
+    with pytest.raises(RuntimeError, match="503"):
+        longtasks.carrier_quote.fn(supplier=fails["flaky"], tender=tender)
+    assert "per_pallet" in longtasks.carrier_quote.fn(supplier=fails["flaky"], tender=tender)
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="502"):
+            longtasks.carrier_quote.fn(supplier=fails["down"], tender=tender)
+    with pytest.raises(longtasks.WorkerDied) as died:
+        longtasks.carrier_quote.fn(supplier=fails["deadly"], tender=tender)
+    # the death is read through a framework's task group too, and nothing else is one
+    grouped = BaseExceptionGroup("a task group", [ValueError("x"), died.value])
+    assert longtasks.WorkerDied.within(died.value) and longtasks.WorkerDied.within(grouped)
+    assert not longtasks.WorkerDied.within(BaseExceptionGroup("g", [KeyboardInterrupt()]))
+    assert "per_pallet" in longtasks.carrier_quote.fn(supplier=fails["deadly"], tender=tender)
+    # a lane never quoted is not awarded; a busy desk awards nothing, then awards
+    assert "error" in longtasks.award_tender.fn(tender=tender, supplier=fails["down"])
+    busy = longtasks.LANES[1][0]
+    longtasks.carrier_quote.fn(supplier=busy, tender=tender)
+    with pytest.raises(RuntimeError, match="busy"):
+        longtasks.award_tender.fn(tender=tender, supplier=busy)
+    assert longtasks.TENDERS[""][tender]["awards"] == []
+    assert json.loads(longtasks.award_tender.fn(tender=tender, supplier=busy))["status"] == "booked"
+    assert longtasks.TENDERS[""][tender]["awards"] == [busy]
+    assert (
+        json.loads(longtasks.open_tender.fn(pallets=3))["tender"] == "TN-0002"
+    )  # a second one shows
+
+
+def test_a_write_done_twice_or_a_call_repeated_fails_its_probe() -> None:
+    turn = cx.Turn(
+        "q",
+        sent=(
+            cx.Probe("atmost", "award_tender", limit=1),
+            cx.Probe("distinct", "shelf_audit"),
+            cx.Probe("distinct"),
+            cx.Probe("asks"),
+            cx.Probe("restarts"),
+        ),
+    )
+    audit = {"tool": "shelf_audit", "args": {"store": "S01", "category": "denim"}, "status": "ok"}
+    award = {"tool": "award_tender", "args": {"tender": "TN-0001"}, "status": "ok"}
+    once = [audit, award, award | {"status": "error"}]  # a failed attempt is not a second award
+    found = cx.checked(turn, "SUCCESS", [], 1, calls=once, happened={"asks"})
+    assert [c["ok"] for c in found[1:]] == [True, True, True, True, False]
+    twice = [audit, award, award, audit | {"args": {"category": "denim", "store": "S01"}}]
+    found = cx.checked(turn, "SUCCESS", [], 1, calls=twice, happened={"restarts"})
+    assert [c["ok"] for c in found[1:]] == [False, False, False, False, True]
+    assert found[2]["found"] == ['shelf_audit({"category": "denim", "store": "S01"})']
+
+
+@pytest.mark.parametrize("adapter", ["langgraph", "react", "deepagents"])
+async def test_the_long_workflows_pass_their_own_checks_on_a_scripted_run(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch, adapter: str
+) -> None:
+    """Each workflow as its gold calls run it: the approval pauses and goes on, the worker
+    dies and another finishes the run, the failing calls fail, and every check holds — a
+    write done once, no call made twice, every request inside the small window."""
+    monkeypatch.setattr(cx, "RESTART_LEASE", 1)  # the dead worker's lease, waited out
+    out = tmp_path / adapter
+    report = await cx.bench(_args(out, cases="long_flow", adapter=adapter), progress=lambda _: None)
+    rows = {x["case"]: x for x in map(json.loads, _read(out.with_suffix(".jsonl")))}
+    assert len(rows) == 9 and not any(x.get("not_applicable") for x in rows.values())
+    bad = {
+        f"{case}/{t['turn']}": [c for c in t["checks"] if not c["ok"]] or t.get("score")
+        for case, row in rows.items()
+        for t in row["turns"]
+        if any(not c["ok"] for c in t["checks"]) or not (t.get("score") or {}).get("correct")
+    }
+    assert not bad, bad
+    assert report["summary"]["by_category"]["long_flow"]["strict"]["mean"] == 1.0
+
+    def calls(case: str, name: str) -> list[str]:
+        return [c["status"] for c in rows[case]["turns"][0]["calls"] if c["tool"] == name]
+
+    assert calls("long-flow-03", "place_transfer") == ["ok"]
+    assert calls("long-flow-04", "open_tender") == ["ok"]  # not opened again after the crash
+    assert calls("long-flow-06", "carrier_quote").count("error") == 1
+    assert calls("long-flow-07", "award_tender") == ["error", "ok"]
+    assert calls("long-flow-08", "carrier_quote").count("error") == 2
+
+
+def test_the_small_window_workflow_runs_on_the_adapters_whose_window_the_harness_keeps() -> None:
+    case = _flow(2)
+    assert set(case.adapters) == {"react", "langgraph", "deepagents"} and case.only_because
+    assert all(not c.adapters for c in longtasks.flow_cases() if c.id != case.id)
 
 
 def test_a_long_tool_output_is_recalled_from_the_earlier_run_not_fetched_again() -> None:
