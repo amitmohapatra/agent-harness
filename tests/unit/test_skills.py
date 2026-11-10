@@ -472,8 +472,6 @@ def test_skill_info_defaults_and_the_scope_key() -> None:
 
 
 async def test_the_openai_source_lists_once_pinned_and_says_a_skill_it_cannot_load() -> None:
-    from agents.sandbox.errors import SkillsConfigError
-
     store = SkillStore()
     store.put("tone", "Be brief.")
     capability = combine(store).openai(Scope())
@@ -482,5 +480,10 @@ async def test_the_openai_source_lists_once_pinned_and_says_a_skill_it_cannot_lo
     await source.prepare()
     [listed] = source.list_skill_metadata(skills_path=".agents")
     assert (listed.name, str(listed.path)) == ("tone", ".agents/tone")
-    with pytest.raises(SkillsConfigError, match="no skill 'nope'"):
-        await source.load_skill(skill_name="nope", session=None, skills_path=".agents")
+    said = await source.load_skill(skill_name="nope", session=None, skills_path=".agents")
+    assert said == {  # answered, not raised: an error raised in the SDK's tool ends its run
+        "status": "unavailable",
+        "skill_name": "nope",
+        "path": ".agents/nope",
+        "error": "no skill 'nope' for this run",
+    }
