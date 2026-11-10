@@ -532,7 +532,9 @@ A shell command that only reads (Claude Code's or Kimi's `Bash`: a program that 
 by pipes and sequences, or Python whose text proves it writes nothing: only the modules,
 functions and methods listed as reading, a module never held under another name) no longer
 pauses: the harness lets it run (`trellis/harness/governance/shell.py`); what is not proven
-pauses. A run that pauses to ask a person about a save
+pauses. A read is one inside the folder the command runs in, the skills written for the run or
+where a kept result is read: a file anywhere else on the machine (`/etc/passwd`, `~/.ssh`), the
+environment, a program that is not one of the system's, pauses too. A run that pauses to ask a person about a save
 inside the run's own working folder
 (`complex.work_folder`: Kimi's and Claude's, under `KIMI_RUN_ROOT` / `CLAUDE_RUN_ROOT`): their
 file tool on a path there, or a command whose every write (`mkdir`, `touch`, `cp`'s target, a

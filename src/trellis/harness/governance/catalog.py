@@ -66,10 +66,11 @@ TOP_RISK: Final[SideEffects] = RISKS[-1]
 
 @dataclass(frozen=True, slots=True)
 class Rule:
-    """The catalog's word on one tool: the risk it decided, and the approval rule an
-    administrator (or an accepted suggestion) set."""
+    """The catalog's word on one tool: the risk it decided (``None``: nobody declared one, so
+    the tool's own decides), and the approval rule an administrator (or an accepted suggestion)
+    set."""
 
-    risk: SideEffects
+    risk: SideEffects | None
     approve_when: str | None = None
 
 
@@ -161,11 +162,12 @@ class MemoryCatalog:
 
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
     """A tool as the catalog stores it. ``side_effects`` only where they are known (a local
-    tool declares them, an OpenAPI method implies them). A tool whose risk no code declares —
-    an MCP tool, a framework's own that says nothing — sends its annotations instead and the
-    service derives the risk, so an administrator's stays; one the harness holds irreversible
-    for what it does not say (``tools.mcp.side_effects_of``: the protocol's default) sends
-    that default said, so the catalog derives the same risk."""
+    tool declares them, an OpenAPI method implies them). An MCP tool sends its annotations
+    instead and the service derives the risk, so an administrator's stays; one the harness
+    holds irreversible for what it does not say (``tools.mcp.side_effects_of``: the protocol's
+    default) sends that default said, so the catalog derives the same risk. Any other tool that
+    says nothing sends nothing of it: the catalog keeps no risk for it, and the harness's own
+    rule decides (it asks)."""
     stored: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
@@ -175,7 +177,7 @@ def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, ob
     }
     if spec.source != "mcp" and spec.side_effects in RISKS:
         stored["side_effects"] = spec.side_effects
-    elif side_effects_of(annotations) == TOP_RISK:
+    elif spec.source == "mcp" and side_effects_of(annotations) == TOP_RISK:
         annotations = {**(annotations or {}), DESTRUCTIVE: True}
     if annotations:
         stored["annotations"] = dict(annotations)

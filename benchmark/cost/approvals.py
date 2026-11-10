@@ -14,6 +14,7 @@ from typing import Any, Final
 
 from trellis.contracts import RunStatus
 from trellis.harness.governance.shell import SHELLS, approvable, file_of, read_only
+from trellis.harness.tools import results
 
 __all__ = ["APPROVALS_MAX", "SHELLS", "approvable", "approved_reads", "read_only"]
 
@@ -31,7 +32,12 @@ async def approved_reads(
     for _ in range(APPROVALS_MAX):
         pending = result.interrupt if result.status is RunStatus.PAUSED else None
         call = pending.tool_call if pending is not None else None
-        if pending is None or call is None or not approvable(call.tool, call.args, folder):
+        kept = [results.PREFIX]  # where a kept result is read: the run may read it, as its folder
+        if (
+            pending is None
+            or call is None
+            or not approvable(call.tool, call.args, folder, reads=kept)
+        ):
             break
         commands.append(str(call.args.get("command") or f"{call.tool} {file_of(call.args)}"))
         result = await agent.resume(pending.interrupt_id, "approve", reviewer=reviewer)

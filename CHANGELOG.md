@@ -5,6 +5,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: ReAct on Deep Agents on a small window
+
+On a 6,000-token window (adversarial `advconv-05`, `react --variant deep`, memory off) the
+summary requests Deep Agents sent were up to 23,156 tokens, 13 of 23 over the window; after a
+summary the model answered the conversation's first question again in place of the run's. Five
+causes, all the harness's; Deep Agents' summarization is left as it is:
+
+- **The earlier turns replayed with memory off are sized for the request**
+  (`conversation.earlier(budget=)`, `Agent.conversation_budget`), as memory's window is: each
+  turn's question and answer from the newest back, then the newest turns whole while they fit.
+  Before, the newest 10 turns went whole whatever the window, and Deep Agents summarized all
+  of them in one request each turn (on `create_agent`, `FitWindow` left them out).
+- **The task kept ahead of a summary is the run's question** (`ModelHooks`), not the first
+  user message of the state, which with earlier turns replayed was the oldest turn's.
+- **The readers of a kept result stay offered when `FitWindow` narrows the tools**
+  (`query_result`, `read_file`): the preview says to call them.
+- **A request refused after a summarization is fitted again with the latest turn's results
+  cut** (Deep Agents keeps a `read_file` page whole): before, the same request was summarized
+  again and refused again.
+- **The model's tokens per counted token are learned where it is called**, of the request it
+  was sent (`ModelHooks`), not of the request before a summarization made it smaller.
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,
@@ -89,8 +111,13 @@ refused: no tool fails at startup.
 - **The tools that say nothing are named once**: when an agent's tools are listed, one warning
   (`trellis.tools`) lists those that declare no side effects, with what to add.
 - The catalog is told the same (`destructiveHint: true`, never a `side_effects` of the
-  harness's) for a tool whose risk no code declares, so an administrator's risk there stays:
-  it is the place to say what a tool you cannot annotate does.
+  harness's) for an MCP tool that says nothing, so an administrator's risk there stays: it is
+  the place to say what a tool you cannot annotate does. Any other tool that declares nothing
+  is published saying nothing of it: the catalog keeps no risk (`null`, trellis-memory 0.6.6)
+  and the tool's own rule decides, so it asks with allow once, for this conversation, deny
+  (always allow with a memory service). A catalog entry with no risk leaves the tool's own
+  declared risk; before, it was read as one (`write`, then `irreversible`), and an undeclared
+  tool asked every call with no "for this conversation".
 - A built-in the harness knows only by name (the graph's state tools, Deep Agents' file tools
   and `execute`, declared a write) is the framework's own: a tool of yours that shares the name
   (`delete`, `write_file`...) says what it does itself, as any other.
@@ -337,6 +364,16 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- OpenAI Agents: a write the person allowed for the conversation no longer asks again for the
+  other calls of the same model reply. Calls governance holds at the SDK's gate
+  (`needs_approval`) wait there together, and a resumed `RunState` keeps each one's pending
+  approval without asking its gate again: the person was asked about every one of them, in the
+  SDK's bare shape ("Approve <tool>?", no choices). Governance now decides each of them when
+  the run resumes, one by one, after the answer to the one before: a call allowed for the
+  conversation runs, and one that still asks (an `irreversible` tool) asks with governance's
+  question and choices. Live (Haiku, 46 runs each): 14 runs asked again before — every run
+  with parallel writes allowed for the conversation, streamed and after a handoff too — and 0
+  after.
 - A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
   tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
   graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell

@@ -816,13 +816,16 @@ def _permission(stored: dict[str, Any]) -> dict[str, Any]:
 
 def _catalog_tool(name: str, fields: dict[str, Any]) -> dict[str, Any]:
     """A catalog entry as the service answers it: every member, the tier derived as the
-    service derives it (``side_effects`` when set, else the annotations)."""
+    service derives it (``side_effects`` when set, else a hint that names one, else none)."""
     annotations = fields.get("annotations") or {}
+    destructive = annotations.get("destructiveHint")
     derived = (
         "read"
         if annotations.get("readOnlyHint")
+        else None
+        if destructive is None
         else "irreversible"
-        if annotations.get("destructiveHint")
+        if destructive
         else "write"
     )
     entry: dict[str, Any] = {
