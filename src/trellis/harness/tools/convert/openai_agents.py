@@ -56,9 +56,10 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
 
 def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
-    harness's are — governance (the catalog's risk, else ``write``: announced), a person when
-    it asks, the journal (a resume does not run a call again), its time and its trace — and
-    offered per turn only while the run offers it (the tool hints' narrowing), as a copy: the
+    harness's are — governance (the catalog's risk; the SDK's tool has nowhere to say what it
+    does, so without one each call asks), a person when it asks, the journal (a resume does
+    not run a call again), its time and its trace — and offered per turn only while the run
+    offers it (the tool hints' narrowing), as a copy: the
     agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
     is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
     else is returned as it is."""
@@ -80,12 +81,11 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         async def run(given: dict[str, Any]) -> Any:
             return await original(context, json.dumps(given))
 
-        # as the run's tool set has it (an agent tool: a helper, read), else undeclared: write
+        # as the run's tool set has it (an agent tool: a helper, read), else undeclared
         spec = runtime.native.get(tool.name) or ToolSpec(
             name=tool.name,
             description=tool.description or tool.name,
             input_schema=tool.params_json_schema,
-            side_effects="write",
         )
         outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
         return results.readable(outcome.output, tool.name)

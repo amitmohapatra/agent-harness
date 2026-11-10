@@ -589,6 +589,7 @@ class Harness:
                 spec.model_copy(update={"description": FORGETS}) if spec.name == FORGET else spec,
                 _memory_call(spec),
                 feature="tool_search" if spec.name == TOOL_SEARCH else "memory_pull",
+                confined=True,
             )
             for spec in await run_memory.agent_tools()
         ]

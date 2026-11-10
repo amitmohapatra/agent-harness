@@ -27,7 +27,7 @@ def read_note(path: str) -> str:
     return f"note at {path}"
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(destructive_hint=False))
 def add_note(text: str) -> str:
     """Add a note."""
     served.append("add_note")
@@ -55,7 +55,7 @@ def whoami(ctx: Context) -> str:
     return headers.get("authorization", "").removeprefix("Bearer ")
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(destructive_hint=False))
 def fail(why: str) -> str:
     """Fail."""
     raise ValueError(why)

@@ -27,6 +27,7 @@ from a2a.utils.errors import InvalidRequestError
 
 from trellis.contracts import (
     ConfigurationError,
+    Interrupt,
     InterruptDecision,
     InterruptReason,
     RunEvent,
@@ -150,7 +151,7 @@ class RunExecutor(AgentExecutor):
             return
         interrupt = record.awaiting
         try:
-            decision, answer = _decision(interrupt.reason, context.message)
+            decision, answer = _decision(interrupt, context.message)
             _, data = text_and_data(context.message)
             comment = data.get("comment")
             record, resolution = await self.agent._resolution(
@@ -284,10 +285,12 @@ def _mode(message: Message | None) -> Mode:
         ) from exc
 
 
-def _decision(reason: InterruptReason, message: Message | None) -> tuple[InterruptDecision, Any]:
+def _decision(interrupt: Interrupt, message: Message | None) -> tuple[InterruptDecision, Any]:
     """A caller's answer as a decision and its value. A data part may name the decision
-    (``{"decision": "approve"}``); an approval reads approve/reject words, or an object as the
-    edited arguments; anything else answers the question."""
+    (``{"decision": "approve"}``); an approval reads one of its options (its value or its
+    label, as plain chat said them: allow once, for this conversation, always, deny),
+    approve/reject words, or an object as the edited arguments; anything else answers the
+    question."""
     text, data = text_and_data(message)
     word = text.strip().lower()
     named = str(data.get(DECISION_KEY) or "").strip().upper()
@@ -296,16 +299,20 @@ def _decision(reason: InterruptReason, message: Message | None) -> tuple[Interru
         decision = InterruptDecision(named)
     elif word in CANCEL_WORDS:
         decision = InterruptDecision.CANCEL
-    elif reason is InterruptReason.APPROVAL:
+    elif interrupt.reason is InterruptReason.APPROVAL:
+        picked = _picked(interrupt, answer)
         if word in APPROVE_WORDS:
             decision = InterruptDecision.APPROVE
         elif word in REJECT_WORDS:
             decision = InterruptDecision.REJECT
+        elif picked is not None:
+            decision, answer = InterruptDecision.ANSWER, picked
         elif data:
             decision = InterruptDecision.EDIT
         else:
             raise ValueError(
-                "an approval is answered with approve, reject, cancel, or the edited arguments"
+                "an approval is answered with one of its options, approve, reject, cancel, or "
+                "the edited arguments"
             )
     else:
         decision = InterruptDecision.ANSWER
@@ -317,6 +324,19 @@ def _decision(reason: InterruptReason, message: Message | None) -> tuple[Interru
             else {k: v for k, v in data.items() if k not in SAID_KEYS}
         )
     return decision, answer
+
+
+def _picked(interrupt: Interrupt, answer: Any) -> str | None:
+    """The value of the approval's option ``answer`` names (its value or label, any case), or
+    ``None``."""
+    if not isinstance(answer, str):
+        return None
+    said = answer.strip().rstrip(".").casefold()
+    for option in interrupt.options:
+        value, label = (option, option) if isinstance(option, str) else (option.value, option.label)
+        if said in (value.casefold(), (label or value).casefold()):
+            return value
+    return None
 
 
 #: What a data part says about a decision rather than as its edited arguments.

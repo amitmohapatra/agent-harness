@@ -139,7 +139,11 @@ async def gate(team: Team, case: Case) -> None:
 
 def purchasing(team: Team, case: Case, run_id: str, qty: int) -> tuple[Any, PlannedChatModel]:
     """The graph for one purchase-order run, and its model (which plans the one call)."""
-    tools = {case.tool: governed(case.create_po, team.governance, name=case.tool, on_ask=team.ask)}
+    tools = {
+        case.tool: governed(
+            case.create_po, team.governance, side_effects="write", name=case.tool, on_ask=team.ask
+        )
+    }
     model = PlannedChatModel(
         plan=[(case.tool, {"sku": case.sku, "qty": qty})], final="Done. {last}"
     )

@@ -5,6 +5,104 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: "Always allow", kept in the memory service
+
+With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,
+`remember="always"`; trellis-contracts 0.7.1): the tool's later calls asked of the same person
+or role run without asking in every conversation of that user until the permission is revoked.
+
+- Kept in the memory service's tool permissions (`PUT /v1/tool-permissions`, trellis-memory
+  0.6.5) with the harness's service key, once, in the background (spooled when the service is
+  down); read once per attempt when a call first asks, so a revoke counts from the next run.
+- Never for an `irreversible` tool (neither offered nor honoured), nor where the tool's
+  `approve_when` or a `before_tool` hook's `Ask` decides the call; a framework's own tools keep
+  their own flow.
+- Offered only where a pick is kept: an attempt that could not read the permissions, or a key
+  that cannot grant (an issuer's token), offers the three choices. Permissions that cannot be
+  read fail closed: the call asks, and a warning is logged once.
+- **A hook's `Ask` beats every allowance:** a `before_tool` hook's question is asked whatever
+  was allowed for this conversation, always, or by the run's schedule (as a PreToolUse "ask"
+  in Claude Code). Before, an approval for the conversation or a schedule's covered it.
+- Without a memory service nothing changes: three choices.
+
+### Changed: a write asks, once a conversation, as in Claude Code
+
+A tool the harness runs that says it writes now asks the person before it runs (it ran,
+announced). The person picks, as in Claude Code: **allow once**, **allow for this
+conversation** or **deny**. An `irreversible` tool offers allow once and deny only: it asks at
+every call.
+
+- **"For this conversation"** covers the tool's later calls in every later run of the same
+  thread for the same user — a resumed run, another worker, a child run — never another
+  thread, user or tool. It is read from the run store's history of answered interrupts
+  (agent-runs' `resolutions`; `LocalRuns` keeps the same): no new setting, no contract change.
+  `remember="run"` is that choice; before, it reached the rest of the run only, and covered an
+  `irreversible` tool too.
+- **The choices travel with the approval**: its interrupt's `options` (`once`, `run`,
+  `reject`), and the question says them for plain chat. AG-UI takes the picked value as the
+  resume's `payload`, A2A the choice in words, `agent.resume(id, "answer", answer="run")` too.
+- **What does not ask:** a write the run keeps to itself — the schedule tools, the memory
+  tools, the sandbox, a sub-agent's call, Deep Agents' files and `execute` — is announced as
+  before. A framework's own tools (Claude Code's and Kimi's built-ins, OpenAI hosted tools)
+  keep their own permission flow. The catalog's `risk` and `approve_when` are unchanged: a rule
+  that does not hold still lets the call run, announced.
+- **A schedule set in chat** names the writes its runs will call (`schedule_task(tools=)`);
+  its confirmation allows them for its runs (kept in the schedule's metadata) or leaves them to
+  ask at each run. A write it does not cover pauses in the chat's thread. A schedule made from
+  code allows nothing.
+- An OpenAI agent holds a write at its own gate (`needs_approval`), so the approved call
+  continues the paused run.
+- A call denied earlier in a run stays denied when a later approval in the run allows its tool.
+- Way 2: `governed(fn, gov, side_effects="write")` and `Governance.check` ask about a write
+  too (`on_ask`).
+
+**Upgrading.** Nothing fails at startup. What changes: a write tool now asks once per
+conversation.
+
+| What you see | The fix |
+|---|---|
+| a `write` tool that ran now pauses (`Approve <tool>? <tool> is write. Allow once, allow for this conversation, or deny.`) | nothing: the person allows it once or for the conversation; an app renders the interrupt's `options` |
+| an `irreversible` tool approved with `remember="run"` asks again | nothing: it asks at every call |
+| a scheduled run's write pauses | name the tool in `schedule_task(tools=)` so the person allows it when confirming; a schedule from code: answer the pause |
+| a tool that only reads is declared `write` | `@tool(side_effects="read")`, or its `risk` in the catalog |
+
+### Changed: a tool that does not say what it does asks a person
+
+A risky call must never run without approval. A tool that declared nothing was taken as
+`write` and ran, only announced: in a live test a purge, a bulk price change and a read of
+another account's data all ran. Now, as in Claude, ChatGPT or MCP, a tool that says nothing
+needs the person's permission — one behaviour for every way a tool comes in. Nothing is
+refused: no tool fails at startup.
+
+- **A tool with no declared side effects asks at each call** (`<tool> has not declared its
+  side effects.`): `@tool` alone, `tool(fn)`, a bare function in `tools=[...]` or given to
+  `agent.tools.use`, `governed(fn, gov)`, a source of your own, a LangChain tool of your graph
+  with no `metadata["side_effects"]`, an OpenAI Agents `FunctionTool`, a built-in of Claude
+  Code or Kimi the harness has no word on, `Governance.check(tool, args)` given none. Its risk
+  is none (`unknown`), and governance asks about a risk it does not know (it announced and
+  ran). Declared tools are as before: `read` runs, `write` runs and is announced,
+  `irreversible` asks.
+- **An MCP tool's annotations are read with the protocol's defaults** (`readOnlyHint` false,
+  `destructiveHint` true): a tool is `irreversible` unless it says it only reads (`read`) or
+  says `destructiveHint: false` (`write`). A tool with no annotations is `irreversible`: each
+  call waits for approval. Before, anything not marked destructive was `write`.
+- **The tools that say nothing are named once**: when an agent's tools are listed, one warning
+  (`trellis.tools`) lists those that declare no side effects, with what to add.
+- The catalog is told the same (`destructiveHint: true`, never a `side_effects` of the
+  harness's) for a tool whose risk no code declares, so an administrator's risk there stays:
+  it is the place to say what a tool you cannot annotate does.
+- A built-in the harness knows only by name (the graph's state tools, Deep Agents' file tools
+  and `execute`, declared a write) is the framework's own: a tool of yours that shares the name
+  (`delete`, `write_file`...) says what it does itself, as any other.
+
+**Upgrading.** Nothing fails at startup. What changes: a tool that declared nothing now pauses.
+
+| What you see | The fix |
+|---|---|
+| a tool of yours that ran now pauses (`<tool> has not declared its side effects.`), and a warning names it | `@tool(side_effects="read")` (or `"write"`, `"irreversible"`) on the function; `tool(fn, side_effects=...)` for one given bare; `governed(fn, gov, side_effects=...)` |
+| an MCP tool that ran now pauses (`<server>-<tool> is irreversible.`) | your server: annotate the tool (`readOnlyHint: true`, or `destructiveHint: false` for a change that can be undone); a server you do not own: its risk in the catalog, `put_catalog([{"name": "<server>-<tool>", "side_effects": "read"}])` |
+| a framework's own tool that ran now pauses | a LangChain tool: `tool.metadata = {"side_effects": "read"}`; any other: its risk in the catalog (as above), or build the tool with the harness (`@tool(side_effects=...)`) |
+
 ### `query_result` over complex data
 
 - JSON rows held at any depth, each array an object holds (`result_<key>`), JSON Lines, markdown
@@ -74,6 +172,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   recommended (`Option.recommended`, trellis-contracts 0.6.5) only with a why; a choice also
   takes another answer in words; plain chat reads the options numbered.
 - Claude's `AskUserQuestion` is the run's question, as Kimi's is.
+- A question's recommended option comes first wherever the model listed it: in the choice,
+  the app's own control and the numbered text.
 - The note asks "which one" when several things fit the user's words (it had made the model
   pick one or answer for each, against the app's own "ask which one is meant": break-and-fix
   clarify 17/21 → 21/21); how to use remembered rules, preferences and values
@@ -83,6 +183,33 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   "update it" choice is recommended by the flag, not by its label.
 - `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
   hour, for the cache): the model no longer "corrects" 03:53 for "in 2 hours" at 01:53 to 03:00.
+- `ask_user` is offered by itself to a run a person is known to read: one a chat front end
+  started (`serve_chat`; `Runtime.attended`), not one its schedule fired, on a framework with
+  no question tool of its own (Claude Code and Kimi Code keep theirs: `Adapter.asks`), never
+  on a graph with its tools bound. `without=["ask"]` turns it off (an eighth name). A run
+  started from code (`run`, `stream`), queued, fired, called over A2A or by another run gets
+  it only when its agent declares it (`tools=[ask_user()]`, as before): nobody is known to
+  answer a pause there. A tool of the agent's named `ask_user` wins; one declared is offered
+  once. `serve_chat` records a run's front end even when the app sent nothing with the
+  message.
+- `ask_user(fields=[{name, label, kind, options, multiple, default, why, required}])`: several
+  values in one question, one answer (an object: what the person gave over what was filled
+  in). No contract change: the `ask_user` component with `props.kind == "form"`, an object
+  `expects` with `ui_schema`, a numbered list in plain chat. A single question is the
+  one-field case; `recommended` with `why` on a number or a date shows the value filled in.
+- Values a request leaves out that an earlier one had are confirmed once before they are used
+  again, shown filled in (`agent.REMEMBERED`): they were filled and said. A rule, preference
+  or value said more than six months ago, or one a tool shows changed, is confirmed the same
+  way.
+- Where the app declared tools of its own, `ask_user` says a value one of them asks for is
+  asked with it (the app's date picker used in 1 of 8 runs before, 13 of 14 after).
+- The asking benchmark (`benchmark/cost/asking.py`): `--ask auto|declared|none` (was
+  `--no-ask-tool`), `--variant`; cases for an ambiguous target (14 products, two), a
+  remembered value that is partial, old or changed elsewhere, a recommendation the data
+  supports, an answer in words or outside the options, several values missing at once, a run
+  nobody reads, and risky actions (cannot be undone, money, many rows, people outside, an
+  instruction in a tool's result, an earlier yes to something else): each waits on its
+  approval whatever the model does; a tool that declares no side effects is measured apart.
 
 ### Schedules set in chat
 
@@ -197,6 +324,19 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
+  tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
+  graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell
+  their model to repeat the paused call; a real model words that call differently, the journal
+  knew a call only by its content, and the person was asked again on every resume. The call a
+  pause came from within is now kept as the model made it, with its place among the run's
+  tool calls, and the call of that tool made there when the run resumes runs as it
+  (`Replay.made`): the answer is for the arguments the person saw. The model is told which
+  call that is, with its arguments (`RESUMED_ASKED`: a resumed Claude or Kimi session, which
+  was told only to repeat "the call with no result"; an OpenAI agent run again from its
+  input, which was told nothing). Approvals stay exact. Haiku, the four rows of #203
+  (`benchmark.cost.schedules`), runs that paused on a tool's question: Claude 7 of 7 right
+  (#203: three of the rows failed), OpenAI Agents 6 of 7 (4 of 7 before its model was told).
 - A Kimi call that asks permission carries its arguments when the model streamed them: Kimi
   asks before it starts the call, so its arguments were only in the call's streamed updates,
   which the adapter dropped, and a pause on `Bash` showed `{}` (no command) to the person and

@@ -30,7 +30,7 @@ from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support import resume_worker
-from tests.support.arm import arm, native_tools
+from tests.support.arm import arm, declaring, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.durable import SharedSaver
 from tests.support.journals import journal_of
@@ -42,6 +42,9 @@ from trellis.harness import runtime as runtime_module
 from trellis.harness.middleware import GovernTools, RunCheckpointer
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job, LeaseLostError
+
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -335,6 +338,7 @@ async def test_an_sdk_agents_own_tool_is_not_run_again_on_another_worker(
     model = ScriptedModel([("deliver", {"order": "o1"}), ("die", {}), ("die", {}), "delivered"])
 
     def agent(h: Harness) -> Any:
+        declaring(h, deliver="write", die="write")  # the SDK's tools: the catalog says what
         return Agent(name="s", model=model, tools=[deliver, die])
 
     _, result = await crash_then_finish(workers, agent, "deliver o1")
@@ -446,7 +450,7 @@ async def test_a_later_steps_identical_call_is_asked_about_again_after_a_pause(
         )
     assert result.status is RunStatus.SUCCESS and result.answer == "twice", result.error
     # the first approval is the first call's: the second is asked about, and wired
-    wire = "Approve lc_wire? lc_wire is irreversible."
+    wire = "Approve lc_wire? lc_wire is irreversible. Allow once, or deny."
     assert asked == [wire, "Go on?", wire]
     assert done == ["wire ada", "wire ada"]
     assert results(model, 3) == ["wired ada", "yes", "wired ada"]

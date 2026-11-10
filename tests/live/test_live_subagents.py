@@ -1,6 +1,7 @@
 """Sub-agents against agent-runs (and its ticker) and the memory service: a ``ReAct`` planner
 queued for workers delegates to two children at once; one asks a person, whose answer comes
 from the inbox through the planner; the worker dies inside that child after its side effect,
+
 and the planner's next attempt continues the child without repeating it."""
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ from trellis import Harness, ReAct, Runtime, tool
 from trellis.contracts import RunStatus
 from trellis.harness.subagents import SUBAGENT
 
-pytestmark = [pytest.mark.live, needs_runs, needs_memory]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_runs, needs_memory, pytest.mark.usefixtures("writes_unasked")]
 
 
 async def test_a_planner_with_two_children_one_asking_survives_a_killed_worker(

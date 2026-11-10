@@ -32,7 +32,9 @@
   ends). The session the CLI kept (``ResultMessage.session_id``) is in the run's journal, and
   the next attempt resumes it (``resume=``): Claude goes on from where it was — its built-in
   tools are not run again — and, told which call a person answered about, calls that tool
-  again, which the journal answers. The session is kept in the run's journal too, as the SDK's
+  again, which the journal answers (a call a question was asked in runs as it was, whatever
+  words Claude makes it again with: ``Replay.made``). The session is kept in the run's journal
+  too, as the SDK's
   ``SessionStore`` (``bridges.claude.JournalSessions``): the SDK writes it back for the CLI on
   any machine. A session the CLI cannot continue (options keeping their own store, a transcript
   it refuses) is a warning, and the query runs again from its prompt against the journal;
@@ -94,7 +96,7 @@ from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.ask import ask_question
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
@@ -109,7 +111,8 @@ if TYPE_CHECKING:
 #: tool catalog); a subagent's
 #: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
 #: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
-#: may do anything its command does: a write. Any other tool the CLI asks about is a write.
+#: may do anything its command does: a write. Any other tool the CLI asks about has said
+#: nothing of what it does: a person approves each call (its risk in the catalog says more).
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Read": "read",
     "Glob": "read",
@@ -196,14 +199,24 @@ RESUMED: Final = (
     "your last tool call has no result yet, call that tool again with the same arguments: "
     "it runs once. Then carry on with the task."
 )
-#: What a session resumed after a person answered about one tool call is told: that call, by
-#: the name Claude knows it by. The session holds the call's result as "waiting for a person's
-#: approval", which :data:`RESUMED`'s "no result yet" does not describe: a model told only that
-#: took the waiting call for a failure and tried other tools instead.
+#: What a session resumed after a person answered about one tool call — its approval, or a
+#: question it asked while it ran — is told: that call, by the name Claude knows it by. The
+#: session holds the call's result as "waiting for a person's approval", which :data:`RESUMED`'s
+#: "no result yet" does not describe: a model told only that took the waiting call for a
+#: failure and tried other tools instead (or asked the person again itself).
 RESUMED_CALL: Final = (
     "This task was paused at your call to {tool}: it was waiting for a person's approval, and "
     "the person has answered. Call {tool} again now with the same arguments: it runs once and "
     "returns its result. Then carry on with the task."
+)
+#: ... and after a person answered a question that call asked while it ran
+#: (``Pending.inside``): named with its arguments, which a session whose transcript ends
+#: before the call does not hold (told to repeat a call it had no record of, Claude made none).
+#: Whatever arguments it is made again with, it runs as it was (``Replay.made``).
+RESUMED_ASKED: Final = (
+    "This task was paused at your call to {tool} with the arguments {args}: it was waiting for "
+    "a person's answer, and the person has answered. Call {tool} again now with those "
+    "arguments: it runs once and returns its result. Then carry on with the task."
 )
 #: ... and after a person denied that call: it does not run, so it returns no result to wait
 #: for, and the session is told so instead of being told to expect one.
@@ -218,10 +231,13 @@ RESUMED_DENIED: Final = (
 class ClaudeInput:
     prompt: str
     context: str | None
-    #: the tool call a person answered about, when the run resumes from that pause
+    #: the tool call a person answered about (``Pending.call``), when the run resumes from
+    #: that pause
     answered: ToolCall | None = None
     #: the person denied that call (``REJECT``): it does not run
     denied: bool = False
+    #: the person answered a question that call asked while it ran (not its approval)
+    asked: bool = False
 
 
 class ClaudeRunError(RuntimeError):
@@ -253,6 +269,10 @@ class ClaudeAdapter:
         """Every query: a steered message is added after a tool call's result (a
         ``PostToolUse`` hook's ``additionalContext``, :func:`_with_governance`); a query that
         calls no tool takes none."""
+        return True
+
+    def asks(self, target: Any) -> bool:
+        """Claude Code's own :data:`QUESTION_TOOL`, asked as the run's (:func:`_answered`)."""
         return True
 
     def prepare_input(
@@ -301,8 +321,9 @@ class ClaudeAdapter:
     ) -> Any:
         return dataclasses.replace(
             native_input,
-            answered=pending.interrupt.tool_call,
+            answered=pending.call,
             denied=resolution.decision is InterruptDecision.REJECT,
+            asked=pending.interrupt.tool_call is None,
         )
 
     def check_options(self, options: Mapping[str, Any]) -> None:
@@ -632,8 +653,16 @@ def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     if call is None:
         return RESUMED
     harness = any(t.name == call.tool for t in run.tools)
-    told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
-    return told.format(tool=f"mcp__{SERVER}__{call.tool}" if harness else call.tool)
+    name = f"mcp__{SERVER}__{call.tool}" if harness else call.tool
+    return resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
+
+
+def resumed_call(call: ToolCall, name: str, *, denied: bool, asked: bool) -> str:
+    """What a session resumed after a person answered about ``call`` is told (``name``: the
+    tool as its agent calls it): the call was denied, or asked them a question, or was
+    approved."""
+    told = RESUMED_DENIED if denied else RESUMED_ASKED if asked else RESUMED_CALL
+    return told.format(tool=name, args=json.dumps(call.args, default=str))
 
 
 class Steps:
@@ -863,7 +892,7 @@ def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
             verdict = await own(name, args, context)
         elif name == QUESTION_TOOL:
             try:
-                verdict = PermissionResultAllow(updated_input=await _answered(args))
+                verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif spec.side_effects == "read" or read_only(name, args, *folders):
@@ -886,31 +915,38 @@ def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
     return can_use_tool
 
 
-async def _answered(args: dict[str, Any]) -> dict[str, Any]:
+async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     """``AskUserQuestion``'s input with the person's ``answers`` (by question, the label picked,
     several joined with ", "), each question asked as ``ask_user`` asks it: its options, several
     picks with ``multiSelect``, the one labelled :data:`RECOMMENDED` recommended (its
-    description why), another answer in words."""
+    description why), another answer in words. The call the resumed session makes again in
+    other words is the one the person answered (``Replay.made``): Claude reads its questions
+    with their answers."""
+    made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
-    for asked in args.get("questions") or ():
-        options = [o for o in asked.get("options") or () if o.get("label")]
-        best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-        picked = await ask_question(
-            asked["question"],
-            [str(o["label"]) for o in options],
-            multiple=bool(asked.get("multiSelect")),
-            recommended=best.get("label"),
-            why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-        )
-        answers[asked["question"]] = ", ".join(picked) if isinstance(picked, list) else str(picked)
-    return {**args, "answers": answers}
+    async with runtime.limited(None, made=made):
+        for asked in made.args.get("questions") or ():
+            options = [o for o in asked.get("options") or () if o.get("label")]
+            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+            picked = await ask_question(
+                asked["question"],
+                [str(o["label"]) for o in options],
+                multiple=bool(asked.get("multiSelect")),
+                recommended=best.get("label"),
+                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+            )
+            answers[asked["question"]] = (
+                ", ".join(picked) if isinstance(picked, list) else str(picked)
+            )
+    runtime.replay.ended(made)
+    return {**made.args, "answers": answers}
 
 
 def _spec(runtime: Runtime, name: str) -> ToolSpec:
     """A call's tool as governance decides it: its risk as the run's tool set has it (an
     in-process server's tool: its annotations), else a built-in's
     (:data:`BUILTIN_SIDE_EFFECTS`)."""
-    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
     return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
 
 
@@ -1011,7 +1047,7 @@ def native_spec(name: str) -> ToolSpec:
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
     spec = builtin(ToolSpec(name=name, side_effects=risk))
     return helper(spec) if name in SUBAGENT_TOOLS else spec
 

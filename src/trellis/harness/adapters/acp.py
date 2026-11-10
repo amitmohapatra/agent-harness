@@ -94,7 +94,7 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -103,7 +103,7 @@ from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+from trellis.harness.tools.base import UNDECLARED, SideEffects
 
 log = logging.getLogger("trellis.harness")
 
@@ -458,10 +458,13 @@ def _check_servers(servers: Sequence[Mapping[str, Any]]) -> None:
 class ACPInput:
     prompt: str
     context: str | None
-    #: the tool call a person answered about, when the run resumes from that pause
+    #: the tool call a person answered about (``Pending.call``), when the run resumes from
+    #: that pause
     answered: ToolCall | None = None
     #: the person denied that call (``REJECT``): it does not run
     denied: bool = False
+    #: the person answered a question that call asked while it ran (not its approval)
+    asked: bool = False
     #: why they denied it, when they said
     why: str | None = None
 
@@ -500,6 +503,10 @@ class ACPAdapter:
         turn under way (``session/prompt`` takes a turn's messages as it starts), so a
         steered message waits its turn."""
         return False
+
+    def asks(self, target: Any) -> bool:
+        """An agent whose profile names its question tool (Kimi's ``AskUserQuestion``)."""
+        return target.profile is not None and bool(target.profile.questions)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
@@ -580,8 +587,9 @@ class ACPAdapter:
         denied = resolution.decision is InterruptDecision.REJECT
         return dataclasses.replace(
             native_input,
-            answered=pending.interrupt.tool_call,
+            answered=pending.call,
             denied=denied,
+            asked=pending.interrupt.tool_call is None,
             why=reason_of(resolution) if denied else None,
         )
 
@@ -766,7 +774,7 @@ def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
     builtins = profile.builtins if profile is not None else {}
-    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS)))
+    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, UNDECLARED)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 
@@ -958,8 +966,8 @@ class Attempt:
         if call is None:
             return RESUMED
         harness = call.tool in self.runtime.toolbox
-        told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
-        said = told.format(tool=f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool)
+        name = f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool
+        said = resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
         why = native_input.why
         return f"{said} {DENIED_WHY.format(why=why)}" if why else said
 
@@ -1248,7 +1256,7 @@ class Attempt:
             return _chosen(options, "allow_once")
         side_effects = (self.profile.builtins if self.profile else {}).get(name)
         found = runtime.native.get(name)
-        spec = found or ToolSpec(name=name, side_effects=side_effects or DEFAULT_SIDE_EFFECTS)
+        spec = found or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
         runtime.model_ended(STEP)
         try:
             decided = await _permitted(spec, args, self.folders)

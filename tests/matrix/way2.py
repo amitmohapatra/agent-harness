@@ -78,7 +78,7 @@ async def tiers(w: World) -> None:
     assert await lookup(topic="o1") == "facts about o1"
     assert await note(text="x") == "noted x"
     assert await refund(order="o1") == "refunded o1"
-    assert [a.tool for a in asked] == ["refund"] and [a.tool for a in announced] == ["note"]
+    assert [a.tool for a in asked] == ["note", "refund"] and announced == []  # a write asks
 
 
 async def approve_when(w: World) -> None:
@@ -432,6 +432,7 @@ async def hook_rewrite(w: World) -> None:
     note = governed(
         _fn(d.note()),
         Governance(),
+        side_effects="write",
         on_ask=lambda _: True,
         hooks=[_Hooked(Rewrite({"text": "[rewritten]"}))],
     )

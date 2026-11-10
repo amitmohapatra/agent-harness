@@ -32,6 +32,10 @@ def flights(city: str) -> str:
     return f"{city}: 2 direct flights a day, from 89 EUR"
 
 
+# what the graph's own tool does, said on it (said nowhere, each call waits for a person)
+flights.metadata = {"side_effects": "read"}
+
+
 @tool(side_effects="read")
 def hotels(city: str, budget: str) -> str:
     """Hotels in a city, within a budget (low or high)."""

@@ -23,7 +23,9 @@ are called before every tool call, before any permission rule: ``allow`` runs it
 permission rules go on (``--allowedTools``, then ``can_use_tool``). After a call that ran, the
 ``PostToolUse`` hooks are called with its result, or the ``PostToolUseFailure`` hooks with its
 error (``{"builtin": ..., "fails": "why"}`` scripts a built-in that fails). ``{"stall":
-seconds}`` is a step on which the "model" sends nothing for that long (then goes on).
+seconds}`` is a step on which the "model" sends nothing for that long (then goes on). A call's
+``"again": {...}`` is the arguments the "model" makes it with when a resumed session has it
+make that call again (a real model rarely repeats a call word for word).
 
 Spending: every result carries usage (:data:`STEP_TOKENS` a step) and a cost
 (``FAKE_CLAUDE_COST`` a step); past ``--max-budget-usd`` the query stops with the real CLI's
@@ -346,6 +348,7 @@ class Cli:
         limit = argument("--max-turns")
         cap = argument("--max-budget-usd")
         steps = 0
+        script = made_again(script, done) if str(prompt).startswith(PAUSED_PROMPT) else script
         for turns, (step, item) in enumerate(enumerate(script[done:], start=done)):
             ended = stopped(turns, steps, limit, cap)
             if ended is not None:  # what the real CLI ends with
@@ -535,6 +538,15 @@ class Cli:
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
         self.result(session, tool_id, content, parent)
         return read, not error, waits or bool(permission.get("interrupt"))
+
+
+def made_again(script: list[dict[str, Any]], done: int) -> list[dict[str, Any]]:
+    """``script`` as a session told its task was paused goes on with it: the call it goes on at
+    made with its ``again`` arguments, when it has them."""
+    worded = [
+        {**item, "args": item["again"]} for item in script[done : done + 1] if "again" in item
+    ]
+    return [*script[:done], *worded, *script[done + len(worded) :]]
 
 
 def projects() -> Path:

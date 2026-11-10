@@ -175,6 +175,7 @@ async def test_the_token_is_on_the_request_only(spans: Any) -> None:
     assert all(token not in text for text in kept)
 
 
+@pytest.mark.usefixtures("writes_unasked")  # the headers, not the call's approval
 async def test_an_a2a_agent_gets_the_runs_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     app, remote, _ = serve()
     sent: list[httpx.Request] = []

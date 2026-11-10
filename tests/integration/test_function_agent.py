@@ -89,17 +89,18 @@ async def test_the_risk_tiers(harness: Harness) -> None:
     agent = arm(harness.wrap(worker, id="refunds"), [lookup, note, refund])
     events = [e async for e in agent.stream("refund o1", user="u1")]
     names = [e.data.get("name") for e in events if e.type is RunEventType.CUSTOM]
-    assert names == ["tool_notice"]  # the write is announced; the read is not
+    assert names == []  # the read runs; the write asks
     finished = events[-1]
     assert finished.outcome is RunOutcome.INTERRUPT
-    interrupt = finished.data["interrupt"]
-    assert interrupt["reason"] == "APPROVAL" and interrupt["tool_call"]["args"] == {
-        "order": "o1",
-        "amount": 40,
-    }
+    assert finished.data["interrupt"]["tool_call"]["tool"] == "note" and calls == ["lookup:o1"]
+    asked = await agent.resume(finished.data["interrupt"]["interrupt_id"], "approve", reviewer="u1")
+    interrupt = asked.interrupt  # the irreversible call asks too
+    assert interrupt is not None and interrupt.reason is InterruptReason.APPROVAL
+    assert interrupt.tool_call is not None
+    assert interrupt.tool_call.args == {"order": "o1", "amount": 40}
     assert calls == ["lookup:o1", "note:checked"]
 
-    done = await agent.resume(interrupt["interrupt_id"], "approve", reviewer="u1")
+    done = await agent.resume(interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "refunded 40.0 on o1"
     # the re-run replayed the read and the write from the journal: each ran once
     assert calls == ["lookup:o1", "note:checked", "refund:o1"]

@@ -46,14 +46,14 @@ from trellis.harness.files import EVENT as FILE_EVENT
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Pending, Replay, content_key
+from trellis.harness.journal import Made, Pending, Replay, content_key
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.bridges.helpers import Helpers
     from trellis.harness.budget import Budget
-    from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.clients.memory import Permissions, RunMemory
     from trellis.harness.conversation import Steer
     from trellis.harness.frontend import Frontend
     from trellis.harness.governance.decision import Decision
@@ -112,11 +112,13 @@ _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=Non
 @dataclass(frozen=True, slots=True)
 class _Call:
     """The tool or model call the code running now is in: when it must end (``time.monotonic``)
-    and, for a tool call, its idempotency key and the id the run's stream gives it."""
+    and, for a tool call, its idempotency key, the id the run's stream gives it and the call
+    as the model made it."""
 
     ends: float | None
     key: str | None
     ref: str | None = None
+    made: Made | None = None
 
 
 _call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
@@ -287,6 +289,12 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: what the person allowed for this conversation in its runs (``conversation.allowed``),
+    #: once read in this attempt
+    allowed: frozenset[str] | None = field(default=None, repr=False)
+    #: what its user allowed always (the memory service's tool permissions:
+    #: ``tools.bridge._always``), once read in this attempt
+    always: Permissions | None = field(default=None, repr=False)
     #: the credentials hook's headers, per target, for this run only (``credentials.py``)
     credentials: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, init=False, repr=False)
@@ -381,6 +389,15 @@ class Runtime:
                 "memory is off for this run: set MEMORY_URL (and leave it out of without=)"
             )
         return self.run_memory.ctx
+
+    @property
+    def attended(self) -> bool:
+        """Whether a person is known to read this run and answer what it asks: a chat front
+        end started it (``serve_chat``, which shows a pause and takes its answer:
+        :attr:`frontend`), and no schedule fired it. Unknown is no: a run started from code
+        (``run``, ``stream``), queued (``start``), fired, called over A2A or by another run
+        may pause with nobody to resume it."""
+        return self.frontend is not None and self.scheduled is None
 
     def uses(self, feature: Feature) -> bool:
         """Whether ``feature`` is on for this run: neither the run nor its agent turned it off
@@ -477,16 +494,21 @@ class Runtime:
 
     @contextlib.asynccontextmanager
     async def limited(
-        self, seconds: float | None, *, key: str | None = None, ref: str | None = None
+        self,
+        seconds: float | None,
+        *,
+        key: str | None = None,
+        ref: str | None = None,
+        made: Made | None = None,
     ) -> AsyncIterator[None]:
         """The code inside — a tool call (``key``: its idempotency key, ``ref``: its id on the
-        stream) or a model call —
+        stream, ``made``: the call as the model made it) or a model call —
         takes at most ``seconds`` (``None``: no limit of its own), or raises ``TimeoutError``;
         the run's own time bounds it as well (the pipeline stops the run)."""
         own = None if seconds is None else time.monotonic() + seconds
         outer = _call.get()
         ends = [t for t in (own, outer.ends if outer else None) if t is not None]
-        token = _call.set(_Call(min(ends) if ends else None, key, ref))
+        token = _call.set(_Call(min(ends) if ends else None, key, ref, made))
         try:
             async with asyncio.timeout(seconds):
                 yield
@@ -670,15 +692,23 @@ class Runtime:
         resolution = await self.interrupt(asked.key, payload=asked.payload, **asked.fields())
         return asked.answer(resolution)
 
-    async def approve(self, call: ToolCall, decision: Decision) -> InterruptResolution:
+    async def approve(
+        self, call: ToolCall, decision: Decision, choices: Sequence[Option] = ()
+    ) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): the question is governance's
         (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
-        (else anyone's, the approval control)."""
+        (else anyone's, the approval control). ``choices``: what the person picks from
+        (``governance.decision.choices``), offered as the interrupt's options and said after
+        the question, for plain chat."""
+        from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
+
+        said = SAID.get(tuple(choices))
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
-            question=decision.question,
+            question=decision.question if said is None else f"{decision.question} {said}",
             ui="approve",
+            options=list(choices),
             tool_call=call,
             assignee=decision.assignee,
             component=decision.component,
@@ -754,7 +784,11 @@ class Runtime:
         # calls made at once may each ask: the run pauses on the first, the others ask again
         # when it resumes
         if self.pending is None:
-            self.pending = Pending(key=key, interrupt=interrupt)
+            # asked inside a tool call, where the framework does not resume in place: its model
+            # makes that call again when the run resumes (``Replay.made``)
+            call = _call.get()
+            inside = call.made if call is not None and self.suspend is None else None
+            self.pending = Pending(key=key, interrupt=interrupt, inside=inside)
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         # the framework's own pause (LangGraph's ``interrupt``): its resume is answered from the
@@ -864,6 +898,6 @@ class Tools:
 
 
 def _built_in(tool: Tool) -> bool:
-    """A tool every run gets: the memory service's pull tools, the schedule tools — never a
-    hint's candidate, never narrowed away."""
-    return tool.spec.source == "memory" or tool.feature == "schedules"
+    """A tool the harness gives a run by itself: the memory service's pull tools, the schedule
+    tools, ``ask_user`` — never a hint's candidate, never narrowed away."""
+    return tool.spec.source == "memory" or tool.feature in ("schedules", "ask")

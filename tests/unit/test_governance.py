@@ -18,7 +18,13 @@ from typing_extensions import TypedDict
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.contracts import ConfigurationError, HarnessError, ToolCall, ToolSpec
+from trellis.contracts import (
+    ConfigurationError,
+    HarnessError,
+    InterruptDecision,
+    ToolCall,
+    ToolSpec,
+)
 from trellis.harness import writes as writes_module
 from trellis.harness.clients.memory import Memory
 from trellis.harness.governance import (
@@ -40,7 +46,18 @@ from trellis.harness.governance.catalog import (
     Rule,
     entry,
 )
-from trellis.harness.governance.decision import decide
+from trellis.harness.governance.decision import (
+    ALWAYS,
+    CHOICES,
+    CONVERSATION,
+    DENY,
+    EVERY_TIME,
+    ONCE,
+    SAID,
+    choices,
+    chosen,
+    decide,
+)
 from trellis.harness.hooks import Deny, Hooks
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.errors import NotFoundError
@@ -55,9 +72,8 @@ ENV = {"MEMORY_URL": "http://memory.test", "TRELLIS_API_KEY": "test"}
     ("risk", "expected"),
     [
         ("read", Action.RUN),
-        ("write", Action.ANNOUNCE),
+        ("write", Action.ASK),
         ("irreversible", Action.ASK),
-        ("unknown", Action.ANNOUNCE),
     ],
 )
 def test_the_action_follows_the_risk(risk: str, expected: Action) -> None:
@@ -160,7 +176,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 async def test_without_a_catalog_the_tools_own_risk_decides() -> None:
     governance = Governance()
     assert (await governance.check("po", {}, side_effects="irreversible")).asks
-    assert (await governance.check("po", {})).announces  # an undeclared tool writes
+    assert (await governance.check("po", {})).asks  # a tool that says nothing asks
     assert await governance.rules(["po"]) == {"po": None}
 
 
@@ -186,18 +202,18 @@ async def test_the_catalog_overrides_the_risk_and_sets_the_approval_rule() -> No
 async def test_rules_are_read_again_within_seconds_conditionally(clock: Clock) -> None:
     catalog = FakeCatalog({"po": Rule(risk="write")})
     governance = Governance(catalog)
-    assert (await governance.check("po", {"amount": 50})).announces
+    assert (await governance.check("po", {"amount": 50})).asks  # a write asks
     clock.now += GOVERNANCE_TTL_SECONDS / 2
     await governance.check("po", {"amount": 50})
     assert len(catalog.asked) == 1  # fresh: not asked again
     clock.now += GOVERNANCE_TTL_SECONDS
-    assert (await governance.check("po", {"amount": 50})).announces  # a 304: the same rules
+    assert (await governance.check("po", {"amount": 50})).asks  # a 304: the same rules
     assert catalog.etags_sent == [None, '"v1"']
     # an administrator adds a rule: the next read (seconds later, not minutes) has it
-    catalog.rules["po"] = Rule(risk="write", approve_when="amount > 10")
+    catalog.rules["po"] = Rule(risk="write", approve_when="amount > 100")
     catalog.version = 2
     clock.now += GOVERNANCE_TTL_SECONDS + 1
-    assert (await governance.check("po", {"amount": 50})).asks
+    assert (await governance.check("po", {"amount": 50})).announces  # the rule decides
 
 
 async def test_a_tool_asked_about_for_the_first_time_is_read_at_once_with_the_others(
@@ -236,7 +252,8 @@ async def test_an_unreadable_catalog_makes_every_tool_that_does_more_than_read_a
     catalog.down = False
     clock.now += GOVERNANCE_TTL_SECONDS + 1
     with caplog.at_level("INFO", logger="trellis.governance"):
-        assert (await governance.check("erp-po", {})).announces  # back to its own risk
+        back = await governance.check("erp-po", {}, side_effects="write")
+        assert back.asks and back.reason == "erp-po is write."  # back to its own risk
     assert "can be read again" in caplog.text
 
 
@@ -366,7 +383,9 @@ async def test_a_learned_rule_that_stops_asking_never_lifts_a_hooks_deny(clock: 
         ran.append(amount)
         return "ordered"
 
-    call = governed(po, governance, on_ask=lambda decision: True, hooks=[Frozen()])
+    call = governed(
+        po, governance, side_effects="write", on_ask=lambda decision: True, hooks=[Frozen()]
+    )
     with pytest.raises(Denied, match="frozen"):
         await call(amount=50)
     assert ran == []
@@ -568,7 +587,12 @@ async def test_a_governed_call_that_asks_runs_as_the_person_decides(
     async def async_(decision: Decision) -> Any:
         return sync(decision)
 
-    call = governed(create_po, irreversible_catalog(), on_ask=async_ if asynchronous else sync)
+    call = governed(
+        create_po,
+        irreversible_catalog(),
+        side_effects="write",
+        on_ask=async_ if asynchronous else sync,
+    )
     assert await call(sku="A-1", qty=5) == expected
     [decision] = asked
     assert decision.tool == "create_po" and decision.args == {"sku": "A-1", "qty": 5}
@@ -582,14 +606,16 @@ async def test_a_rejected_call_raises_and_does_not_run() -> None:
         ran.append(qty)
         return qty
 
-    call = governed(po, irreversible_catalog(), name="create_po", on_ask=lambda d: False)
+    call = governed(
+        po, irreversible_catalog(), name="create_po", side_effects="write", on_ask=lambda d: False
+    )
     with pytest.raises(Rejected, match="create_po was not run") as rejected:
         await call(qty=5)
     assert rejected.value.decision.asks and ran == []
 
 
 async def test_an_answer_that_is_no_decision_is_refused() -> None:
-    call = governed(create_po, irreversible_catalog(), on_ask=lambda d: "yes")
+    call = governed(create_po, irreversible_catalog(), side_effects="write", on_ask=lambda d: "yes")
     with pytest.raises(TypeError, match="on_ask answered 'yes'"):
         await call(sku="A-1", qty=5)
 
@@ -610,11 +636,16 @@ async def test_a_governed_call_that_is_announced_tells_on_announce_first(
         heard.append("ran")
         return text
 
-    governance = Governance()
+    # a rule that does not hold lets a write run, announced
+    governance = Governance(FakeCatalog({"note": Rule(risk="write", approve_when='text == "x"')}))
     on_announce = async_ if asynchronous else sync
-    call = governed(note, governance, on_ask=lambda d: True, on_announce=on_announce)
+    call = governed(
+        note, governance, side_effects="write", on_ask=lambda d: True, on_announce=on_announce
+    )
     assert await call(text="hi") == "hi" and heard == ["note", "ran"]
-    quiet = governed(note, governance, on_ask=lambda d: True)  # no on_announce: it just runs
+    quiet = governed(
+        note, governance, side_effects="write", on_ask=lambda d: True
+    )  # no on_announce: it just runs
     assert await quiet(text="hi") == "hi"
     read = governed(note, governance, side_effects="read", on_ask=lambda d: True)
     assert await read(text="x") == "x" and heard == ["note", "ran", "ran", "ran"]
@@ -629,7 +660,9 @@ async def test_a_langgraph_node_pauses_a_call_that_asks_with_its_own_interrupt()
     """The pluggable recipe: ``on_ask`` is LangGraph's ``interrupt``, so the graph's
     checkpointer keeps the pause and ``Command(resume=...)`` is the person's decision."""
     governance = irreversible_catalog()
-    call = governed(create_po, governance, on_ask=lambda d: interrupt(d.question))
+    call = governed(
+        create_po, governance, side_effects="write", on_ask=lambda d: interrupt(d.question)
+    )
 
     async def order(state: State) -> dict[str, str]:
         return {"result": await call(sku=state["sku"], qty=5)}
@@ -754,3 +787,15 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     [put] = service.named("put_catalog")
     assert put.body["tools"][0]["name"] == "refund"
     await writes.aclose()
+
+
+def test_always_allow_is_offered_only_where_it_is_kept_and_never_for_an_irreversible_tool() -> None:
+    assert choices("write") == CHOICES == (ONCE, CONVERSATION, DENY)
+    assert choices("write", always=True) == (ONCE, CONVERSATION, ALWAYS, DENY)
+    assert choices("undeclared", always=True) == (ONCE, CONVERSATION, ALWAYS, DENY)
+    assert choices("irreversible", always=True) == choices("irreversible") == EVERY_TIME
+    assert SAID[choices("write", always=True)] == (
+        "Allow once, allow for this conversation, always allow, or deny."
+    )
+    assert chosen(ALWAYS.value) == (InterruptDecision.APPROVE, "always")
+    assert chosen(CONVERSATION.value) == (InterruptDecision.APPROVE, "run")

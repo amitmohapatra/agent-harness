@@ -182,6 +182,13 @@
                 "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
               },
+              "tools": {
+                "description": "Tools its runs will call that change something: the user allows them now.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "when": {
                 "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",
                 "type": "string"
@@ -458,6 +465,13 @@
               "timezone": {
                 "description": "An IANA zone, only when the user names one; default theirs.",
                 "type": "string"
+              },
+              "tools": {
+                "description": "Tools its runs will call that change something: the user allows them now.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "when": {
                 "description": "5-field cron in the user's zone: '0 9 * * *' daily 9:00, '0 9,17 * * *' 9:00 and 17:00, '0 9 * * 1-5' weekdays, '0 8 * * 1' Mondays, '0 9 1 * *' the 1st; one day ('tomorrow at 9', 'next Monday at 10') counted from today: '0 9 4 11 *' with once.",

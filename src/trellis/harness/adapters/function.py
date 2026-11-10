@@ -54,6 +54,9 @@ class FunctionAdapter:
     def steers(self, target: Any) -> bool:
         return False  # a function has no step the harness sees between its calls
 
+    def asks(self, target: Any) -> bool:
+        return False  # its code asks with ``agent.ask``; a model it calls, with ``ask_user``
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:

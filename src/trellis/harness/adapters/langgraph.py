@@ -155,6 +155,9 @@ class LangGraphAdapter:
         (``AgentMiddleware.before_model``); any other graph has no hook the harness owns."""
         return HARNESS_TOOLS in (getattr(target, "channels", None) or {})
 
+    def asks(self, target: Any) -> bool:
+        return False  # LangGraph's ``interrupt`` is a node's code: its model has no question tool
+
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The graph's checkpointer, unless it checkpoints into its run. A durable one is
         said once (:data:`DUPLICATE_STORAGE`)."""
@@ -318,13 +321,23 @@ class LangGraphAdapter:
         that takes the run's tools per model call (``ReAct``, ``middleware()``) has its own
         LangChain tools and sub-agents here, beside the run's toolbox. Read once per graph."""
         if self._native is None:
-            from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE, STATE_TOOLS, spec_of
+            from trellis.harness.middleware import (
+                MACHINERY,
+                OUTSIDE_STATE,
+                STATE_TOOLS,
+                framework_made,
+                spec_of,
+            )
             from trellis.harness.tools.convert.langchain import made
 
             found = (
                 _own_spec(spec_of(t), outside=bool((t.metadata or {}).get(OUTSIDE_STATE)))
                 for t in graph_tools(target)
-                if (t.name not in STATE_TOOLS or (t.metadata or {}).get(OUTSIDE_STATE))
+                if (
+                    t.name not in STATE_TOOLS
+                    or (t.metadata or {}).get(OUTSIDE_STATE)
+                    or not framework_made(t)
+                )
                 and not (t.metadata or {}).get(MACHINERY)
                 and not made(t)
             )

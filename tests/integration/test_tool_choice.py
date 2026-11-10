@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from langchain.agents.middleware import LLMToolSelectorMiddleware
 
 from tests.support.arm import arm
@@ -14,6 +15,9 @@ from trellis import Harness, ReAct, tool
 from trellis.contracts import ToolCall, ToolOutcome
 from trellis.contracts import ToolStatus as Status
 from trellis.harness.evals import EvalCase, exact_match, tool_coverage
+
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
 
 
 @tool(side_effects="read")

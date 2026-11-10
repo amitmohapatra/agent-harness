@@ -45,7 +45,7 @@ from trellis.contracts import ConfigurationError, ToolSpec
 from trellis.harness.clients.bifrost import Gateway, code_mode_tools
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
-from trellis.harness.governance.catalog import Rule
+from trellis.harness.governance.catalog import RISKS, Rule
 from trellis.harness.tools.base import Source, Tool, data_of
 from trellis.harness.tools.links import Link, chained, links, related
 from trellis.harness.tools.lint import lint
@@ -56,6 +56,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.tools")
 
+#: What the toolbox says once of the tools that declare no side effects, when it lists them.
+UNDECLARED_SAID: Final = (
+    "these tools do not say what they do, so each of their calls waits for a person's "
+    'approval: %s — say it where the tool is defined (@tool(side_effects="read"), "write" or '
+    '"irreversible"; a LangChain tool: metadata={"side_effects": "read"}), or give it its '
+    "risk in the tool catalog"
+)
 #: Code Mode is chosen for the read-only Code Mode servers from this many servers, or tools.
 CODE_MODE_MIN_SERVERS: Final = 3
 CODE_MODE_MIN_TOOLS: Final = 20
@@ -316,10 +323,20 @@ def _scriptable(
 
 
 def _linted(listing: Listing) -> None:
-    """What makes the listed tools hard to choose among (``tools.lint``), each a warning."""
+    """What makes the listed tools hard to choose among (``tools.lint``), each a warning, and
+    the tools that do not say what they do (:func:`said_undeclared`)."""
     specs = [t.spec for t in listing.local if t.spec.source != "memory"]
     for finding in lint([*specs, *(_spec(d) for d in listing.defs)]):
         log.warning("tool choice: %s", finding)
+    said_undeclared(specs)
+
+
+def said_undeclared(specs: Sequence[ToolSpec]) -> None:
+    """One warning naming the tools of ``specs`` that declare no side effects: nothing stops
+    them, and each of their calls waits for a person until they say what they do."""
+    silent = sorted(s.name for s in specs if s.side_effects not in RISKS)
+    if silent:
+        log.warning(UNDECLARED_SAID, ", ".join(silent))
 
 
 def _published(listing: Listing) -> list[str]:

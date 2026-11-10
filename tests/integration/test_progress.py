@@ -33,6 +33,9 @@ from trellis.runs import (
 )
 from trellis.runs.payloads import SEGMENTS, PayloadRef, decode
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 paid: list[int] = []
 looked: list[str] = []
 exported: list[int] = []
@@ -422,12 +425,16 @@ async def test_a_long_runs_journal_keeps_the_step_under_way_not_every_step(
 
     log_line.metadata = {"side_effects": "write"}
 
+    log_line.metadata = {"side_effects": "write"}
+
     @lc_tool
     def lc_boom() -> str:
         """The worker dies here, once."""
         if crashes:
             raise crashes.pop()
         return "fine"
+
+    lc_boom.metadata = {"side_effects": "write"}
 
     class Kept(LocalRuns):
         async def heartbeat(

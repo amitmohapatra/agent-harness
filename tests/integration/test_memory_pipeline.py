@@ -30,11 +30,12 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
-from trellis.harness.agent import ASKING, NARROW_FROM, REMEMBERED
+from trellis.harness.agent import ANSWERING, ASKING, NARROW_FROM, REMEMBERED
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
+from trellis.harness.governance.decision import CHOICES, SAID
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
@@ -66,7 +67,9 @@ def graph_tools(n: int) -> list[Any]:
         def lookup(key: str) -> str:
             return f"t{i}:{key}"
 
-        return StructuredTool.from_function(lookup, name=f"t{i}", description=f"Tool {i}.")
+        return StructuredTool.from_function(
+            lookup, name=f"t{i}", description=f"Tool {i}.", metadata={"side_effects": "read"}
+        )
 
     return [make(i) for i in range(n)]
 
@@ -162,6 +165,27 @@ async def test_the_note_on_remembered_values_comes_only_with_a_profile(
     sent = pushed(model.requests[0])
     assert ASKING in sent
     assert (REMEMBERED in sent) is profile
+    assert with_note(memory_service.context_text) in sent  # the helper the tests share
+
+
+@pytest.mark.parametrize("memories", [False, True])
+async def test_the_note_on_answering_from_memory_comes_only_with_memories(
+    memory_harness: Harness, memory_service: FakeMemoryService, memories: bool
+) -> None:
+    """How to answer from memory entries (read them all, answer from what they say, a
+    labelled inference before "I don't know", whose it is when it is someone else's) comes
+    with a context that holds memories, before the note on asking: a context with only a
+    profile or a tool's results has no entries to read, and gets no tokens for them."""
+    held = "## Memories\n- [m1] 2026-10-15 Thursday ana: I moved to Lisbon in May."
+    memory_service.context_text = held if memories else "## Profile\n### about\n- Ana"
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="answering")
+    result = await agent.run("where does Ana live?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = pushed(model.requests[0])
+    assert (ANSWERING in sent) is memories
+    if memories:
+        assert sent.index(held) < sent.index(ANSWERING) < sent.index(ASKING)
     assert with_note(memory_service.context_text) in sent  # the helper the tests share
 
 
@@ -356,6 +380,8 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     def own(key: str) -> str:
         """The graph's own tool, not the harness's."""
         return key
+
+    own.metadata = {"side_effects": "read"}
 
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}
@@ -849,7 +875,7 @@ async def test_the_catalog_decides_tiers_and_approvals(
     assert (await agent.run(50, user="u")).answer == "paid 50"
     paused = await agent.run(500, user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     await memory_harness.writes.drain()
     [put] = memory_service.named("put_catalog")
     assert put.scope["tenant_id"] == "acme" and "user_id" not in put.scope
@@ -1134,7 +1160,7 @@ async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
     agent = memory_harness.wrap(graph, id="graph-payer")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     assert paid == []
 
 
@@ -1181,7 +1207,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     agent = memory_harness.wrap(triage, id="triage")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     assert paid == []
     # the re-run hands off again; the approved call runs once
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")

@@ -240,6 +240,41 @@ async def test_claude_reads_the_runs_skills_as_a_local_plugin_written_for_the_ru
     assert options.skills == "all"
 
 
+async def test_a_resumed_claude_run_finds_its_skills_where_they_were(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude's session holds the paths of the skill files it was shown; a run resumed after a
+    pause continues that session, so its plugin is written where it was (and removed again)."""
+    from dataclasses import replace
+
+    @tool(side_effects="irreversible")
+    def publish(text: str) -> str:
+        """Publish a text."""
+        return f"published {text}"
+
+    src = combine(store_with(files={"rules.md": "No SELECT *."}))
+    plan = [("publish", {"text": "x"})]
+    options, _ = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, plan)
+    options = replace(options, **src.claude())
+    record = Path(options.env["FAKE_CLAUDE_RECORD"])
+
+    def started() -> dict[str, dict[str, str]]:
+        return json.loads(record.read_text())["plugins"]
+
+    agent = arm(harness.wrap(options, id="claude-resumed"), [publish])
+    paused = await agent.run("go", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    [first] = await asyncio.to_thread(started)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS, done.error
+    [(again, files)] = (await asyncio.to_thread(started)).items()
+    assert again == first  # the same folder for each query of the run
+    assert files["skills/sql-review/rules.md"] == "No SELECT *."
+    assert not await asyncio.to_thread(Path(again).exists)  # removed when the query ended
+    other = await agent.run("go", user="ada")  # another run: a folder of its own
+    assert other.status is RunStatus.PAUSED and list(await asyncio.to_thread(started)) != [first]
+
+
 # --------------------------------------------------------------------------- OpenAI
 async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: Harness) -> None:
     from agents import RunConfig
@@ -263,6 +298,41 @@ async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: H
     result = await agent.run("review", user="ada")
     assert result.status is RunStatus.SUCCESS, result.error
     assert "Check every JOIN." in str(result.answer) and "No SELECT *." in str(result.answer)
+
+
+async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_goes_on(
+    harness: Harness,
+) -> None:
+    """A skill deleted once the run pinned it, and a name the run has no skill for: the SDK's
+    ``load_skill`` answers the model with why (an error raised there ends the SDK's run), the
+    warning is said, and the run goes on to its answer."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    store = store_with()
+    original = store.load
+
+    async def load_after_delete(name: str, version: str, scope: Any) -> Any:
+        store.kept.pop(("sql-review", "tenant", "default"), None)
+        return await original(name, version, scope)
+
+    store.load = load_after_delete  # type: ignore[method-assign]
+    model = PlannedModel(
+        [("load_skill", {"skill_name": "sql-review"}), ("load_skill", {"skill_name": "nope"})]
+    )
+    target = SandboxAgent(
+        name="box", instructions="Work.", model=model,
+        capabilities=[Shell(), combine(store).openai()],
+    )  # fmt: skip
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(target, id="oai-gone", framework_options={"run_config": config})
+    events = [e async for e in agent.stream("review", user="ada")]
+    assert events[-1].error is None, events[-1].error
+    assert "no skill 'nope'" in str(events[-1].data.get("result"))  # the last result it read
+    assert any("sql-review" in w and "cannot be read" in w for w in warnings_of(events))
+    assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
 
 
 # --------------------------------------------------------------------------- no skills slot

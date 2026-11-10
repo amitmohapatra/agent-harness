@@ -355,8 +355,9 @@ async def test_a_push_is_signed_with_the_registered_token() -> None:
 
 
 def test_an_answer_is_read_as_the_decision_it_names() -> None:
-    from trellis.contracts import InterruptDecision, InterruptReason
+    from trellis.contracts import Interrupt, InterruptDecision, InterruptReason, ToolCall
     from trellis.harness.a2a.executor import _decision
+    from trellis.harness.governance.decision import CHOICES, CONVERSATION
 
     def message(text: str = "", data: dict[str, Any] | None = None) -> Any:
         parts = [new_text_part(text)] if text else []
@@ -364,7 +365,16 @@ def test_an_answer_is_read_as_the_decision_it_names() -> None:
             parts.append(new_data_part(data))
         return new_message(parts, role=Role.ROLE_USER)
 
-    approval, question = InterruptReason.APPROVAL, InterruptReason.QUESTION
+    call = ToolCall(tool="pay", args={}, task="t")
+    approval = Interrupt(
+        tenant_id="t",
+        run_id="r",
+        reason=InterruptReason.APPROVAL,
+        question="Approve pay?",
+        tool_call=call,
+        options=list(CHOICES),
+    )
+    question = Interrupt(tenant_id="t", run_id="r", question="Where?")
     assert _decision(approval, message("yes")) == (InterruptDecision.APPROVE, "yes")
     assert _decision(approval, message("deny"))[0] is InterruptDecision.REJECT
     assert _decision(approval, message(data={"amount": 5})) == (
@@ -378,6 +388,10 @@ def test_an_answer_is_read_as_the_decision_it_names() -> None:
     )
     with pytest.raises(ValueError, match="approval"):
         _decision(approval, message("maybe"))
+    # plain chat: one of the choices it was told, by its words or its value
+    picked = (InterruptDecision.ANSWER, CONVERSATION.value)
+    assert _decision(approval, message("Allow for this conversation.")) == picked
+    assert _decision(approval, message(data={"answer": "run"})) == picked
 
 
 async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_the_sdk() -> None:
@@ -412,7 +426,7 @@ async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_th
 async def test_an_answer_carries_a_comment_and_an_approval_remembered_for_the_run() -> None:
     from trellis import tool
 
-    @tool(side_effects="irreversible")
+    @tool(side_effects="write")  # allowed for the conversation
     def deploy(region: str) -> str:
         """Deploy to a region."""
         return f"deployed to {region}"

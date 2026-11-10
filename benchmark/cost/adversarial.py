@@ -2174,6 +2174,7 @@ def file_cases() -> list[Any]:
         ((("export_stock_report", {"skus": skus}),),),
         record({"file": name}, reference=f"Saved {name} ({len(skus)} SKUs, as of {t0})."),
         user="ana",
+        approve=True,  # a write asks: the person allows it
     )
     opened = ((("list_files", {}),), (("open_file", {"name": name}),))
     diff = {k: now[k] - then[k] for k in skus}
@@ -2312,6 +2313,7 @@ def file_cases() -> list[Any]:
                     ((("delete_file", {"name": name}),),),
                     reply=f"Deleted {name}.",
                     user="ana",
+                    approve=True,
                 ),
                 Turn(
                     "What's in that file?",

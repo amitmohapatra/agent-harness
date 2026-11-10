@@ -39,6 +39,9 @@ from trellis.harness.tools.bridge import STALLED
 from trellis.harness.tools.query import GONE
 from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 @tool(side_effects="read")
 def look(item: str) -> str:
@@ -64,8 +67,8 @@ def tool_messages(model: ScriptedChatModel, call: int) -> list[tuple[str, Any]]:
 async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
     harness: Harness,
 ) -> None:
-    zeta = tool(lambda: "z", name="zeta")
-    alpha = tool(lambda: "a", name="alpha")
+    zeta = tool(lambda: "z", name="zeta", side_effects="read")
+    alpha = tool(lambda: "a", name="alpha", side_effects="read")
     model = ScriptedChatModel(turns=[("zeta", {}), "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(target, id="sorted", without={"schedules"}), [zeta, alpha])
@@ -79,7 +82,7 @@ async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
 
 
 async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None:
-    @tool
+    @tool(side_effects="read")
     def own(x: str) -> str:
         """The graph's own tool, not the harness's."""
         return x
@@ -90,6 +93,8 @@ async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None
     def mine(x: str) -> str:
         """Bound when the graph is built."""
         return f"mine {x}"
+
+    mine.metadata = {"side_effects": "read"}
 
     model = ScriptedChatModel(turns=[("mine", {"x": "1"}), "done"])
     target = graph(model, HarnessTools(), tools=[mine])
@@ -203,8 +208,8 @@ async def test_a_pause_in_a_step_keeps_what_finished_and_the_later_writes_wait(
     assert sorted(asked, key=str) == sorted(
         [
             ("Is a right?", None),
-            ("Approve ship? ship is irreversible.", 1),
-            ("Approve bill? bill is irreversible.", 4),
+            ("Approve ship? ship is irreversible. Allow once, or deny.", 1),
+            ("Approve bill? bill is irreversible. Allow once, or deny.", 4),
         ],
         key=str,
     )

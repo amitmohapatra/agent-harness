@@ -93,6 +93,7 @@ from trellis.harness.evals import (
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.frontend import FRONTEND, Frontend
+from trellis.harness.governance.decision import chosen as choice
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
@@ -103,11 +104,12 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools import query
+from trellis.harness.tools import ask, query
+from trellis.harness.tools.ask import ASK_USER
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
-from trellis.harness.tools.toolbox import Toolbox
+from trellis.harness.tools.toolbox import Toolbox, said_undeclared
 from trellis.memory.models import PromptContext
 from trellis.runs import Job, RateLimitedError
 from trellis.runs.answers import answer_problem
@@ -220,21 +222,50 @@ ASKING: Final = (
 )
 #: How to use the remembered rules, preferences and values (memory dates each one,
 #: ``standing_rules``), sent only with a context that has them (the service's profile, the
-#: ``## Profile`` heading it renders): said with their date, filled only when cheap, a
-#: superseded rule asked about.
+#: ``## Profile`` heading it renders): a standing rule or preference used and said with its
+#: date; the values of an earlier request confirmed once before they are used again, filled
+#: in (``ask_user``'s ``fields``), as is anything old or changed since; a superseded rule
+#: asked about.
 REMEMBERED: Final = (
     "## Using what you remember\n"
     "When you use a remembered rule, preference or value from the profile, say which one and "
     'the date it was said ("as CSV, as you said on 2026-10-15").\n'
-    "Values filled from memory or an earlier one: the user's new values win; for something "
-    "cheap to undo, or when they say 'as before', act and name what you filled and from "
-    "when; ask first when a filled value costs (money, a send, a delete, a limit others rely "
-    "on), is old, or conflicts with what they just said.\n"
+    "Values the request leaves out that an earlier one of theirs had (their last alert, "
+    "order or report, 'as before'): ask once before you act, all of them in one question, "
+    "each filled in with the remembered value and where it is from; the values they gave "
+    "now stand and are not asked again. Confirm the same way a rule, preference or value "
+    "said more than six months ago, or one a tool shows was changed since.\n"
     "A rule shown with 'earlier:' replaced that rule by its words, not by the user's say: ask "
     "which holds (the newer recommended), unless they said to change it."
 )
 #: The heading the memory service renders its profile under (rules, preferences, about the user).
 PROFILE: Final = "## Profile\n"
+
+
+#: The heading the memory service renders its memory entries under.
+MEMORIES: Final = "## Memories\n"
+#: How to answer from the memory entries, sent only with a context that holds them (the
+#: service's ``## Memories`` heading). Without it a model with no reader prompt of its own
+#: stopped at the first entry, declined when the entries said it indirectly, and answered for
+#: the person asked about what another person had said. Measured on LoCoMo through this path
+#: (the service's context, these notes, a neutral system prompt; 1,528 questions, the same
+#: memories): 0.828 -> 0.851 judged correct, 65 gained and 29 lost, every category up, and
+#: questions with a false premise unchanged (363 -> 365 of 446 declined or corrected).
+ANSWERING: Final = (
+    "## Answering from memory\n"
+    "Read every memory entry before you answer: the answer is often spread over several, so "
+    "give every item they support, with the names, dates and details they give. Answer from "
+    "what the entries say even when they are indirect or worded differently from the "
+    "question. When they do not state the answer but show enough about the person to choose, "
+    'give the best-supported answer and say it is an inference ("Likely: ..."). Say you do '
+    "not know only when no entry bears on the question, or when the entries give what is "
+    "asked to someone else: then say whose it is. Work dates out from the entries' own dates."
+)
+
+
+def answering_note(context: str) -> str | None:
+    """The note on answering from memory entries, for a context that holds them."""
+    return ANSWERING if MEMORIES in context else None
 
 
 def asking_notes(context: str) -> str:
@@ -689,6 +720,10 @@ class Agent:
                 f"run {run_id} waits on {record.awaiting.interrupt_id}, not {interrupt_id}"
             )
         chosen = InterruptDecision(str(decision).upper())
+        awaiting = record.awaiting
+        picked = choice(answer) if answer in awaiting.option_values else None
+        if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and picked:
+            (chosen, remember), answer = picked, None  # an approval's choice: what it names
         edited = chosen is InterruptDecision.EDIT
         try:
             resolution = InterruptResolution(
@@ -912,11 +947,13 @@ class Agent:
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``), the memory pull
-        tools — none, with a warning, when the memory service cannot list them — and the
-        schedule tools (``schedules.py``; a target whose tools are fixed gets neither), less the
-        tools of what the run is without (``without=``: its MCP tools...); and the tools the
-        run's front end declared (``frontend.py``), but one named as one of those, which is
-        said in a warning."""
+        tools — none, with a warning, when the memory service cannot list them —, the
+        schedule tools (``schedules.py``) and, in a run a person is known to read
+        (``Runtime.attended``) whose framework has no question tool of its own
+        (``Adapter.asks``), ``ask_user`` (``tools/ask.py``; a target whose tools are fixed
+        gets none of the three), less the tools of what the run is without (``without=``: its
+        MCP tools...); and the tools the run's front end declared (``frontend.py``), but one
+        named as one of those, which is said in a warning."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -932,6 +969,9 @@ class Agent:
         if not self.adapter.fixed_tools and runtime.scheduled is None:
             named = {t.name for t in tools}
             tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
+            if runtime.attended and ASK_USER not in named and not self.adapter.asks(self.target):
+                apps = runtime.frontend.tools if runtime.frontend is not None else ()
+                tools.append(ask.offered([t["name"] for t in apps]))
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})
@@ -945,8 +985,8 @@ class Agent:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
         run's harness tools — with them the run's tool set — published to the tenant's catalog
         (an administrator's risk and rules govern them as any tool's), once per set of names
-        per tenant. One that cannot be read is a warning: the run goes on with its harness
-        tools."""
+        per tenant — those that declare no side effects named then, in one warning. One that
+        cannot be read is a warning: the run goes on with its harness tools."""
         try:
             specs = await self.adapter.native(self.target)
         except Exception as exc:
@@ -957,6 +997,7 @@ class Agent:
         if found and self._published_native.get(runtime.tenant) != names:
             governance = self.harness._governance(runtime.tenant)
             await governance.publish(list(found.values()))
+            said_undeclared(list(found.values()))
             self._published_native[runtime.tenant] = names
         return found
 
@@ -1100,7 +1141,13 @@ class Agent:
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
         if note is not None and SEARCH_TOOL in runtime.toolbox:
             note = f"{note}\n{EARLIER_CHATS}"
-        parts = (pushed.rendered, note, snapshots.note(stale), asking_notes(pushed.rendered))
+        parts = (
+            pushed.rendered,
+            note,
+            snapshots.note(stale),
+            answering_note(pushed.rendered),
+            asking_notes(pushed.rendered),
+        )
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.past_results = query.past_refs(pushed.rendered)
@@ -1454,8 +1501,8 @@ class Agent:
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
         metadata = self._metadata(turned_off, framework_options, document_ids, budget)
-        if app is not None and (kept := app.kept()):
-            metadata[FRONTEND] = kept
+        if app is not None:  # kept even when it gave nothing: the run has a front end
+            metadata[FRONTEND] = app.kept()
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {

@@ -43,7 +43,7 @@ from tests.matrix.world import (
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
-from tests.support.planned import Call, PlannedChat, PlannedChatModel
+from tests.support.planned import Call, PlannedChat, PlannedChatModel, Reworded
 from tests.support.sandbox import PausingSandboxes
 from trellis import (
     Harness,
@@ -126,8 +126,10 @@ async def events(w: World) -> None:
     o.succeeded()
     assert o.answer == "Done. noted high", o.answer
     called = [c for c in o.called() if c != CONFIRM[0]]
-    assert called == ["lookup", "note"], called
-    assert [n["tool"] for n in o.custom("tool_notice")] == ["note"]  # a write is announced
+    # a target run again from its input after the write's pause replays lookup's call
+    assert list(dict.fromkeys(called)) == ["lookup", "note"], called
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert "note" in asked and not o.custom("tool_notice"), asked  # a write asks, then runs
     assert d.ran("note") == [{"text": "high"}]
     if w.mode == "stream":
         assert [e.type for e in o.surface][-1] is RunEventType.RUN_FINISHED
@@ -160,9 +162,12 @@ async def tiers(w: World) -> None:
     ]
     o = (await w.go([d.lookup(), d.note(), d.refund()], plan)).succeeded()
     asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
-    assert asked == ["refund"], asked  # only the irreversible call asks
+    assert asked == ["note", "refund"], asked  # the write and the irreversible call ask
     assert o.pauses[0].reason is InterruptReason.APPROVAL
-    assert [n["tool"] for n in o.custom("tool_notice")] == ["note"]
+    # always allow too where the memory service keeps it; never for the irreversible call
+    kept = "memory" in w.switched - o.without
+    write = ["once", "run", "always", "reject"] if kept else ["once", "run", "reject"]
+    assert [p.option_values for p in o.pauses] == [write, ["once", "reject"]]
     assert d.ran("refund") == [{"order": "o1"}] and d.ran("note") == [{"text": "refund o1"}]
     assert o.answer == "Done. refunded o1"
 
@@ -177,7 +182,7 @@ async def approve_when(w: World) -> None:
         assert asked == [{"text": "big"}], asked  # the rule, not the tool's risk, asks
         assert 'text == "big"' in o.pauses[0].question
     else:
-        assert asked == [], asked  # no catalog: a write runs, announced
+        assert asked == [{"text": "small"}, {"text": "big"}], asked  # no catalog: a write asks
     assert d.ran("note") == [{"text": "small"}, {"text": "big"}]
 
 
@@ -231,6 +236,64 @@ async def ask_user_tool(w: World) -> None:
     assert asked.question == "Which day? (a date, YYYY-MM-DD)"  # what plain chat reads
     assert asked.expects == {"type": "string", "format": "date"}
     assert o.answer == "Done. 2026-11-05", o.answer
+
+
+async def ask_user_form(w: World) -> None:
+    """Several values in one question: one pause, a form of the fields with the remembered
+    values filled in, one object back."""
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", {"supplier": "SUP-07"}
+        return approve_all(interrupt)
+
+    fields = [{"name": "units", "kind": "number", "default": 200, "why": "your last order"},
+              {"name": "supplier", "options": ["SUP-04", "SUP-07"], "default": "SUP-04"}]  # fmt: skip
+    plan: list[Call] = [("ask_user", {"question": "Confirm the order.", "fields": fields})]
+    o = (await w.go([ask_user()], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.props is not None and asked.props["kind"] == "form", asked
+    assert [f["name"] for f in asked.props["fields"]] == ["units", "supplier"]
+    assert asked.expects is not None and asked.expects["properties"]["units"]["default"] == 200
+    assert o.answer == 'Done. {"units": 200, "supplier": "SUP-07"}', o.answer
+
+
+async def ask_user_offered(w: World) -> None:
+    """A chat front end's run is given ``ask_user`` with nothing declared. Claude Code and Kimi
+    Code ask with their own question tool (the run's question too): no second one."""
+    if w.adapter in ("claude", "kimi"):
+        (await w.go([Desk().lookup()], [("lookup", {"topic": "x"})])).succeeded()
+        assert w.claude_offered, "the agent was never given the run's tools"
+        assert all("ask_user" not in names for names in w.claude_offered), w.claude_offered
+        return
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "2026-11-05"
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("ask_user", {"question": "Which day?", "kind": "date"})]
+    o = (await w.go([], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.component == "ask_user" and asked.props == {"kind": "date", "options": []}
+    assert o.answer == "Done. 2026-11-05", o.answer
+
+
+async def ask_once(w: World) -> None:
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "Friday"
+        return approve_all(interrupt)
+
+    # a model asked for the step again words its call anew (a framework not resumed in place)
+    asking = Reworded({"question": "Which day?"}, again={"question": "What day should it be?"})
+    o = (await w.go([ask_user()], [("ask_user", asking)], answer=answer)).succeeded()
+    [asked] = o.pauses  # the call made again is the one the person answered: asked once
+    assert asked.question == "Which day?", asked
+    assert o.answer == "Done. Friday", o.answer
 
 
 async def reject(w: World) -> None:
@@ -450,6 +513,10 @@ async def parallel_writes(w: World) -> None:
 
 
 async def repeated_calls(w: World) -> None:
+    from trellis.harness.governance import decision
+
+    # the repeats are the subject, not the write's approval (``writes_unasked``)
+    w.monkeypatch.setitem(decision.ACTIONS, "write", decision.Action.ANNOUNCE)
     d = Desk()
     step: list[Call] = [("pw", {"key": "1"}), ("pw", {"key": "2"})] + [("pw", {"key": "1"})] * 2
     o = await w.go([d.parallel("pw", "write")], [step], target=_parallel_target(w))  # type: ignore[list-item]
@@ -1141,7 +1208,7 @@ FEATURES: Final[list[Feature]] = [
     ),
     Feature(
         "F32",
-        "governance tiers: read runs, write is announced, irreversible asks",
+        "governance tiers: read runs, write asks (once a conversation), irreversible asks",
         "F32",
         "always on; per tool through side_effects",
         tiers,
@@ -1178,6 +1245,36 @@ FEATURES: Final[list[Feature]] = [
         "F36 (when and how to ask)",
         "tools=[ask_user()]",
         ask_user_choice,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36f",
+        "ask_user: several values asked at once are one form, the remembered ones filled in",
+        "F36 (backlog: a multi-field ask_user)",
+        "tools=[ask_user()] (fields=)",
+        ask_user_form,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36a",
+        "ask_user by itself: a chat front end's run is given it with nothing declared",
+        "F36 (backlog: ask_user where a person answers)",
+        "on over serve_chat; off: without='ask'",
+        ask_user_offered,
+        modes=only_modes(
+            "agui",
+            reason="only a chat front end's run is known to have a person reading it: "
+            "elsewhere the agent declares ask_user (F36u)",
+        ),
+        adapters={"langgraph": FIXED_GRAPH, "deepagents": FIXED_GRAPH},
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36o",
+        "ask_user: asked once, though the model words the call differently when it makes it again",
+        "F36, F23 (#203)",
+        "tools=[ask_user()]",
+        ask_once,
         way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(
@@ -1906,8 +2003,8 @@ async def sandboxed(w: World) -> None:
 
 # --------------------------------------------------------------------------- the selection
 async def selection(w: World) -> None:
-    """One run that does a bit of everything (a read retried, a write announced, an approval)
-    under the cell's selection: what is on works together, what is off leaves no trace
+    """One run that does a bit of everything (a read retried, a write and an irreversible call
+    approved) under the cell's selection: what is on works together, what is off leaves no trace
     (``World.verify``, after every scenario)."""
     d = Desk()
     plan: list[Call] = [
@@ -1918,7 +2015,7 @@ async def selection(w: World) -> None:
     o = (await w.go([d.quote(), d.note(), d.refund()], plan)).succeeded()
     assert o.answer == "Done. refunded o1", o.answer
     assert d.quotes == 3 and d.ran("refund") == [{"order": "o1"}]
-    assert [p.tool_call.tool for p in o.pauses if p.tool_call is not None] == ["refund"]
+    assert [p.tool_call.tool for p in o.pauses if p.tool_call is not None] == ["note", "refund"]
 
 
 SELECTION: Final = Feature(

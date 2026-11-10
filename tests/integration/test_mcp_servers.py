@@ -21,7 +21,7 @@ import pytest
 from tests.support.arm import arm, native_tools
 from tests.support.gateway import URL, FakeGateway
 from trellis import Harness, Runtime, Settings, mcp, stdio
-from trellis.contracts import ConfigurationError, RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.tools.mcp import MCPSource, server_name, side_effects_of
 
 SERVER = Path(__file__).parents[1] / "support" / "mcp_server.py"
@@ -81,7 +81,11 @@ async def test_a_local_servers_tools_are_named_by_it_and_judged_by_their_annotat
         return "done"
 
     agent = arm(harness.wrap(notes, id="notes", without={"schedules"}), [local()])
-    events = [e async for e in agent.stream("go", user="u")]
+    paused = await agent.run("go", user="u")  # a change asks; a read runs
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None, paused
+    assert paused.interrupt.tool_call.tool == "notes_box-add_note"
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS, done
     names, read, added = seen
     assert names == [
         "notes_box-add_note",
@@ -93,10 +97,6 @@ async def test_a_local_servers_tools_are_named_by_it_and_judged_by_their_annotat
         "notes_box-whoami",
     ]
     assert (read, added) == ("note at a.md", "added hi")
-    notices = [
-        e for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "tool_notice"
-    ]
-    assert [n.data["tool"] for n in notices] == ["notes_box-add_note"]  # a change, announced
 
 
 async def test_a_destructive_tool_asks_and_a_resume_runs_nothing_twice(harness: Harness) -> None:
@@ -108,7 +108,9 @@ async def test_a_destructive_tool_asks_and_a_resume_runs_nothing_twice(harness: 
     agent = arm(
         harness.wrap(cleaner, id="cleaner"), [mcp(stdio(sys.executable, str(SERVER)), name="Notes")]
     )
-    paused = await agent.run("clean", user="u")
+    change = await agent.run("clean", user="u")
+    assert change.interrupt is not None, change  # the change asks first
+    paused = await agent.resume(change.interrupt.interrupt_id, "approve", reviewer="r")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.question.startswith("Approve notes-delete_note?")
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
@@ -117,6 +119,7 @@ async def test_a_destructive_tool_asks_and_a_resume_runs_nothing_twice(harness: 
     assert served == ["add_note", "delete_note"]  # the change before the pause ran once
 
 
+@pytest.mark.usefixtures("writes_unasked")  # the server's error, not the call's approval
 async def test_an_error_the_server_reports_is_an_error_the_agent_reads(harness: Harness) -> None:
     async def failing(input: str, agent: Runtime) -> Any:
         return await agent.tools.call("notes_box-fail", why="the disk is full")
@@ -191,7 +194,7 @@ def test_what_mcp_takes() -> None:
     with pytest.raises(ConfigurationError, match="needs the command"):
         stdio("")
     assert server_name("Notes Box!") == "notes_box"
-    assert side_effects_of(None) == "write"
+    assert side_effects_of(None) == "irreversible"  # a tool that says nothing
     assert repr(mcp("https://h/mcp")) == "mcp('https://h/mcp')"
 
 

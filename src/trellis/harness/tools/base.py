@@ -48,8 +48,12 @@ from trellis.harness.tools import pages
 
 SideEffects = Literal["read", "write", "irreversible"]
 
-#: What an unknown tool is assumed to do: something, but nothing a person must approve.
-DEFAULT_SIDE_EFFECTS: SideEffects = "write"
+#: What a tool that has not said what it does is held to do (the contracts' ``ToolSpec``
+#: default): nothing known, so a person approves each of its calls (``governance.decision``)
+#: — a function made a tool without ``side_effects``, a framework's own tool object, an MCP
+#: server's or a CLI's the harness has no word on, alike. Saying it lets it run: where the tool
+#: is defined, or — a tool nobody can annotate — as its risk in the tool catalog.
+UNDECLARED: Final = "unknown"
 
 Runner = Callable[[dict[str, Any]], Awaitable[Any]]
 
@@ -160,6 +164,11 @@ class Tool:
     #: A call cut by a crash continues where it was when it runs again (a sub-agent: its run
     #: keeps a journal of its own), so it is run again rather than reported of unknown effect.
     resumable: bool = False
+    #: Its writes keep to what the run owns, so they are announced rather than asked (governance
+    #: ``Decision.unasked``): a harness built-in — its sandbox, its schedules (confirmed when
+    #: made), its memory, a sub-agent (whose own calls are governed) — or a framework's own tool
+    #: (Deep Agents' files and ``execute``). Set by the harness only.
+    confined: bool = False
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:

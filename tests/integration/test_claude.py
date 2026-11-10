@@ -26,7 +26,7 @@ from trellis.contracts import (
 )
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
-    RESUMED,
+    RESUMED_ASKED,
     RESUMED_CALL,
     RESUMED_DENIED,
     native_spec,
@@ -38,6 +38,9 @@ from trellis.harness.journal import content_key
 from trellis.harness.sandbox import DELIVERS_HERE
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
+
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 refunds: list[str] = []
@@ -104,7 +107,12 @@ class NoArguments:
     """An MCP server's tool that takes no argument: its schema is ``{"type": "object"}``."""
 
     async def resolve(self) -> list[Tool]:
-        spec = ToolSpec(name="now", description="The time.", input_schema={"type": "object"})
+        spec = ToolSpec(
+            name="now",
+            description="The time.",
+            input_schema={"type": "object"},
+            side_effects="read",
+        )
 
         async def run(args: dict[str, Any]) -> Any:
             asked.append(args)
@@ -257,11 +265,13 @@ async def pick_warehouse() -> str:
     return f"ships from {await runtime.ask('Which warehouse?')}"
 
 
-async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call(
+async def test_a_question_a_tool_asked_resumes_the_session_naming_its_call(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """A pause that is not an approval names no call: the resumed session is told to make
-    again the call that has no result yet."""
+    """The session holds the call the question was asked in as waiting for a person: told
+    only to repeat a call with no result yet, Claude asked the person again with another tool
+    (#203). It is told which call to make again, with its arguments: a session whose
+    transcript ends before that call no longer holds them."""
     script = [{"tool": "pick_warehouse", "args": {}}, {"text": "{last}"}]
     agent = arm(harness.wrap(options(tmp_path, script), id="shipping"), [pick_warehouse])
     asked = await agent.run("where does it ship from?", user="u1")
@@ -269,7 +279,8 @@ async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call
     assert asked.interrupt.tool_call is None
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Leeds", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "ships from Leeds"
-    assert started_with(tmp_path)["prompt"] == RESUMED
+    told = RESUMED_ASKED.format(tool="mcp__trellis__pick_warehouse", args="{}")
+    assert started_with(tmp_path)["prompt"] == told
 
 
 async def test_claudes_question_to_its_user_is_the_runs_question(
@@ -314,6 +325,31 @@ async def test_claudes_question_to_its_user_is_the_runs_question(
         "Which regions?": "north (Recommended), south",
         "Which format?": "CSV",
     }
+
+
+async def test_claudes_question_is_asked_once_though_it_words_it_anew(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The resumed session is told to make its paused call again, and words its
+    ``AskUserQuestion`` differently: it is the question the person answered, not a new one, and
+    Claude reads the answer under the question that was asked."""
+
+    def asking(question: str, *labels: str) -> dict[str, Any]:
+        options = [{"label": label} for label in labels]
+        return {"questions": [{"question": question, "header": "Format", "options": options}]}
+
+    step = {
+        "builtin": "AskUserQuestion",
+        "args": asking("Which format?", "CSV", "PDF"),
+        "again": asking("What format do you want?", "PDF", "CSV"),
+    }
+    agent = harness.wrap(options(tmp_path, [step, {"text": "ok"}]), id="asks-once")
+    paused = await agent.run("export it", user="u1")
+    assert paused.interrupt is not None and paused.interrupt.options == ["CSV", "PDF"]
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="PDF", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.interrupt
+    [asked] = built_ins(tmp_path)
+    assert asked["args"]["answers"] == {"Which format?": "PDF"}
 
 
 async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
@@ -623,7 +659,10 @@ async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
     script = [{"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
     for configured in (config, str(config), json.dumps({"mcpServers": {"erp": erp}})):
         target = options(tmp_path, script, mcp_servers=configured)
-        agent = arm(harness.wrap(target, id=f"mcp-{len(harness.agents)}"), [tool(refund.fn)])
+        agent = arm(
+            harness.wrap(target, id=f"mcp-{len(harness.agents)}"),
+            [tool(refund.fn, side_effects="write")],
+        )
         assert (await agent.run("refund o9", user="u1")).answer == "done"
         servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
         assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"

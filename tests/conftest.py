@@ -121,6 +121,16 @@ def narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def writes_unasked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``write`` runs announced, unasked: the tests of what a write does once it runs (its
+    retries, a crash around it, its progress saves, its stream), whose subject is not whether
+    it asks (``test_write_asks``, ``test_approvals``)."""
+    from trellis.harness.governance import decision
+
+    monkeypatch.setitem(decision.ACTIONS, "write", decision.Action.ANNOUNCE)
+
+
+@pytest.fixture
 def spans(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemorySpanExporter]:
     """The spans the harness ends during the test, in memory."""
     exporter = InMemorySpanExporter()

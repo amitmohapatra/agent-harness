@@ -26,6 +26,7 @@ from langchain_core.tools import tool
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.shared_runs import FileRuns
 from trellis import Harness, Settings, middleware
+from trellis.harness.governance import decision
 
 AGENT_ID: Final = "shipping"
 #: The environment variable that makes the process die after the write.
@@ -73,6 +74,9 @@ def agent_graph(ledger: Path, calls: Path) -> Any:
 
 
 async def main(store: Path, ledger: Path, calls: Path) -> bool:
+    # the write runs unasked, as the ``writes_unasked`` fixture has it: a crash around a write
+    # is the subject here, not its approval
+    decision.ACTIONS["write"] = decision.Action.ANNOUNCE
     async with Harness(config=Settings(), runs=FileRuns(store)) as h:
         agent = h.wrap(agent_graph(ledger, calls), id=AGENT_ID)
         return await h.worker([agent]).run_once()

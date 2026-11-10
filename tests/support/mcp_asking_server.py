@@ -16,6 +16,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.resolve import Elicit, Resolve
 from mcp.server.runner import serve_loop
 from mcp.server.stdio import stdio_server
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 server = MCPServer("Shop")
@@ -39,7 +40,7 @@ def when(item: str) -> Elicit[Booking]:
     return Elicit(f"When should {item} be delivered?", Booking)
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(destructive_hint=False))
 def order(item: str, size: Annotated[ElicitationResult[Size], Resolve(which_size)]) -> str:
     """Order an item; the person picks its size.
 
@@ -52,7 +53,7 @@ def order(item: str, size: Annotated[ElicitationResult[Size], Resolve(which_size
     return f"ordered {item} in size {size.data.size}"
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(destructive_hint=False))
 def book(item: str, booking: Annotated[Booking, Resolve(when)]) -> str:
     """Book a delivery; the person gives the day.
 
@@ -63,7 +64,7 @@ def book(item: str, booking: Annotated[Booking, Resolve(when)]) -> str:
     return f"{item} on {booking.day.isoformat()}: {booking.note}"
 
 
-@server.tool()
+@server.tool(annotations=ToolAnnotations(read_only_hint=True))
 def served_calls() -> list[str]:
     """The calls this process served to the end."""
     return list(served)

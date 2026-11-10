@@ -78,7 +78,8 @@ from trellis.harness.tools.sources import FunctionTool
 from trellis.memory import MemoryContext
 from trellis.memory.models import Feedback
 
-pytestmark = [pytest.mark.live, needs_memory, needs_runs]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_memory, needs_runs, pytest.mark.usefixtures("writes_unasked")]
 
 #: A run here waits on both services (and a worker on the ticker's sweep): well above that.
 TIMEOUT_SECONDS: Final = 300

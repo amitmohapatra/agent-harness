@@ -75,6 +75,7 @@ from trellis.runs import (
     LeaseLostError,
     NotFoundError,
     Page,
+    ResolutionEntry,
     RunSummary,
     ScheduleUpdate,
 )
@@ -233,6 +234,19 @@ class RunStore(Protocol):
         max_pages: int | None = ...,
     ) -> AsyncIterator[RunSummary]: ...
 
+    async def resolutions(
+        self,
+        run_id: str,
+        *,
+        cursor: str | None = ...,
+        limit: int = ...,
+        tenant: str | None = ...,
+    ) -> Page[ResolutionEntry]:
+        """One page of every interrupt the run paused on and how it was answered, oldest
+        first: what a later run of the conversation reads of what the person allowed for it
+        (``conversation.allowed``)."""
+        ...
+
     @property
     def artifacts(self) -> RunArtifacts: ...
 
@@ -277,6 +291,8 @@ class LocalRuns:
         #: run id -> the schedule tick that queued it (``_fired``'s key)
         self._fired_by_run: dict[str, str] = {}
         self._runs: dict[str, RunRecord] = {}
+        #: run id -> every interrupt it paused on and how it was answered, oldest first
+        self._resolutions: dict[str, list[ResolutionEntry]] = {}
         self._queue: deque[str] = deque()
         #: runs that were ever queued: a resume sends them back to the queue
         self._queued: set[str] = set()
@@ -415,6 +431,13 @@ class LocalRuns:
         record = self._require(resolution.run_id, tenant)
         if record.awaiting is None or not resolution.resolves(record.awaiting):
             raise _conflict(f"run {record.run_id} is not waiting on {resolution.interrupt_id}")
+        entry = ResolutionEntry(
+            interrupt=record.awaiting,
+            resolution=resolution,
+            attempt=record.attempt,
+            recorded_at=datetime.now(UTC),
+        )
+        self._resolutions.setdefault(record.run_id, []).append(entry)
         if resolution.decision is InterruptDecision.CANCEL:
             return self._move(record, RunStatus.CANCELLED, last_resolution=resolution)
         requeue = record.run_id in self._queued
@@ -483,6 +506,22 @@ class LocalRuns:
                 thread_id=record.thread_id,
                 updated_at=record.updated_at,
             )
+
+    async def resolutions(
+        self,
+        run_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = PAGE_LIMIT,
+        tenant: str | None = None,
+    ) -> Page[ResolutionEntry]:
+        self._require(run_id, tenant)
+        start = int(cursor or 0)
+        entries = self._resolutions.get(run_id, [])
+        after = start + limit
+        return Page[ResolutionEntry](
+            items=entries[start:after], next_cursor=str(after) if after < len(entries) else None
+        )
 
     async def aclose(self) -> None:
         return None
@@ -562,6 +601,7 @@ class LocalRuns:
 
     def _drop(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
+        self._resolutions.pop(run_id, None)
         self._queued.discard(run_id)
         self._leases.pop(run_id, None)
         self._running_since.pop(run_id, None)

@@ -3640,6 +3640,8 @@ async def run_case(
     happened: dict[int, set[str]] = {}
     #: the read-only commands each turn (by id) was resumed past, approved
     approved: dict[int, list[str]] = {}
+    #: each restart turn's queued run (by the turn's id)
+    handles: dict[int, Any] = {}
 
     def conversation(t: Turn) -> str:
         return f"cx-{tag}-{case.id}-{t.thread}"
@@ -3649,9 +3651,14 @@ async def run_case(
         ``longtasks.WorkerDied``: nothing more is written), then finished by another worker —
         another harness sharing only the run store, which claims the run once the dead
         worker's lease has lapsed."""
+        handle = handles[id(t)] = await agent.start(t.text, user=user_of(t), thread=conversation(t))
+        return await worked(t, handle)
+
+    async def worked(t: Turn, handle: Any) -> Any:
+        """The queued run worked to its pause or end (:func:`taken_over`), again after an
+        approval."""
         from trellis.runs import Job
 
-        handle = await agent.start(t.text, user=user_of(t), thread=conversation(t))
         worker = h.worker([agent])
         claimed = await h.runs.claim(worker.worker_id, [agent.id], lease_seconds=RESTART_LEASE)
         assert claimed is not None
@@ -3697,6 +3704,8 @@ async def run_case(
             happened.setdefault(id(t), set()).add("asks")
             asked_about = result.interrupt.interrupt_id
             result = await agent.resume(asked_about, "approve", reviewer=REVIEWER)
+            if t.restart and result.status is RunStatus.QUEUED:  # a worker goes on with it
+                result = await worked(t, handles[id(t)])
         # a shell command that only reads, or saves only inside the run's own folder, is
         # approved, as a user reading it would; any other pause stays one
         result, approved[id(t)] = await approvals.approved_reads(

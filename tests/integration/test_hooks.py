@@ -84,6 +84,7 @@ def results(events: list[Any]) -> dict[str, tuple[str, Any]]:
 # --------------------------------------------------------------------------- tool hooks
 
 
+@pytest.mark.usefixtures("writes_unasked")  # the hooks' verdicts, not the write's approval
 @pytest.mark.parametrize("framework", list(BUILDERS))
 async def test_a_hook_denies_rewrites_and_checks_calls_on_every_adapter(
     harness: Harness, framework: str, tmp_path: Path
@@ -118,7 +119,9 @@ async def test_a_hook_asks_a_person_and_its_decision_is_journaled_on_every_adapt
     agent = arm(harness.wrap(target, id=f"asking-{framework}", hooks=[hooks]), tools)
     paused = await agent.run("quote A", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
-    assert paused.interrupt.question == "Approve quote? Quote A for this customer?"
+    assert paused.interrupt.question == (
+        "Approve quote? Quote A for this customer? Allow once, allow for this conversation, or deny."
+    )
     assert paused.interrupt.assignee == "role:sales" and quoted == []
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="sales")
     assert done.status is RunStatus.SUCCESS and done.answer == "Done. A costs 7"
@@ -387,7 +390,7 @@ async def test_governed_code_gets_the_same_tool_hooks() -> None:
     secret = governed(quote.fn, gov, side_effects="read", on_ask=asked.append, hooks=[Guard()])
     with pytest.raises(Denied, match="quote was not run: secret SKUs are not quoted"):
         await secret(sku="secret")
-    paying = governed(pay.fn, gov, on_ask=lambda d: True, hooks=[Guard()])
+    paying = governed(pay.fn, gov, side_effects="write", on_ask=lambda d: True, hooks=[Guard()])
     assert await paying(amount=500) == "paid 100 (checked)" and paid == [100]
 
     class Asking(Hooks):

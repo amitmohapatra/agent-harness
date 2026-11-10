@@ -32,6 +32,9 @@ from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT, SubAgent
 from trellis.runs import Job
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 done: list[str] = []
 
 

@@ -2,7 +2,8 @@
 lazily loaded (``Skills(lazy_from=...)``). The capability is the SDK's, its instructions and
 ``load_skill`` tool too; what the harness adds is the source: the run's pinned skills listed,
 and a skill ``load_skill`` asks for copied into the sandbox, its ``SKILL.md`` and its files
-(``trellis.harness.skills``).
+(``trellis.harness.skills``). A skill that cannot be loaded (deleted since the run pinned it, a
+name the run has none for) is the tool's answer, saying why: the run goes on.
 
 The SDK lists a lazy source's skills synchronously, so the capability pins them first, in its
 (asynchronous) instructions: the same per-run pin as every framework's.
@@ -12,10 +13,9 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agents.sandbox.capabilities.skills import LazySkillSource, SkillMetadata, Skills
-from agents.sandbox.errors import SkillsConfigError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.types import User
@@ -23,6 +23,9 @@ from pydantic import ConfigDict, Field
 
 from trellis.contracts import ToolError
 from trellis.harness.skills import SKILL_MD, Scope, SkillSet
+
+#: The ``status`` of a skill ``load_skill`` could not load (``"loaded"`` is the SDK's own).
+UNAVAILABLE: Final = "unavailable"
 
 
 class TrellisSkillSource(LazySkillSource):
@@ -57,16 +60,19 @@ class TrellisSkillSource(LazySkillSource):
         user: str | User | None = None,
     ) -> dict[str, str]:
         skills = self.skills
+        loaded = {"skill_name": skill_name, "path": f"{skills_path}/{skill_name}"}
         try:
             files = {SKILL_MD: await skills.full_text(skill_name, self.scope)}
             for path in (await skills.document(skill_name, self.scope)).files:
                 files[path] = await skills.read_file(skill_name, path, self.scope)
         except ToolError as exc:
-            raise SkillsConfigError(message=str(exc), context={"skill_name": skill_name}) from exc
+            # answered, not raised: the SDK's ``load_skill`` tool has no error function, so an
+            # error raised here ends its run; the model reads why and the run goes on
+            return {"status": UNAVAILABLE, **loaded, "error": str(exc)}
         home = Path(session.state.manifest.root) / skills_path / skill_name
         for path, text in files.items():
             await session.write(home / path, io.BytesIO(text.encode()), user=user)
-        return {"status": "loaded", "skill_name": skill_name, "path": f"{skills_path}/{skill_name}"}
+        return {"status": "loaded", **loaded}
 
 
 class TrellisSkills(Skills):

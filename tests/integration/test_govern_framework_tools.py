@@ -15,7 +15,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 
-from tests.support.arm import native_tools
+from tests.support.arm import declaring, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, tool
@@ -50,6 +50,9 @@ refund.metadata = {"side_effects": "irreversible"}
 def broken(x: str) -> str:
     """Fail."""
     raise ValueError("the service is down")
+
+
+broken.metadata = {"side_effects": "write"}
 
 
 @tool(side_effects="irreversible")
@@ -108,6 +111,7 @@ async def test_an_irreversible_own_tool_asks_and_a_resume_runs_nothing_twice(
     assert ran == ["lookup o1", "refund o1"]  # the read was journaled, not run again
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_own_tool_that_fails_is_an_error_the_model_reads(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("broken", {"x": "1"}), "it failed"])
     agent = harness.wrap(graph(model, broken), id="g")
@@ -196,14 +200,16 @@ async def test_react_governs_a_tool_its_given_middleware_brings(harness: Harness
     assert paused.interrupt is not None and ran == []
 
 
-def test_a_tools_risk_is_declared_else_annotated_else_write() -> None:
+def test_a_tools_risk_is_declared_else_annotated_else_none() -> None:
     assert side_effects_of({"side_effects": "read"}) == "read"
     assert side_effects_of({"annotations": {"readOnlyHint": True}}) == "read"
     assert side_effects_of({"annotations": {"destructiveHint": True}}) == "irreversible"
-    assert side_effects_of(None) == "write"
+    assert side_effects_of({"annotations": {}}) == "irreversible"  # as an MCP tool's
+    assert side_effects_of(None) == "unknown"  # nothing said: governance asks
 
 
 # --------------------------------------------------------------------------- OpenAI Agents
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_sdk_agents_own_tool_is_governed_on_a_copy(harness: Harness) -> None:
     @function_tool
     def ship(order: str) -> str:
@@ -214,16 +220,17 @@ async def test_an_sdk_agents_own_tool_is_governed_on_a_copy(harness: Harness) ->
     target = Agent(name="s", model=ScriptedModel([("ship", {"order": "o1"}), "shipped"]))
     target.tools.append(ship)
     tools_before = list(target.tools)
-    agent = harness.wrap(target, id="sdk")
+    agent = declaring(harness, ship="write").wrap(target, id="sdk")  # the catalog says what
     events = [e async for e in agent.stream("ship o1", user="u")]
     assert results(events) == {"ship": "ok"} and ran == ["ship o1"]
     notices = [
         e for e in events if e.type is RunEventType.CUSTOM and e.data.get("name") == "tool_notice"
     ]
-    assert notices  # a change, announced (no declared risk: write)
+    assert notices  # a change, announced
     assert target.tools == tools_before and target.tools[0] is ship  # yours, unchanged
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_error_the_tool_itself_reports_is_an_error_outcome(harness: Harness) -> None:
     from langchain_core.tools import ToolException
 
@@ -231,6 +238,8 @@ async def test_an_error_the_tool_itself_reports_is_an_error_outcome(harness: Har
     def picky(x: str) -> str:
         """Refuse."""
         raise ToolException("not that one")
+
+    picky.metadata = {"side_effects": "write"}
 
     picky.handle_tool_error = True
     model = ScriptedChatModel(turns=[("picky", {"x": "1"}), "refused"])

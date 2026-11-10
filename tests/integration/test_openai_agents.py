@@ -9,13 +9,14 @@ from typing import Any
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
 
-from tests.support.arm import arm, native_tools, with_governance
+from tests.support.arm import arm, declaring, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
+from trellis.harness.adapters.claude import RESUMED_ASKED
 from trellis.harness.events import WARNING
 from trellis.harness.governance import ApprovalRuleError, Governance
 from trellis.harness.governance.catalog import Rule
@@ -46,6 +47,7 @@ def _reset() -> None:
     done.clear()
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness) -> None:
     @function_tool
     def eta(order: str) -> str:
@@ -55,7 +57,8 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
         [("eta", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped, arriving tomorrow"]
     )
     target = Agent(name="shipper", instructions="You ship orders.", model=model, tools=[eta])
-    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    wrapped = declaring(harness, eta="read").wrap(target, id="shipper")
+    agent = arm(wrapped, [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "shipped, arriving tomorrow"
     assert done == ["o1"]
@@ -105,16 +108,18 @@ async def test_a_rejected_governance_approval_tells_the_model_and_does_not_run(
     assert len(model.inputs) == 2
 
 
-async def test_a_governance_approval_for_the_run_covers_the_tools_later_calls(
+async def test_an_irreversible_tools_approval_covers_one_call_only(
     harness: Harness,
 ) -> None:
     model = ScriptedModel([("ship", {"order": "o1"}), ("ship", {"order": "o2"}), "both"])
     agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
     paused = await agent.run("ship o1 and o2", user="u1")
     assert paused.interrupt is not None
-    finished = await agent.resume(
+    again = await agent.resume(
         paused.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
     )
+    assert again.interrupt is not None and done == ["o1"], again  # asked at every call
+    finished = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert finished.status is RunStatus.SUCCESS and finished.answer == "both"
     assert done == ["o1", "o2"] and len(model.inputs) == 3
 
@@ -184,6 +189,43 @@ async def test_ask_inside_a_tool_returns_the_answer_on_resume(harness: Harness) 
     assert finished.answer == "customer said yes"
     tool_output = model.inputs[-1][-1]
     assert tool_output["type"] == "function_call_output" and tool_output["output"] == "yes"
+
+
+class Reconsiders(ScriptedModel):
+    """A model that, run again from the same input, asks in words — unless it is told which
+    call the person answered about, which it then makes again, in other words."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def _next(self, input: Any, system: str | None) -> list[Any]:
+        items = input if isinstance(input, list) else [{"role": "user", "content": input}]
+        results = [i["output"] for i in items if i.get("type") == "function_call_output"]
+        told = any("paused at your call to confirm" in str(i.get("content")) for i in items)
+        if results:
+            self.turns = [f"customer said {results[-1]}"]
+        elif not self.inputs:
+            self.turns = [("confirm", {"order": "o1"})]
+        else:
+            self.turns = [("confirm", {"order": "order o1"})] if told else ["Ship which order?"]
+        return super()._next(input, system)
+
+
+async def test_a_run_resumed_from_its_input_is_told_the_call_the_person_answered_about(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The SDK runs the agent again from its input, and a model may decide otherwise this
+    time (ask in words, make another call): it is told which call the person answered about,
+    as a resumed Claude session is. Only the model reads that: the session keeps the input."""
+    model, session = Reconsiders(), SQLiteSession("s1", tmp_path / "s.db")
+    agent = arm(harness.wrap(Agent(name="c", model=model), id="told-again"), [confirm])
+    paused = await agent.run("check o1", user="u1", framework_options={"session": session})
+    assert paused.interrupt is not None and paused.interrupt.question == "Ship o1?"
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "customer said yes"
+    told = RESUMED_ASKED.format(tool="confirm", args='{"order": "o1"}')
+    assert {"role": "user", "content": told} in model.inputs[-1]
+    assert told not in json.dumps(await session.get_items())
 
 
 async def test_the_sdks_own_approval_pauses_and_resumes_its_run_state(harness: Harness) -> None:
@@ -712,6 +754,7 @@ async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_durat
     assert sorted(results) == sorted(recorded)
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
     harness: Harness,
 ) -> None:
@@ -727,7 +770,8 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
     calls: list[Any] = [("ship", {"order": "o1"}), ("eta", {"order": "o1"})] * 3
     model = ScriptedModel([calls, "shipped, arriving tomorrow"])
     target = Agent(name="shipper", model=model, tools=[eta])
-    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    wrapped = declaring(harness, eta="read").wrap(target, id="shipper")
+    agent = arm(wrapped, [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS, result.error
     assert done == ["o1"] and asked == ["o1"]
@@ -807,6 +851,7 @@ async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) ->
     assert "Max turns (2) exceeded" in result.error.message
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on(
     harness: Harness,
 ) -> None:

@@ -445,7 +445,9 @@ async def test_an_mcp_servers_error_and_a_rejected_call_reach_the_model_as_error
         results.append(await governed.call_tool("find", {"order": "o1"}))
         return "ok"
 
-    async with with_governance(Harness(), Governance(FakeCatalog({"boom": Rule("read")}))) as h:
+    async with with_governance(
+        Harness(), Governance(FakeCatalog({"boom": Rule("read"), "find": Rule("read")}))
+    ) as h:
         assert (await h.wrap(call, id="mcp-errors").run("x", user="u")).status is RunStatus.SUCCESS
     broke, found = results
     assert broke.is_error and broke.content[0].text == "boom failed: it broke"  # type: ignore[union-attr]

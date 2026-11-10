@@ -78,9 +78,18 @@ where `ask` returns, saying so.
 `question.answer(record.last_resolution)` reads the answer back (into `form`); agent-runs checks
 the answer when it is given.
 
-**The model asks: `ask_user()`.** Opt-in: `ReAct(tools=[trellis.ask_user()])` (or any
-agent's tools) gives the model an `ask_user(question, options=None, kind="text",
-multiple=False, recommended=None, why=None)` tool, its answer the call's result. `kind` is
+**The model asks: `ask_user()`.** The model's own question tool: `ask_user(question,
+options=None, kind="text", multiple=False, recommended=None, why=None, fields=None)`, its
+answer the call's result. Who has it:
+
+| The run | `ask_user` |
+|---|---|
+| a chat front end's ([`serve_chat`](surfaces.md): a person reads it and answers its pauses) | offered by itself; off with `without=["ask"]` |
+| the same, on Claude Code or Kimi Code | theirs instead (`AskUserQuestion`, asked as the run's question): no second tool |
+| started from code (`agent.run`, `stream`), queued (`start`), fired by a schedule, called over A2A or by another run | not offered by itself: nobody is known to answer, and a pause there may never be resumed. An agent whose caller answers pauses declares it: `ReAct(tools=[trellis.ask_user()])` (or any agent's tools) |
+| a graph built with its tools bound | never (its tools are fixed) |
+
+A tool of the agent's own named `ask_user` wins, and one declared is offered once. `kind` is
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be
 picked, `recommended` (with `why`) marks one option `Option.recommended`. The model decides each
 question's shape; when to ask at all is the note sent with every memory context
@@ -94,14 +103,51 @@ preference or value used is said with its date, a costly or old fill asked about
 |---|---|---|---|---|
 | `component`, `props` (an app's own control) | `ask_user`, `{"kind": "text", "options": [...]}` | `ask_user`, `{"kind": "date", "options": []}` | the same, `date_range` | the same, `number` |
 | `ui` and the schema (any other UI) | `choice` | `form`, `{"type": "string", "format": "date"}`, a date widget | `form`, `{start, end}` dates, or text | `form`, a number or text |
-| What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
+| What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one, which comes first on every surface) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
 
 A range and a number may be answered in words, so a plain chat can answer them; a choice is
-one of its options or another answer in words ("Other"). `ask_user` stays opt-in: measured
-(`benchmark/cost/asking.py`), offering it changed no ask-or-act case, only the shape a UI shows.
+one of its options or another answer in words ("Other"). Measured (`benchmark/cost/asking.py`:
+`--ask auto`, `declared`, `none`), offering it changes no ask-or-act case, only the shape a UI
+shows: a picker, a dropdown or a number field where there was a sentence.
 
-An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
-the same pause with `reason=APPROVAL` and the tool call attached.
+**Several values at once: one form.** `fields=[{name, label, kind, options, multiple, default,
+why, required}]` asks several values in one question, answered in one go: values a request
+leaves out, or values remembered from an earlier request that the person confirms before they
+are used again (`default`: the remembered value, shown filled in; `why`: where it is from). It
+is the same question, with more than one field (one field is the single question above):
+
+| Surface | What it gets |
+|---|---|
+| an app's own control | the `ask_user` component, `props` `{"kind": "form", "fields": [{name, label, kind, options, multiple, default, why, required}, ...]}` |
+| any other UI | `ui: "form"`; `expects` an object schema, a property a field (its kind's schema or its options as `enum`, `title`, `default`, `description`), `required` the fields with nothing filled in; `ui_schema` their order and widgets |
+| plain chat | the question, then the fields numbered: `1. Units (a number): 200 (your order of 2026-11-02)`; answered in words ("keep all", "change the quantity to 40") |
+
+The answer is one object, what the person gave over what was filled in; an answer in words is
+those words. A single question takes a remembered value too: `recommended` with `why` on a
+number or a date shows it filled in (`props.default`, the schema's `default`).
+
+Where the app declared tools of its own, `ask_user` says first that a value one of them asks
+for is asked with it (the app's date picker, not `kind="date"`).
+
+**What a UI gets from each framework's own question tool.** Claude Code and Kimi Code ask their
+own way; the harness changes neither:
+
+| | Claude Code `AskUserQuestion` | Kimi Code `AskUserQuestion` |
+|---|---|---|
+| a choice | the `ask_user` component, the options, several picks (`multiSelect`), the option labelled "(Recommended)" recommended with its description as why | `ui: "choice"` with its options; no component, no recommended option, one pick |
+| another answer in words | taken | refused: one of its options only |
+| a date, a number, open text | no kinds: asked in its reply, as text | the same |
+| several values | several questions in one call, asked one after another | one question a call |
+
+A risky action is not a question of the model's: governance pauses the call for the person's
+approval whatever the model does ([governance.md](governance.md)). The same benchmark's
+`risky` cases check that on every adapter; its `undeclared` cases show what a tool that
+declares no `side_effects` gets (it asks).
+
+An approval (a `write` or `irreversible` tool, a catalog `approve_when` that holds, a hook's
+`Ask`) is the same pause with `reason=APPROVAL`, the tool call attached and the person's
+choices as its `options`: allow once, allow for this conversation, deny — and, with a memory
+service, always allow ([governance.md](governance.md#what-the-person-picks)).
 
 ## Who reviews, on which screen: a `before_tool` hook
 
@@ -157,31 +203,39 @@ whose `approve_when` holds, is always asked about. A tool a rule governs is decl
 so it runs (announced) when the rule does not hold.
 
 **Automatic.** The hook's verdict is journaled with the call: a resumed run reads it instead of
-asking the hook again. An approval remembered for the run (`remember="run"`, below) covers the
-later calls a hook asks of the same `assignee`.
+asking the hook again. A hook's question is asked whatever was allowed beyond one call (for
+this conversation, always, or by a schedule: [governance.md](governance.md#what-the-person-picks)),
+as a PreToolUse "ask" is in Claude Code.
 
 **On failure.** A hook that raises fails the call (the framework sees the error).
 
-## Comments, and approving for the rest of the run
+## Comments, and allowing for this conversation
 
 **What.** `agent.resume(..., comment="Fine this once; over 500 needs finance")` keeps the
-reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call approves
-that tool's later calls in the same run without asking.
+reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call (the
+choice "allow for this conversation") approves that tool's later calls in this run and in
+every later run of the same thread for the same user without asking — never an
+`irreversible` tool's, which asks at every call. With a memory service, `remember="always"`
+(the choice "always allow") approves them in every conversation of the user until the
+permission is revoked ([governance.md](governance.md#what-the-person-picks)).
 
 **When.** A comment whenever a decision needs its why (it reaches the feedback approval
-patterns are learned from). `remember="run"` when a reviewer trusts the rest of this run with
-the tool (a batch of refunds of one customer).
+patterns are learned from). "For this conversation" when the person trusts the chat with the
+tool (a batch of refunds of one customer).
 
-**Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`), an A2A answer's
-data part (`{"comment": ..., "remember": "run"}`), an inbox of your own; every adapter and
-`ReAct`. Way 2: `InterruptResolution(comment=, remember=)`.
+**Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`, or the picked
+option's value as `payload`: `"once"`, `"run"`, `"always"`, `"reject"`), an A2A answer (a data part
+`{"comment": ..., "remember": "run"}`, or the choice in words, as plain chat said it), an inbox
+of your own; every adapter and `ReAct`. `agent.resume(id, "answer", answer="run")` picks an
+option too. Way 2: `InterruptResolution(comment=, remember=)`.
 
 **Automatic.** The comment is on the run record (`last_resolution`, agent-runs' resolution
 history), on the `decision` event and the span attributes of the attempt that goes on after
 it, and in the feedback record; a rejection's comment is what the model reads as why, when the
-reject carries no `answer`. A remembered approval is kept in the run's journal: every later
-call of that tool in the run — after a pause, a crash, on another worker — runs without asking,
-with a `decision` event (`remembered: true`); another run asks again. It covers the tool's
+reject carries no `answer`. An approval for the conversation is kept in the run's journal and
+the run store's resolutions: every later call of that tool in the conversation — after a pause,
+a crash, on another worker, in a later run of the thread — runs without asking, with a
+`decision` event (`remembered: true`); another thread or user asks again. It covers the tool's
 later approvals asked of the same person or role (governance's, or a hook's `Ask` with the
 same `assignee`): an `Ask` that names someone else — finance, for a large amount — still
 asks.
@@ -453,7 +507,13 @@ and only a run assigned to that person or to nobody; never a run assigned to a g
 * **Everything else** re-runs from the input as the next attempt, with the **journal**:
   answers already given return where their question is asked, and tool calls already made
   return their recorded outputs instead of running again. Entries are keyed by content (the
-  question; the tool and its arguments) and consumed in order.
+  question; the tool and its arguments) and consumed in order. A model asked for a step again
+  rarely repeats its call word for word, so the tool call a question was asked in is kept as
+  the model made it, and the model is told which call the person answered about (a resumed
+  Claude or Kimi session, an OpenAI agent run again from its input). The call of that tool
+  made at its place among the run's tool calls runs as that call, with the arguments the
+  person saw, and is not asked about again. Any other call with other arguments is a new
+  call, and an approval is always for the exact call.
 
 Per framework — which pauses resume in place, what the model is asked again, the frameworks'
 own gates — see the [framework pages](README.md#which-target). A checkpointed graph resumes in
