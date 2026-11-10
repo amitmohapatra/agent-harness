@@ -496,10 +496,13 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     if problem is not None:
         return problem
     sql = str(args["sql"]).strip().rstrip(";")
-    past = await _past(runtime, [str(r) for r in args.get("results") or ()])
+    refs = [str(r) for r in args.get("results") or ()]
+    past = await _past(runtime, refs)
     if isinstance(past, str):
         return past
     path = None if args.get("file_path") is None else "/" + str(args["file_path"]).lstrip("/")
+    if path is not None and path.rsplit("/", 1)[-1] in refs and path not in saved(runtime):
+        path = None  # a path guessed for a past result it also names: that result is the table
     record: dict[str, Any] | None = None
     given: Source | None = text
     if text is None and path is not None and _stored(path):

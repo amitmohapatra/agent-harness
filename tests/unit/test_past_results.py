@@ -86,6 +86,21 @@ def test_past_results_alone_need_no_file(run: Run, service: FakeMemoryService) -
     assert ask(sql="SELECT count(*) AS n FROM result", results=[ref]).endswith("n\n30")
 
 
+def test_a_past_result_given_with_a_path_it_never_had_is_still_the_table(
+    run: Run, service: FakeMemoryService
+) -> None:
+    """Deep Agents' saved-result path guessed for a past result (``file_path=
+    "/large_tool_results/<its id>"`` beside ``results=[<its id>]``, the all-adapter run's
+    hist-long-01): no run keeps that path, the id names what to load, so it is ``result``."""
+    ref = _said(service, "ann", MONDAY)
+    sql = "SELECT sku, units FROM result ORDER BY units DESC LIMIT 1 OFFSET 6"
+    said = ask(file_path=f"/large_tool_results/{ref}", sql=sql, results=[ref])
+    assert said.endswith("sku,units\nS6,94"), said
+    # a path that is not the result it names is still not found
+    other = ask(file_path="/large_tool_results/msg_other", sql=sql, results=[ref])
+    assert other.startswith("Error: File '/large_tool_results/msg_other' not found"), other
+
+
 def test_another_users_result_is_refused(run: Run, service: FakeMemoryService) -> None:
     ref = _said(service, "bob", MONDAY)
     said = ask(sql="SELECT * FROM t1", results=[ref])
