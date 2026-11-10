@@ -272,14 +272,16 @@ def _joined(words: list[str]) -> list[str]:
 
 def python_reads(code: str, *, at: Path | None = None, home: Path | None = None) -> bool:
     """Whether Python ``code`` only reads: it parses, imports none of :data:`PY_MODULES`, calls
-    none of :data:`PY_WRITES`, and opens files only to read (``open``'s mode, when given, is
-    ``r`` or ``rb``). Given the run's folder (``home``; ``at`` its working directory), a
-    :data:`PY_SAVES` call, ``open`` for writing and a write to an opened file
-    (:data:`PY_HANDLES`) are allowed too when the path is written out and inside it."""
+    none of :data:`PY_WRITES` (a text's own ``replace`` is none: :func:`_replaces_text`), and
+    opens files only to read (``open``'s mode, when given, is ``r`` or ``rb``). Given the run's
+    folder (``home``; ``at`` its working directory), a :data:`PY_SAVES` call, ``open`` for
+    writing and a write to an opened file (:data:`PY_HANDLES`) are allowed too when the path
+    is written out and inside it."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return False
+    modules = _modules(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import | ast.ImportFrom):
             names = [a.name for a in node.names]
@@ -292,12 +294,48 @@ def python_reads(code: str, *, at: Path | None = None, home: Path | None = None)
             name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
             saved = home is not None and _inside(_saved_to(node) or "", at, home)
             if name in PY_WRITES and not (
-                (name in PY_SAVES and saved) or (name in PY_HANDLES and home is not None)
+                (name in PY_SAVES and saved)
+                or (name in PY_HANDLES and home is not None)
+                or _replaces_text(node, modules)
             ):
                 return False
             if name == "open" and not (_reading(node) or saved):
                 return False
     return True
+
+
+def _modules(tree: ast.AST) -> set[str]:
+    """The names a module goes by in the code: as imported (``import os as o``, ``from os
+    import path``) and as assigned from one of those names (``o = os``)."""
+    known = {
+        (alias.asname or alias.name).split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for alias in node.names
+    }
+    assigned = [
+        (target.id, node.value.id)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign | ast.NamedExpr) and isinstance(node.value, ast.Name)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    ]
+    for _ in assigned:  # an alias of an alias: at most one pass per assignment
+        known |= {name for name, value in assigned if value in known}
+    return known
+
+
+def _replaces_text(call: ast.Call, modules: set[str]) -> bool:
+    """Whether a call is a value's own ``replace`` — ``text.replace(old, new[, count])``, a
+    string's — not one that moves a file: ``Path.replace(target)`` takes one argument,
+    ``os.replace(src, dst)`` is called on the module (by any of its names: :func:`_modules`)
+    or as a bare name. A method of that name with two or three positional arguments, on
+    something that names no module, is the text's."""
+    called = call.func
+    if not isinstance(called, ast.Attribute) or called.attr != "replace":
+        return False
+    on = {n.id for n in ast.walk(called.value) if isinstance(n, ast.Name)}
+    return len(call.args) in (2, 3) and not call.keywords and not (on & modules)
 
 
 def _saved_to(call: ast.Call) -> str | None:

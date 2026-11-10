@@ -29,6 +29,12 @@ READS = [
     "ls -la x > /dev/null && echo found",
     # Kimi's, in the natural re-measure: a cd first (into any folder: nothing is written)
     "cd /srv/kimi/cwd && ls -l /large_tool_results/3dfef05 && head -3 s.csv && wc -l s.csv",
+    # Claude's, on the long set: a string's replace is no file's (os.replace, Path.replace)
+    "cd /srv/claude/tool-results && python3 -c \"\nimport json\nt=json.load(open('a.json'))[0]['text']\n"
+    "print('tail:', t[10:310].replace(chr(10),' ')[:300])\n\"",
+    """python3 -c "name = 'Trail Sandal'; print(name.replace(' ', '_'))\"""",
+    """python3 -c "print(open('s.csv').read().replace(',', ';', 3))\"""",
+    """python3 -c "v = 'a b'; d = {}; d['k'] = v; print(d['k'].replace(' ', '_'))\"""",
 ]
 NOT = [
     "rm -rf /tmp/x",
@@ -47,6 +53,15 @@ NOT = [
     "python3 -c \"open('out.txt', 'w').write('x')\"",
     "python3 -c \"import subprocess; subprocess.run(['ls'])\"",
     "python3 -c \"import os; os.remove('s.csv')\"",
+    # a replace that moves a file: os's (by any name the module has), a Path's (one argument)
+    "python3 -c \"import os; os.replace('s.csv', 'old.csv')\"",
+    "python3 -c \"import os as o; o.replace('s.csv', 'old.csv')\"",
+    "python3 -c \"import os; o = os; p = o; p.replace('s.csv', 'old.csv')\"",
+    "python3 -c \"import os\nif (o := os):\n    o.replace('s.csv', 'old.csv')\"",
+    "python3 -c \"import os, sys; sys.modules['os'].replace('s.csv', 'old.csv')\"",
+    "python3 -c \"from os import replace; replace('s.csv', 'old.csv')\"",
+    "python3 -c \"from pathlib import Path; Path('s.csv').replace('old.csv')\"",
+    "python3 -c \"from pathlib import Path; p = Path('s.csv'); p.replace(target='old.csv')\"",
     "python3 -c 'import matplotlib.pyplot as plt; plt.savefig(\"c.png\")'",
     "python3 -c 'syntax error('",
     "cat $(ls)",
