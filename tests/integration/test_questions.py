@@ -1,7 +1,8 @@
 """W5 questions on every adapter, ``ReAct`` and Way 2: labelled options and several picks, a
 form from a pydantic model with widget hints, the asker's own screen; the answer checked by the
 one check agent-runs makes; whoever waits is told (a run hook, in process); a sub-agent's
-question carried to its parent whole, and told once."""
+question carried to its parent whole, and told once; a question asked once, though the model
+words the call it was asked in differently when it makes it again."""
 
 from __future__ import annotations
 
@@ -15,14 +16,16 @@ from pydantic import BaseModel
 import trellis
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm
-from tests.support.planned import Call
-from trellis import Harness, Hooks, Runtime, Settings, tool
+from tests.support.planned import Call, Reworded
+from trellis import Harness, Hooks, Runtime, Settings, ask_user, tool
 from trellis.contracts import (
     ConfigurationError,
     InterruptReason,
     Option,
     RunStart,
     RunStatus,
+    ToolCall,
+    ToolOutcome,
 )
 from trellis.harness.asking import Question
 from trellis.harness.runs import LocalRuns
@@ -45,6 +48,28 @@ async def pick_plans(customer: str) -> str:
         assignee="role:sales",
     )
     return ",".join(picked)
+
+
+@tool(side_effects="read")
+async def pick_drink(drinks: list[str]) -> str:
+    """Ask the customer which of the drinks to order."""
+    runtime = trellis.current()
+    assert runtime is not None
+    picked = await runtime.ask(
+        "Which one?", options=[Option(value=str(n), label=d) for n, d in enumerate(drinks)]
+    )
+    return drinks[int(picked)]
+
+
+class Answers(Hooks):
+    """What each ``ask_user`` call that ran asked and read."""
+
+    def __init__(self) -> None:
+        self.answers: list[tuple[str, Any]] = []
+
+    async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
+        self.answers.append((call.args["question"], outcome.output))
+        return outcome
 
 
 class Address(BaseModel):
@@ -74,6 +99,73 @@ async def test_a_choice_of_labelled_options_with_several_picks_on_every_adapter(
         await agent.resume(asked.interrupt_id, "answer", answer=["a", "z"], reviewer="lee")
     done = await Reviewer({"plan-picker": ["a", "c"]}).settle(agent, paused)
     assert done.status is RunStatus.SUCCESS and done.answer == "Done. a,c", done
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_a_question_is_asked_once_though_the_model_words_its_call_anew(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """#203: a framework that runs a resumed run again from its input (OpenAI Agents), or
+    tells its model to repeat the paused call (Claude, Kimi), has the model make ``ask_user``
+    again — with other words. It is the call the person answered: not asked again."""
+    asking = Reworded({"question": "Which day?"}, again={"question": "What day should it be?"})
+    target, tools = await BUILDERS[framework](
+        harness, [ask_user()], tmp_path, [("ask_user", asking)]
+    )
+    agent = arm(harness.wrap(target, id=f"once-{framework}"), tools)
+    paused = await agent.run("book the room", user="ada")
+    assert paused.interrupt is not None and paused.interrupt.question == "Which day?", paused
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "answer", answer="Friday", reviewer="ada"
+    )
+    assert done.status is RunStatus.SUCCESS, done.interrupt  # asked once
+    assert done.answer == "Done. Friday"  # and the answer is what the model read
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_an_answer_is_for_the_call_the_person_saw(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """A tool's own question follows from its arguments (here the options, in their order). The
+    model makes the call again with them in another order: the person's pick is the drink they
+    saw at that place, not the one now there."""
+    drinks = Reworded({"drinks": ["tea", "coffee"]}, again={"drinks": ["coffee", "tea"]})
+    plan: list[Call] = [("pick_drink", drinks)]
+    target, tools = await BUILDERS[framework](harness, [pick_drink], tmp_path, plan)
+    agent = arm(harness.wrap(target, id=f"saw-{framework}"), tools)
+    paused = await agent.run("order a drink", user="ada")
+    asked = paused.interrupt
+    seen = [Option(value="0", label="tea"), Option(value="1", label="coffee")]
+    assert asked is not None and asked.options == seen, paused
+    done = await agent.resume(asked.interrupt_id, "answer", answer="1", reviewer="ada")
+    assert done.status is RunStatus.SUCCESS, done.interrupt
+    assert done.answer == "Done. coffee"
+
+
+@pytest.mark.parametrize("framework", list(BUILDERS))
+async def test_two_questions_are_each_asked_once_though_both_calls_are_worded_anew(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """The second resume makes a framework that runs again from its input repeat both calls,
+    and one that goes on in its session only the second: each reads its own answer."""
+    plan: list[Call] = [
+        ("ask_user", Reworded({"question": "Which day?"}, again={"question": "What day?"})),
+        ("ask_user", Reworded({"question": "Which room?"}, again={"question": "What room?"})),
+    ]
+    target, tools = await BUILDERS[framework](harness, [ask_user()], tmp_path, plan)
+    read = Answers()
+    agent = arm(harness.wrap(target, id=f"twice-{framework}", hooks=[read]), tools)
+    first = await agent.run("book the room", user="ada")
+    assert first.interrupt is not None and first.interrupt.question == "Which day?", first
+    second = await agent.resume(
+        first.interrupt.interrupt_id, "answer", answer="Friday", reviewer="a"
+    )
+    assert second.interrupt is not None and second.interrupt.question == "Which room?", second
+    done = await agent.resume(second.interrupt.interrupt_id, "answer", answer="Blue", reviewer="a")
+    assert done.status is RunStatus.SUCCESS, done.interrupt
+    assert done.answer == "Done. Blue"
+    # each call ran once, as the one the person answered
+    assert read.answers == [("Which day?", "Friday"), ("Which room?", "Blue")]
 
 
 async def test_a_form_from_a_model_with_widget_hints_reads_the_answer_back(

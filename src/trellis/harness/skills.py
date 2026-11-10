@@ -55,7 +55,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
-from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.contracts import ConfigurationError, ToolError, ToolSpec, stable_id
 from trellis.harness import telemetry
 from trellis.harness.bounded import LRU
 from trellis.harness.journal import content_key
@@ -87,8 +87,10 @@ DEFAULT_TENANT: Final = "default"
 #: Where a Deep Agent finds the skills (its ``skills=`` source, a route of its backend).
 SKILLS_ROOT: Final = "/skills/"
 SKILL_MD: Final = "SKILL.md"
-#: The Claude plugin the skills are a local plugin of (``trellis:<skill>``).
+#: The Claude plugin the skills are a local plugin of (``trellis:<skill>``), and what the
+#: folder a run's plugin is written in is named with, before the run's own part.
 PLUGIN: Final = "trellis"
+RUN_FOLDER: Final = "trellis-skills-"
 #: The event, and the span attribute ``trellis.skills``, a run's pinned versions are said with;
 #: the code of the warning a source that is down, or a skill that is gone, is said with.
 EVENT: Final = "skills"
@@ -96,6 +98,15 @@ UNAVAILABLE: Final = "skills_unavailable"
 #: The tools of an engine with no skills slot (:meth:`SkillSet.tools`).
 LIST_SKILLS: Final = "list_skills"
 LOAD_SKILL: Final = "load_skill"
+#: What a run offered those tools is told with its context (:func:`told`), before its skills
+#: (a line each); the most characters of those lines, and what is said of the rest.
+NOTE: Final = (
+    "## Skills\n"
+    "Instructions kept for kinds of task, by name. Before you work on a task one of them "
+    f"covers, read it with {LOAD_SKILL}(name) and follow it."
+)
+NOTE_CHARS: Final = 8_000
+MORE: Final = f"- and {{more}} more: {LIST_SKILLS}() lists them all"
 #: What a skill's text may hold: it is data, never the system's own instructions.
 MAX_DESCRIPTION: Final = 1024
 MAX_BODY: Final = 32_000
@@ -687,19 +698,32 @@ def _written(root: Path, files: Mapping[str, str]) -> None:
 
 
 async def for_run(plugins: Sequence[Any]) -> tuple[list[Any], list[Path]]:
-    """``plugins`` with each :class:`ClaudeSkills` written for the run in a folder of its own,
-    and the folders to remove when the query ends."""
+    """``plugins`` with each :class:`ClaudeSkills` written for the run in a folder of the
+    run's own (:func:`_run_folder`), and the folders to remove when the query ends."""
     made: list[Path] = []
     given: list[Any] = []
-    for plugin in plugins:
+    for n, plugin in enumerate(plugins):
         if not isinstance(plugin, ClaudeSkills):
             given.append(plugin)
             continue
-        root = Path(tempfile.mkdtemp(prefix="trellis-skills-"))
+        root = _run_folder(n)
         made.append(root)
         await write_plugin(plugin.skills, root)
         given.append({"type": "local", "path": str(root)})
     return given, made
+
+
+def _run_folder(n: int) -> Path:
+    """The folder the run's ``n``-th plugin is written in, made empty and its owner's alone:
+    the same path for every query of the run. Claude's session holds the paths of the skill
+    files it was shown, and a run resumed after a pause continues that session — on any worker:
+    the path is the run's, not the process's."""
+    runtime = current()
+    assert runtime is not None  # the adapter writes them inside the run it works for
+    root = Path(tempfile.gettempdir()) / f"{RUN_FOLDER}{stable_id(runtime.run_id, n)}"
+    shutil.rmtree(root, ignore_errors=True)  # an earlier query's that a crash left
+    root.mkdir(mode=0o700)
+    return root
 
 
 def removed(folders: Sequence[Path]) -> None:
@@ -743,9 +767,13 @@ class SkillTools:
             Tool(loading, self._load),
         ]
 
-    async def _list(self, args: dict[str, Any]) -> str:
+    async def lines(self) -> list[str]:
+        """The skills as a listing says them: a line each, its name and what it is for."""
         pinned = await self.skills.pinned(self.scope)
-        return "\n".join(f"- {c.name}: {c.description}" for c in pinned.values()) or "no skills"
+        return [f"- {c.name}: {c.description}" for c in pinned.values()]
+
+    async def _list(self, args: dict[str, Any]) -> str:
+        return "\n".join(await self.lines()) or "no skills"
 
     async def _load(self, args: dict[str, Any]) -> str:
         name, path = str(args["name"]), args.get("path")
@@ -755,6 +783,33 @@ class SkillTools:
         listed = "".join(f"\n- {f}" for f in doc.files)
         files = f"\n\nFiles ({LOAD_SKILL}(name, path)):{listed}" if listed else ""
         return f"{await self.skills.full_text(name, self.scope)}{files}"
+
+
+async def told(runtime: Runtime) -> None:
+    """A run offered :data:`LOAD_SKILL` — its framework has no skills slot — is told its
+    skills with its context (:data:`NOTE`): each one's name and what it is for, the listing a
+    framework's own slot puts in the model's instructions itself (Deep Agents, Claude, Kimi,
+    the OpenAI sandbox agent), so a task a skill covers finds it without a listing call
+    first. At most :data:`NOTE_CHARS` of lines, then how many more :data:`LIST_SKILLS` lists;
+    the two tools stay offered where the run's tools are narrowed. A run with no skill, or
+    whose ``load_skill`` is a tool of its own, is told nothing."""
+    tool = runtime.toolbox.get(LOAD_SKILL)
+    source = getattr(tool.run, "__self__", None) if tool is not None else None
+    lines = await source.lines() if isinstance(source, SkillTools) else []
+    if not lines:
+        return
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        used += len(line)
+        if used > NOTE_CHARS:
+            shown.append(MORE.format(more=len(lines) - len(shown)))
+            break
+        shown.append(line)
+    said = "\n".join([NOTE, *shown])
+    runtime.context = "\n\n".join(part for part in (runtime.pushed_context, said) if part)
+    if runtime.offered is not None:
+        runtime.offered |= {LIST_SKILLS, LOAD_SKILL}
 
 
 # --------------------------------------------------------------------------- built-in sources

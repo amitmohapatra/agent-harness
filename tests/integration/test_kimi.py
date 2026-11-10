@@ -445,6 +445,46 @@ async def test_kimi_reads_the_runs_skills(
     assert "sql-review" in sent and "Reviews SQL queries for joins." in sent
 
 
+async def test_a_conversations_next_turn_continues_kimis_session_when_its_runs_have_skills(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A run given skills works in a home of its own, removed with the run; Kimi's sessions
+    stay in its usual home (linked into the run's), so the conversation's next turn resumes
+    the session the last one ended in: the earlier turn is in what the model is sent, and no
+    session is reported lost."""
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    store = SkillStore()
+    store.put("sql-review", "Check every JOIN.", description="Reviews SQL queries for joins.")
+    target = kimi_target(endpoint, tmp_path, **combine(store).kimi())
+    agent = harness.wrap(target, id="kimi-chat")
+    first = await agent.run("My order is o-17.", user="ada", thread="chat")
+    assert first.status is RunStatus.SUCCESS, first.error
+    events = [e async for e in agent.stream("Which order was it?", user="ada", thread="chat")]
+    lost = [e.data for e in events if e.data.get("code") == "acp_session"]
+    assert lost == [] and events[-1].error is None
+    assert "My order is o-17." in json.dumps(endpoint.requests[-1])
+    assert (tmp_path / "kimi-home" / "sessions").is_dir()  # kept where Kimi keeps them
+
+
+async def test_a_sandboxed_conversations_next_turn_is_given_its_earlier_turns_by_the_harness(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A sandboxed run's home links nothing, so its session is removed with it: the session is
+    not kept for the conversation's next turn, which starts a new one with the earlier turns
+    in its context (no session reported lost, no turn without its history)."""
+    target = kimi_target(endpoint, tmp_path, sandbox=sandbox(FakeSandboxes()))
+    agent = harness.wrap(target, id="kimi-boxed-chat")
+    first = await agent.run("My order is o-17.", user="ada", thread="chat")
+    assert first.status is RunStatus.SUCCESS, first.error
+    events = [e async for e in agent.stream("Which order was it?", user="ada", thread="chat")]
+    lost = [e.data for e in events if e.data.get("code") == "acp_session"]
+    assert lost == [] and events[-1].error is None
+    assert "My order is o-17." in json.dumps(endpoint.requests[-1])
+    assert not (tmp_path / "kimi-home" / "sessions").exists()  # nothing of it on this machine
+
+
 async def test_a_kept_result_stays_out_of_the_workspace_and_pages_smaller_than_kimis_read(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:

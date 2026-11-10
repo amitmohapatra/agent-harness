@@ -46,7 +46,7 @@ from trellis.harness.files import EVENT as FILE_EVENT
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Pending, Replay, content_key
+from trellis.harness.journal import Made, Pending, Replay, content_key
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
@@ -112,11 +112,13 @@ _current: ContextVar[Runtime | None] = ContextVar("trellis_runtime", default=Non
 @dataclass(frozen=True, slots=True)
 class _Call:
     """The tool or model call the code running now is in: when it must end (``time.monotonic``)
-    and, for a tool call, its idempotency key and the id the run's stream gives it."""
+    and, for a tool call, its idempotency key, the id the run's stream gives it and the call
+    as the model made it."""
 
     ends: float | None
     key: str | None
     ref: str | None = None
+    made: Made | None = None
 
 
 _call: ContextVar[_Call | None] = ContextVar("trellis_call", default=None)
@@ -486,16 +488,21 @@ class Runtime:
 
     @contextlib.asynccontextmanager
     async def limited(
-        self, seconds: float | None, *, key: str | None = None, ref: str | None = None
+        self,
+        seconds: float | None,
+        *,
+        key: str | None = None,
+        ref: str | None = None,
+        made: Made | None = None,
     ) -> AsyncIterator[None]:
         """The code inside — a tool call (``key``: its idempotency key, ``ref``: its id on the
-        stream) or a model call —
+        stream, ``made``: the call as the model made it) or a model call —
         takes at most ``seconds`` (``None``: no limit of its own), or raises ``TimeoutError``;
         the run's own time bounds it as well (the pipeline stops the run)."""
         own = None if seconds is None else time.monotonic() + seconds
         outer = _call.get()
         ends = [t for t in (own, outer.ends if outer else None) if t is not None]
-        token = _call.set(_Call(min(ends) if ends else None, key, ref))
+        token = _call.set(_Call(min(ends) if ends else None, key, ref, made))
         try:
             async with asyncio.timeout(seconds):
                 yield
@@ -763,7 +770,11 @@ class Runtime:
         # calls made at once may each ask: the run pauses on the first, the others ask again
         # when it resumes
         if self.pending is None:
-            self.pending = Pending(key=key, interrupt=interrupt)
+            # asked inside a tool call, where the framework does not resume in place: its model
+            # makes that call again when the run resumes (``Replay.made``)
+            call = _call.get()
+            inside = call.made if call is not None and self.suspend is None else None
+            self.pending = Pending(key=key, interrupt=interrupt, inside=inside)
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         # the framework's own pause (LangGraph's ``interrupt``): its resume is answered from the

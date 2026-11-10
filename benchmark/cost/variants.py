@@ -50,6 +50,8 @@ class Setup:
     max_steps: int
     #: the harness tools every variant runs (a ``ReAct``'s ``tools=``)
     tools: tuple[Any, ...] = ()
+    #: a skill source (``trellis.skills``) for ``ReAct``'s own slot (``skills=``), if any
+    skills: Any = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ def main(
             context_window=window or setup.window,
             tools=setup.tools,
             backend=JournalBackend() if deep else None,
+            skills=setup.skills,
         )
     return target, {}
 

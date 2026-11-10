@@ -94,7 +94,7 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -458,10 +458,13 @@ def _check_servers(servers: Sequence[Mapping[str, Any]]) -> None:
 class ACPInput:
     prompt: str
     context: str | None
-    #: the tool call a person answered about, when the run resumes from that pause
+    #: the tool call a person answered about (``Pending.call``), when the run resumes from
+    #: that pause
     answered: ToolCall | None = None
     #: the person denied that call (``REJECT``): it does not run
     denied: bool = False
+    #: the person answered a question that call asked while it ran (not its approval)
+    asked: bool = False
     #: why they denied it, when they said
     why: str | None = None
 
@@ -584,8 +587,9 @@ class ACPAdapter:
         denied = resolution.decision is InterruptDecision.REJECT
         return dataclasses.replace(
             native_input,
-            answered=pending.interrupt.tool_call,
+            answered=pending.call,
             denied=denied,
+            asked=pending.interrupt.tool_call is None,
             why=reason_of(resolution) if denied else None,
         )
 
@@ -956,8 +960,8 @@ class Attempt:
         if call is None:
             return RESUMED
         harness = call.tool in self.runtime.toolbox
-        told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
-        said = told.format(tool=f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool)
+        name = f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool
+        said = resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
         why = native_input.why
         return f"{said} {DENIED_WHY.format(why=why)}" if why else said
 
@@ -1367,14 +1371,18 @@ class RunHome:
       resume reads the same ones;
     * **a run that is not sandboxed** keeps this process's environment, and the agent's own
       configuration and login (``config.toml``, ``credentials``) are linked into the run's home
-      from the agent's usual one;
+      from the agent's usual one — and so are its sessions (:data:`SESSIONS`), which stay in
+      the usual home: the conversation's next turn resumes the session this run ends in
+      (``sessions``), where a home removed with its run would have taken the session with it;
     * **a sandboxed run** (:class:`Sandboxed`) gets an environment of :data:`SANDBOXED_ENV`
       and the agent's own ``env`` only, its ``HOME`` the run's too, nothing linked: no
       credential of this machine's reaches it (its model comes through the gateway, or from
-      ``env``)."""
+      ``env``), and its session ends with it (:meth:`closed`)."""
 
     #: what of the agent's usual home a run's home links to (its configuration, its login)
     LINKED: Final = ("config.toml", "credentials")
+    #: the folder of its home the agent keeps its sessions in, linked too (made if missing)
+    SESSIONS: Final = "sessions"
 
     def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
         from trellis.contracts import stable_id
@@ -1403,7 +1411,8 @@ class RunHome:
         return env
 
     def _linked(self, usual: Path) -> None:
-        for name in self.LINKED:
+        (usual / self.SESSIONS).mkdir(parents=True, exist_ok=True)
+        for name in (*self.LINKED, self.SESSIONS):
             found, link = usual / name, self.agent_home / name
             if found.exists() and not link.exists():
                 link.symlink_to(found)
@@ -1419,9 +1428,14 @@ class RunHome:
 
     async def closed(self) -> None:
         """The attempt ended: the run's home and working directory removed with the run (kept
-        while it waits on a person: the next attempt resumes the agent's session from them)."""
+        while it waits on a person: the next attempt resumes the agent's session from them).
+        A sandboxed run's sessions were in that home (nothing of it is linked), so its session
+        is forgotten with it: the conversation's next turn takes its earlier turns from the
+        harness, not from a session that is gone."""
         if self.runtime.pending is None:
             shutil.rmtree(self.root, ignore_errors=True)
+            if self.target.sandbox is not None:
+                self.runtime.replay.journal.session = None
 
 
 class Sandboxed:

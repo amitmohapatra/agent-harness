@@ -19,7 +19,10 @@
   its run record naming the run, its memory context, tool records and outcome. It runs the
   governed copy of its agent; where the SDK's agent tool cannot be pointed at it, its own tools'
   calls are not governed, which is said once;
-* pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal;
+* pause: ``trellis.current().ask`` stops the run and a resume re-runs it against the journal,
+  its model told which call the person answered about (``adapters.claude.RESUMED_ASKED``, as a
+  resumed Claude session is: a model run again from the same input may decide otherwise);
+  that call, made again in other words, runs as it was (``Replay.made``);
   a call governance asks about is held at the SDK's own gate (:func:`_gated`: a
   ``needs_approval`` policy asking governance, ``tools.convert.openai_agents.held``), as are
   the SDK's own ``needs_approval`` tools: they pause with the SDK's ``RunState``, and a resume
@@ -72,6 +75,7 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
+from trellis.harness.adapters.claude import resumed_call
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession, input_items
@@ -114,6 +118,15 @@ class _Continue:
     #: an edit: the tool and its edited arguments, approved when the model calls it with them
     tool: str | None = None
     edited: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Again:
+    """A resume that runs the agent again from its input, its model told (``told``) which call
+    the person answered about."""
+
+    input: Any
+    told: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +209,7 @@ class OpenAIAgentsAdapter:
 
         helpers = Helpers(run.runtime, self.name)
         agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
-        options = _options(run.runtime, target)
+        options = _options(run.runtime, target, native_input)
         error: BaseException | None = None
         try:
             given = await self._input(agent, native_input)
@@ -216,7 +229,7 @@ class OpenAIAgentsAdapter:
 
         helpers = Helpers(run.runtime, self.name)
         agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
-        options = _options(run.runtime, target)
+        options = _options(run.runtime, target, native_input)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         error: BaseException | None = None
@@ -264,7 +277,11 @@ class OpenAIAgentsAdapter:
         resolution: InterruptResolution,
     ) -> Any:
         if pending.native_state is None:
-            return native_input
+            call = pending.call
+            if call is None or pending.interrupt.tool_call is not None:
+                return native_input
+            # a question a tool asked while it ran: the model makes that call again
+            return _Again(native_input, resumed_call(call, call.tool, denied=False, asked=True))
         state, call_id = pending.native_state, pending.native_id
         decision = resolution.decision
         if decision is InterruptDecision.APPROVE:
@@ -336,6 +353,8 @@ class OpenAIAgentsAdapter:
 
     @staticmethod
     async def _input(agent: Any, native_input: Any) -> Any:
+        if isinstance(native_input, _Again):
+            return native_input.input
         if not isinstance(native_input, _Continue):
             return native_input
         from agents import RunState
@@ -674,17 +693,19 @@ def _said_inside(agent_id: str, tool: str, tools: str) -> None:
     )
 
 
-def _options(runtime: Runtime, target: Any) -> dict[str, Any]:
+def _options(runtime: Runtime, target: Any, native_input: Any) -> dict[str, Any]:
     """``Runner.run``'s options: the run's framework options, with the memory service's thread
     as the session (``bridges.session``) when the run keeps no thread of its own and memory is
-    on, and the model names routed through Bifrost when it serves the harness
-    (:func:`_routed`)."""
+    on, the model names routed through Bifrost when it serves the harness (:func:`_routed`),
+    and the model of a run resumed from its input told which call the person answered about
+    (:class:`_Again`)."""
     options = dict(runtime.framework_options)
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
     told = _told_unknown_tools(options)
     asked = _asked_with(runtime, told)
-    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked)))
+    again = native_input.told if isinstance(native_input, _Again) else None
+    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked, again)))
 
 
 def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
@@ -792,17 +813,19 @@ def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
     return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=asked)}
 
 
-def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> dict[str, Any]:
     """The options with the messages steered into the run (``Runtime.steered``) joining the
     input of each model call where they were taken, as the user's
     (``RunConfig.call_model_input_filter``, after the run's own filter): the SDK keeps a
-    filter's input for that call only, so each call is given them again, in place."""
+    filter's input for that call only, so each call is given them again, in place. ``again``:
+    what a run resumed from its input is told first, the same way (no session keeps it)."""
     from agents import RunConfig
     from agents.run_config import ModelInputData
 
     config = options.get("run_config") or RunConfig()
     theirs = config.call_model_input_filter
     kept: list[tuple[int, dict[str, Any]]] = []
+    said = [again] if again else []
 
     async def steered(data: Any) -> Any:
         given = data.model_data
@@ -811,7 +834,9 @@ def _steering(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
             if inspect.isawaitable(given):
                 given = await given
         items: list[Any] = list(given.input)
-        kept.extend((len(items), {"role": "user", "content": s.text}) for s in runtime.steered())
+        said.extend(s.text for s in runtime.steered())
+        kept.extend((len(items), {"role": "user", "content": text}) for text in said)
+        said.clear()
         for offset, (at, item) in enumerate(kept):
             items.insert(at + offset, item)
         return ModelInputData(input=items, instructions=given.instructions)

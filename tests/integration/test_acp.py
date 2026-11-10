@@ -31,7 +31,7 @@ from trellis.harness.adapters.acp import (
     kimi,
     native_spec,
 )
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.adapters.claude import RESUMED_ASKED, RESUMED_CALL, RESUMED_DENIED
 from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
@@ -212,7 +212,7 @@ async def pick_warehouse() -> str:
     return f"ships from {await runtime.ask('Which warehouse?')}"
 
 
-async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call(
+async def test_a_question_a_tool_asked_resumes_the_session_naming_its_call(
     harness: Harness, tmp_path: Path
 ) -> None:
     script = [{"tool": "pick_warehouse", "args": {}}, {"text": "{last}"}]
@@ -221,7 +221,8 @@ async def test_a_question_a_tool_asked_resumes_the_session_without_naming_a_call
     assert asked.interrupt is not None and asked.interrupt.tool_call is None
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Leeds", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "ships from Leeds"
-    assert recorded(tmp_path)["prompts"][-1] == RESUMED
+    told = RESUMED_ASKED.format(tool="mcp__trellis__pick_warehouse", args="{}")
+    assert recorded(tmp_path)["prompts"][-1] == told
 
 
 async def test_a_harness_tool_error_reaches_the_agent(harness: Harness, tmp_path: Path) -> None:
@@ -949,7 +950,10 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     [seen] = recorded(tmp_path)["skills"]
     assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]
     assert seen["files"]["sql-review/rules.md"] == "No SELECT *."
-    assert seen["linked"] == ["config.toml"]  # its own configuration; no credentials kept here
+    # its own configuration (no credentials kept here), and its sessions: kept in its usual
+    # home, where the conversation's next turn finds the one this run ended in
+    assert seen["linked"] == ["config.toml", "sessions"]
+    assert (usual / "sessions").is_dir()
     started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
     gone = not Path(started).exists()  # noqa: ASYNC240
     assert started != str(usual) and gone  # the run's, removed with it
