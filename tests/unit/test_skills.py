@@ -465,6 +465,55 @@ async def test_a_claude_plugin_holds_the_skills_and_never_a_file_out_of_its_fold
     assert plugin == {"type": "local", "path": ""} and plugin.skills is src
 
 
+# --------------------------------------------------------------------------- no skills slot
+async def test_a_run_offered_the_skill_tools_is_told_its_skills_with_its_context() -> None:
+    """The listing a framework's own skills slot puts before the model, said by the harness
+    where the framework has none: after the run's context, the two tools kept offered."""
+    store = SkillStore()
+    store.put("sql-review", "Check JOINs.", description="Reviews SQL.")
+    store.put("tone", "Be brief.", description="How we write.", level="user", owner="ada")
+    tools = {t.name: t for t in await combine(store).tools(ADA).resolve()}
+    run = SimpleNamespace(toolbox=tools, offered={"other"}, pushed_context="## Profile\n- x")
+    await module.told(run)  # type: ignore[arg-type]
+    assert run.context == (
+        f"## Profile\n- x\n\n{module.NOTE}\n- sql-review: Reviews SQL.\n- tone: How we write."
+    )
+    assert "load_skill(name)" in module.NOTE
+    assert run.offered == {"other", "list_skills", "load_skill"}  # named: not narrowed away
+    alone = SimpleNamespace(toolbox=tools, offered=None, pushed_context=None)
+    await module.told(alone)  # type: ignore[arg-type]
+    assert alone.context.startswith(module.NOTE) and alone.offered is None
+
+
+async def test_a_run_is_told_nothing_without_the_skill_tools_or_without_a_skill() -> None:
+    async def load_skill(args: dict[str, Any]) -> str:
+        return "theirs"
+
+    spec = module.ToolSpec(name="load_skill", description="A tool of the team's own.")
+    for toolbox in (
+        {},  # a framework with a skills slot, or no skills at all
+        {"load_skill": module.Tool(spec, load_skill)},  # the name, not the harness's tool
+        {t.name: t for t in await combine(SkillStore()).tools(ADA).resolve()},  # no skill kept
+    ):
+        run = SimpleNamespace(toolbox=toolbox, offered={"other"}, pushed_context="kept")
+        await module.told(run)  # type: ignore[arg-type]
+        assert not hasattr(run, "context") and run.offered == {"other"}
+
+
+async def test_the_listing_a_run_is_told_is_cut_at_its_cap_saying_how_many_more() -> None:
+    store = SkillStore()
+    for n in range(300):
+        store.put(f"skill-{n:03d}", "x", description="d" * 90)
+    tools = {t.name: t for t in await combine(store).tools(ADA).resolve()}
+    run = SimpleNamespace(toolbox=tools, offered=None, pushed_context=None)
+    await module.told(run)  # type: ignore[arg-type]
+    lines = run.context.splitlines()
+    shown = [x for x in lines if x.startswith("- skill-")]
+    assert sum(map(len, shown)) <= module.NOTE_CHARS < sum(map(len, shown)) + len(shown[0])
+    assert lines[-1] == f"- and {300 - len(shown)} more: list_skills() lists them all"
+    assert shown[0].startswith("- skill-000:")  # by name, as every listing is
+
+
 def test_skill_info_defaults_and_the_scope_key() -> None:
     info = SkillInfo("tone", "T.", "1")
     assert (info.level, info.enabled, info.updated_at) == ("platform", True, None)

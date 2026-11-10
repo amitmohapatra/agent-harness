@@ -316,3 +316,29 @@ async def test_the_skill_tools_work_where_the_harness_runs_the_tools(
     events = [e async for e in agent.stream("go", user="ada")]
     outputs = [str(e.data["output"]) for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
     assert any("Check every JOIN." in o for o in outputs), outputs
+
+
+@pytest.mark.parametrize("framework", ["langgraph", "middleware", "openai_agents"])
+async def test_a_framework_with_no_skills_slot_has_the_skills_before_its_model_from_the_start(
+    harness: Harness, tmp_path: Path, framework: str
+) -> None:
+    """Deep Agents, Claude, Kimi and the OpenAI sandbox agent list the skills in the model's
+    instructions themselves; where there is no slot the harness says them with the run's
+    context — the run's own (its scope, pinned) — so a task a skill covers finds it without a
+    listing call first."""
+    store = store_with()
+    store.put("tone", "Be brief.", description="How we write.", level="user", owner="ada")
+    store.put("secret", "x", description="Bob's own.", level="user", owner="bob")
+    seen: list[Any] = []
+    target, tools = await BUILDERS[framework](
+        harness, [combine(store).tools()], tmp_path, [], seen=seen
+    )
+    agent = arm(harness.wrap(target, id=f"told-{framework}"), tools)
+    events = [e async for e in agent.stream("go", user="ada")]
+    assert events[-1].error is None, events[-1].error
+    said = seen[0].said()
+    assert "- sql-review: Reviews SQL." in said and "- tone: How we write." in said
+    assert "load_skill(name)" in said and "Bob's own." not in said
+    assert [e.get("versions") for e in events_of(events, "skills")] == [
+        {"sql-review": "t1", "tone": "u1"}
+    ]

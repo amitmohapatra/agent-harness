@@ -96,6 +96,15 @@ UNAVAILABLE: Final = "skills_unavailable"
 #: The tools of an engine with no skills slot (:meth:`SkillSet.tools`).
 LIST_SKILLS: Final = "list_skills"
 LOAD_SKILL: Final = "load_skill"
+#: What a run offered those tools is told with its context (:func:`told`), before its skills
+#: (a line each); the most characters of those lines, and what is said of the rest.
+NOTE: Final = (
+    "## Skills\n"
+    "Instructions kept for kinds of task, by name. Before you work on a task one of them "
+    f"covers, read it with {LOAD_SKILL}(name) and follow it."
+)
+NOTE_CHARS: Final = 8_000
+MORE: Final = f"- and {{more}} more: {LIST_SKILLS}() lists them all"
 #: What a skill's text may hold: it is data, never the system's own instructions.
 MAX_DESCRIPTION: Final = 1024
 MAX_BODY: Final = 32_000
@@ -743,9 +752,13 @@ class SkillTools:
             Tool(loading, self._load),
         ]
 
-    async def _list(self, args: dict[str, Any]) -> str:
+    async def lines(self) -> list[str]:
+        """The skills as a listing says them: a line each, its name and what it is for."""
         pinned = await self.skills.pinned(self.scope)
-        return "\n".join(f"- {c.name}: {c.description}" for c in pinned.values()) or "no skills"
+        return [f"- {c.name}: {c.description}" for c in pinned.values()]
+
+    async def _list(self, args: dict[str, Any]) -> str:
+        return "\n".join(await self.lines()) or "no skills"
 
     async def _load(self, args: dict[str, Any]) -> str:
         name, path = str(args["name"]), args.get("path")
@@ -755,6 +768,33 @@ class SkillTools:
         listed = "".join(f"\n- {f}" for f in doc.files)
         files = f"\n\nFiles ({LOAD_SKILL}(name, path)):{listed}" if listed else ""
         return f"{await self.skills.full_text(name, self.scope)}{files}"
+
+
+async def told(runtime: Runtime) -> None:
+    """A run offered :data:`LOAD_SKILL` — its framework has no skills slot — is told its
+    skills with its context (:data:`NOTE`): each one's name and what it is for, the listing a
+    framework's own slot puts in the model's instructions itself (Deep Agents, Claude, Kimi,
+    the OpenAI sandbox agent), so a task a skill covers finds it without a listing call
+    first. At most :data:`NOTE_CHARS` of lines, then how many more :data:`LIST_SKILLS` lists;
+    the two tools stay offered where the run's tools are narrowed. A run with no skill, or
+    whose ``load_skill`` is a tool of its own, is told nothing."""
+    tool = runtime.toolbox.get(LOAD_SKILL)
+    source = getattr(tool.run, "__self__", None) if tool is not None else None
+    lines = await source.lines() if isinstance(source, SkillTools) else []
+    if not lines:
+        return
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        used += len(line)
+        if used > NOTE_CHARS:
+            shown.append(MORE.format(more=len(lines) - len(shown)))
+            break
+        shown.append(line)
+    said = "\n".join([NOTE, *shown])
+    runtime.context = "\n\n".join(part for part in (runtime.pushed_context, said) if part)
+    if runtime.offered is not None:
+        runtime.offered |= {LIST_SKILLS, LOAD_SKILL}
 
 
 # --------------------------------------------------------------------------- built-in sources
