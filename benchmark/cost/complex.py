@@ -3244,6 +3244,18 @@ class Trace(Hooks):
 ERROR_CHARS: Final = 500
 
 
+def said_by(result: Any) -> str:
+    """What a turn's run said: its answer; or, paused on a question to its user (its own, or
+    its framework's, Kimi's or Claude's), that question with its options."""
+    asked = result.interrupt
+    if result.status is RunStatus.PAUSED and asked is not None and asked.tool_call is None:
+        options = [o if isinstance(o, str) else o.label or o.value for o in asked.options or ()]
+        return "\n".join([asked.question, *options])
+    return (
+        result.answer if isinstance(result.answer, str) else json.dumps(result.answer, default=str)
+    )
+
+
 def said_in(requests: Sequence[dict[str, Any]], told: Sequence[str]) -> str:
     """What the run was told, as the scorer reads it (``context``): every captured request's
     messages, and what the harness gave its runs (``Trace.told``) - for Kimi and Claude the
@@ -3645,11 +3657,7 @@ async def run_case(
                 if isinstance(result, BaseException):
                     ended.append(("", "RAISED", f"{type(result).__name__}: {result}"[:300], None))
                     continue
-                answer = (
-                    result.answer
-                    if isinstance(result.answer, str)
-                    else json.dumps(result.answer, default=str)
-                )
+                answer = said_by(result)
                 error = result.error.message[:300] if result.error is not None else None
                 ended.append((answer or "", result.status.value, error, result.run_id))
         except SpendCapReached as exc:

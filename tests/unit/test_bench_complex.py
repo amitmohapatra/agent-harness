@@ -632,6 +632,30 @@ async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> No
     assert not cx.score(turn.expect, failed + " About 240 units.", [], turn.text, told)["correct"]
 
 
+def test_a_question_the_run_asks_its_user_is_its_answer() -> None:
+    """bf2-clarify-01 (Kimi, the all-adapter run): Kimi asked "which black slim jeans?" with
+    its own question tool, so the run paused on that question and its answer was null, scored
+    as asking nothing. A question the run asks is what it said; an approval it waits on is not
+    an answer, as before."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import Option, RunStatus
+
+    case = next(c for c in breakfix.cases() if c.id == "bf2-clarify-01")
+    turn = case.turns[0]
+    assert turn.expect is not None
+    options = [Option(value="Black Slim Jeans Black"), "Stretch Slim Jeans Black"]
+    asked = SimpleNamespace(question="Which jeans?", options=options, tool_call=None)
+    said = cx.said_by(SimpleNamespace(status=RunStatus.PAUSED, interrupt=asked, answer=None))
+    assert said == "Which jeans?\nBlack Slim Jeans Black\nStretch Slim Jeans Black"
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    approval = SimpleNamespace(question="Run refund?", options=[], tool_call=object())
+    waits = SimpleNamespace(status=RunStatus.PAUSED, interrupt=approval, answer=None)
+    assert cx.said_by(waits) == "null"  # an approval it waits on: no answer, as before
+    done = SimpleNamespace(status=RunStatus.SUCCESS, interrupt=None, answer={"n": 1})
+    assert cx.said_by(done) == '{"n": 1}'
+
+
 def test_a_set_answered_in_prose_may_show_every_candidate_in_a_table() -> None:
     """bf3-past-04 t1, Claude: "Only one South store was under your alert line: S26", then a
     table of every south store's revenue. The table is the evidence, not the answer."""
