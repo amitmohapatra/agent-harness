@@ -1045,7 +1045,9 @@ class Agent:
             return
         whole = self.adapter.history_in == "messages" and self.model_window is not None
         try:
-            earlier = await conversation.earlier(runtime, whole=whole)
+            earlier = await conversation.earlier(
+                runtime, whole=whole, budget=self.conversation_budget(runtime) if whole else None
+            )
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return
@@ -1181,7 +1183,11 @@ class Agent:
         ]
         said = [SystemMessage(self.instructions or ""), HumanMessage(runtime.task)]
         holds = count_tokens_approximately(said, tools=tools)
-        return conversation_budget(self.model_window, holds=holds, context=self.context_budget)
+        # with memory off, the front end's context is the only one pushed (:meth:`push`)
+        context = self.context_budget
+        if runtime.run_memory is None:
+            context = int(context * frontend.SHARE)
+        return conversation_budget(self.model_window, holds=holds, context=context)
 
     def unreached(self, runtime: Runtime) -> None:
         """The memory context pushed for ``runtime`` reached nothing: the adapter found no
