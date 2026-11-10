@@ -88,7 +88,7 @@ from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
@@ -277,16 +277,12 @@ class ClaudeAdapter:
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from claude_agent_sdk import ResultMessage
 
-        transcript: list[Said] = []
+        transcript = _transcript(output)
         answer: Any = None
         for message in output:
-            if isinstance(message, AssistantMessage):
-                text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
-                if text:
-                    transcript.append(Said(Speaker.ASSISTANT, text))
-            elif isinstance(message, ResultMessage):
+            if isinstance(message, ResultMessage):
                 if message.is_error:
                     raise ClaudeRunError("; ".join(message.errors or []) or message.subtype)
                 answer = (
@@ -547,6 +543,43 @@ async def _subagents(helpers: Helpers, message: Any) -> None:
                     await helpers.end(result.tool_use_id, error=text or SUBAGENT_FAILED)
                 else:
                     await helpers.end(result.tool_use_id, output=text)
+
+
+def _transcript(messages: Sequence[Any]) -> list[Said]:
+    """The query's own messages as said (its subagents' are inside their ``Agent`` call): each
+    text, each call — a harness tool by its own name, not Claude's ``mcp__trellis__`` one — and
+    each call's result, so what memory keeps of the turn holds its steps."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        TextBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    from trellis.harness.tools.convert.claude import SERVER
+
+    harness = f"mcp__{SERVER}__"
+    out: list[Said] = []
+    for message in messages:
+        if getattr(message, "parent_tool_use_id", None) is not None:
+            continue
+        if isinstance(message, AssistantMessage):
+            text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+            calls = tuple(
+                Called(b.id, b.name.removeprefix(harness), b.input)
+                for b in message.content
+                if isinstance(b, ToolUseBlock)
+            )
+            if text or calls:
+                out.append(Said(Speaker.ASSISTANT, text, tool_calls=calls))
+        elif isinstance(message, UserMessage) and isinstance(message.content, list):
+            out.extend(
+                Said(Speaker.TOOL, _result_text(b.content), tool_call_id=b.tool_use_id)
+                for b in message.content
+                if isinstance(b, ToolResultBlock)
+            )
+    return out
 
 
 def _result_text(content: Any) -> str:
