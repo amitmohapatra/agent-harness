@@ -92,6 +92,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   answer a pause there. A tool of the agent's named `ask_user` wins; one declared is offered
   once. `serve_chat` records a run's front end even when the app sent nothing with the
   message.
+- `ask_user(fields=[{name, label, kind, options, multiple, default, why, required}])`: several
+  values in one question, one answer (an object: what the person gave over what was filled
+  in). No contract change: the `ask_user` component with `props.kind == "form"`, an object
+  `expects` with `ui_schema`, a numbered list in plain chat. A single question is the
+  one-field case; `recommended` with `why` on a number or a date shows the value filled in.
+- Values a request leaves out that an earlier one had are confirmed once before they are used
+  again, shown filled in (`agent.REMEMBERED`): they were filled and said. A rule, preference
+  or value said more than six months ago, or one a tool shows changed, is confirmed the same
+  way.
+- Where the app declared tools of its own, `ask_user` says a value one of them asks for is
+  asked with it (the app's date picker used in 1 of 8 runs before, 13 of 14 after).
 - The asking benchmark (`benchmark/cost/asking.py`): `--ask auto|declared|none` (was
   `--no-ask-tool`), `--variant`; cases for an ambiguous target (14 products, two), a
   remembered value that is partial, old or changed elsewhere, a recommendation the data

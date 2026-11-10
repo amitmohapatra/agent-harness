@@ -5,6 +5,7 @@ one "used N tools · ran K commands" line."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -318,3 +319,159 @@ async def test_a_framework_with_a_question_tool_of_its_own_keeps_that_one() -> N
     graph = ReAct(system_prompt="x", model=PlannedChat([]))
     targets = [ClaudeAgentOptions(), kimi(), plain, function, graph, sdk]
     assert [detect(t).asks(t) for t in targets] == [True, True, False, False, False, False]
+
+
+# --------------------------------------------------------------------------- several values
+FORM = {
+    "question": "Confirm the reorder.",
+    "fields": [
+        {"name": "quantity", "label": "Units", "kind": "number", "default": 200,
+         "why": "your order of 2026-11-02"},
+        {"name": "supplier", "label": "Supplier", "options": ["SUP-04", "SUP-07"],
+         "default": "SUP-04", "why": "your usual supplier"},
+        {"name": "deliver_on", "label": "Delivery date", "kind": "date", "required": False},
+    ],
+}  # fmt: skip
+
+
+async def test_several_values_are_one_form_filled_in_with_what_is_remembered(
+    harness: Harness,
+) -> None:
+    """One question, one submit: the app's control gets each field (its kind, its options,
+    the remembered value to show filled in and where it is from), any other UI the same as a
+    JSON Schema with widget hints, plain chat a short numbered list."""
+    agent = asking(harness, FORM, "ask-form")
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        assert entry["reason"] == "question"
+        assert entry["metadata"]["component"] == "ask_user"
+        assert entry["metadata"]["props"] == {
+            "kind": "form",
+            "fields": [
+                {"name": "quantity", "label": "Units", "kind": "number", "default": 200,
+                 "why": "your order of 2026-11-02", "required": True},
+                {"name": "supplier", "label": "Supplier", "kind": "text",
+                 "options": ["SUP-04", "SUP-07"], "default": "SUP-04",
+                 "why": "your usual supplier", "required": True},
+                {"name": "deliver_on", "label": "Delivery date", "kind": "date",
+                 "required": False},
+            ],
+        }  # fmt: skip
+        assert entry["responseSchema"] == {
+            "type": ["object", "string"],
+            "properties": {
+                "quantity": {"type": ["number", "string"], "title": "Units", "default": 200,
+                             "description": "your order of 2026-11-02"},
+                "supplier": {"type": "string", "title": "Supplier", "enum": ["SUP-04", "SUP-07"],
+                             "default": "SUP-04", "description": "your usual supplier"},
+                "deliver_on": {"type": "string", "format": "date", "title": "Delivery date"},
+            },
+            "required": [],  # each required one is filled in: its default stands
+        }  # fmt: skip
+        assert entry["metadata"]["ui_schema"] == {
+            "ui:order": ["quantity", "supplier", "deliver_on"],
+            "quantity": {"ui:widget": "updown"},
+            "deliver_on": {"ui:widget": "date"},
+        }
+        assert entry["message"] == (
+            "Confirm the reorder.\n"
+            "1. Units (a number): 200 (your order of 2026-11-02)\n"
+            "2. Supplier (SUP-04 or SUP-07): SUP-04 (your usual supplier)\n"
+            "3. Delivery date (a date, YYYY-MM-DD), if any\n"
+            "(Answer each, or say what to keep and what to change.)"
+        )
+        changed = [{"interruptId": entry["id"], "payload": {"quantity": 40}}]
+        done = (await post(http, {"resume": changed}))[-1]
+    # one object: what the person changed over what was filled in
+    assert done["result"] == 'Done. {"quantity": 40, "supplier": "SUP-04"}'
+
+
+async def test_a_form_is_answered_in_words_in_plain_chat(harness: Harness) -> None:
+    agent = asking(harness, FORM, "ask-form-words")
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        words = [{"interruptId": entry["id"], "payload": "keep all, deliver on the 20th"}]
+        done = (await post(http, {"resume": words}))[-1]
+    assert done["result"] == "Done. keep all, deliver on the 20th"
+
+
+async def test_a_remembered_value_is_shown_filled_in_a_single_question_too(
+    harness: Harness,
+) -> None:
+    """``recommended`` is the one field's default: for a number or a date, the value shown
+    filled in, with where it is from."""
+    args = {"question": "Which threshold?", "kind": "number", "recommended": "20",
+            "why": "your usual, said 2025-11-03"}  # fmt: skip
+    async with served(asking(harness, args, "ask-filled")) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+    assert entry["message"] == "Which threshold? (a number): 20 (your usual, said 2025-11-03)"
+    assert entry["responseSchema"] == {"type": ["number", "string"], "default": "20"}
+    assert entry["metadata"]["props"] == {"kind": "number", "options": [], "default": "20",
+                                          "why": "your usual, said 2025-11-03"}  # fmt: skip
+
+
+async def test_one_field_is_the_single_question_it_always_was(harness: Harness) -> None:
+    """One mechanism: a question with one value asked as a field is the question its plain
+    arguments make — the same interrupt, no form."""
+    flat = {"question": "Which region?", "options": ["north", "west"], "recommended": "west",
+            "why": "least stock"}  # fmt: skip
+    field = {"question": "Which region?", "fields": [
+        {"name": "region", "options": ["north", "west"], "default": "west",
+         "why": "least stock"}]}  # fmt: skip
+    seen = []
+    for n, args in enumerate((flat, field)):
+        async with served(asking(harness, args, f"ask-one-{n}")) as http:
+            [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        seen.append({k: entry[k] for k in ("reason", "message", "responseSchema", "metadata")})
+    assert seen[0] == seen[1] and seen[0]["reason"] == "choice"
+    assert seen[0]["metadata"]["props"] == {"kind": "text", "options": ["north", "west"]}
+
+
+async def test_a_forms_fields_are_named_once_each(harness: Harness) -> None:
+    twice = {"question": "Confirm.", "fields": [{"name": "a"}, {"name": "a"}]}
+    async with served(asking(harness, twice, "ask-twice")) as http:
+        done = (await post(http, {"messages": SAID}))[-1]
+    assert done["outcome"] == {"type": "success"} and "named once" in done["result"]
+
+
+async def test_ask_user_names_the_apps_own_controls_as_the_ones_to_call(
+    harness: Harness,
+) -> None:
+    """Beside ``ask_user`` the app's date picker is the control for a date: the tool says so
+    first, naming the app's tools; with an app that declared none it says nothing of them."""
+    from trellis.harness.tools.ask import APPS
+
+    picker = {"name": "pick_date", "description": "Show a date picker.",
+              "parameters": {"type": "object", "properties": {}}}  # fmt: skip
+    model = PlannedChat([])
+    agent = harness.wrap(ReAct(system_prompt="Help.", model=model), id="app-tools")
+    async with served(agent) as http:
+        await post(http, {"messages": SAID, "tools": [picker]})
+        await post(http, {"messages": SAID})
+    with_tools, without = (
+        {t["function"]["name"]: t["function"] for t in request["tools"]}
+        for request in (model.requests[0], model.requests[-1])
+    )
+    said = APPS.format(tools="pick_date")
+    plain = without["ask_user"]
+    assert with_tools["pick_date"]["description"] == "Show a date picker."
+    assert with_tools["ask_user"]["description"] == f"{said} {plain['description']}"
+    kinds = [f["parameters"]["properties"]["kind"]["description"] for f in
+             (with_tools["ask_user"], plain)]  # fmt: skip
+    assert kinds[0] == f"{kinds[1]} {said}"  # and where the kind of answer is chosen
+    assert "controls" not in json.dumps(plain)
+
+
+def test_a_forms_field_with_several_picks_is_an_array_of_its_options() -> None:
+    from trellis.harness.tools.ask import Field
+
+    regions = Field(name="regions", options=["north", "west"], multiple=True, default=["west"])
+    assert regions.in_form() == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["north", "west"]},
+        "uniqueItems": True,
+        "title": "regions",
+        "default": ["west"],
+    }
+    both = regions.model_copy(update={"default": ["north", "west"]})
+    assert both.line("Regions") == "Regions (north or west): north, west"

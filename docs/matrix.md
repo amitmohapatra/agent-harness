@@ -28,6 +28,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 | F36 ask: a question pauses the run, the answer resumes it | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36m ask_user: several picks among options, one recommended with why | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
+| F36f ask_user: several values asked at once are one form, the remembered ones filled in | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36a ask_user by itself: a chat front end's run is given it with nothing declared | partly 2 (3) | partly 2 (3) | partly 2 (3) | no (4) | no (4) | partly 2 (3) | partly 2 (3) | partly 2 (3) |
 | F04 a rejected approval: the call never runs and the model reads why | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (5) | partly 10 (6, 7) | no (8) | partly 10 (6, 7) | partly 10 (6, 7) | partly 10 (6, 7) | no (9) | no (10) |
@@ -124,6 +125,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 | F36 ask: a question pauses the run, the answer resumes it | yes 1 |
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | no (52) |
 | F36m ask_user: several picks among options, one recommended with why | no (52) |
+| F36f ask_user: several values asked at once are one form, the remembered ones filled in | no (52) |
 | F36a ask_user by itself: a chat front end's run is given it with nothing declared | no (52) |
 | F04 a rejected approval: the call never runs and the model reads why | yes 1 |
 | F35 framework-native approvals (HITL middleware, interrupt_on, needs_approval) | no (53) |

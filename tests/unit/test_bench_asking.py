@@ -92,6 +92,16 @@ def test_a_confirmation_recommends_the_remembered_value_first_and_says_it() -> N
         "answer lacks '200'",
         "recommended [], not '200'",
     ]
+    form = question("Confirm the order.\n1. Units (a number): 200 (your usual)")
+    form = form.model_copy(update={"props": {"kind": "form", "fields": [
+        {"name": "units", "kind": "number", "default": 200, "why": "your usual"},
+        {"name": "store", "kind": "text"}]}})  # fmt: skip
+    assert check(asked(form)) == []  # a form shows the remembered value filled in
+    assert b.asks(kind="form", recommended=True)(asked(form)) == []
+    assert b.asks(kind="form", recommended=True)(asked(question("How many?"))) == [
+        "kind=text",
+        "nothing recommended or filled in",
+    ]
     assert check(b.Chat(answers=["Your usual is 200 units: order that many?"])) == []  # in text
     assert check(b.Chat(answers=["How many units?"])) == ["answer lacks '200'"]
 

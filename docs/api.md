@@ -428,6 +428,7 @@ a2a(url)(message, user=, tenant=)` outside a run, as the run inside one)
 
 `ask_user()` — a tool the model asks the person with: `ask_user(question, options=None,
 kind="text")`, `kind` one of `text`, `date`, `date_range`, `number`; the answer is its result.
+`fields=[...]` asks several values as one form, the remembered ones filled in.
 A chat front end's run (`serve_chat`) has it by itself (off: `without=["ask"]`); any other run
 when its agent declares it (`ReAct(tools=[ask_user()])`) ([interrupts.md](interrupts.md#asking)).
 
