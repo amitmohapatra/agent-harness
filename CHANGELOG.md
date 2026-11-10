@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a kept table queried under its note's name reads its own rows
+
+A kept table's note names the table to query (`FROM sku_catalog_2`). Inside a query, the
+results a Deep Agents graph saved in its state joined the query and were named first (a
+`ChainMap` iterates its last map first), so they took that name: the footwear note's table
+read another turn's denim rows (ReAct on Deep Agents, adversarial `advconv-05`; the
+`deepagents` adapter too). `query.tables` now names the conversation's earlier turns' results
+first, then the run's own, then the graph's, which join only while a query runs. Adapters with
+no graph files (OpenAI Agents, Claude, Kimi, `create_agent`) keep the names they had.
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

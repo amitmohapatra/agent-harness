@@ -225,6 +225,31 @@ def test_two_results_of_one_tool_are_two_tables(journal: Journal) -> None:
     assert list(query.tables(run).values()) == ["rows", "rows_2", "rows_3"]
 
 
+def test_a_result_is_queried_under_the_table_its_note_named(journal: Journal) -> None:
+    """A kept table's note names its table (``results.tabled``) before the query runs; the
+    results a Deep Agents graph saved in its state join the query only while it runs
+    (``query.graph_results``). They never take the name the note gave: they did, and the
+    footwear note's ``sku_catalog_2`` read another turn's denim rows (ReAct on Deep Agents,
+    advconv-05). The conversation's earlier turns keep their names too."""
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    denim = "\n".join(["sku,cat", *(f"D{n},denim" for n in range(30))])
+    run.earlier_results = {results.PREFIX + "/earlier": denim}  # type: ignore[union-attr]
+    run.kept_from[results.PREFIX + "/earlier"] = "catalog"  # type: ignore[union-attr]
+    footwear = "\n".join(["sku,cat", *(f"F{n},footwear" for n in range(30))])
+    noted = results.tabled(footwear, tool="catalog")
+    path = noted.split("also saved at ")[1].split(". ")[0]
+    assert "FROM catalog_2" in noted  # the earlier turn's is catalog
+    shirts = "\n".join(["sku,cat", *(f"S{n},shirts" for n in range(30))])
+    evicted = {results.PREFIX + "/call_1": shirts}  # another call's, evicted by Deep Agents
+    with query.graph_results(evicted, dict.fromkeys(evicted, "catalog")):
+        sql = "SELECT DISTINCT cat FROM catalog_2"
+        said = asyncio.run(query.query({"file_path": path, "sql": sql}))
+        assert said == "cat\nfootwear", said
+        earlier = asyncio.run(query.query({"file_path": path, "sql": "SELECT cat FROM catalog"}))
+        assert earlier.splitlines()[1] == "denim", earlier
+
+
 def amounts(seed: int, n: int = 6000) -> tuple[str, Decimal]:
     """``n`` two-decimal amounts as CSV, and their exact sum."""
     rng = random.Random(seed)

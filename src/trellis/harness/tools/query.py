@@ -397,12 +397,18 @@ def saved(runtime: Any) -> Mapping[str, str]:
 def tables(runtime: Any) -> dict[str, str]:
     """Every result the run keeps, by its path, and the table it is in a query: the name of the
     tool that returned it (``results.keep``'s ``tool``, in this attempt), else ``result_<n>``
-    in the order kept — each name once, never :data:`TABLE` (the queried file's own)."""
-    kept = saved(runtime)
-    tools = {**_GRAPH.get()[1], **(getattr(runtime, "kept_from", None) or {})}
+    — each name once, never :data:`TABLE` (the queried file's own) — given in the order the
+    results became the run's: its conversation's earlier turns', then its own, then those its
+    Deep Agents graph saved, which join only while a query runs (:func:`graph_results`). So a
+    name a kept table's note gave (``results.tabled``) stays that table's: a graph's file named
+    first took it, and a query read another turn's rows under it."""
+    graph, tools = _GRAPH.get()
+    tools = {**tools, **(getattr(runtime, "kept_from", None) or {})}
+    earlier = getattr(runtime, "earlier_results", None) or {}
     used = {TABLE}
     found: dict[str, str] = {}
-    for n, path in enumerate(kept, start=1):
+    order = dict.fromkeys([*earlier, *runtime.replay.journal.results, *graph])
+    for n, path in enumerate(order, start=1):
         base = column_names([tools.get(path) or f"{TABLE}_{n}"])[0]
         name, more = base, 1
         while name in used:
