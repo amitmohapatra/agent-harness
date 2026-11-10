@@ -35,7 +35,10 @@ def test_a_bare_function_is_a_source_and_anything_else_is_refused() -> None:
     def lookup(sku: str) -> int:
         return 1
 
-    assert as_source(lookup).spec.name == "lookup"  # type: ignore[attr-defined]
+    made = tool(lookup, side_effects="read")
+    assert as_source(made) is made and made.spec.side_effects == "read"
+    bare = as_source(lookup)  # it says nothing of what it does: each call asks
+    assert (bare.spec.name, bare.spec.side_effects) == ("lookup", "unknown")  # type: ignore[attr-defined]
     with pytest.raises(ConfigurationError, match="not a tool: 42 — give a function"):
         as_source(42)  # type: ignore[arg-type]
 
@@ -102,7 +105,7 @@ async def test_variadic_parameters_are_not_tool_arguments() -> None:
     def flexible(sku: str, *rest: str, **options: str) -> str:
         return sku
 
-    [resolved] = await tool(flexible).resolve()
+    [resolved] = await tool(flexible, side_effects="read").resolve()
     assert resolved.spec.input_schema is not None
     assert set(resolved.spec.input_schema["properties"]) == {"sku"}
 

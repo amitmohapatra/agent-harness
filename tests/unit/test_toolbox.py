@@ -124,7 +124,7 @@ async def test_mcp_tools_have_the_side_effects_of_their_annotations() -> None:
     )
     assert {n: t.side_effects for n, t in tools.items()} == {
         "erp-get_stock": "read",
-        "erp-create_po": "write",
+        "erp-create_po": "irreversible",  # no annotations: the protocol's default
         "erp-delete_po": "irreversible",
     }
     assert await tools["erp-get_stock"].run({"sku": "a"}) == {"ok": "erp-get_stock"}
@@ -134,7 +134,10 @@ async def test_mcp_tools_have_the_side_effects_of_their_annotations() -> None:
 @pytest.mark.parametrize(
     ("hints", "expected"),
     [
-        (None, "write"),
+        (None, "irreversible"),  # nothing said: the protocol's default is destructive
+        ({}, "irreversible"),
+        ({"read_only_hint": False}, "irreversible"),
+        ({"idempotent_hint": True}, "irreversible"),
         ({"read_only_hint": True}, "read"),
         ({"read_only_hint": True, "destructive_hint": True}, "read"),
         ({"destructive_hint": True}, "irreversible"),
@@ -142,12 +145,15 @@ async def test_mcp_tools_have_the_side_effects_of_their_annotations() -> None:
     ],
 )
 def test_annotations_give_an_mcp_tool_its_side_effects(hints: dict | None, expected: str) -> None:
-    annotations = None
+    """As the protocol reads them: a hint not given has its default (read-only: false,
+    destructive: true) — an SDK object's attributes, and the wire's names in a mapping."""
+    annotations = wire = None
     if hints is not None:
         annotations = SimpleNamespace(read_only_hint=None, destructive_hint=None)
         for name, value in hints.items():
             setattr(annotations, name, value)
-    assert side_effects_of(annotations) == expected
+        wire = ToolAnnotations(**hints).model_dump(by_alias=True, exclude_none=True)
+    assert side_effects_of(annotations) == side_effects_of(wire) == expected
 
 
 async def test_every_tool_is_published_once_mcp_with_annotations_local_with_side_effects() -> None:
@@ -242,7 +248,10 @@ async def test_two_tools_of_one_name_are_refused() -> None:
         return x
 
     with pytest.raises(ConfigurationError, match="erp-get_stock"):
-        await resolved([Def("erp-get_stock", "erp")], sources=[tool(dup, name="erp-get_stock")])
+        await resolved(
+            [Def("erp-get_stock", "erp")],
+            sources=[tool(dup, name="erp-get_stock", side_effects="read")],
+        )
 
 
 # --------------------------------------------------------------------------- freshness

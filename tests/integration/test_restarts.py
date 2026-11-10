@@ -30,7 +30,7 @@ from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from tests.support import resume_worker
-from tests.support.arm import arm, native_tools
+from tests.support.arm import arm, declaring, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.durable import SharedSaver
 from tests.support.journals import journal_of
@@ -335,6 +335,7 @@ async def test_an_sdk_agents_own_tool_is_not_run_again_on_another_worker(
     model = ScriptedModel([("deliver", {"order": "o1"}), ("die", {}), ("die", {}), "delivered"])
 
     def agent(h: Harness) -> Any:
+        declaring(h, deliver="write", die="write")  # the SDK's tools: the catalog says what
         return Agent(name="s", model=model, tools=[deliver, die])
 
     _, result = await crash_then_finish(workers, agent, "deliver o1")

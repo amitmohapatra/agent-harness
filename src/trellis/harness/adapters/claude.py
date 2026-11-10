@@ -96,7 +96,7 @@ from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
 from trellis.harness.tools.ask import ask_question
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+from trellis.harness.tools.base import UNDECLARED, SideEffects
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
@@ -111,7 +111,8 @@ if TYPE_CHECKING:
 #: tool catalog); a subagent's
 #: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
 #: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
-#: may do anything its command does: a write. Any other tool the CLI asks about is a write.
+#: may do anything its command does: a write. Any other tool the CLI asks about has said
+#: nothing of what it does: a person approves each call (its risk in the catalog says more).
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Read": "read",
     "Glob": "read",
@@ -928,7 +929,7 @@ def _spec(runtime: Runtime, name: str) -> ToolSpec:
     """A call's tool as governance decides it: its risk as the run's tool set has it (an
     in-process server's tool: its annotations), else a built-in's
     (:data:`BUILTIN_SIDE_EFFECTS`)."""
-    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
     return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
 
 
@@ -1029,7 +1030,7 @@ def native_spec(name: str) -> ToolSpec:
     parts = name.split("__")
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
-    risk = BUILTIN_SIDE_EFFECTS.get(name, DEFAULT_SIDE_EFFECTS)
+    risk = BUILTIN_SIDE_EFFECTS.get(name, UNDECLARED)
     spec = builtin(ToolSpec(name=name, side_effects=risk))
     return helper(spec) if name in SUBAGENT_TOOLS else spec
 

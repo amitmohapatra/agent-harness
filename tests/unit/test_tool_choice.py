@@ -80,7 +80,12 @@ def test_a_function_tool_keeps_every_paragraph_and_describes_its_parameters() ->
     properties = lost_sales.spec.input_schema["properties"]  # type: ignore[index]
     assert properties["store"]["description"] == "The store's id."
     assert properties["weeks"]["description"] == "Weeks back, 1 to 52."
-    assert tool(lambda: 1, name="given", description="Said here.").spec.description == "Said here."
+    assert (
+        tool(
+            lambda: 1, name="given", description="Said here.", side_effects="read"
+        ).spec.description
+        == "Said here."
+    )
 
 
 def test_annotations_resolve_where_the_function_is_and_as_written_otherwise() -> None:
@@ -88,7 +93,7 @@ def test_annotations_resolve_where_the_function_is_and_as_written_otherwise() ->
         """A return type nobody can resolve: the parameters as written still work."""
         return x
 
-    made = tool(later)
+    made = tool(later, side_effects="read")
     assert made.spec.input_schema["properties"]["x"]["type"] == "integer"  # type: ignore[index]
 
 
@@ -130,7 +135,10 @@ async def test_the_same_tool_on_two_servers_is_two_names_and_a_clash_is_refused(
     tools, _, _ = await resolved([Def("erp-lookup", "erp"), Def("crm-lookup", "crm")])
     assert sorted(tools) == ["crm-lookup", "erp-lookup"]
     with pytest.raises(ConfigurationError, match="two tools are named erp-lookup"):
-        await resolved([Def("erp-lookup", "erp")], sources=[tool(lambda: 1, name="erp-lookup")])
+        await resolved(
+            [Def("erp-lookup", "erp")],
+            sources=[tool(lambda: 1, name="erp-lookup", side_effects="read")],
+        )
 
 
 # --------------------------------------------------------------------------- lint
@@ -222,7 +230,9 @@ async def test_the_toolbox_logs_what_the_check_found_when_its_tools_change(
 ) -> None:
     terse = Def("erp-get", "erp", annotations=READ)
     with caplog.at_level(logging.WARNING, logger="trellis.tools"):
-        await resolved([terse], sources=[tool(lambda: 1, name="mine", description="")])
+        await resolved(
+            [terse], sources=[tool(lambda: 1, name="mine", description="", side_effects="read")]
+        )
     said = [r.getMessage() for r in caplog.records if "tool choice" in r.getMessage()]
     assert said == [
         "tool choice: mine: no description: say what it is for, and when",

@@ -6,7 +6,8 @@ besides them, every run has the MCP tools the agent's Bifrost virtual key allows
 automatically (``tools.toolbox``).
 
 Each resolves to :class:`~trellis.harness.tools.base.Tool`\\ s once per agent. A local
-function says what it does (``side_effects``) and an OpenAPI operation is judged by its method;
+function says what it does (``side_effects``; one that does not asks a person at each call)
+and an OpenAPI operation is judged by its method;
 the tool catalog may override either (``trellis.harness.governance``). Each takes a
 ``call_timeout``: the most one call may take (an OpenAPI operation and an A2A exchange have one
 by default, the same: :data:`~trellis.harness.tools.base.REMOTE_TIMEOUT_SECONDS`).
@@ -30,8 +31,8 @@ from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.credentials import Target, headers_for
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
-    DEFAULT_SIDE_EFFECTS,
     REMOTE_TIMEOUT_SECONDS,
+    UNDECLARED,
     SideEffects,
     Source,
     Sourced,
@@ -72,7 +73,7 @@ class FunctionTool:
         *,
         name: str | None = None,
         description: str | None = None,
-        side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+        side_effects: SideEffects | None = None,
         idempotent: bool = False,
         timeout: float | None = None,
         response_format: ResponseFormat = "content",
@@ -85,21 +86,19 @@ class FunctionTool:
                 f"response_format is 'content' or 'content_and_artifact', not {response_format!r}"
             )
         self.fn = fn
+        named = name or fn.__name__
         self.response_format = response_format
         self.model = _arguments_model(fn)
         said, params = documented(inspect.getdoc(fn) or "")
         self.spec = ToolSpec(
-            name=name or fn.__name__,
+            name=named,
             description=description or said,
             input_schema=_described(self.model.model_json_schema(), params),
             output_schema=output_schema(fn),
             source="local",
-            side_effects=side_effects,
+            side_effects=side_effects or UNDECLARED,
             idempotent=idempotent,
-            **data_of(
-                {"freshness": freshness, "max_age": max_age, "paged": paged},
-                name=name or fn.__name__,
-            ),
+            **data_of({"freshness": freshness, "max_age": max_age, "paged": paged}, name=named),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -133,7 +132,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects | None = None,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -146,7 +145,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects | None = None,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -160,7 +159,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects | None = None,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -168,8 +167,14 @@ def tool(
     max_age: float | None = None,
     paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
-    """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
+    """A function as a tool: ``@tool(side_effects="read")``, ``tool(fn, side_effects="read")``
+    — or ``@tool`` and ``tool(fn)``, which say nothing of what it does.
 
+    ``side_effects`` is what a call does — ``"read"`` (it changes nothing: it runs),
+    ``"write"`` (it changes what can be changed back: it runs and is announced) or
+    ``"irreversible"`` (it cannot be undone: a person approves each call). A tool that does
+    not say (a bare function in ``tools=[...]`` too) is held to nothing: a person approves
+    each of its calls, and the toolbox says so once, naming it (``tools.toolbox``).
     The schema comes from the signature (pydantic validates the model's arguments), each
     parameter described by the docstring's ``Args:`` (or ``:param x:``) unless an
     ``Annotated[..., Field(description=...)]`` says; the description is the docstring without

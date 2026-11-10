@@ -53,7 +53,7 @@ def said_to_model(model: ScriptedChatModel) -> list[str]:
 
 # --------------------------------------------------------------------------- names, schemas
 async def test_two_functions_of_one_name_are_refused(harness: Harness) -> None:
-    other = tool(lambda item: item, name="look", description="Another look.")
+    other = tool(lambda item: item, name="look", description="Another look.", side_effects="read")
     agent = arm(harness.wrap(ReAct("s", ScriptedChatModel(turns=["x"])), id="dup"), [look, other])
     result = await agent.run("x", user="u")
     assert result.status is RunStatus.ERROR and result.error is not None
@@ -61,7 +61,7 @@ async def test_two_functions_of_one_name_are_refused(harness: Harness) -> None:
 
 
 def test_an_empty_description_and_a_unicode_name_are_kept_and_flagged() -> None:
-    bare = tool(lambda: 1, name="préstamo", description="")
+    bare = tool(lambda: 1, name="préstamo", description="", side_effects="read")
     sent = convert_to_openai_tool(lc.convert([bare.tool])[0])["function"]
     assert (sent["name"], sent["description"]) == ("préstamo", "préstamo")  # the name stands in
     assert [f.code for f in lint([bare.spec])] == ["invalid_name", "no_description"]

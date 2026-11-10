@@ -64,8 +64,8 @@ def tool_messages(model: ScriptedChatModel, call: int) -> list[tuple[str, Any]]:
 async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
     harness: Harness,
 ) -> None:
-    zeta = tool(lambda: "z", name="zeta")
-    alpha = tool(lambda: "a", name="alpha")
+    zeta = tool(lambda: "z", name="zeta", side_effects="read")
+    alpha = tool(lambda: "a", name="alpha", side_effects="read")
     model = ScriptedChatModel(turns=[("zeta", {}), "done"])
     target = graph(model, HarnessTools(), checkpointer=RunCheckpointer())
     agent = arm(harness.wrap(target, id="sorted", without={"schedules"}), [zeta, alpha])
@@ -79,7 +79,7 @@ async def test_a_graph_with_harness_tools_takes_the_runs_tools_sorted_per_call(
 
 
 async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None:
-    @tool
+    @tool(side_effects="read")
     def own(x: str) -> str:
         """The graph's own tool, not the harness's."""
         return x
@@ -90,6 +90,8 @@ async def test_a_graphs_own_tools_stay_beside_the_runs(harness: Harness) -> None
     def mine(x: str) -> str:
         """Bound when the graph is built."""
         return f"mine {x}"
+
+    mine.metadata = {"side_effects": "read"}
 
     model = ScriptedChatModel(turns=[("mine", {"x": "1"}), "done"])
     target = graph(model, HarnessTools(), tools=[mine])

@@ -250,6 +250,8 @@ async def test_a_graph_built_by_hand_pulls_from_memory_with_memory_tools(
         """Where a SKU is shelved."""
         return f"{sku}: aisle 4"
 
+    shelf.metadata = {"side_effects": "read"}
+
     tools = [shelf, *await memory_harness.memory_tools()]
     assert [t.name for t in tools] == ["shelf", *MEMORY_TOOLS]
     model = ScriptedChatModel(

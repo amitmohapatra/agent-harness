@@ -15,8 +15,10 @@ With ``Harness(credentials=)`` an HTTP server's connections are per tenant, user
 headers (a session is the identity's that opened it), each closed after
 :data:`~trellis.harness.credentials.IDLE_SECONDS` unused (``credentials.py``).
 Its tools are named ``<server>-<tool>`` (``server`` from ``name=``, else the name the server
-gives itself), their side effects come from their annotations (``readOnlyHint``: ``read``;
-``destructiveHint``: ``irreversible``; otherwise ``write``; the catalog has the last word), and
+gives itself), their side effects come from their annotations as the protocol reads them
+(``readOnlyHint``: ``read``; else ``irreversible`` — a person approves each call — unless the
+tool says ``destructiveHint: false``: ``write``; a tool with no annotations says nothing, so it
+is ``irreversible``; the catalog has the last word), and
 every call goes through the bridge as any other: governance, the journal, retries of reads,
 paging, the run's records.
 
@@ -59,6 +61,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.tools")
 
+#: The annotations a tool's risk is read from, by their names on the wire.
+READ_ONLY: Final = "readOnlyHint"
+DESTRUCTIVE: Final = "destructiveHint"
 #: An HTTP server's address.
 URL: Final = re.compile(r"^https?://", re.IGNORECASE)
 #: What a server that asks while several of its calls are under way is told (before
@@ -100,11 +105,13 @@ def server_name(text: str) -> str:
 
 def side_effects_of(annotations: Any) -> SideEffects:
     """An MCP tool's side effects from its server's annotations — the MCP SDK's or, through the
-    gateway, bifrost-sdk's ``ToolAnnotations``: hints, not guarantees (the catalog has the last
-    word)."""
-    if _hint(annotations, "read_only_hint", "readOnlyHint"):
+    gateway, bifrost-sdk's ``ToolAnnotations`` — read as the protocol defines them: a hint a
+    tool does not give has the protocol's default (``readOnlyHint`` false, ``destructiveHint``
+    true), so a tool is ``irreversible`` unless it says it only reads or is not destructive —
+    one with no annotations too. Hints, not guarantees (the catalog has the last word)."""
+    if _hint(annotations, "read_only_hint", READ_ONLY, default=False):
         return "read"
-    if _hint(annotations, "destructive_hint", "destructiveHint"):
+    if _hint(annotations, "destructive_hint", DESTRUCTIVE, default=True):
         return "irreversible"
     return "write"
 
@@ -119,11 +126,14 @@ def data_of_listed(listed: Any) -> dict[str, Any]:
     )
 
 
-def _hint(annotations: Any, attribute: str, key: str) -> bool:
-    """An annotation's hint: an SDK object's attribute, or a mapping's key (the wire's name)."""
+def _hint(annotations: Any, attribute: str, key: str, *, default: bool) -> bool:
+    """An annotation's hint: an SDK object's attribute, or a mapping's key (the wire's name);
+    the protocol's ``default`` where the tool does not give it."""
     if isinstance(annotations, Mapping):
-        return bool(annotations.get(key))
-    return bool(getattr(annotations, attribute, None))
+        found = annotations.get(key)
+    else:
+        found = getattr(annotations, attribute, None)
+    return default if found is None else bool(found)
 
 
 class MCPSource:

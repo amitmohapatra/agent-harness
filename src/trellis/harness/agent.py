@@ -107,7 +107,7 @@ from trellis.harness.tools import query
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
-from trellis.harness.tools.toolbox import Toolbox
+from trellis.harness.tools.toolbox import Toolbox, said_undeclared
 from trellis.memory.models import PromptContext
 from trellis.runs import Job, RateLimitedError
 from trellis.runs.answers import answer_problem
@@ -945,8 +945,8 @@ class Agent:
         """The tools the framework gives the model itself (the adapter's ``native``), less the
         run's harness tools — with them the run's tool set — published to the tenant's catalog
         (an administrator's risk and rules govern them as any tool's), once per set of names
-        per tenant. One that cannot be read is a warning: the run goes on with its harness
-        tools."""
+        per tenant — those that declare no side effects named then, in one warning. One that
+        cannot be read is a warning: the run goes on with its harness tools."""
         try:
             specs = await self.adapter.native(self.target)
         except Exception as exc:
@@ -957,6 +957,7 @@ class Agent:
         if found and self._published_native.get(runtime.tenant) != names:
             governance = self.harness._governance(runtime.tenant)
             await governance.publish(list(found.values()))
+            said_undeclared(list(found.values()))
             self._published_native[runtime.tenant] = names
         return found
 

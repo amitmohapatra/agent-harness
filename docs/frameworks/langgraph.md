@@ -30,8 +30,12 @@ h = Harness()  # the deployment is the environment
 
 @tool
 def reorder(sku: str, qty: int) -> str:
-    """Order more units of a SKU."""  # the catalog says it is irreversible: a person approves
+    """Order more units of a SKU."""
     ...
+
+
+# what it does, said on the tool (or its risk in the catalog); said nowhere, each call asks
+reorder.metadata = {"side_effects": "irreversible"}
 
 
 # 1. your graph, with HarnessTools for the gateway's MCP tools and the memory tools
@@ -51,7 +55,9 @@ result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="
 
 The graph's own tools are governed as its tool node runs them — the catalog's risk and rules,
 approvals, the journal, the records — their risk the tool catalog's (an administrator's, in the
-memory service; without it, a write). `HarnessTools` offers the harness's tools at each model
+memory service), else the tool's own word (`tool.metadata = {"side_effects": "read"}`); a tool
+that says nothing asks a person at each call
+([governance.md](../governance.md#a-tool-that-does-not-say-what-it-does)). `HarnessTools` offers the harness's tools at each model
 call: every MCP tool the Bifrost virtual key allows and — memory on — the memory tools
 (`memory_search`, `memory_remember`, `memory_update`, `memory_forget`, `profile_edit`,
 `tool_search`). A hand-built graph takes the memory tools alone with `await h.memory_tools()`.

@@ -98,6 +98,8 @@ async def main() -> None:
             answer = await stock.run(question, user=run.user)
             return str(answer.answer)
 
+        # the graph's own tool says what it does (said nowhere, each call waits for a person)
+        ask_stock.metadata = {"side_effects": "read"}
         graph = create_agent(
             langchain_model([("ask_stock", {"question": QUESTION}), "3 left"]), tools=[ask_stock]
         )

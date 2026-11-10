@@ -48,11 +48,16 @@ class McpTool:
     @property
     def description(self) -> str:
         """The docstring without its ``Args:`` (as the harness reads a local tool's)."""
-        return local_tool(self.fn).spec.description
+        return self._read().spec.description
 
     def schema(self) -> dict[str, Any]:
         """The arguments' JSON schema, each described by the docstring's ``Args:``."""
-        return dict(local_tool(self.fn).spec.input_schema or {})
+        return dict(self._read().spec.input_schema or {})
+
+    def _read(self) -> Any:
+        """The function as the harness reads a local tool: for its description and schema."""
+        effects = "read" if self.read_only else "irreversible" if self.destructive else "write"
+        return local_tool(self.fn, side_effects=effects)
 
 
 @dataclass

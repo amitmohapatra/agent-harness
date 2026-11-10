@@ -317,7 +317,7 @@ async def test_a_result_from_outside_is_an_ask_in_the_tool_on_every_adapter(
 
 
 async def test_a_refused_result_from_outside_is_an_error_the_model_reads(harness: Harness) -> None:
-    @tool
+    @tool(side_effects="read")
     async def scan(page: int) -> Any:
         """Scan a page."""
         runtime = current()

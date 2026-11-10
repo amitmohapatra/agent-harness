@@ -152,7 +152,7 @@ async def main() -> None:
     async def sandbox_exec(command: str) -> dict[str, Any]:
         return (await box.exec(command, timeout=30)).model_dump()
 
-    run = governed(sandbox_exec, Governance(), on_ask=lambda decision: True)
+    run = governed(sandbox_exec, Governance(), side_effects="write", on_ask=lambda decision: True)
     print(await run(command="wc -l sales.csv"))
     await provider.delete(box.ref)
 

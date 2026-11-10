@@ -145,6 +145,7 @@ from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     FAILED,
+    UNDECLARED,
     SideEffects,
     Sourced,
     Tool,
@@ -242,6 +243,22 @@ FILE_TOOLS: Final = FILE_READS | FILE_WRITES
 FILES_CHANNEL: Final = "files"
 
 
+#: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
+#: sandbox tool is (``sandbox().tools()``).
+EXECUTE: Final = "execute"
+#: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
+FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
+
+
+def framework_made(tool: Any) -> bool:
+    """Whether the framework made ``tool`` (its code is the framework's): only then is it one
+    of the built-ins the harness knows by name — the graph's state tools, Deep Agents' file
+    tools and ``execute``. A tool of the agent's own with a built-in's name says what it does
+    itself, as any other does."""
+    code = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+    return (getattr(code, "__module__", None) or "").startswith(FRAMEWORK_CODE)
+
+
 def outside_state(name: str) -> dict[str, Any]:
     """The marks of a Deep Agents file tool ``name`` on a backend outside the graph's state:
     governed (:data:`OUTSIDE_STATE`), a read or a write."""
@@ -253,7 +270,8 @@ def declare_files(graph: Any) -> None:
     :func:`outside_state` in each graph whose files are not its state (no
     :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
     ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
-    is: those calls only change the state, which its checkpoint keeps."""
+    is: those calls only change the state, which its checkpoint keeps. Deep Agents'
+    :data:`EXECUTE` is declared a write. Only the framework's own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -266,10 +284,15 @@ def declare_files(graph: Any) -> None:
         outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
         for tool in bound_tools(found):
             name = getattr(tool, "name", None)
-            if outside and name in FILE_TOOLS and not (tool.metadata or {}).get(OUTSIDE_STATE):
-                tool.metadata = {**(tool.metadata or {}), **outside_state(name)}
-            elif name == TASK_TOOL:
+            said = tool.metadata or {}
+            if name == TASK_TOOL:
                 pending.extend(subagent_graphs(tool))
+            elif not framework_made(tool):
+                continue
+            elif outside and name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
+                tool.metadata = {**said, **outside_state(name)}
+            elif name == EXECUTE and "side_effects" not in said:
+                tool.metadata = {**said, "side_effects": "write"}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
@@ -342,12 +365,13 @@ async def governed_call(
 ) -> ToolMessage | Command[Any]:
     """A framework's own tool call, inside a harness run, run as the harness's are: governance
     decides it (the catalog's risk, else the tool's declared one in its
-    ``metadata["side_effects"]``, else its MCP-style annotations, else ``write``: announced), a
+    ``metadata["side_effects"]``, else its MCP-style annotations, else none: it asks), a
     person approves when it asks, and it is journaled (a resume does not run it again), timed,
     traced and recorded (``tools.bridge``). What the tool returned is returned as it is — a
     ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
     from the journal, as the message the model read. The harness's tools, the graph's state
-    tools (:data:`STATE_TOOLS`), a call already governed and any call outside a run are let
+    tools (:data:`STATE_TOOLS`, the framework's: :func:`framework_made`), a call already
+    governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
     (:data:`OUTSIDE_STATE`) is governed. A call repeating an earlier one of its model step
     (the same tool, the same arguments) does not run — the harness's tools' included — and
@@ -357,7 +381,8 @@ async def governed_call(
     own = request.tool
     if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
-    if call["name"] in STATE_TOOLS and not (own.metadata or {}).get(OUTSIDE_STATE):
+    state_only = call["name"] in STATE_TOOLS and framework_made(own)
+    if state_only and not (own.metadata or {}).get(OUTSIDE_STATE):
         return _scratch_said(runtime, call["name"], await handler(request))
     _, step = _step_of(request)
     first = _repeats(step).get(str(call["id"]))
@@ -659,13 +684,15 @@ _INSTALLED: Final = "_trellis_governed"
 
 def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
-    ``irreversible``), else MCP-style annotations (``readOnlyHint``: read, ``destructiveHint``:
-    irreversible), else ``write``."""
+    ``irreversible``), else MCP-style annotations (read as an MCP tool's:
+    ``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves each call
+    until the tool, or the catalog, says what it does)."""
     found = dict(metadata or {})
     declared = found.get("side_effects")
     if declared in get_args(SideEffects):
         return str(declared)
-    return annotated(found.get("annotations"))
+    hints = found.get("annotations")
+    return UNDECLARED if hints is None else annotated(hints)
 
 
 def spec_of(tool: BaseTool) -> ToolSpec:

@@ -598,11 +598,13 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
-    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, outside_state
+    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, framework_made, outside_state
 
     runs = supports_execution(backend)
     for tool in graph_tools(graph):
         marks: dict[str, Any] = {}
+        if not framework_made(tool):
+            continue  # the agent's own tool of that name: it says what it does itself
         if outside and tool.name in FILE_TOOLS:
             marks = outside_state(tool.name)
         elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):

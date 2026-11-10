@@ -35,6 +35,7 @@ from typing import Any, Final, Protocol
 
 from trellis.contracts import Feedback, ToolSpec
 from trellis.harness.bounded import LRUSet
+from trellis.harness.tools.mcp import DESTRUCTIVE, side_effects_of
 from trellis.memory import MemoryContext
 from trellis.memory.models import ApprovalSuggestion, SideEffects
 
@@ -160,8 +161,11 @@ class MemoryCatalog:
 
 def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, object]:
     """A tool as the catalog stores it. ``side_effects`` only where they are known (a local
-    tool declares them, an OpenAPI method implies them); an MCP tool sends its server's
-    annotations instead and the service derives the risk, so an administrator's stays."""
+    tool declares them, an OpenAPI method implies them). A tool whose risk no code declares —
+    an MCP tool, a framework's own that says nothing — sends its annotations instead and the
+    service derives the risk, so an administrator's stays; one the harness holds irreversible
+    for what it does not say (``tools.mcp.side_effects_of``: the protocol's default) sends
+    that default said, so the catalog derives the same risk."""
     stored: dict[str, object] = {
         "name": spec.name,
         "description": spec.description,
@@ -169,8 +173,10 @@ def entry(spec: ToolSpec, annotations: Mapping[str, Any] | None) -> dict[str, ob
         "source": spec.source,
         "server": spec.server,
     }
-    if spec.source != "mcp" and spec.side_effects in ("read", "write", "irreversible"):
+    if spec.source != "mcp" and spec.side_effects in RISKS:
         stored["side_effects"] = spec.side_effects
+    elif side_effects_of(annotations) == TOP_RISK:
+        annotations = {**(annotations or {}), DESTRUCTIVE: True}
     if annotations:
         stored["annotations"] = dict(annotations)
     return stored

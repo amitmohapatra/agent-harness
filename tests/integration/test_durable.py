@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.arm import arm
-from trellis import Harness, Runtime, Settings
+from trellis import Harness, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.runs import LocalRuns
 from trellis.harness.worker.__main__ import load, main
@@ -62,7 +62,8 @@ async def test_another_process_resumes_from_the_checkpoint_alone() -> None:
 
     store = LocalRuns()
     processes = [Harness(config=Settings(), runs=store) for _ in range(3)]
-    agents = [arm(h.wrap(billing, id="billing"), [charge]) for h in processes]
+    tools = [tool(charge, side_effects="write")]
+    agents = [arm(h.wrap(billing, id="billing"), tools) for h in processes]
     try:
         handle = await agents[0].start("order 7", user="u")
         assert await processes[0].worker([agents[0]]).run_once()

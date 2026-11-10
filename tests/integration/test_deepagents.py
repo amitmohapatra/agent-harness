@@ -69,6 +69,8 @@ async def test_a_tool_of_the_deep_agents_own_asking_with_interrupt_offers_what_i
         )
         return ",".join(picked)
 
+    pick_plans.metadata = {"side_effects": "read"}
+
     model = ScriptedChatModel(turns=[("pick_plans", {"customer": "acme"}), "offered a and b"])
     graph = create_deep_agent(model=model, tools=[pick_plans], checkpointer=InMemorySaver())
     agent = harness.wrap(graph, id="sales")
