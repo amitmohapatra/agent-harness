@@ -74,6 +74,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   recommended (`Option.recommended`, trellis-contracts 0.6.5) only with a why; a choice also
   takes another answer in words; plain chat reads the options numbered.
 - Claude's `AskUserQuestion` is the run's question, as Kimi's is.
+- A question's recommended option comes first wherever the model listed it: in the choice,
+  the app's own control and the numbered text.
 - The note asks "which one" when several things fit the user's words (it had made the model
   pick one or answer for each, against the app's own "ask which one is meant": break-and-fix
   clarify 17/21 → 21/21); how to use remembered rules, preferences and values

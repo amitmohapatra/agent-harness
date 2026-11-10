@@ -122,6 +122,29 @@ async def test_a_recommended_option_says_why_and_several_may_be_picked(
     assert done["result"] == 'Done. ["north", "east"]'
 
 
+async def test_the_recommended_option_comes_first_wherever_the_model_listed_it(
+    harness: Harness,
+) -> None:
+    """The option to pick is the one a person reads first: in the choice a UI renders, in the
+    app's own control and in the numbered text."""
+    args = {"question": "Which region?", "options": ["north", "south", "west"],
+            "recommended": "west", "why": "least stock"}  # fmt: skip
+    agent = asking(harness, args, "ask-first")
+    said = [{"id": "m", "role": "user", "content": "Send the pallet"}]
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": said}))[-1]["outcome"]["interrupts"]
+    assert entry["metadata"]["options"] == [
+        {"value": "west", "description": "least stock", "recommended": True},
+        "north",
+        "south",
+    ]
+    assert entry["metadata"]["props"]["options"] == ["west", "north", "south"]
+    assert entry["message"] == (
+        "Which region?\n1. west (Recommended: least stock)\n2. north\n3. south"
+        "\n(Pick one, or say another.)"
+    )
+
+
 @pytest.mark.parametrize(
     "args",
     [
