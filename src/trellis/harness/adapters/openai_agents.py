@@ -26,7 +26,9 @@
   a call governance asks about is held at the SDK's own gate (:func:`_gated`: a
   ``needs_approval`` policy asking governance, ``tools.convert.openai_agents.held``), as are
   the SDK's own ``needs_approval`` tools: they pause with the SDK's ``RunState``, and a resume
-  approves or rejects on that state and continues it (``RunState.approve``/``reject``). The SDK
+  approves or rejects on that state and continues it (``RunState.approve``/``reject``) — the
+  other calls governance's gate held in the same reply decided again then, one by one
+  (:func:`_decided`: the SDK keeps them waiting and does not ask the gate again). The SDK
   takes no edited arguments and no answer in place of a tool's result, so: a reject carries the
   reviewer's reason (``rejection_message``, the text the model reads); an answer is a reject
   whose message is the answer; an edit is a reject telling the model to call the tool again
@@ -214,8 +216,9 @@ class OpenAIAgentsAdapter:
         try:
             given = await self._input(agent, native_input)
             result = await Runner.run(agent, given, hooks=hooks, **options)
-            state = _edited_call(result, native_input)
-            if state is not None:  # the model called the edited tool as told: it runs, approved
+            resumed = native_input
+            while (state := await _continued(result, resumed, run.runtime)) is not None:
+                resumed = None  # an edited call is approved once
                 result = await Runner.run(agent, state, hooks=hooks, **options)
         except BaseException as exc:
             error = exc
@@ -236,8 +239,9 @@ class OpenAIAgentsAdapter:
         try:
             async for delta in _deltas(result):
                 yield delta
-            state = _edited_call(result, native_input)
-            if state is not None:
+            resumed = native_input
+            while (state := await _continued(result, resumed, run.runtime)) is not None:
+                resumed = None
                 result = Runner.run_streamed(agent, state, hooks=hooks, **options)
                 async for delta in _deltas(result):
                     yield delta
@@ -943,6 +947,39 @@ async def _deltas(result: Any) -> AsyncIterator[str]:
         data = getattr(event, "data", None)
         if event.type == "raw_response_event" and getattr(data, "type", None) == TEXT_DELTA:
             yield data.delta  # type: ignore[union-attr]
+
+
+async def _continued(result: Any, native_input: Any, runtime: Runtime) -> Any | None:
+    """The SDK's run state to continue with when its run paused on a call a person already
+    decided: the call a reviewer edited, made again with exactly the edited arguments
+    (:func:`_edited_call`), or the next call governance's gate held in the same model reply as
+    the one just answered (:func:`_decided`); else ``None``."""
+    state = _edited_call(result, native_input)
+    return state if state is not None else await _decided(result, runtime)
+
+
+async def _decided(result: Any, runtime: Runtime) -> Any | None:
+    """The run state with the first held call governance now lets run approved
+    (``RunState.approve``), when the run paused again on calls its gate held in an earlier
+    reply (``tools.convert.openai_agents.asked_again``) — the SDK keeps their pending
+    approvals on a resume and does not ask the gate again: each is decided now, in order,
+    after the answer to the one before (an approval for the conversation lets the rest of its
+    tool's calls run). ``None`` when none waits, or the first asks: its pause is governance's,
+    as the first call's was."""
+    from trellis.harness.tools.convert.openai_agents import asked_again
+
+    if runtime.pending is not None:  # a call of this attempt's reply asked: the run's pause
+        return None
+    for item in result.interruptions:
+        asks = await asked_again(item, result.context_wrapper)
+        if asks is None:
+            continue
+        if asks:
+            return None
+        state = result.to_state()
+        state.approve(item)
+        return state
+    return None
 
 
 def _edited_call(result: Any, native_input: Any) -> Any:

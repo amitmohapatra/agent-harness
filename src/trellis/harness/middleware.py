@@ -1028,7 +1028,7 @@ def _named(tool: BaseTool | dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- the model call
 class ModelHooks(AgentMiddleware):
     """Around every model call: the task kept ahead of a summary (the conversation's leading system
-    messages, the pushed memory context among them, and its first user message), the run's
+    messages, the pushed memory context among them, and the run's question), the run's
     ``on_error`` hooks for a call that failed, a ``chat`` span with the usage, at most ``timeout``
     seconds (and what is left of the run's time), and the stored ``prompt`` of the gateway
     (``stored("name", **vars)``), pinned for the run: with no variables to fill, on a routed
@@ -1099,6 +1099,9 @@ class ModelHooks(AgentMiddleware):
                     raise
                 raise error from exc
             _replied(span, reply)
+        # what the model counted of the request it was sent, as sent: a summarization between
+        # ``FitWindow`` and here made it smaller than what ``FitWindow`` counted
+        _calibrated(name or "", _size(request), reply)
         return reply
 
     def _in_order(self, request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
@@ -1155,23 +1158,27 @@ class ModelHooks(AgentMiddleware):
 def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     """The request with the task kept ahead of a summary: a summarization middleware (Deep
     Agents', LangChain's) replaces the older turns by a summary, the run's task and its pushed
-    memory context among them — the conversation's leading system messages and first user
-    message are put back before it."""
+    memory context among them — the conversation's leading system messages and the run's
+    question (its last user message not steered into it: earlier turns replayed before it are
+    the summary's) are put back before it."""
     messages = request.messages
     if not messages or not _summary(messages[0]):
         return request
-    state = list(request.state.get("messages", []))
-    head: list[AnyMessage] = []
-    for message in state:
-        if _summary(message):
-            break
-        head.append(message)
-        if isinstance(message, HumanMessage):
-            break
-    else:
+    # a summary kept in the state (LangChain's) ends what is looked at
+    state = list(itertools.takewhile(lambda m: not _summary(m), request.state.get("messages", [])))
+    asked = next(
+        (
+            m
+            for m in reversed(state)
+            if isinstance(m, HumanMessage) and STEERED not in m.response_metadata
+        ),
+        None,
+    )
+    if asked is None:
         return request
+    lead = itertools.takewhile(lambda m: isinstance(m, SystemMessage), state)
     sent = {m.id for m in messages if m.id is not None}
-    kept = [m for m in head if m.id is None or m.id not in sent]
+    kept = [m for m in [*lead, asked] if m.id is None or m.id not in sent]
     return request.override(messages=[*kept, *messages]) if kept else request
 
 
@@ -1811,9 +1818,7 @@ class FitWindow(AgentMiddleware):
         ratio = _RATIOS.get(name) or 1.0
         sent, counted = self._within(request, int(budget / ratio))
         try:
-            reply = await handler(sent)
-            _calibrated(name, counted, reply)
-            return reply
+            return await handler(sent)
         except Exception as exc:
             real = _refused_size(exc)
             if real is None:
@@ -1827,14 +1832,16 @@ class FitWindow(AgentMiddleware):
                 learned = ratio * 1.25
             FITTED["refit"] += 1
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
-            return await handler(self._within(request, int(budget / learned))[0])
+            return await handler(self._within(request, int(budget / learned), refit=True)[0])
 
-    def _within(self, request: ModelRequest[Any], budget: int) -> tuple[ModelRequest[Any], int]:
+    def _within(
+        self, request: ModelRequest[Any], budget: int, *, refit: bool = False
+    ) -> tuple[ModelRequest[Any], int]:
         """The request fitted to ``budget`` (counted tokens), and its count."""
         size = _size(request)
         if size <= budget:
             return request, size
-        fitted = self._fitted(request, budget)
+        fitted = self._fitted(request, budget, refit=refit)
         return fitted, _size(fitted)
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
@@ -1851,19 +1858,30 @@ class FitWindow(AgentMiddleware):
                 reply = max(reply, value)
         return max(0, int(window * FIT_SHARE) - reply)
 
-    def _results(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-        """The longest results cut (:func:`_cut`) — none with a summarization after it, whose
-        own overflow handling offloads them whole (Deep Agents')."""
-        return _cut(request, budget) if self.turns else request
+    def _results(
+        self, request: ModelRequest[Any], budget: int, *, refit: bool
+    ) -> ModelRequest[Any]:
+        """The longest results cut (:func:`_cut`) — with a summarization after it, whose own
+        overflow handling offloads them whole (Deep Agents'), only once the request was refused
+        all the same (``refit``: what it keeps, its ``read_file``'s pages, did not fit beside its
+        summary), and only the latest turn's: the messages it cuts the summary at stay where
+        they are."""
+        if self.turns:
+            return _cut(request, budget)
+        return _cut(request, budget, latest=True) if refit else request
 
-    def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+    def _fitted(
+        self, request: ModelRequest[Any], budget: int, *, refit: bool = False
+    ) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
+            lambda r, b: self._results(
+                _narrowed(r, b, runtime, least=0, before=before), b, refit=refit
+            ),
             lambda r, b: _latest(r) if self.turns else r,
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
@@ -1948,7 +1966,8 @@ def _narrowed(
     least: int,
     before: Collection[str] = (),
 ) -> ModelRequest[Any]:
-    """The request's tools ranked — those the run used (and the graph's own state tools),
+    """The request's tools ranked — those the run used (and the graph's own state tools, and
+    the readers of a result the run keeps, :data:`SAVING`, which its preview says to call),
     those an earlier call of the run kept (``before``: the same set call after call, so a
     prompt cache keeps its prefix), those the tool hints chose, then by the words they share
     with the user's latest message — and kept in that order while they fit what the messages
@@ -1957,6 +1976,7 @@ def _narrowed(
     if not tools:
         return request
     used = set(runtime.used) if runtime is not None else set()
+    used |= {*STATE_TOOLS, *(SAVING if _saved(request.state) else ())}
     hinted = (runtime.offered or set()) if runtime is not None else set()
     asked = next((m.text for m in reversed(request.messages) if isinstance(m, HumanMessage)), "")
     words = set(_WORD.findall(asked.lower()))
@@ -1964,7 +1984,7 @@ def _narrowed(
     def rank(item: tuple[int, BaseTool | dict[str, Any]]) -> tuple[int, int, int]:
         n, tool = item
         name = _named(tool)
-        must = name in used or name in STATE_TOOLS
+        must = name in used
         shared = len(words & set(_WORD.findall(f"{name} {_described(tool)}".lower())))
         tier = 0 if must else 1 if name in before else 2 if name in hinted else 3
         return (tier, -shared, n)
@@ -1972,7 +1992,7 @@ def _narrowed(
     room = budget - _size(request.override(tools=[]))
     kept: list[BaseTool | dict[str, Any]] = []
     for _, tool in sorted(enumerate(tools), key=rank):
-        must = _named(tool) in used or _named(tool) in STATE_TOOLS
+        must = _named(tool) in used
         cost = count_tokens_approximately([], tools=[tool])
         if must or len(kept) < least or cost <= room:
             kept.append(tool)
@@ -2082,21 +2102,28 @@ def _remembered_less(
     return request.override(messages=messages)
 
 
-def _cut(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
-    """The longest tool results cut to their head and tail until the request fits — inside a
-    run, each kept whole first (``tools.results``) and its cut saying where the rest is: the
-    ``read_file`` call that reads on from the line the cut starts on (offered with it), so no
-    row of it is out of the model's reach. A kept table's note (``results.noted``: its path
-    and the table to query) stays whole after the cut: without it, the model guessed a table
-    name and read another result's rows."""
+def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> ModelRequest[Any]:
+    """The longest tool results cut to their head and tail until the request (``latest``: its
+    latest turn, :func:`_latest`, whose results alone are cut) fits — inside a run, each kept
+    whole first (``tools.results``) and its cut saying where the rest is: the ``read_file`` call
+    that reads on from the line the cut starts on (offered with it), so no row of it is out of
+    the model's reach. A kept table's note (``results.noted``: its path and the table to query)
+    stays whole after the cut: without it, the model guessed a table name and read another
+    result's rows."""
     tools = list(request.tools)
     inside = current() is not None and any(isinstance(m, ToolMessage) for m in request.messages)
     if inside and all(_named(t) != READ_FILE for t in tools):
         tools.append(READ_FILE_TOOL)
     messages = list(request.messages)
-    over = _size(request.override(tools=tools)) - budget
+    measured = request.override(tools=tools)
+    # the latest turn's first message: the user's latest one (:func:`_latest`)
+    start = 0
+    if latest:
+        measured = _latest(measured)
+        start = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=0)
+    over = _size(measured) - budget
     for n in sorted(
-        (n for n, m in enumerate(messages) if isinstance(m, ToolMessage)),
+        (n for n, m in enumerate(messages) if n >= start and isinstance(m, ToolMessage)),
         key=lambda n: -len(messages[n].text),
     ):
         if over <= 0:
