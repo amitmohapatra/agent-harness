@@ -324,6 +324,16 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- OpenAI Agents: a write the person allowed for the conversation no longer asks again for the
+  other calls of the same model reply. Calls governance holds at the SDK's gate
+  (`needs_approval`) wait there together, and a resumed `RunState` keeps each one's pending
+  approval without asking its gate again: the person was asked about every one of them, in the
+  SDK's bare shape ("Approve <tool>?", no choices). Governance now decides each of them when
+  the run resumes, one by one, after the answer to the one before: a call allowed for the
+  conversation runs, and one that still asks (an `irreversible` tool) asks with governance's
+  question and choices. Live (Haiku, 46 runs each): 14 runs asked again before — every run
+  with parallel writes allowed for the conversation, streamed and after a handoff too — and 0
+  after.
 - A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
   tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
   graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell
