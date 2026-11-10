@@ -509,8 +509,10 @@ chat", not a date. Each case's chats are one user's, kept to the run and the
 case (`<user>-<run tag>-<case id>`): no other case nor an earlier run leaks into its memory;
 before a later chat the harness's writes are drained, as a chat an hour later finds them.
 A shell command that only reads (Claude Code's or Kimi's `Bash`: a program that reads, joined
-by pipes and sequences, or Python whose code writes nothing) no longer pauses: the harness lets
-it run (`trellis/harness/governance/shell.py`). A run that pauses to ask a person about a save
+by pipes and sequences, or Python whose text proves it writes nothing: only the modules,
+functions and methods listed as reading, a module never held under another name) no longer
+pauses: the harness lets it run (`trellis/harness/governance/shell.py`); what is not proven
+pauses. A run that pauses to ask a person about a save
 inside the run's own working folder
 (`complex.work_folder`: Kimi's and Claude's, under `KIMI_RUN_ROOT` / `CLAUDE_RUN_ROOT`): their
 file tool on a path there, or a command whose every write (`mkdir`, `touch`, `cp`'s target, a
