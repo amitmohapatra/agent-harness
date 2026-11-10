@@ -6,12 +6,17 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
+import shutil
 from pathlib import Path
 
 import pytest
 
 from trellis.harness.governance import shell
 from trellis.harness.governance.shell import approvable, read_only
+
+#: The standard library's own: the tests below stand in another for it.
+WHICH = shutil.which
 
 
 def py(code: str) -> str:
@@ -25,7 +30,7 @@ def _a_machine_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     test says of a command does not depend on the machine it runs on."""
     for variable in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
         monkeypatch.delenv(variable, raising=False)
-    monkeypatch.setattr(shell.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shell.shutil, "which", lambda name, path=None: f"/usr/bin/{name}")
 
 
 @pytest.fixture
@@ -598,10 +603,10 @@ def test_a_program_is_one_of_the_systems(run: Path, monkeypatch: pytest.MonkeyPa
     any other, or not at all, is not."""
     assert reads("cat s.csv && /usr/bin/wc -l s.csv && /bin/ls", run)
     for found in (f"{run}/bin/cat", "/tmp/x/cat", None):
-        monkeypatch.setattr(shell.shutil, "which", lambda name, found=found: found)
+        monkeypatch.setattr(shell.shutil, "which", lambda name, path=None, found=found: found)
         assert not reads("cat s.csv", run)
     monkeypatch.setattr(shell, "SYSTEM", frozenset({str(run)}))  # the folder itself, a system's
-    monkeypatch.setattr(shell.shutil, "which", lambda name: f"{run}/{name}")
+    monkeypatch.setattr(shell.shutil, "which", lambda name, path=None: f"{run}/{name}")
     assert not reads("cat s.csv", run)
 
 
@@ -631,6 +636,183 @@ def test_python_is_the_installed_one(run: Path, monkeypatch: pytest.MonkeyPatch)
         monkeypatch.setenv(variable, value)
         assert reads(plain, run) is safe, (variable, value)
         monkeypatch.delenv(variable)
+
+
+#: A read through the run's folder that a ``cd`` the line holds may leave elsewhere: the folder
+#: does not exist (``cd`` fails, and ``;`` goes on from where it was), a ``*`` that the shell
+#: fills in with a link out of the folder, or a ``cd`` in a pipe's own shell.
+ELSEWHERE_AFTER_CD = [
+    "cd nosuch ; cat ../secret",
+    "cd nosuch || cat ../secret",
+    "cd sub | cat ../secret",
+    "cd l* && cat passwd",
+    "cd sub ; cat ../../secret",
+]
+
+
+@pytest.mark.parametrize("command", ELSEWHERE_AFTER_CD)
+def test_a_cd_is_followed_to_every_folder_it_may_leave_the_line_in(command: str, run: Path) -> None:
+    (run / "sub").mkdir()
+    (run / "link").symlink_to("/etc")
+    assert not reads(command, run)
+
+
+def test_a_cd_that_surely_moves_the_line_is_followed(run: Path) -> None:
+    (run / "sub").mkdir()
+    assert reads("cd sub && cat ../a.csv && ls", run)
+    assert reads("cd sub ; cat a.csv", run)  # from the run's folder or from sub: both inside
+
+
+def test_the_environment_the_command_gets_is_the_one_read(
+    run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The adapter passes the environment its CLI is given: the ``PATH`` a program is found on,
+    what puts a folder on Python's path, the ``CDPATH`` a ``cd`` searches - not this
+    process's."""
+    plain = py("import json\nprint(json.dumps(1))")
+    command = {"command": plain}
+    assert read_only("Bash", command, run, env={})
+    for variable, value in (("PYTHONPATH", "src"), ("PYTHONSTARTUP", f"{run}/s.py")):
+        assert not read_only("Bash", command, run, env={variable: value}), variable
+    monkeypatch.setenv("PYTHONPATH", "src")  # this process's: not the CLI's
+    assert read_only("Bash", command, run, env={})
+    monkeypatch.undo()
+    monkeypatch.setattr(shell.shutil, "which", lambda name, path=None: f"{path}/{name}")
+    assert read_only("Bash", {"command": "cat a.csv"}, run, env={"PATH": "/usr/bin"})
+    assert not read_only("Bash", {"command": "cat a.csv"}, run, env={"PATH": f"{run}/bin"})
+    (run / "sub").mkdir()
+    cd = {"command": "cd sub && cat passwd"}
+    assert read_only("Bash", cd, run, env={"PATH": "/usr/bin"})
+    assert not read_only("Bash", cd, run, env={"PATH": "/usr/bin", "CDPATH": "/etc"})
+    plain_cd = {"command": "cd ./sub && cat a"}
+    assert read_only("Bash", plain_cd, run, env={"PATH": "/usr/bin", "CDPATH": "/etc"})
+
+
+def test_a_program_found_on_a_relative_path_is_found_from_the_shells_folder(
+    run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``PATH`` entry with no ``/`` at its start (``bin``, an empty one: ``.``) is a folder
+    of wherever the shell is: a ``cat`` there is not the system's."""
+    monkeypatch.setattr(shell.shutil, "which", WHICH)
+    system = os.pathsep.join(sorted(shell.SYSTEM))
+    command = {"command": "cat a.csv"}
+    assert read_only("Bash", command, run, env={"PATH": f"bin{os.pathsep}{system}"})
+    (run / "bin").mkdir()
+    (run / "bin" / "cat").write_text("")
+    (run / "bin" / "cat").chmod(0o755)
+    for path in (f"bin{os.pathsep}{system}", f"{run}/bin{os.pathsep}{system}"):
+        assert not read_only("Bash", command, run, env={"PATH": path}), path
+    assert not shell.Shell(None).read_only("Bash", command)
+    assert not shell._found("cat", shell._Folders(None, None, (), {"PATH": "bin"}))
+
+
+def test_a_command_given_a_folder_of_its_own_runs_there(run: Path) -> None:
+    """Kimi Code's ``Bash`` takes the folder a command runs in (``cwd``): as after a ``cd``,
+    one the run may read, and what the command reads is placed from there."""
+    (run / "sub").mkdir()
+    (run / "link").symlink_to("/etc")
+    kept = run.parent / "kept"
+    assert read_only("Bash", {"command": "cat a.csv", "cwd": "sub"}, run, [kept])
+    assert read_only("Bash", {"command": "cat a.csv", "cwd": str(kept)}, run, [kept])
+    for cwd in ("/etc", "link", "..", "~", 3, "nosuch"):
+        assert not read_only("Bash", {"command": "cat passwd", "cwd": cwd}, run, [kept]), cwd
+    assert not read_only("Bash", {"command": "cat ../secret", "cwd": "sub/.."}, run, [kept])
+
+
+def test_a_shell_that_keeps_its_folder_is_read_from_every_folder_it_may_be_in(
+    tmp_path: Path,
+) -> None:
+    """Claude Code's shell keeps the folder a ``cd`` left it in. Once a person approved a
+    ``cd`` out of the folder, a later relative read is placed from there too, not from the
+    run's folder alone; a folder of the run's (``reads``) it went to, likewise."""
+    run, kept = tmp_path / "a" / "run", tmp_path / "b" / "kept"
+    run.mkdir(parents=True)
+    kept.mkdir(parents=True)
+    (run / "sub").mkdir()
+    (run / "link").symlink_to("/etc")
+    bash = shell.Shell(run, [kept], env={})
+    assert bash.read_only("Bash", {"command": "cat a.csv"})
+    bash.ran({"command": "ls -la"})  # no cd: where it was
+    assert bash.places == {run}
+    bash.ran({"command": "cd /etc && cat passwd"})  # a person approved it
+    assert bash.places == {run, Path("/etc").resolve()}
+    for command in ("cat passwd", "cat a.csv", py("print(open('a.csv').read())")):
+        assert not bash.read_only("Bash", {"command": command}), command
+    assert bash.read_only("Bash", {"command": f"cat {run}/a.csv && echo hi"})
+    for command in ("ls", "grep -r root", "du"):  # the folder it is in: /etc too
+        assert not bash.read_only("Bash", {"command": command}), command
+
+    bash = shell.Shell(run, [kept], env={})
+    bash.ran({"command": "cd link"})  # inside, by its name: /etc
+    assert not bash.read_only("Bash", {"command": "cat passwd"})
+    bash = shell.Shell(run, [kept], env={})
+    bash.ran({"command": f"cd {kept}"})  # a folder the run may read, beside another
+    assert not bash.read_only("Bash", {"command": "cat ../run/x"})  # b/run/x, not a/run/x
+    assert bash.read_only("Bash", {"command": "cat x"})  # in run or kept: both readable
+    bash = shell.Shell(run, [kept], env={})
+    bash.ran({"command": "cd sub && cd nosuch && ls"})  # stops at the one that fails
+    assert bash.places == {run, run / "sub"}
+    assert bash.read_only("Bash", {"command": "cat a.csv"})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd $HOME",
+        "cd",
+        "cd -",
+        "cd ~",
+        "cd s*",
+        "pushd /etc",
+        "ls && cd /etc",
+        "cd sub ; cd /etc",
+        "eval 'cd /etc'",
+        "source env.sh",
+        ". env.sh",
+        "builtin cd /etc",
+        "X=1 cd /etc",
+        "if true; then cd /etc; fi",
+        "ls\ncd /etc",
+        "echo $(cd /etc)",
+    ],
+)
+def test_a_move_that_cannot_be_followed_leaves_nothing_placed(command: str, run: Path) -> None:
+    bash = shell.Shell(run, env={})
+    assert shell.moves({"command": command})
+    bash.ran({"command": command})
+    assert bash.places is None
+    assert not bash.read_only("Bash", {"command": "cat a.csv"})
+    assert bash.read_only("Bash", {"command": "echo hi"})
+    bash.ran({"command": "cd /tmp"})  # not known stays not known
+    assert bash.places is None
+
+
+def test_a_move_under_way_or_in_the_background_leaves_nothing_placed(run: Path) -> None:
+    bash = shell.Shell(run, env={})
+    assert not bash.read_only("Bash", {"command": "cat a.csv"}, moving=True)
+    bash.ran({"command": "cd sub", "run_in_background": True})
+    assert bash.places is None
+    bash = shell.Shell(run, env={"CDPATH": "/etc"})
+    bash.ran({"command": "cd sub"})  # CDPATH may lead it elsewhere
+    assert bash.places is None
+    bash = shell.Shell(run, env={})
+    for n in range(shell.PLACES_MAX):
+        (run / f"d{n}").mkdir()
+        bash.ran({"command": f"cd d{n}"})
+    assert bash.places is None  # past PLACES_MAX folders
+
+
+def test_a_command_that_cannot_move_its_shell_is_known_so() -> None:
+    for command in (
+        "ls .",
+        "echo cd",
+        "cat cd",
+        "python3 - <<'EOF'\nimport os\nEOF",
+        "grep -c x .",
+    ):
+        assert not shell.moves({"command": command}), command
+    assert not shell.moves({})
+    assert shell.Shell(None).places is None
 
 
 def test_only_a_shell_call_is_read_here() -> None:
@@ -702,6 +884,9 @@ OUTSIDE = [
     "python3 -c \"import os; os.chdir('/etc'); open('x', 'w')\"",
     "python3 -c \"import matplotlib.pyplot as plt; plt.savefig('c.png', backend='module://x')\"",
     "python3 -c \"import matplotlib.pyplot as plt; plt.title('t', usetex=True); plt.savefig('c.png')\"",
+    # a property given as a dict: by position or as the font's (approved on #218's head)
+    "python3 -c \"import matplotlib.pyplot as plt; plt.title('t', {'usetex': 1}); plt.savefig('c.png')\"",
+    "python3 -c \"import matplotlib.pyplot as plt; fd = {'usetex': 1}; plt.xlabel('x', fontdict=fd)\"",
     "python3 -c \"import matplotlib.pyplot as plt; s = plt.savefig; s('/etc/c.png')\"",
 ]
 

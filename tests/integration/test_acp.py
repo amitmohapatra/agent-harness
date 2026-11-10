@@ -254,6 +254,34 @@ async def test_a_read_outside_the_working_folder_asks_a_person(
     assert asked.interrupt.tool_call.args == {"command": "cat /etc/passwd"}
 
 
+@pytest.mark.parametrize(
+    ("args", "fields"),
+    [
+        ({"command": "cat passwd", "cwd": "/etc"}, {}),  # Bash runs it in the folder it names
+        ({"command": "python3 -c 'print(1)'"}, {"env": {"PYTHONPATH": "src"}}),  # Kimi's env
+    ],
+)
+async def test_where_and_with_what_kimi_runs_a_command_is_read(
+    harness: Harness, tmp_path: Path, args: dict[str, Any], fields: dict[str, Any]
+) -> None:
+    script = [{"builtin": "Bash", "args": args, "ask": True, "output": ""}, {"text": "done"}]
+    asked = await harness.wrap(fake(tmp_path, script, **fields), id="ops").run("x", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == args
+
+
+async def test_a_folder_the_target_names_is_read_unasked(harness: Harness, tmp_path: Path) -> None:
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    script = [
+        {"builtin": "Bash", "args": {"command": f"cat {kept}/a.csv"}, "ask": True, "output": "1"},
+        {"text": "done"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script, reads=(str(kept),)), id="ops")
+    assert (await agent.run("x", user="u1")).interrupt is None
+    assert kimi(reads=["/srv/kept"]).reads == ("/srv/kept",)
+
+
 async def test_its_own_tools_are_governed_and_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

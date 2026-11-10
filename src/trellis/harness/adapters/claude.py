@@ -90,6 +90,7 @@ from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
+from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
@@ -707,13 +708,18 @@ def _options(
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
-    hooks = _with_governance(options.hooks, steps)
+    env = dict(routed_env(options.env, runtime) or options.env)
+    if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
+        env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
+    shell = _shell(options, env)
+    hooks = _with_governance(options.hooks, steps, shell)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context) if context else hooks,
         "system_prompt": _told(options.system_prompt),
         # what Claude Code asks its user about, the harness answers (the team's own first)
-        "can_use_tool": _asked(options.can_use_tool, steps, _folders(options)),
+        "can_use_tool": _asked(options.can_use_tool, steps, shell),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
+        "env": env,
     }
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
     if store is not None:
@@ -726,10 +732,6 @@ def _options(
     changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
-    env = dict(routed_env(options.env, runtime) or options.env)
-    if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
-        env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
-    changes["env"] = env
     return dataclasses.replace(options, **changes)
 
 
@@ -791,12 +793,12 @@ def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     return [*given, *dict.fromkeys(hidden)]
 
 
-def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps) -> dict[str, Any]:
+def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell) -> dict[str, Any]:
     """The options' hooks with the governance hook (:func:`_governance`) and the record hooks
     (:func:`_recorded`) after theirs."""
     given = dict(hooks or {})
     given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
-    recorded = _recorded(steps)
+    recorded = _recorded(steps, shell)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
     given[RAN_EVENT] = [*given[RAN_EVENT], _steering()]
@@ -859,32 +861,42 @@ def _governance(steps: Steps) -> Any:
     return HookMatcher(hooks=[pre_tool_use])
 
 
-def _folders(options: Any) -> tuple[str, list[str]]:
-    """Where the CLI's shell works (its ``cwd``, else this process's) and what else the run
-    may read there: the plugins it is given by a folder (the skills written for the run:
-    ``skills.for_run``), and where a kept result is read (``results.PREFIX``: the name the
-    model is told, which it also tries in its shell)."""
+def _shell(options: Any, env: Mapping[str, str]) -> Shell:
+    """The CLI's shell (``governance.shell.Shell``): where it works (its ``cwd``, else this
+    process's); what else the run may read there - the folders the options add to Claude
+    Code's own (``add_dirs``: it reads and works there itself, and a team names a folder of
+    its own there, such as the tool results the CLI saves), the plugins it is given by a
+    folder (the skills written for the run: ``skills.for_run``), where a kept result is read
+    (``results.PREFIX``: the name the model is told, which it also tries in its shell); and
+    the environment the SDK starts it with (this process's, under the options' ``env``)."""
     from trellis.harness.tools import results
 
     plugins = [p for p in options.plugins or () if isinstance(p, Mapping)]
     given = [str(p["path"]) for p in plugins if p.get("path")]
-    return str(options.cwd or os.getcwd()), [*given, results.PREFIX]
+    added = [str(d) for d in options.add_dirs or ()]
+    reads = [*added, *given, results.PREFIX]
+    return Shell(options.cwd or os.getcwd(), reads, {**os.environ, **env})
 
 
-def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
+def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
     """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
     permission mode and rules let it through without asking otherwise): the team's own
     callback, when it has one; else a call that only reads runs — a read tool, or a shell
-    command :func:`~trellis.harness.governance.shell.read_only` reads as read-only, inside
-    ``folders`` (the working folder, and what else the run may read) — and any
+    command the CLI's ``shell`` reads as read-only (``Shell.read_only``: from every folder it
+    may be in, none known while another call that may move it is under way) — and any
     other asks a person (``bridge.asked``); Claude's question to its user is the run's
     (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
-    from trellis.harness.governance.shell import read_only
     from trellis.harness.tools.convert.claude import WAITING
 
     async def can_use_tool(name: str, args: dict[str, Any], context: Any) -> Any:
+        this = str(getattr(context, "tool_use_id", None) or name)
+
+        def moving() -> bool:
+            under_way = (a for ref, (n, a, _) in steps.calls.items() if ref != this and n in SHELLS)
+            return any(moves(a) for a in under_way)
+
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         spec = _spec(runtime, name)
@@ -895,7 +907,7 @@ def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
-        elif spec.side_effects == "read" or read_only(name, args, *folders):
+        elif spec.side_effects == "read" or shell.read_only(name, args, moving=moving()):
             verdict = PermissionResultAllow()
         else:
             try:
@@ -909,7 +921,7 @@ def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
             else:
                 verdict = PermissionResultAllow(updated_input=decided.args)
         if not isinstance(verdict, PermissionResultAllow):
-            steps.ended(str(getattr(context, "tool_use_id", None) or name))
+            steps.ended(this)
         return verdict
 
     return can_use_tool
@@ -950,11 +962,13 @@ def _spec(runtime: Runtime, name: str) -> ToolSpec:
     return runtime.native.get(name) or ToolSpec(name=name, side_effects=risk)
 
 
-def _recorded(steps: Steps) -> Any:
+def _recorded(steps: Steps, shell: Shell) -> Any:
     """The ``PostToolUse`` / ``PostToolUseFailure`` hook: a call Claude ran itself (a built-in,
     its own MCP servers' tools), recorded as the run's (``tools.bridge.observed``) with its
     result or its error and its duration (from its ``PreToolUse``); a harness tool's call is
-    the bridge's. Either way the stall watch goes on once no call runs."""
+    the bridge's. Either way the stall watch goes on once no call runs. A shell command of
+    Claude's own (not a subagent's: the CLI keeps their folder) is where the shell may have
+    moved (``Shell.ran``)."""
     from claude_agent_sdk import HookMatcher
 
     from trellis.harness.tools.convert.claude import SERVER
@@ -967,6 +981,8 @@ def _recorded(steps: Steps) -> Any:
             return {}
         steps.adapter.observed(name)
         _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
+        if name in SHELLS and "agent_id" not in given:
+            shell.ran(args)
         failed = given.get("hook_event_name") == FAILED_EVENT
         outcome = ToolOutcome(
             tool=name,
