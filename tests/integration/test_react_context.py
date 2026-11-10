@@ -61,11 +61,13 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     agent = arm(memory_harness.wrap(target, id="book"), [page, publish])
     paused = await agent.run("read the book", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
-    cleared = [n for n in range(len(model.requests)) if CLEARED in contents(model, n)]
+    # the first page's result, cleared, names the path the model then reads it back from
+    gone = CLEARED.replace("{path}", "/large_tool_results/call_1")
+    cleared = [n for n in range(len(model.requests)) if gone in contents(model, n)]
     first = cleared[0]
     assert first > 1  # only once the results grew past half the window
     results = [c for c in contents(model, first) if str(c).startswith(("page", "[result"))]
-    assert results[0] == CLEARED
+    assert results[0] == gone and 'file_path="/large_tool_results/call_1"' in gone
     assert all(r.startswith("page") for r in results[-3:])  # the last three stay
     offered = [{t["function"]["name"] for t in r["tools"]} for r in model.requests]
     # the placeholder's tool, offered once a result was cleared
