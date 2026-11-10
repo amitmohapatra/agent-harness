@@ -300,6 +300,41 @@ async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: H
     assert "Check every JOIN." in str(result.answer) and "No SELECT *." in str(result.answer)
 
 
+async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_goes_on(
+    harness: Harness,
+) -> None:
+    """A skill deleted once the run pinned it, and a name the run has no skill for: the SDK's
+    ``load_skill`` answers the model with why (an error raised there ends the SDK's run), the
+    warning is said, and the run goes on to its answer."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    store = store_with()
+    original = store.load
+
+    async def load_after_delete(name: str, version: str, scope: Any) -> Any:
+        store.kept.pop(("sql-review", "tenant", "default"), None)
+        return await original(name, version, scope)
+
+    store.load = load_after_delete  # type: ignore[method-assign]
+    model = PlannedModel(
+        [("load_skill", {"skill_name": "sql-review"}), ("load_skill", {"skill_name": "nope"})]
+    )
+    target = SandboxAgent(
+        name="box", instructions="Work.", model=model,
+        capabilities=[Shell(), combine(store).openai()],
+    )  # fmt: skip
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(target, id="oai-gone", framework_options={"run_config": config})
+    events = [e async for e in agent.stream("review", user="ada")]
+    assert events[-1].error is None, events[-1].error
+    assert "no skill 'nope'" in str(events[-1].data.get("result"))  # the last result it read
+    assert any("sql-review" in w and "cannot be read" in w for w in warnings_of(events))
+    assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
+
+
 # --------------------------------------------------------------------------- no skills slot
 async def test_calls_at_once_pin_the_run_once(harness: Harness) -> None:
     class Slow(SkillStore):
