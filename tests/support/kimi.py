@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from tests.support.planned import CUT, CUT_REPLY, FINAL, Call
+from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
 from trellis.harness.tools.bridge import TURN_STALLED
 
@@ -167,7 +167,8 @@ class PlannedEndpoint:
                     return edited
                 if isinstance(step, list):
                     return [(kimi_name(n), a) for n, a in step]
-                return (kimi_name(step[0]), step[1])
+                name, args = worded(step)
+                return (kimi_name(name), args)
             done += len(step) if isinstance(step, list) else 1
         return self.final.replace("{last}", results[-1] if results else "")
 

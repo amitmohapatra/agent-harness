@@ -94,7 +94,7 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIED
+from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -458,10 +458,13 @@ def _check_servers(servers: Sequence[Mapping[str, Any]]) -> None:
 class ACPInput:
     prompt: str
     context: str | None
-    #: the tool call a person answered about, when the run resumes from that pause
+    #: the tool call a person answered about (``Pending.call``), when the run resumes from
+    #: that pause
     answered: ToolCall | None = None
     #: the person denied that call (``REJECT``): it does not run
     denied: bool = False
+    #: the person answered a question that call asked while it ran (not its approval)
+    asked: bool = False
     #: why they denied it, when they said
     why: str | None = None
 
@@ -580,8 +583,9 @@ class ACPAdapter:
         denied = resolution.decision is InterruptDecision.REJECT
         return dataclasses.replace(
             native_input,
-            answered=pending.interrupt.tool_call,
+            answered=pending.call,
             denied=denied,
+            asked=pending.interrupt.tool_call is None,
             why=reason_of(resolution) if denied else None,
         )
 
@@ -952,8 +956,8 @@ class Attempt:
         if call is None:
             return RESUMED
         harness = call.tool in self.runtime.toolbox
-        told = RESUMED_DENIED if native_input.denied else RESUMED_CALL
-        said = told.format(tool=f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool)
+        name = f"{HARNESS_PREFIX}{call.tool}" if harness else call.tool
+        said = resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
         why = native_input.why
         return f"{said} {DENIED_WHY.format(why=why)}" if why else said
 

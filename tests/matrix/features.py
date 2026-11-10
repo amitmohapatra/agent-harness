@@ -43,7 +43,7 @@ from tests.matrix.world import (
 from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.memory import MEMORY_TOOLS
-from tests.support.planned import Call, PlannedChat, PlannedChatModel
+from tests.support.planned import Call, PlannedChat, PlannedChatModel, Reworded
 from tests.support.sandbox import PausingSandboxes
 from trellis import (
     Harness,
@@ -231,6 +231,22 @@ async def ask_user_tool(w: World) -> None:
     assert asked.question == "Which day? (a date, YYYY-MM-DD)"  # what plain chat reads
     assert asked.expects == {"type": "string", "format": "date"}
     assert o.answer == "Done. 2026-11-05", o.answer
+
+
+async def ask_once(w: World) -> None:
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "Friday"
+        return approve_all(interrupt)
+
+    # a model asked for the step again words its call anew (a framework not resumed in place)
+    asking = Reworded({"question": "Which day?"}, again={"question": "What day should it be?"})
+    o = (await w.go([ask_user()], [("ask_user", asking)], answer=answer)).succeeded()
+    [asked] = o.pauses  # the call made again is the one the person answered: asked once
+    assert asked.question == "Which day?", asked
+    assert o.answer == "Done. Friday", o.answer
 
 
 async def reject(w: World) -> None:
@@ -1178,6 +1194,14 @@ FEATURES: Final[list[Feature]] = [
         "F36 (when and how to ask)",
         "tools=[ask_user()]",
         ask_user_choice,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36o",
+        "ask_user: asked once, though the model words the call differently when it makes it again",
+        "F36, F23 (#203)",
+        "tools=[ask_user()]",
+        ask_once,
         way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(

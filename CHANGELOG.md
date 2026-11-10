@@ -197,6 +197,19 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
+  tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
+  graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell
+  their model to repeat the paused call; a real model words that call differently, the journal
+  knew a call only by its content, and the person was asked again on every resume. The call a
+  pause came from within is now kept as the model made it, with its place among the run's
+  tool calls, and the call of that tool made there when the run resumes runs as it
+  (`Replay.made`): the answer is for the arguments the person saw. The model is told which
+  call that is, with its arguments (`RESUMED_ASKED`: a resumed Claude or Kimi session, which
+  was told only to repeat "the call with no result"; an OpenAI agent run again from its
+  input, which was told nothing). Approvals stay exact. Haiku, the four rows of #203
+  (`benchmark.cost.schedules`), runs that paused on a tool's question: Claude 7 of 7 right
+  (#203: three of the rows failed), OpenAI Agents 6 of 7 (4 of 7 before its model was told).
 - A Kimi call that asks permission carries its arguments when the model streamed them: Kimi
   asks before it starts the call, so its arguments were only in the call's streamed updates,
   which the adapter dropped, and a pause on `Bash` showed `{}` (no command) to the person and

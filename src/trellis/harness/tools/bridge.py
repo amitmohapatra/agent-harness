@@ -67,7 +67,7 @@ from trellis.harness.conversation import result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, content_key
+from trellis.harness.journal import OUTCOME, Made, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
@@ -136,10 +136,13 @@ async def call(
             f"{tool.name} is a trellis tool: it runs inside a Harness run (agent.run/stream)",
             source="tools",
         )
-    key = content_key("call", tool.name, args)
+    made = runtime.replay.made(tool.name, args)  # the paused call made again runs as it was
+    key = content_key("call", tool.name, made.args)
     step = runtime.next_step() if step is None else step
     async with runtime.replay.exclusive(key):
-        return await _called(runtime, tool, args, key=key, step=step, call_id=call_id)
+        outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
+    runtime.replay.ended(made)
+    return outcome
 
 
 def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
@@ -269,12 +272,13 @@ async def observed(
 async def _called(
     runtime: Runtime,
     tool: Tool,
-    args: dict[str, Any],
+    made: Made,
     *,
     key: str,
     step: int,
     call_id: str | None,
 ) -> ToolOutcome:
+    args = made.args
     # what the tool hands its service: this run's n-th such call, in every attempt (the
     # call's own key, the same for the same call anywhere, is what feedback is filed under)
     idempotency_key = f"{runtime.run_id}:{key}:{runtime.replay.occurrence(key)}"
@@ -311,7 +315,7 @@ async def _called(
     _started(runtime, ref, tool.name, tool_call.args)
     try:
         outcome = await _ran(
-            runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key
+            runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
         )
     except asyncio.CancelledError:
         # the run was cancelled, or ran out of time, while the call was under way
@@ -339,10 +343,12 @@ async def _ran(
     key: str,
     ref: str,
     idem: str,
+    made: Made,
 ) -> ToolOutcome:
     """The call, started on the stream, under way: saved as started (one that does more than
-    read), executed (``idem``: the key the tool hands its service), and its outcome as the
-    ``after_tool`` hooks leave it. A pause (it asked a person) or a cancellation propagates."""
+    read), executed (``idem``: the key the tool hands its service; ``made``: the call as the
+    model made it, which a pause from within it keeps), and its outcome as the ``after_tool``
+    hooks leave it. A pause (it asked a person) or a cancellation propagates."""
     args = tool_call.args
     if tool.feature == "code_mode":
         runtime.code_mode_scripts.append((datetime.now(UTC), tool_call.step))
@@ -357,7 +363,7 @@ async def _ran(
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
-        within = runtime.limited(tool.timeout, key=idem, ref=ref)
+        within = runtime.limited(tool.timeout, key=idem, ref=ref, made=made)
         outcome, error = await execute(tool, args, reads=reads, within=within)
         if isinstance(error, RunCancelled) or (error is not None and is_pause_signal(error)):
             if not reads:
