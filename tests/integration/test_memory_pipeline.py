@@ -30,7 +30,7 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
-from trellis.harness.agent import ASKING, NARROW_FROM, REMEMBERED
+from trellis.harness.agent import ANSWERING, ASKING, NARROW_FROM, REMEMBERED
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
@@ -162,6 +162,27 @@ async def test_the_note_on_remembered_values_comes_only_with_a_profile(
     sent = pushed(model.requests[0])
     assert ASKING in sent
     assert (REMEMBERED in sent) is profile
+    assert with_note(memory_service.context_text) in sent  # the helper the tests share
+
+
+@pytest.mark.parametrize("memories", [False, True])
+async def test_the_note_on_answering_from_memory_comes_only_with_memories(
+    memory_harness: Harness, memory_service: FakeMemoryService, memories: bool
+) -> None:
+    """How to answer from memory entries (read them all, answer from what they say, a
+    labelled inference before "I don't know", whose it is when it is someone else's) comes
+    with a context that holds memories, before the note on asking: a context with only a
+    profile or a tool's results has no entries to read, and gets no tokens for them."""
+    held = "## Memories\n- [m1] 2026-10-15 Thursday ana: I moved to Lisbon in May."
+    memory_service.context_text = held if memories else "## Profile\n### about\n- Ana"
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="answering")
+    result = await agent.run("where does Ana live?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = pushed(model.requests[0])
+    assert (ANSWERING in sent) is memories
+    if memories:
+        assert sent.index(held) < sent.index(ANSWERING) < sent.index(ASKING)
     assert with_note(memory_service.context_text) in sent  # the helper the tests share
 
 

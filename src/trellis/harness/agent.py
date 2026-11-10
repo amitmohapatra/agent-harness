@@ -237,6 +237,32 @@ REMEMBERED: Final = (
 PROFILE: Final = "## Profile\n"
 
 
+#: The heading the memory service renders its memory entries under.
+MEMORIES: Final = "## Memories\n"
+#: How to answer from the memory entries, sent only with a context that holds them (the
+#: service's ``## Memories`` heading). Without it a model with no reader prompt of its own
+#: stopped at the first entry, declined when the entries said it indirectly, and answered for
+#: the person asked about what another person had said. Measured on LoCoMo through this path
+#: (the service's context, these notes, a neutral system prompt; 1,528 questions, the same
+#: memories): 0.828 -> 0.851 judged correct, 65 gained and 29 lost, every category up, and
+#: questions with a false premise unchanged (363 -> 365 of 446 declined or corrected).
+ANSWERING: Final = (
+    "## Answering from memory\n"
+    "Read every memory entry before you answer: the answer is often spread over several, so "
+    "give every item they support, with the names, dates and details they give. Answer from "
+    "what the entries say even when they are indirect or worded differently from the "
+    "question. When they do not state the answer but show enough about the person to choose, "
+    'give the best-supported answer and say it is an inference ("Likely: ..."). Say you do '
+    "not know only when no entry bears on the question, or when the entries give what is "
+    "asked to someone else: then say whose it is. Work dates out from the entries' own dates."
+)
+
+
+def answering_note(context: str) -> str | None:
+    """The note on answering from memory entries, for a context that holds them."""
+    return ANSWERING if MEMORIES in context else None
+
+
 def asking_notes(context: str) -> str:
     """The notes on asking a memory context gets: when to ask, always; how to use remembered
     values, only when the context has a profile."""
@@ -1100,7 +1126,13 @@ class Agent:
         note = None if hints and best >= NARROW_FLOOR else ABSTAIN_NOTES.get(status)
         if note is not None and SEARCH_TOOL in runtime.toolbox:
             note = f"{note}\n{EARLIER_CHATS}"
-        parts = (pushed.rendered, note, snapshots.note(stale), asking_notes(pushed.rendered))
+        parts = (
+            pushed.rendered,
+            note,
+            snapshots.note(stale),
+            answering_note(pushed.rendered),
+            asking_notes(pushed.rendered),
+        )
         rendered = "\n\n".join(part for part in parts if part)
         runtime.context = rendered or None
         runtime.past_results = query.past_refs(pushed.rendered)
