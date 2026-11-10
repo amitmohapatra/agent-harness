@@ -58,7 +58,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, cast
@@ -463,7 +463,7 @@ class ClaudeAdapter:
         """One query (``session``: the one it resumes); the session it runs in kept in the
         journal as it goes. ``last``: the one last answer at the turn limit — its prompt as
         given, one turn, no tool (no built-in, no MCP server), no context added again."""
-        from claude_agent_sdk import ResultMessage
+        from claude_agent_sdk import AssistantMessage, ResultMessage
 
         runtime = run.runtime
         given = runtime.framework_options
@@ -481,6 +481,8 @@ class ClaudeAdapter:
         first = last or session is None or runtime.attempt == 1
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
+        # each reply's usage by its message id, until the query's result counts them all
+        replies: dict[str, dict[str, Any]] | None = {}
         try:
             # closed as it is left (``aclosing``): its CLI process ends here, in this loop
             async with aclosing(_queried(prompt, options)) as messages:
@@ -491,6 +493,10 @@ class ClaudeAdapter:
                         runtime.replay.journal.session = found
                     if isinstance(message, ResultMessage):
                         _spent(runtime, options, message)
+                        replies = None
+                    elif replies is not None and isinstance(message, AssistantMessage):
+                        if message.message_id and message.usage:
+                            replies[message.message_id] = message.usage
                     yield message
                     if runtime.pending is not None:
                         # the run paused: stop here; the CLI process goes with it
@@ -498,6 +504,8 @@ class ClaudeAdapter:
         finally:
             runtime.model_ended(STEP)
             skills.removed(written)
+            if replies:  # it ended with no result (paused, stopped): what its replies said
+                _spent(runtime, options, None, replies.values())
 
 
 def _queried(prompt: Any, options: Any) -> AsyncGenerator[Any, None]:
@@ -560,19 +568,25 @@ def _result_text(content: Any) -> str:
     return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
 
-def _spent(runtime: Runtime, options: Any, result: Any) -> None:
+def _spent(
+    runtime: Runtime, options: Any, result: Any, replies: Iterable[dict[str, Any]] = ()
+) -> None:
     """A query's usage and cost (its ``ResultMessage``: the subagents' included) on the run's
-    budget."""
-    usage = result.usage or {}
-    cached = int(usage.get("cache_read_input_tokens") or 0)
-    written = int(usage.get("cache_creation_input_tokens") or 0)
+    budget; with no result (a query that paused or was stopped), the usage its ``replies``
+    carried, which the CLI gives no cost for."""
+    usages = [result.usage or {}] if result is not None else list(replies)
+
+    def total(key: str) -> int:
+        return sum(int(u.get(key) or 0) for u in usages)
+
+    cached, written = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
     budget.account(
         runtime,
         model=options.model,
-        input_tokens=int(usage.get("input_tokens") or 0) + cached + written,
-        output_tokens=int(usage.get("output_tokens") or 0),
+        input_tokens=total("input_tokens") + cached + written,
+        output_tokens=total("output_tokens"),
         cached=cached,
-        cost=result.total_cost_usd,
+        cost=result.total_cost_usd if result is not None else None,
     )
 
 
