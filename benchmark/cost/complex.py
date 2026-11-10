@@ -2716,14 +2716,16 @@ _TABLE_ROW: Final = re.compile(r"^[ \t]*\|[^\n]*\|[ \t]*$", re.MULTILINE)  # a l
 _ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
 _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
-#: A count of the data's own things ("the 50 leggings SKUs", "14 matches"): in a refusal it says
-#: what the run could use instead, not a figure of what was asked (#162: a right refusal scored
-#: made up for its "50"). A figure with a currency, a decimal, or after a word such as "average"
-#: is no count and is still read.
+#: A count of the data's own things ("the 50 leggings SKUs", "14 matches", "the last 90 days"):
+#: in a refusal it says what the run could use instead, not a figure of what was asked (#162: a
+#: right refusal scored made up for its "50"). A figure with a currency, a decimal, or after a
+#: word such as "average" is no count and is still read.
 _COUNTED: Final = re.compile(
     r"(?<![£$€.\d])\b\d{1,3}(?:,\d{3})*(?![.,]\d)\s+(?:[a-z][\w-]*\s+){0,2}"
     r"(?:skus?|products?|items?|rows?|lines?|stores?|suppliers?|matches|results?|records?|"
-    r"styles?|colou?rs?|sources?|tools?)\b",
+    r"styles?|colou?rs?|sources?|tools?)\b"
+    # a period of the data offered, not a duration stated as an answer ("lead time 30 days")
+    r"|\b(?:last|past|previous)\s+\d{1,3}\s+(?:days|weeks|months)\b",
     re.IGNORECASE,
 )
 #: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",
@@ -2808,10 +2810,11 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     return any(abs(n - value) <= tol + 1e-9 for n in found)
 
 
-#: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917") or before
-#: one ("a 0.92% drop", "£1,917 lower").
+#: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917", "a drop of
+#: 10") or before one ("a 0.92% drop", "£1,917 lower").
 _FALL: Final = re.compile(
-    r"\b(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?[\s*_£$€]{0,6}"
+    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?|"
+    r"(?:drop|decline|decrease|fall) of)[\s*_£$€]{0,6}"
     # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)"
     r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:or|,|\()\s*[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
     r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
@@ -2988,10 +2991,9 @@ def score(
         if not names:
             missing.append("the earlier turn called no tool")
         missing += [n for n in names if n not in a]
-        if k == "steps" and len(held.get("calls", [])) not in [
-            int(n) for n in numbers(a) if n == int(n)
-        ]:
-            missing.append(f"count {len(held.get('calls', []))}")
+        calls = len(held.get("calls", []))
+        if k == "steps" and not _has_number(a, calls, 0):
+            missing.append(f"count {calls}")
     elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
         pass  # done after all: the file the run saved for the user (``query_result``, #97)
     elif k == "cannot" and ran:
