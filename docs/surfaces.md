@@ -186,7 +186,8 @@ from a data part `{"decision": "approve"}` when present; else the words `cancel`
 `reject`/`rejected`/`no`/`deny`/`denied`, or a data object as the edited arguments (its
 `payload` field when it has one); anything else answers the question (a data part's `answer`,
 or the text). A data part's `comment` is the reviewer's remark and `"remember": "run"` approves
-the tool's later calls in this conversation (neither is an edited argument). The `input-required` status
+the tool's later calls in this conversation, `"always"` in every conversation of the user, with
+a memory service (neither is an edited argument; another `remember` is refused and asked again). The `input-required` status
 carries the interrupt's `interrupt_id`, `reason`, `ui`, `options`, `multiple`, `expects`,
 `ui_schema`, `component`, `props`, `payload` and `tool_call` as a data part. An answer that
 cannot be read, or that does not fit the question or the tool
