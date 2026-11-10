@@ -106,6 +106,31 @@ async def test_a_turn_answers_and_calls_harness_tools(harness: Harness, tmp_path
     assert record["initialize"][0]["terminal"] is False  # no sandbox: no terminal of ours
 
 
+async def test_the_turns_tool_calls_and_results_are_in_its_transcript(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """The agent reports each call it makes (``tool_call``) and its result (its update): the
+    transcript memory keeps has each call by the harness tool's name and its result, with its
+    run record, so a later chat's steps list says which tool answered (explain-08 and histx on
+    Kimi, the all-adapter run, said "the record holds only the answer")."""
+    script = [{"tool": "lookup", "args": {"topic": "tea"}}, {"text": "found: {last}"}]
+    agent = arm(memory_harness.wrap(fake(tmp_path, script), id="lookups"), [lookup])
+    assert (await agent.run("tell me about tea", user="u1")).answer == "found: facts about tea"
+    await memory_harness.writes.drain()
+    [batch] = memory_service.named("messages")
+    sent = batch.body["messages"]
+    assert [(m["role"], m["content"]) for m in sent] == [
+        ("USER", "tell me about tea"),
+        ("ASSISTANT", ""),
+        ("TOOL", "facts about tea"),
+        ("ASSISTANT", "found: facts about tea"),
+    ]
+    [made] = sent[1]["tool_calls"]
+    assert made["name"] == "lookup" and made["arguments"] == {"topic": "tea"}
+    assert sent[2]["tool_call_id"] == made["id"]
+    assert sent[2]["custom_metadata"]["run_record"]["status"] == "ok"
+
+
 async def test_the_harness_mcp_server_refuses_a_request_without_its_token() -> None:
     import httpx
 

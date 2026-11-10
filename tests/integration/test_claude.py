@@ -113,6 +113,33 @@ class NoArguments:
         return [Tool(spec, run, feature="mcp")]
 
 
+async def test_the_turns_tool_calls_and_results_are_in_its_transcript(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Claude reports its calls in its own messages (``ToolUseBlock``, ``ToolResultBlock``):
+    the transcript memory keeps has each call by the harness tool's name and its result, with
+    its run record, so a later chat's steps list says which tool answered (explain-08 and
+    histx on Claude, the all-adapter run, said "the record holds only the answer")."""
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o4"}}, {"text": "refunded o4"}]
+    target = options(tmp_path, script)
+    agent = arm(memory_harness.wrap(target, id="refunds"), [tool(refund.fn, side_effects="write")])
+    assert (await agent.run("refund o4", user="u1")).answer == "refunded o4"
+    await memory_harness.writes.drain()
+    [batch] = memory_service.named("messages")
+    sent = batch.body["messages"]
+    assert [(m["role"], m["content"]) for m in sent] == [
+        ("USER", "refund o4"),
+        ("ASSISTANT", ""),
+        ("TOOL", "refunded o4"),
+        ("ASSISTANT", "refunded o4"),
+    ]
+    [made] = sent[1]["tool_calls"]
+    assert made["name"] == "refund" and made["arguments"] == {"order": "o4"}
+    assert sent[2]["tool_call_id"] == made["id"]
+    assert sent[2]["custom_metadata"]["run_record"]["status"] == "ok"
+
+
 async def test_a_tool_whose_schema_declares_no_properties_takes_no_argument(
     harness: Harness, tmp_path: Path
 ) -> None:

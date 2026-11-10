@@ -57,7 +57,7 @@ from trellis.harness.adapters.openai_agents import (
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.evals import _unfenced
 from trellis.harness.gateways import ProviderSDK
-from trellis.harness.history import ASKED_WITH, Said, Speaker
+from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 
 # --------------------------------------------------------------------------- the query
@@ -150,11 +150,12 @@ def test_structured_output_outranks_the_result_text() -> None:
     said = AssistantMessage(
         content=[TextBlock(text="thinking"), ToolUseBlock("t", "x", {})], model="m"
     )
+    empty = AssistantMessage(content=[TextBlock(text="")], model="m")  # says nothing: left out
     extracted = ClaudeAdapter().extract(
-        None, [said, _result(result="text", structured_output={"n": 1})]
+        None, [said, empty, _result(result="text", structured_output={"n": 1})]
     )
     assert extracted.answer == {"n": 1}
-    assert extracted.transcript == [Said(Speaker.ASSISTANT, "thinking")]
+    assert extracted.transcript == [Said(Speaker.ASSISTANT, "thinking", (Called("t", "x"),))]
 
 
 async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
