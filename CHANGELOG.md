@@ -5,6 +5,28 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: ReAct on Deep Agents on a small window
+
+On a 6,000-token window (adversarial `advconv-05`, `react --variant deep`, memory off) the
+summary requests Deep Agents sent were up to 23,156 tokens, 13 of 23 over the window; after a
+summary the model answered the conversation's first question again in place of the run's. Five
+causes, all the harness's; Deep Agents' summarization is left as it is:
+
+- **The earlier turns replayed with memory off are sized for the request**
+  (`conversation.earlier(budget=)`, `Agent.conversation_budget`), as memory's window is: each
+  turn's question and answer from the newest back, then the newest turns whole while they fit.
+  Before, the newest 10 turns went whole whatever the window, and Deep Agents summarized all
+  of them in one request each turn (on `create_agent`, `FitWindow` left them out).
+- **The task kept ahead of a summary is the run's question** (`ModelHooks`), not the first
+  user message of the state, which with earlier turns replayed was the oldest turn's.
+- **The readers of a kept result stay offered when `FitWindow` narrows the tools**
+  (`query_result`, `read_file`): the preview says to call them.
+- **A request refused after a summarization is fitted again with the latest turn's results
+  cut** (Deep Agents keeps a `read_file` page whole): before, the same request was summarized
+  again and refused again.
+- **The model's tokens per counted token are learned where it is called**, of the request it
+  was sent (`ModelHooks`), not of the request before a summarization made it smaller.
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,
