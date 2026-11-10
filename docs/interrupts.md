@@ -78,9 +78,18 @@ where `ask` returns, saying so.
 `question.answer(record.last_resolution)` reads the answer back (into `form`); agent-runs checks
 the answer when it is given.
 
-**The model asks: `ask_user()`.** Opt-in: `ReAct(tools=[trellis.ask_user()])` (or any
-agent's tools) gives the model an `ask_user(question, options=None, kind="text",
-multiple=False, recommended=None, why=None)` tool, its answer the call's result. `kind` is
+**The model asks: `ask_user()`.** The model's own question tool: `ask_user(question,
+options=None, kind="text", multiple=False, recommended=None, why=None, fields=None)`, its
+answer the call's result. Who has it:
+
+| The run | `ask_user` |
+|---|---|
+| a chat front end's ([`serve_chat`](surfaces.md): a person reads it and answers its pauses) | offered by itself; off with `without=["ask"]` |
+| the same, on Claude Code or Kimi Code | theirs instead (`AskUserQuestion`, asked as the run's question): no second tool |
+| started from code (`agent.run`, `stream`), queued (`start`), fired by a schedule, called over A2A or by another run | not offered by itself: nobody is known to answer, and a pause there may never be resumed. An agent whose caller answers pauses declares it: `ReAct(tools=[trellis.ask_user()])` (or any agent's tools) |
+| a graph built with its tools bound | never (its tools are fixed) |
+
+A tool of the agent's own named `ask_user` wins, and one declared is offered once. `kind` is
 `text`, `date`, `date_range` or `number`; `options` makes it a choice, `multiple` lets several be
 picked, `recommended` (with `why`) marks one option `Option.recommended`. The model decides each
 question's shape; when to ask at all is the note sent with every memory context
@@ -97,8 +106,43 @@ preference or value used is said with its date, a costly or old fill asked about
 | What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one, which comes first on every surface) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
 
 A range and a number may be answered in words, so a plain chat can answer them; a choice is
-one of its options or another answer in words ("Other"). `ask_user` stays opt-in: measured
-(`benchmark/cost/asking.py`), offering it changed no ask-or-act case, only the shape a UI shows.
+one of its options or another answer in words ("Other"). Measured (`benchmark/cost/asking.py`:
+`--ask auto`, `declared`, `none`), offering it changes no ask-or-act case, only the shape a UI
+shows: a picker, a dropdown or a number field where there was a sentence.
+
+**Several values at once: one form.** `fields=[{name, label, kind, options, multiple, default,
+why, required}]` asks several values in one question, answered in one go: values a request
+leaves out, or values remembered from an earlier request that the person confirms before they
+are used again (`default`: the remembered value, shown filled in; `why`: where it is from). It
+is the same question, with more than one field (one field is the single question above):
+
+| Surface | What it gets |
+|---|---|
+| an app's own control | the `ask_user` component, `props` `{"kind": "form", "fields": [{name, label, kind, options, multiple, default, why, required}, ...]}` |
+| any other UI | `ui: "form"`; `expects` an object schema, a property a field (its kind's schema or its options as `enum`, `title`, `default`, `description`), `required` the fields with nothing filled in; `ui_schema` their order and widgets |
+| plain chat | the question, then the fields numbered: `1. Units (a number): 200 (your order of 2026-11-02)`; answered in words ("keep all", "change the quantity to 40") |
+
+The answer is one object, what the person gave over what was filled in; an answer in words is
+those words. A single question takes a remembered value too: `recommended` with `why` on a
+number or a date shows it filled in (`props.default`, the schema's `default`).
+
+Where the app declared tools of its own, `ask_user` says first that a value one of them asks
+for is asked with it (the app's date picker, not `kind="date"`).
+
+**What a UI gets from each framework's own question tool.** Claude Code and Kimi Code ask their
+own way; the harness changes neither:
+
+| | Claude Code `AskUserQuestion` | Kimi Code `AskUserQuestion` |
+|---|---|---|
+| a choice | the `ask_user` component, the options, several picks (`multiSelect`), the option labelled "(Recommended)" recommended with its description as why | `ui: "choice"` with its options; no component, no recommended option, one pick |
+| another answer in words | taken | refused: one of its options only |
+| a date, a number, open text | no kinds: asked in its reply, as text | the same |
+| several values | several questions in one call, asked one after another | one question a call |
+
+A risky action is not a question of the model's: governance pauses the call for the person's
+approval whatever the model does ([governance.md](governance.md)). The same benchmark's
+`risky` cases check that on every adapter; its `undeclared` cases show what a tool that
+declares no `side_effects` gets (it runs, announced).
 
 An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
 the same pause with `reason=APPROVAL` and the tool call attached.

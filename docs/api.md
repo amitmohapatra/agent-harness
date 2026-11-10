@@ -86,7 +86,7 @@ them ([tools.md](tools.md)).
 | `judges` | `()` | online judges, each on the share of successful runs it samples (`llm_judge(sample=)`; else a tenth) ([evaluation.md](evaluation.md#online-judges)); not `grounding()`, which every wrapped run already gets on a sampled share (refused, saying so) |
 | `budget` | none: no cap | the most each run may spend, a sub-agent's run counted toward its parent's ([`Budget`](#budget)) |
 | `run_timeout` | no limit | the most working time of each run, in seconds, however it starts ([reliability.md](reliability.md#run-time-limit-and-deadline)) |
-| `without` | `()` | what the harness does not do for any of its runs: `memory`, `tool_search`, `mcp`, `code_mode`, `grounding`, `judges` ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
+| `without` | `()` | what the harness does not do for any of its runs: `memory`, `tool_search`, `mcp`, `code_mode`, `grounding`, `judges`, `schedules`, `ask` ([configuration.md](configuration.md#what-is-on-and-how-to-turn-it-off)) |
 | `framework_options` | none | the framework's own options for every run's call, passed through ([configuration.md](configuration.md#the-frameworks-own-run-options)) |
 
 A framework installed outside the range this release was tested with is said once in the log
@@ -430,7 +430,9 @@ a2a(url)(message, user=, tenant=)` outside a run, as the run inside one)
 
 `ask_user()` — a tool the model asks the person with: `ask_user(question, options=None,
 kind="text")`, `kind` one of `text`, `date`, `date_range`, `number`; the answer is its result.
-Opt-in (`ReAct(tools=[ask_user()])`) ([interrupts.md](interrupts.md#asking)).
+`fields=[...]` asks several values as one form, the remembered ones filled in.
+A chat front end's run (`serve_chat`) has it by itself (off: `without=["ask"]`); any other run
+when its agent declares it (`ReAct(tools=[ask_user()])`) ([interrupts.md](interrupts.md#asking)).
 
 ### openapi
 

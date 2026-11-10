@@ -103,7 +103,8 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools import query
+from trellis.harness.tools import ask, query
+from trellis.harness.tools.ask import ASK_USER
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
@@ -220,16 +221,19 @@ ASKING: Final = (
 )
 #: How to use the remembered rules, preferences and values (memory dates each one,
 #: ``standing_rules``), sent only with a context that has them (the service's profile, the
-#: ``## Profile`` heading it renders): said with their date, filled only when cheap, a
-#: superseded rule asked about.
+#: ``## Profile`` heading it renders): a standing rule or preference used and said with its
+#: date; the values of an earlier request confirmed once before they are used again, filled
+#: in (``ask_user``'s ``fields``), as is anything old or changed since; a superseded rule
+#: asked about.
 REMEMBERED: Final = (
     "## Using what you remember\n"
     "When you use a remembered rule, preference or value from the profile, say which one and "
     'the date it was said ("as CSV, as you said on 2026-10-15").\n'
-    "Values filled from memory or an earlier one: the user's new values win; for something "
-    "cheap to undo, or when they say 'as before', act and name what you filled and from "
-    "when; ask first when a filled value costs (money, a send, a delete, a limit others rely "
-    "on), is old, or conflicts with what they just said.\n"
+    "Values the request leaves out that an earlier one of theirs had (their last alert, "
+    "order or report, 'as before'): ask once before you act, all of them in one question, "
+    "each filled in with the remembered value and where it is from; the values they gave "
+    "now stand and are not asked again. Confirm the same way a rule, preference or value "
+    "said more than six months ago, or one a tool shows was changed since.\n"
     "A rule shown with 'earlier:' replaced that rule by its words, not by the user's say: ask "
     "which holds (the newer recommended), unless they said to change it."
 )
@@ -938,11 +942,13 @@ class Agent:
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``), the memory pull
-        tools — none, with a warning, when the memory service cannot list them — and the
-        schedule tools (``schedules.py``; a target whose tools are fixed gets neither), less the
-        tools of what the run is without (``without=``: its MCP tools...); and the tools the
-        run's front end declared (``frontend.py``), but one named as one of those, which is
-        said in a warning."""
+        tools — none, with a warning, when the memory service cannot list them —, the
+        schedule tools (``schedules.py``) and, in a run a person is known to read
+        (``Runtime.attended``) whose framework has no question tool of its own
+        (``Adapter.asks``), ``ask_user`` (``tools/ask.py``; a target whose tools are fixed
+        gets none of the three), less the tools of what the run is without (``without=``: its
+        MCP tools...); and the tools the run's front end declared (``frontend.py``), but one
+        named as one of those, which is said in a warning."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -958,6 +964,9 @@ class Agent:
         if not self.adapter.fixed_tools and runtime.scheduled is None:
             named = {t.name for t in tools}
             tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
+            if runtime.attended and ASK_USER not in named and not self.adapter.asks(self.target):
+                apps = runtime.frontend.tools if runtime.frontend is not None else ()
+                tools.append(ask.offered([t["name"] for t in apps]))
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})
@@ -1487,8 +1496,8 @@ class Agent:
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
         metadata = self._metadata(turned_off, framework_options, document_ids, budget)
-        if app is not None and (kept := app.kept()):
-            metadata[FRONTEND] = kept
+        if app is not None:  # kept even when it gave nothing: the run has a front end
+            metadata[FRONTEND] = app.kept()
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {

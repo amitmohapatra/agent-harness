@@ -141,6 +141,12 @@ class Adapter(Protocol):
         ``Runtime.steered``): its framework has a hook there the harness uses."""
         ...
 
+    def asks(self, target: Any) -> bool:
+        """Whether ``target``'s framework gives its model a question tool of its own, which
+        the harness asks as the run's question: such a run is offered no ``ask_user``
+        (``Agent.tools_for``)."""
+        ...
+
     def prepare_input(
         self,
         target: Any,

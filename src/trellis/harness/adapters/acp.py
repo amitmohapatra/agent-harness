@@ -504,6 +504,10 @@ class ACPAdapter:
         steered message waits its turn."""
         return False
 
+    def asks(self, target: Any) -> bool:
+        """An agent whose profile names its question tool (Kimi's ``AskUserQuestion``)."""
+        return target.profile is not None and bool(target.profile.questions)
+
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         return None
 

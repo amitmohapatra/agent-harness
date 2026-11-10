@@ -650,19 +650,17 @@ async def _sse(buffer: RunBuffer, after: int) -> AsyncIterator[str]:
         yield encode(event, number)
 
 
-def _frontend(body: RunAgentInput) -> Frontend | None:
+def _frontend(body: RunAgentInput) -> Frontend:
     """What the request's front end gives the run: its tools, context, state and the person's
-    zone (one that is not an IANA zone is left out)."""
+    zone (one that is not an IANA zone is left out) — nothing of them, and the run still has
+    a front end, whose person reads it (``Runtime.attended``)."""
     stated = "state" in body.model_fields_set and body.state is not None
-    zone = zone_of(body.forwarded.timezone)
-    if not (body.tools or body.context or stated or zone):
-        return None
     return Frontend(
         tools=tuple(t.model_dump(exclude_none=True) for t in body.tools),
         context=tuple(c.model_dump() for c in body.context),
         state=body.state,
         stated=stated,
-        timezone=zone,
+        timezone=zone_of(body.forwarded.timezone),
     )
 
 

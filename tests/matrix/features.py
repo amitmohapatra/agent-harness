@@ -233,6 +233,48 @@ async def ask_user_tool(w: World) -> None:
     assert o.answer == "Done. 2026-11-05", o.answer
 
 
+async def ask_user_form(w: World) -> None:
+    """Several values in one question: one pause, a form of the fields with the remembered
+    values filled in, one object back."""
+    from trellis import ask_user
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", {"supplier": "SUP-07"}
+        return approve_all(interrupt)
+
+    fields = [{"name": "units", "kind": "number", "default": 200, "why": "your last order"},
+              {"name": "supplier", "options": ["SUP-04", "SUP-07"], "default": "SUP-04"}]  # fmt: skip
+    plan: list[Call] = [("ask_user", {"question": "Confirm the order.", "fields": fields})]
+    o = (await w.go([ask_user()], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.props is not None and asked.props["kind"] == "form", asked
+    assert [f["name"] for f in asked.props["fields"]] == ["units", "supplier"]
+    assert asked.expects is not None and asked.expects["properties"]["units"]["default"] == 200
+    assert o.answer == 'Done. {"units": 200, "supplier": "SUP-07"}', o.answer
+
+
+async def ask_user_offered(w: World) -> None:
+    """A chat front end's run is given ``ask_user`` with nothing declared. Claude Code and Kimi
+    Code ask with their own question tool (the run's question too): no second one."""
+    if w.adapter in ("claude", "kimi"):
+        (await w.go([Desk().lookup()], [("lookup", {"topic": "x"})])).succeeded()
+        assert w.claude_offered, "the agent was never given the run's tools"
+        assert all("ask_user" not in names for names in w.claude_offered), w.claude_offered
+        return
+
+    def answer(interrupt: Any) -> tuple[str, Any]:
+        if interrupt.component == "ask_user":
+            return "answer", "2026-11-05"
+        return approve_all(interrupt)
+
+    plan: list[Call] = [("ask_user", {"question": "Which day?", "kind": "date"})]
+    o = (await w.go([], plan, answer=answer)).succeeded()
+    [asked] = o.pauses
+    assert asked.component == "ask_user" and asked.props == {"kind": "date", "options": []}
+    assert o.answer == "Done. 2026-11-05", o.answer
+
+
 async def ask_once(w: World) -> None:
     from trellis import ask_user
 
@@ -1194,6 +1236,28 @@ FEATURES: Final[list[Feature]] = [
         "F36 (when and how to ask)",
         "tools=[ask_user()]",
         ask_user_choice,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36f",
+        "ask_user: several values asked at once are one form, the remembered ones filled in",
+        "F36 (backlog: a multi-field ask_user)",
+        "tools=[ask_user()] (fields=)",
+        ask_user_form,
+        way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
+    ),
+    Feature(
+        "F36a",
+        "ask_user by itself: a chat front end's run is given it with nothing declared",
+        "F36 (backlog: ask_user where a person answers)",
+        "on over serve_chat; off: without='ask'",
+        ask_user_offered,
+        modes=only_modes(
+            "agui",
+            reason="only a chat front end's run is known to have a person reading it: "
+            "elsewhere the agent declares ask_user (F36u)",
+        ),
+        adapters={"langgraph": FIXED_GRAPH, "deepagents": FIXED_GRAPH},
         way2=NA("ask_user is a harness tool: it asks through a harness run's pause"),
     ),
     Feature(

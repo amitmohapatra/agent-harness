@@ -271,6 +271,10 @@ class ClaudeAdapter:
         calls no tool takes none."""
         return True
 
+    def asks(self, target: Any) -> bool:
+        """Claude Code's own :data:`QUESTION_TOOL`, asked as the run's (:func:`_answered`)."""
+        return True
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:

@@ -91,7 +91,7 @@ operations. A large one gets the map and the cards, fetches more on demand, and 
 | `execute`, Code Mode | a sandbox or Code Mode is configured | exists (`sandbox()`; `tools/toolbox.py`) |
 | provider code execution | the provider offers it and the data policy allows it | backlog |
 | `write_todos` | a long-task signal and a window of 32k or more | exists (`automatic.py`, `TodoListMiddleware`) |
-| `ask_user` | the request is ambiguous (the model decides) | exists as an opt-in tool (`trellis.ask_user()`: options, several picks, a recommended one with why, a date, a date range, a number); when to ask is one note with the memory context (`agent.ASKING`); not offered by default: measured, it changed no ask-or-act case |
+| `ask_user` | a person is known to read the run and answer it (a chat front end's, `Runtime.attended`), not a schedule's, on a framework with no question tool of its own (`Adapter.asks`); the model decides when the request is ambiguous | exists (`tools/ask.py`: options, several picks, a recommended one with why, a date, a date range, a number), offered by itself there (off: `without=["ask"]`), declared by the agent anywhere else (`trellis.ask_user()`); when to ask is one note with the memory context (`agent.ASKING`). Measured (`benchmark/cost/asking.py`, `--ask auto`, `declared`, `none`): the same ask-or-act answers, the question in a shape a UI renders |
 
 ### 3. Per call (`ReAct` only, in the loop)
 

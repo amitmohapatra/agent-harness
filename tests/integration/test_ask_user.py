@@ -5,6 +5,7 @@ one "used N tools · ran K commands" line."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,12 +15,13 @@ from fastapi import FastAPI
 
 from tests.support.arm import arm
 from tests.support.planned import PlannedChat
-from trellis import Harness, ReAct, Runtime, Settings, ask_user, tool
+from trellis import Harness, Hooks, ReAct, Runtime, Settings, ask_user, tool
 from trellis.contracts import ConfigurationError
 from trellis.harness.agui.sse import decode
 from trellis.harness.tools.ask import EXPECTS
 
 PATH = "/agui"
+SAID = [{"id": "m", "role": "user", "content": "Order a shirt"}]
 
 
 @pytest.fixture
@@ -222,3 +224,287 @@ async def test_a_call_replayed_on_resume_is_counted_once(harness: Harness) -> No
         e["content"]["tools"] for e in [*first, *resumed] if e["type"] == "ACTIVITY_SNAPSHOT"
     ]
     assert counted == [1, 1]  # the replayed lookup has the same id: the line says 1 again
+
+
+# --------------------------------------------------------------------------- offered by itself
+SIZE = {"question": "Which size?", "options": ["S", "L"]}
+
+
+class Seen:
+    """A function target that keeps the names of the tools each of its runs was offered, and
+    calls the tools it is told to."""
+
+    def __init__(self) -> None:
+        self.toolboxes: list[set[str]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def __call__(self, input: Any, agent: Runtime) -> str:
+        self.toolboxes.append(set(agent.toolbox))
+        said = [str(await agent.tools.call(name, **args)) for name, args in self.calls]
+        return said[-1] if said else "ok"
+
+
+async def test_a_chat_front_ends_run_is_offered_ask_user_by_itself(harness: Harness) -> None:
+    """A person reads a chat front end's run (``serve_chat``) and answers its pauses: the model
+    is given ``ask_user`` with nothing declared, whatever the app sent besides the message."""
+    agent = harness.wrap(ReAct(system_prompt="Help.", model=PlannedChat([("ask_user", SIZE)])),
+                         id="auto")  # fmt: skip
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        assert entry["metadata"]["component"] == "ask_user"
+        assert entry["metadata"]["props"] == {"kind": "text", "options": ["S", "L"]}
+        done = (await post(http, {"resume": [{"interruptId": entry["id"], "payload": "L"}]}))[-1]
+    assert done["result"] == "Done. L"
+
+
+async def test_a_run_nobody_is_known_to_read_is_offered_none(harness: Harness) -> None:
+    """Started from code (``run``, ``stream``), queued for a worker (``start``) or started by
+    another run, nobody is known to answer: a pause there may never be resumed, so the tool is
+    the developer's to add."""
+    seen = Seen()
+    agent = harness.wrap(seen, id="code")
+
+    async def parent(input: Any, runtime: Runtime) -> str:
+        return str((await agent.run("child", user="u1")).answer)
+
+    await agent.run("hi", user="u1")
+    assert [e.type async for e in agent.stream("hi", user="u1")]
+    await agent.start("hi", user="u1")
+    assert await harness.worker([agent]).run_once() is True
+    async with served(harness.wrap(parent, id="parent")) as http:  # a chat's run starts it
+        await post(http, {"messages": SAID})
+    assert len(seen.toolboxes) == 4 and not any("ask_user" in t for t in seen.toolboxes)
+
+
+async def test_a_schedule_set_in_the_chat_fires_without_it(harness: Harness) -> None:
+    """The chat's run has it; the run its schedule fires — nobody is there then — has not."""
+    seen = Seen()
+    agent = harness.wrap(seen, id="desk")
+    seen.calls = [("schedule_task", {"task": "check stock", "when": "0 8 * * *"})]
+    async with served(agent) as http:
+        await post(http, {"messages": SAID})
+    seen.calls = []
+    [schedule] = harness.runs._schedules.values()  # type: ignore[union-attr]
+    await harness.runs.schedules.fire(schedule.schedule_id)
+    assert await harness.worker([agent]).run_once() is True
+    assert ["ask_user" in t for t in seen.toolboxes] == [True, False]
+
+
+async def test_without_ask_turns_it_off(harness: Harness) -> None:
+    seen = Seen()
+    async with served(harness.wrap(seen, id="quiet", without=["ask"])) as http:
+        await post(http, {"messages": SAID})
+    assert seen.toolboxes and "ask_user" not in seen.toolboxes[-1]
+
+
+async def test_the_agents_own_ask_user_wins_and_is_offered_once(harness: Harness) -> None:
+    """A tool of the agent's named ``ask_user`` is the one the model calls — its own function,
+    or ``ask_user()`` passed as before — and the harness adds no second."""
+
+    @tool(name="ask_user", side_effects="read")
+    async def own(question: str) -> str:
+        """Ask the person."""
+        return f"asked my way: {question}"
+
+    seen = Seen()
+    seen.calls = [("ask_user", {"question": "Which size?"})]
+    async with served(arm(harness.wrap(seen, id="own"), [own])) as http:
+        done = (await post(http, {"messages": SAID}))[-1]
+    assert done["result"] == "asked my way: Which size?"
+    explicit, offered = ask_user(), []
+
+    class Offered(Hooks):
+        async def on_run_start(self, run: Runtime) -> None:
+            offered.extend(run.toolbox.values())
+
+    given = harness.wrap(seen, id="given", hooks=[Offered()])
+    seen.calls = []
+    async with served(arm(given, [explicit])) as http:
+        await post(http, {"messages": SAID})
+    assert [t for t in offered if t.name == "ask_user"] == [explicit.tool]
+
+
+async def test_a_framework_with_a_question_tool_of_its_own_keeps_that_one() -> None:
+    """Claude Code and Kimi Code ask with their own ``AskUserQuestion``, asked as the run's
+    question: such a target says so, and its runs get no second tool."""
+    from agents import Agent as SDKAgent
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from tests.support.planned import PlannedModel
+    from trellis.harness.adapters import detect
+    from trellis.harness.adapters.acp import ACPAgent, kimi
+
+    async def function(input: Any, agent: Runtime) -> str:
+        return "ok"
+
+    plain = ACPAgent(command=("some-agent", "acp"))
+    sdk = SDKAgent(name="a", model=PlannedModel([]))
+    graph = ReAct(system_prompt="x", model=PlannedChat([]))
+    targets = [ClaudeAgentOptions(), kimi(), plain, function, graph, sdk]
+    assert [detect(t).asks(t) for t in targets] == [True, True, False, False, False, False]
+
+
+# --------------------------------------------------------------------------- several values
+FORM = {
+    "question": "Confirm the reorder.",
+    "fields": [
+        {"name": "quantity", "label": "Units", "kind": "number", "default": 200,
+         "why": "your order of 2026-11-02"},
+        {"name": "supplier", "label": "Supplier", "options": ["SUP-04", "SUP-07"],
+         "default": "SUP-04", "why": "your usual supplier"},
+        {"name": "deliver_on", "label": "Delivery date", "kind": "date", "required": False},
+    ],
+}  # fmt: skip
+
+
+async def test_several_values_are_one_form_filled_in_with_what_is_remembered(
+    harness: Harness,
+) -> None:
+    """One question, one submit: the app's control gets each field (its kind, its options,
+    the remembered value to show filled in and where it is from), any other UI the same as a
+    JSON Schema with widget hints, plain chat a short numbered list."""
+    agent = asking(harness, FORM, "ask-form")
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        assert entry["reason"] == "question"
+        assert entry["metadata"]["component"] == "ask_user"
+        assert entry["metadata"]["props"] == {
+            "kind": "form",
+            "fields": [
+                {"name": "quantity", "label": "Units", "kind": "number", "default": 200,
+                 "why": "your order of 2026-11-02", "required": True},
+                {"name": "supplier", "label": "Supplier", "kind": "text",
+                 "options": ["SUP-04", "SUP-07"], "default": "SUP-04",
+                 "why": "your usual supplier", "required": True},
+                {"name": "deliver_on", "label": "Delivery date", "kind": "date",
+                 "required": False},
+            ],
+        }  # fmt: skip
+        assert entry["responseSchema"] == {
+            "type": ["object", "string"],
+            "properties": {
+                "quantity": {"type": ["number", "string"], "title": "Units", "default": 200,
+                             "description": "your order of 2026-11-02"},
+                "supplier": {"type": "string", "title": "Supplier", "enum": ["SUP-04", "SUP-07"],
+                             "default": "SUP-04", "description": "your usual supplier"},
+                "deliver_on": {"type": "string", "format": "date", "title": "Delivery date"},
+            },
+            "required": [],  # each required one is filled in: its default stands
+        }  # fmt: skip
+        assert entry["metadata"]["ui_schema"] == {
+            "ui:order": ["quantity", "supplier", "deliver_on"],
+            "quantity": {"ui:widget": "updown"},
+            "deliver_on": {"ui:widget": "date"},
+        }
+        assert entry["message"] == (
+            "Confirm the reorder.\n"
+            "1. Units (a number): 200 (your order of 2026-11-02)\n"
+            "2. Supplier (SUP-04 or SUP-07): SUP-04 (your usual supplier)\n"
+            "3. Delivery date (a date, YYYY-MM-DD), if any\n"
+            "(Answer each, or say what to keep and what to change.)"
+        )
+        changed = [{"interruptId": entry["id"], "payload": {"quantity": 40}}]
+        done = (await post(http, {"resume": changed}))[-1]
+    # one object: what the person changed over what was filled in
+    assert done["result"] == 'Done. {"quantity": 40, "supplier": "SUP-04"}'
+
+
+async def test_a_form_is_answered_in_words_in_plain_chat(harness: Harness) -> None:
+    agent = asking(harness, FORM, "ask-form-words")
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        words = [{"interruptId": entry["id"], "payload": "keep all, deliver on the 20th"}]
+        done = (await post(http, {"resume": words}))[-1]
+    assert done["result"] == "Done. keep all, deliver on the 20th"
+
+
+async def test_a_remembered_value_is_shown_filled_in_a_single_question_too(
+    harness: Harness,
+) -> None:
+    """``recommended`` is the one field's default: for a number or a date, the value shown
+    filled in, with where it is from."""
+    args = {"question": "Which threshold?", "kind": "number", "recommended": "20",
+            "why": "your usual, said 2025-11-03"}  # fmt: skip
+    async with served(asking(harness, args, "ask-filled")) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+    assert entry["message"] == "Which threshold? (a number): 20 (your usual, said 2025-11-03)"
+    assert entry["responseSchema"] == {"type": ["number", "string"], "default": "20"}
+    assert entry["metadata"]["props"] == {"kind": "number", "options": [], "default": "20",
+                                          "why": "your usual, said 2025-11-03"}  # fmt: skip
+
+
+async def test_one_field_is_the_single_question_it_always_was(harness: Harness) -> None:
+    """One mechanism: a question with one value asked as a field is the question its plain
+    arguments make — the same interrupt, no form."""
+    flat = {"question": "Which region?", "options": ["north", "west"], "recommended": "west",
+            "why": "least stock"}  # fmt: skip
+    field = {"question": "Which region?", "fields": [
+        {"name": "region", "options": ["north", "west"], "default": "west",
+         "why": "least stock"}]}  # fmt: skip
+    seen = []
+    for n, args in enumerate((flat, field)):
+        async with served(asking(harness, args, f"ask-one-{n}")) as http:
+            [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        seen.append({k: entry[k] for k in ("reason", "message", "responseSchema", "metadata")})
+    assert seen[0] == seen[1] and seen[0]["reason"] == "choice"
+    # the recommended one first, as for any choice
+    assert seen[0]["metadata"]["props"] == {"kind": "text", "options": ["west", "north"]}
+
+
+async def test_a_forms_fields_are_named_once_each(harness: Harness) -> None:
+    twice = {"question": "Confirm.", "fields": [{"name": "a"}, {"name": "a"}]}
+    async with served(asking(harness, twice, "ask-twice")) as http:
+        done = (await post(http, {"messages": SAID}))[-1]
+    assert done["outcome"] == {"type": "success"} and "named once" in done["result"]
+
+
+async def test_ask_user_names_the_apps_own_controls_as_the_ones_to_call(
+    harness: Harness,
+) -> None:
+    """Beside ``ask_user`` the app's date picker is the control for a date: the tool says so
+    first, naming the app's tools; with an app that declared none it says nothing of them."""
+    from trellis.harness.tools.ask import APPS
+
+    picker = {"name": "pick_date", "description": "Show a date picker.",
+              "parameters": {"type": "object", "properties": {}}}  # fmt: skip
+    model = PlannedChat([])
+    agent = harness.wrap(ReAct(system_prompt="Help.", model=model), id="app-tools")
+    async with served(agent) as http:
+        await post(http, {"messages": SAID, "tools": [picker]})
+        await post(http, {"messages": SAID})
+    with_tools, without = (
+        {t["function"]["name"]: t["function"] for t in request["tools"]}
+        for request in (model.requests[0], model.requests[-1])
+    )
+    said = APPS.format(tools="pick_date")
+    plain = without["ask_user"]
+    assert with_tools["pick_date"]["description"] == "Show a date picker."
+    assert with_tools["ask_user"]["description"] == f"{said} {plain['description']}"
+    kinds = [f["parameters"]["properties"]["kind"]["description"] for f in
+             (with_tools["ask_user"], plain)]  # fmt: skip
+    assert kinds[0] == f"{kinds[1]} {said}"  # and where the kind of answer is chosen
+    assert "controls" not in json.dumps(plain)
+
+
+def test_a_forms_option_field_lists_its_recommended_option_first() -> None:
+    from trellis.harness.tools.ask import Field
+
+    region = Field(name="region", options=["north", "west"], default="west", why="least stock")
+    assert region.in_form()["enum"] == ["west", "north"]
+    assert region.shown()["options"] == ["west", "north"]
+    assert region.line("Region") == "Region (west or north): west (least stock)"
+
+
+def test_a_forms_field_with_several_picks_is_an_array_of_its_options() -> None:
+    from trellis.harness.tools.ask import Field
+
+    regions = Field(name="regions", options=["north", "west"], multiple=True, default=["west"])
+    assert regions.in_form() == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["north", "west"]},
+        "uniqueItems": True,
+        "title": "regions",
+        "default": ["west"],
+    }
+    both = regions.model_copy(update={"default": ["north", "west"]})
+    assert both.line("Regions") == "Regions (north or west): north, west"

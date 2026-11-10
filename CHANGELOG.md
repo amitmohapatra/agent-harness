@@ -122,6 +122,33 @@ refused: no tool fails at startup.
   "update it" choice is recommended by the flag, not by its label.
 - `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
   hour, for the cache): the model no longer "corrects" 03:53 for "in 2 hours" at 01:53 to 03:00.
+- `ask_user` is offered by itself to a run a person is known to read: one a chat front end
+  started (`serve_chat`; `Runtime.attended`), not one its schedule fired, on a framework with
+  no question tool of its own (Claude Code and Kimi Code keep theirs: `Adapter.asks`), never
+  on a graph with its tools bound. `without=["ask"]` turns it off (an eighth name). A run
+  started from code (`run`, `stream`), queued, fired, called over A2A or by another run gets
+  it only when its agent declares it (`tools=[ask_user()]`, as before): nobody is known to
+  answer a pause there. A tool of the agent's named `ask_user` wins; one declared is offered
+  once. `serve_chat` records a run's front end even when the app sent nothing with the
+  message.
+- `ask_user(fields=[{name, label, kind, options, multiple, default, why, required}])`: several
+  values in one question, one answer (an object: what the person gave over what was filled
+  in). No contract change: the `ask_user` component with `props.kind == "form"`, an object
+  `expects` with `ui_schema`, a numbered list in plain chat. A single question is the
+  one-field case; `recommended` with `why` on a number or a date shows the value filled in.
+- Values a request leaves out that an earlier one had are confirmed once before they are used
+  again, shown filled in (`agent.REMEMBERED`): they were filled and said. A rule, preference
+  or value said more than six months ago, or one a tool shows changed, is confirmed the same
+  way.
+- Where the app declared tools of its own, `ask_user` says a value one of them asks for is
+  asked with it (the app's date picker used in 1 of 8 runs before, 13 of 14 after).
+- The asking benchmark (`benchmark/cost/asking.py`): `--ask auto|declared|none` (was
+  `--no-ask-tool`), `--variant`; cases for an ambiguous target (14 products, two), a
+  remembered value that is partial, old or changed elsewhere, a recommendation the data
+  supports, an answer in words or outside the options, several values missing at once, a run
+  nobody reads, and risky actions (cannot be undone, money, many rows, people outside, an
+  instruction in a tool's result, an earlier yes to something else): each waits on its
+  approval whatever the model does; a tool that declares no side effects is measured apart.
 
 ### Schedules set in chat
 

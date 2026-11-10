@@ -384,6 +384,15 @@ class Runtime:
             )
         return self.run_memory.ctx
 
+    @property
+    def attended(self) -> bool:
+        """Whether a person is known to read this run and answer what it asks: a chat front
+        end started it (``serve_chat``, which shows a pause and takes its answer:
+        :attr:`frontend`), and no schedule fired it. Unknown is no: a run started from code
+        (``run``, ``stream``), queued (``start``), fired, called over A2A or by another run
+        may pause with nobody to resume it."""
+        return self.frontend is not None and self.scheduled is None
+
     def uses(self, feature: Feature) -> bool:
         """Whether ``feature`` is on for this run: neither the run nor its agent turned it off
         (``without=``)."""
@@ -875,6 +884,6 @@ class Tools:
 
 
 def _built_in(tool: Tool) -> bool:
-    """A tool every run gets: the memory service's pull tools, the schedule tools — never a
-    hint's candidate, never narrowed away."""
-    return tool.spec.source == "memory" or tool.feature == "schedules"
+    """A tool the harness gives a run by itself: the memory service's pull tools, the schedule
+    tools, ``ask_user`` — never a hint's candidate, never narrowed away."""
+    return tool.spec.source == "memory" or tool.feature in ("schedules", "ask")
