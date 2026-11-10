@@ -594,10 +594,13 @@ def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() ->
         assert not cx.score(turn.expect, COMPETITOR_REFUSAL + answer, [], turn.text)["correct"]
 
 
-async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
-    """Kimi and Claude: the captured requests do not hold the harness's tool results (the
-    CLI's own requests are not seen), so the error a failed call returned ("503 Service
-    Unavailable") is read from the turn's own calls; a figure nothing returned is still not."""
+async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> None:
+    """Kimi and Claude: the captured requests are not the CLI's own, so what the harness gave
+    the run is read from the turn itself — each call's result (an error, "503 Service
+    Unavailable", or a figure, histx-02's 154 on Claude in the all-adapter run) and the memory
+    context it pushed (histx-01's budget). A figure nothing gave the run is still not."""
+    from types import SimpleNamespace
+
     from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
 
     trace = cx.Trace()
@@ -607,11 +610,13 @@ async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
         ToolOutcome(tool="demand_forecast", status=ToolStatus.ERROR, output=error),
     )
     await trace.after_tool(
-        ToolCall(tool="sku_details", args={"sku": "SKU-00001"}),
-        ToolOutcome(tool="sku_details", status=ToolStatus.OK, output="unit cost 41.20"),
+        ToolCall(tool="stock_level", args={"sku": "SKU-01517"}),
+        ToolOutcome(tool="stock_level", status=ToolStatus.OK, output={"on_hand": {"east": 154}}),
     )
-    told = cx.said_in([], trace.calls)
-    assert "503 Service Unavailable" in told and "41.20" not in told  # errors only
+    run = SimpleNamespace(run_id="r1", used=set(), pushed_context="Budget: £50,000 for knitwear")
+    await trace.on_run_end(run, None)
+    told = cx.said_in([], trace.told)
+    assert all(x in told for x in ("503 Service Unavailable", "154", "50,000")), told
     case = next(c for c in breakfix.cases() if c.id == "bf3-explain-03")
     turn = case.turns[0]
     assert turn.expect is not None
@@ -1552,8 +1557,10 @@ async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
     from types import SimpleNamespace
 
     trace = cx.Trace()
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}), None)
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"Bash"}), None)  # a resume
+    run = SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}, pushed_context=None)
+    await trace.on_run_end(run, None)
+    run.used = {"Bash"}
+    await trace.on_run_end(run, None)  # a resume
     assert trace.used == {"r1": {"WebSearch", "store_list", "Bash"}}
 
 

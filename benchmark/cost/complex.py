@@ -3198,10 +3198,12 @@ class Captured(runner.Meter):
 
 class Trace(Hooks):
     """Every tool call of the current turn: its name, arguments, status and run; ``started``
-    is set once a call of the turn starts."""
+    is set once a call of the turn starts; ``told``: what the harness gave the turn's runs
+    (each call's result, each run's pushed memory context), which :func:`said_in` reads."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.told: list[str] = []
         self.started = asyncio.Event()
         #: every tool each run (by id) used, its framework's own too (Claude's WebSearch,
         #: Kimi's Bash): those run outside the tool hooks (``bridge.observed``)
@@ -3209,19 +3211,23 @@ class Trace(Hooks):
 
     async def on_run_end(self, run: Any, result: Any) -> None:
         self.used.setdefault(run.run_id, set()).update(run.used)
+        if run.pushed_context:
+            self.told.append(run.pushed_context)
 
     async def before_tool(self, call: ToolCall) -> None:
         self.started.set()
 
     async def after_tool(self, call: ToolCall, outcome: ToolOutcome) -> ToolOutcome:
         runtime = current()
+        if outcome.output is not None:
+            self.told.append(str(outcome.output))
         self.calls.append(
             {
                 "tool": call.tool,
                 "args": dict(call.args),
                 "status": outcome.status.value,
                 "run": runtime.run_id if runtime is not None else None,
-                # what a failed call told the model (:func:`said_in`)
+                # what a failed call told the model, in the turn's record
                 **(
                     {"error": str(outcome.output)[:ERROR_CHARS]}
                     if outcome.status.value in ("error", "timeout") and outcome.output
@@ -3236,12 +3242,13 @@ class Trace(Hooks):
 ERROR_CHARS: Final = 500
 
 
-def said_in(requests: Sequence[dict[str, Any]], calls: Sequence[dict[str, Any]]) -> str:
+def said_in(requests: Sequence[dict[str, Any]], told: Sequence[str]) -> str:
     """What the run was told, as the scorer reads it (``context``): every captured request's
-    messages, and the errors its failed calls returned - for Kimi and Claude the captured
-    requests are not the CLI's own, so a tool's error is read from the call itself."""
+    messages, and what the harness gave its runs (``Trace.told``) - for Kimi and Claude the
+    captured requests are not the CLI's own, so the tools' results and the memory context are
+    read from the turn itself."""
     sent = [_texts(m) for q in requests for m in q.get("messages") or []]
-    return "\n".join([*sent, *(c["error"] for c in calls if c.get("error"))])
+    return "\n".join([*sent, *told])
 
 
 # --------------------------------------------------------------------------- running
@@ -3600,6 +3607,7 @@ async def run_case(
         for _ in range(t.ticks):
             w.tick()
         trace.calls = []
+        trace.told = []
         trace.used = {}
         trace.started.clear()
         wire.clear()
@@ -3690,7 +3698,7 @@ async def run_case(
             }
             if turn.expect is not None:
                 row["expect"] = _expect_row(turn.expect)
-                said = said_in(captured.requests, calls)
+                said = said_in(captured.requests, trace.told)
                 used = set(row["native"])
                 ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
                 row["score"] = score(
