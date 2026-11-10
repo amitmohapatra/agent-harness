@@ -36,7 +36,7 @@ from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
-__all__ = ["FIX_ARGUMENTS", "arguments_of", "convert", "governed", "held"]
+__all__ = ["FIX_ARGUMENTS", "arguments_of", "asked_again", "convert", "governed", "held"]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
@@ -45,6 +45,8 @@ MADE: Final = "_trellis_made"
 #: holding that agent.
 AGENT_TOOL: Final = "_is_agent_tool"
 AGENT_OF_TOOL: Final = "_agent_instance"
+#: The attribute marking a ``needs_approval`` policy :func:`held` made (governance's gate).
+HELD: Final = "_trellis_held"
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -115,7 +117,25 @@ def held(tool: Any, spec: ToolSpec) -> Any:
             runtime.pending = runtime.pending.model_copy(update={"native_id": call_id})
         return True
 
+    setattr(asks, HELD, True)
     return dataclasses.replace(tool, needs_approval=asks)
+
+
+async def asked_again(item: Any, context: Any) -> bool | None:
+    """Whether governance asks now about a call :func:`held` held in an earlier model reply
+    (``item``: the SDK's ``ToolApprovalItem`` for it), asked as the gate asks (``True``: asked
+    — governance's pause, with its choices; ``False``: it may run). The calls of one reply
+    wait at the gate together, and a resumed run keeps each one's pending approval without
+    asking the gate again, so the person's answer to the first (an approval for the
+    conversation) would never reach the others. ``None``: a call this gate did not hold (your
+    own gate's, the SDK's to ask), or one whose arguments it cannot read."""
+    tool = next((t for t in item.agent.tools if getattr(t, "name", None) == item.name), None)
+    gate = getattr(tool, "needs_approval", None)
+    args = arguments_of(item.arguments)
+    if not getattr(gate, HELD, False) or isinstance(args, str):
+        return None
+    assert gate is not None
+    return bool(await gate(context, args, item.call_id))
 
 
 def _narrowed(name: str, own: Any) -> Any:

@@ -42,7 +42,7 @@ The harness's tools — the MCP tools the Bifrost virtual key allows and, memory
 tools — reach Kimi as one more MCP server (below); your own MCP servers go in `mcp_servers=`.
 
 `kimi(*, model=None, cwd=None, env=None, mcp_servers=(), mode=None, sandbox=None, skills=None,
-command="kimi")`:
+command="kimi", reads=())`:
 
 | Argument | What it is |
 |---|---|
@@ -53,6 +53,7 @@ command="kimi")`:
 | `mode` | Kimi's session mode: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call |
 | `sandbox` | `sandbox()`: Kimi's `Bash` and file writes go to the run's sandbox (below) |
 | `skills` | a skill set, `**src.kimi()`: the run's skills in Kimi's own skills folder (below) |
+| `reads` | folders besides `cwd` a `Bash` command may read without asking a person (below) |
 
 ## What is automatic
 
@@ -60,7 +61,7 @@ command="kimi")`:
 |---|---|
 | Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt), marked off from the question as `ReAct`'s is (`<memory_context>`, `history.ASKED_WITH`) |
 | Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the attempt on `127.0.0.1` with a bearer token of its own, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run, from 30 tools of the run's own (Kimi's built-ins are not counted); `read_file` pages a large result |
-| Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked, unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Kimi Code 2.1.1 reads `[permission]` rules in its `config.toml` but does not apply them over ACP (pinned by `test_kimi.py`): it still asks, and a person is asked |
+| Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked, unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`), reading only what the run may read: its folder (or the folder the call names, Bash's `cwd`), `reads`, the run's skills, where a kept result is read; with the environment Kimi is given (`env`: its `PATH`, `PYTHONPATH`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Kimi Code 2.1.1 reads `[permission]` rules in its `config.toml` but does not apply them over ACP (pinned by `test_kimi.py`): it still asks, and a person is asked |
 | Schedules: off | Kimi runs for one attempt and ends with it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them, as ACP has no way to take a built-in off. A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
 | Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result. Kimi decides when (the model calls the tool): nothing to configure |

@@ -287,8 +287,12 @@ A target that takes messages and fits each request to a known window (`ReAct` wi
 `context_window=` or a model profile that says it) gets each earlier turn this process ran
 whole: its question, its tool calls and their results (one past its tool's age marked out of
 date), and its answer — the figures behind an answer, for "why was that?" or "redo it with X",
-as memory's window gives them with memory on. `ReAct`'s clearing and `FitWindow` fit them to
-the window (older results cleared first, `read_file` reads one back). The transcripts are
+as memory's window gives them with memory on. They are sized for the request they go into, as
+memory's window is (`Agent.conversation_budget`: what the window leaves once the instructions,
+the tools, the question, the front end's context and a reply are in): each turn's question
+and answer from the newest back while they fit, then each of those turns whole, from the
+newest back, while it fits. `ReAct`'s clearing and `FitWindow` fit the turn under way (older
+results cleared first, `read_file` reads one back). The transcripts are
 kept with the conversation's saved results (`agent.results`, in this process); a turn another
 process ran, or one with no window known, is its question and answer.
 
