@@ -102,7 +102,7 @@ from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
 
 log = logging.getLogger("trellis.harness")
@@ -647,6 +647,10 @@ class ACPAdapter:
             env.update(profile.env)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
+        # where its shell works, the run's own skills, where a kept result is read (the name
+        # the model is told): what a command may read unasked
+        own = [str(home.agent_home / "skills")] if home is not None else []
+        attempt.folders = (str(cwd), [*own, results.PREFIX])
         capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
         async with contextlib.AsyncExitStack() as stack:
             if home is not None:
@@ -804,6 +808,8 @@ class Attempt:
         self.session_id: str | None = None
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.calls: dict[str, _Call] = {}
+        #: where the agent's shell works and what else the run may read (``governance.shell``)
+        self.folders: tuple[str | None, list[str]] = (None, [])
         self.usage: UsageLog | None = None
         #: what the agent is told next, in a prompt of its own, once the turn has stopped
         self.followup: str | None = None
@@ -1245,7 +1251,7 @@ class Attempt:
         spec = found or ToolSpec(name=name, side_effects=side_effects or DEFAULT_SIDE_EFFECTS)
         runtime.model_ended(STEP)
         try:
-            decided = await _permitted(spec, args)
+            decided = await _permitted(spec, args, self.folders)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
@@ -1554,11 +1560,14 @@ def _said_reads(agent_id: str) -> None:
     log.warning("%s: %s", agent_id, READS_NOT_ISOLATED, extra={"agent_id": agent_id})
 
 
-async def _permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+async def _permitted(
+    spec: ToolSpec, args: dict[str, Any], folders: tuple[str | None, list[str]]
+) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
     (``bridge.permitted``: hooks, governance), then — since the agent asks — a person asked
     (``bridge.asked``), unless it only reads (a read tool, or a shell command
-    ``governance.shell.read_only`` reads as read-only) or the run changed its arguments (the
+    ``governance.shell.read_only`` reads as read-only inside ``folders``: the agent's working
+    folder, and what else the run may read) or the run changed its arguments (the
     agent is told to call it again so: that call is the one let through). A pause
     propagates."""
     from trellis.harness.governance.shell import read_only
@@ -1566,7 +1575,7 @@ async def _permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOut
     decided = await bridge.permitted(spec, args)
     if isinstance(decided, ToolOutcome) or decided.args != args or spec.side_effects == "read":
         return decided
-    if read_only(spec.name, args):
+    if read_only(spec.name, args, *folders):
         return decided
     return await bridge.asked(spec, args, KIMI_CODE)
 

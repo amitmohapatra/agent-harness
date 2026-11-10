@@ -683,7 +683,7 @@ def _options(
         "hooks": with_context(hooks, context) if context else hooks,
         "system_prompt": _told(options.system_prompt),
         # what Claude Code asks its user about, the harness answers (the team's own first)
-        "can_use_tool": _asked(options.can_use_tool, steps),
+        "can_use_tool": _asked(options.can_use_tool, steps, _folders(options)),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
     }
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
@@ -830,11 +830,24 @@ def _governance(steps: Steps) -> Any:
     return HookMatcher(hooks=[pre_tool_use])
 
 
-def _asked(own: Any, steps: Steps) -> Any:
+def _folders(options: Any) -> tuple[str, list[str]]:
+    """Where the CLI's shell works (its ``cwd``, else this process's) and what else the run
+    may read there: the plugins it is given by a folder (the skills written for the run:
+    ``skills.for_run``), and where a kept result is read (``results.PREFIX``: the name the
+    model is told, which it also tries in its shell)."""
+    from trellis.harness.tools import results
+
+    plugins = [p for p in options.plugins or () if isinstance(p, Mapping)]
+    given = [str(p["path"]) for p in plugins if p.get("path")]
+    return str(options.cwd or os.getcwd()), [*given, results.PREFIX]
+
+
+def _asked(own: Any, steps: Steps, folders: tuple[str, list[str]]) -> Any:
     """The ``can_use_tool`` the CLI calls when Claude Code would ask its user about a call (its
     permission mode and rules let it through without asking otherwise): the team's own
     callback, when it has one; else a call that only reads runs — a read tool, or a shell
-    command :func:`~trellis.harness.governance.shell.read_only` reads as read-only — and any
+    command :func:`~trellis.harness.governance.shell.read_only` reads as read-only, inside
+    ``folders`` (the working folder, and what else the run may read) — and any
     other asks a person (``bridge.asked``); Claude's question to its user is the run's
     (:func:`_answered`). A call not let through ends its step."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
@@ -853,7 +866,7 @@ def _asked(own: Any, steps: Steps) -> Any:
                 verdict = PermissionResultAllow(updated_input=await _answered(args))
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
-        elif spec.side_effects == "read" or read_only(name, args):
+        elif spec.side_effects == "read" or read_only(name, args, *folders):
             verdict = PermissionResultAllow()
         else:
             try:

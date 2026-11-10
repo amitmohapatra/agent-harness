@@ -237,6 +237,22 @@ async def test_a_harness_tool_error_reaches_the_agent(harness: Harness, tmp_path
 
 
 # --------------------------------------------------------------------------- its own tools
+async def test_a_read_outside_the_working_folder_asks_a_person(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A command that only reads runs unasked inside the folder the agent works in; a file
+    anywhere else on the machine (``/etc/passwd``) changes nothing, but asks a person."""
+    script = [
+        {"builtin": "Bash", "args": {"command": "ls"}, "ask": True, "output": "a.txt"},
+        {"builtin": "Bash", "args": {"command": "cat /etc/passwd"}, "ask": True, "output": ""},
+        {"text": "done"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="ops")
+    asked = await agent.run("look around", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == {"command": "cat /etc/passwd"}
+
+
 async def test_its_own_tools_are_governed_and_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

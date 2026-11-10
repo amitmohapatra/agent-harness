@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +19,33 @@ def py(code: str) -> str:
     return f"python3 - <<'EOF'\n{code}\nEOF"
 
 
+@pytest.fixture(autouse=True)
+def _a_machine_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every program is found in the system's folder, and nothing is on Python's path: what a
+    test says of a command does not depend on the machine it runs on."""
+    for variable in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(shell.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
+@pytest.fixture
+def run(tmp_path: Path) -> Path:
+    """The run's working folder (``@RUN`` in a command), beside a folder the harness lets it
+    read (``@KEPT``)."""
+    (tmp_path / "run").mkdir()
+    (tmp_path / "kept").mkdir()
+    return tmp_path / "run"
+
+
+def reads(command: str, run: Path) -> bool:
+    """Whether ``command`` is read-only run in ``run``, the folder beside it readable too."""
+    kept = run.parent / "kept"
+    command = command.replace("@RUN", str(run)).replace("@KEPT", str(kept))
+    return read_only("Bash", {"command": command}, run, [kept])
+
+
 READS = [
-    "cat /data/sales.csv | head -50",
+    "cat sales.csv | head -50",
     "wc -l sales.csv && head -3 sales.csv",
     "grep -c denim sales.csv; sort -t, -k3 -n sales.csv | tail -5",
     "awk -F, '{s+=$4} END {print s}' sales.csv",
@@ -37,10 +63,10 @@ READS = [
     # Kimi's, run with the fixes: an error output thrown away
     "which gnuplot convert magick 2>/dev/null; pwd",
     "ls -la x > /dev/null && echo found",
-    # Kimi's, in the natural re-measure: a cd first (into any folder: nothing is written)
-    "cd /srv/kimi/cwd && ls -l /large_tool_results/3dfef05 && head -3 s.csv && wc -l s.csv",
+    # Kimi's, in the natural re-measure: a cd first (into a folder the run may read)
+    "cd @RUN && ls -l && head -3 s.csv && wc -l data/s.csv",
     # Claude's, on the long set: a string's replace is no file's (os.replace, Path.replace)
-    "cd /srv/claude/tool-results && python3 -c \"\nimport json\nt=json.load(open('a.json'))[0]['text']\n"
+    "cd @KEPT && python3 -c \"\nimport json\nt=json.load(open('a.json'))[0]['text']\n"
     "print('tail:', t[10:310].replace(chr(10),' ')[:300])\n\"",
     """python3 -c "name = 'Trail Sandal'; print(name.replace(' ', '_'))\"""",
     """python3 -c "print(open('s.csv').read().replace(',', ';', 3))\"""",
@@ -56,8 +82,17 @@ READS = [
         "import json, re, math, statistics, datetime, collections, itertools, csv, string, textwrap"
     ),
     py(
-        "from pathlib import Path\nfor q in Path('.').glob('*.csv'):\n    print(q.name, q.stat().st_size)"
+        "from pathlib import Path\nprint(Path('s.csv').name, Path('s.csv').stat().st_size, Path('.').exists())"
     ),
+    py(
+        "import os, glob\nprint(os.listdir(), os.listdir('data'), glob.glob('**/*.csv', recursive=True))"
+    ),
+    py("import json\nprint(json.load(open('@KEPT/a.json')), open('@RUN/s.csv').read())"),
+    # a folder the harness lets the run read (the skills it wrote for it)
+    "cat @KEPT/skills/stock-cover/SKILL.md | head -40",
+    "ls -la @KEPT && grep -rn cover @KEPT/skills --include=*.md",
+    "diff s.csv --to-file=@KEPT/a.csv",
+    "grep -e total -e sum s.csv | head; rg --files; rg -n total src",
     py("from pathlib import Path\nprint(Path('a.txt').open().read(), Path('b').open(mode='rb'))"),
     py(
         "import pandas as pd\npd.set_option('display.max_columns', None)\n"
@@ -433,13 +468,169 @@ NOT = [
 
 
 @pytest.mark.parametrize("command", READS)
-def test_a_command_that_only_reads_is_approved(command: str) -> None:
-    assert read_only("Bash", {"command": command})
+def test_a_command_that_only_reads_is_approved(command: str, run: Path) -> None:
+    assert reads(command, run)
 
 
 @pytest.mark.parametrize("command", NOT)
-def test_a_command_that_may_write_or_cannot_be_read_stays_a_pause(command: str) -> None:
-    assert not read_only("Bash", {"command": command})
+def test_a_command_that_may_write_or_cannot_be_read_stays_a_pause(command: str, run: Path) -> None:
+    assert not reads(command, run)
+
+
+# --------------------------------------------------------------------------- reads outside the run's folder
+#: What changes nothing, but reads what the machine keeps - a file outside the run's folder
+#: and the folders the harness lets it read, the environment - or reads a file the command
+#: does not name: a pause, in the run's folder too (all read-only before).
+ELSEWHERE = [
+    "cat /etc/passwd",
+    "cat ~/.ssh/id_rsa",
+    "cat /proc/self/environ",
+    "head -3 ../other/s.csv",
+    "tail -1 data/../../x",
+    "ls /",
+    "ls ..",
+    "ls -la ~",
+    "cd /etc && cat passwd",
+    "cd .. && ls",
+    "cd @KEPT/.. && ls",
+    "grep -r key /home",
+    "grep key s.csv /etc/passwd",
+    "grep /etc/passwd -e root",  # the pattern is the option's: the first word is a file
+    "grep -ie root /etc/passwd",
+    "grep --regexp=root /etc/passwd",
+    "rg --files /etc",
+    "cd - && cat passwd",
+    "find / -name id_rsa",
+    "find . -newer /etc/passwd",
+    "wc -l --include=/etc/passwd",
+    "wc -l --files0-from=list",
+    "sort --files0-from=list",
+    "du --files0-from=list",
+    "file -f list",
+    "date -f dates",
+    "find -files0-from list",
+    "grep -f /etc/passwd s.csv",
+    "grep --file=/etc/passwd s.csv",
+    "grep --file pats s.csv",
+    "grep -R key .",
+    "rg -L key",
+    "rg -f pats",
+    "jq -n env",
+    "jq '$ENV.HOME' a.json",
+    "jq -n 'import \"x\" as $x; $x'",
+    "jq -f prog.jq a.json",
+    "jq -L lib .a a.json",
+    "jq .a /etc/x.json",
+    "awk 'BEGIN{print ENVIRON[\"HOME\"]}'",
+    "awk 'BEGIN{ARGV[1]=\"/etc/passwd\";ARGC=2} {print}'",
+    "awk '{print}' /etc/passwd",
+    "sed -n 1p /etc/passwd",
+    "sed -n -e 1p /etc/passwd",
+    "diff s.csv --to-file=/etc/passwd",
+    "ls -l /large_tool_results/3dfef05",  # Kimi's: a kept result's name is no file of the machine
+    "printenv",
+    "env",
+    "/tmp/ls",  # a program is one of the system's
+    "/opt/tools/cat s.csv",
+    "@RUN/cat s.csv",
+    "bin/python3 -c 'print(1)'",
+    py("print(open('/etc/passwd').read())"),
+    py("print(open('../x').read())"),
+    py("print(open('~/.ssh/id_rsa').read())"),
+    py("f = 's.csv'\nprint(open(f).read())"),  # the cost: a path not written out
+    py("print(open())"),
+    py("import io, gzip\nprint(io.open('/etc/passwd'), gzip.open('/var/log/x.gz'))"),
+    py("import pandas as pd\nprint(pd.read_csv('/etc/passwd'))"),
+    py("import openpyxl\nprint(openpyxl.load_workbook('/etc/x.xlsx'))"),
+    py("import os\nprint(os.listdir('/'))"),
+    py("import os\nprint(os.listdir('..'))"),
+    py("import os\nprint(list(os.walk('/home')))"),
+    py("import os\nd = '/'\nprint(os.listdir(d))"),
+    py("import glob\nprint(glob.glob('/etc/*'))"),
+    py("import glob\nprint(glob.glob('*', root_dir='/etc'))"),
+    py("import os\nprint(os.getenv('HOME'))"),
+    py("from pathlib import Path\nprint(Path('/etc/passwd').read_text())"),
+    py("from pathlib import Path\np = Path('s.csv')\nprint((p / '../../etc/passwd').read_text())"),
+    py("from pathlib import Path\nprint(Path('.').parent.parent)"),
+    py("from pathlib import Path\nprint(Path.home(), Path.cwd())"),
+    py("from pathlib import Path\nprint(Path('a', '/etc/passwd').read_text())"),
+    py("from pathlib import Path\nprint(Path('s.csv', x=1))"),
+    py("from pathlib import Path\nfor q in Path('.').glob('*.csv'):\n    print(q.read_text())"),
+    py("from pathlib import Path\nprint(Path('.').resolve())"),
+    py("from pathlib import PurePath"),
+]
+
+
+@pytest.mark.parametrize("command", ELSEWHERE)
+def test_a_read_outside_what_the_run_may_read_stays_a_pause(command: str, run: Path) -> None:
+    assert not reads(command, run)
+
+
+def test_with_no_folder_known_a_command_that_reads_a_file_stays_a_pause() -> None:
+    """Nothing can be placed: only a command that reads no file is read-only."""
+    assert read_only("Bash", {"command": "echo hi; date +%s; pwd; which python3 | tr a b"})
+    for command in ("cat s.csv", "ls", "cd /srv && ls", "grep -c x '*.csv'", py("print(1)")):
+        assert not read_only("Bash", {"command": command})
+    assert not shell.python_reads("print(open('s.csv').read())")
+    assert shell.python_reads("print(open('s.csv').read())", at=Path("/srv/run"))
+    assert shell.python_reads(
+        "print(open('/kept/a').read())", at=Path("/srv/run"), reads=[Path("/kept")]
+    )
+
+
+def test_a_word_the_shell_fills_in_is_read_as_the_files_it_names(run: Path) -> None:
+    """``*.csv`` is the files it matches: each one the run may read, none named like an
+    option (``-delete``), none a link out of the folder."""
+    (run / "a.csv").write_text("x")
+    assert reads("wc -l *.csv ./*.csv && find . -name '*.csv' && ls *.xlsx", run)
+    (run / "link").symlink_to("/etc")
+    assert not reads("cat l*/passwd", run)
+    assert not reads("cat link/passwd", run)
+    assert reads("cat a*", run)
+    (run / "-delete").write_text("")
+    assert not reads("find *", run)
+    assert not reads("cat s.csv --x=*", run)
+    assert reads("cat a*", run)  # nothing it matches starts with a dash
+
+
+def test_a_program_is_one_of_the_systems(run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name is the program the system's folders hold; one found in the run's folder, in
+    any other, or not at all, is not."""
+    assert reads("cat s.csv && /usr/bin/wc -l s.csv && /bin/ls", run)
+    for found in (f"{run}/bin/cat", "/tmp/x/cat", None):
+        monkeypatch.setattr(shell.shutil, "which", lambda name, found=found: found)
+        assert not reads("cat s.csv", run)
+    monkeypatch.setattr(shell, "SYSTEM", frozenset({str(run)}))  # the folder itself, a system's
+    monkeypatch.setattr(shell.shutil, "which", lambda name: f"{run}/{name}")
+    assert not reads("cat s.csv", run)
+
+
+def test_python_is_the_installed_one(run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The folder Python starts in is first on its path: a module there named as one of its
+    own is imported in its place - and with a library imported, any module there may be."""
+    plain, library = py("import json\nprint(json.dumps(1))"), py("import numpy\nprint(numpy.pi)")
+    assert reads(plain, run) and reads(library, run) and reads(py("print(1)"), run)
+    (run / "analysis.py").write_text("")  # no module of Python's has that name
+    assert reads(plain, run) and not reads(library, run)
+    (run / "analysis.py").unlink()
+    for name in ("json.py", "re.pyc", "stringprep.py", "sitecustomize.py", "x.pth", "matplotlibrc"):
+        (run / name).write_text("")
+        assert not reads(plain, run) and not reads(py("print(1)"), run), name
+        (run / name).unlink()
+    (run / "enum").mkdir()
+    assert reads(plain, run)  # a folder that is no package
+    (run / "enum" / "__init__.py").write_text("")
+    assert not reads(plain, run)
+    (run / "enum" / "__init__.py").unlink()
+    for variable, value, safe in (
+        ("PYTHONPATH", "src:.", False),
+        ("PYTHONPATH", f"/opt/lib:{run}/lib", False),
+        ("PYTHONPATH", "/opt/lib", True),
+        ("PYTHONSTARTUP", f"{run}/start.py", False),
+    ):
+        monkeypatch.setenv(variable, value)
+        assert reads(plain, run) is safe, (variable, value)
+        monkeypatch.delenv(variable)
 
 
 def test_only_a_shell_call_is_read_here() -> None:
@@ -453,7 +644,8 @@ def test_only_a_shell_call_is_read_here() -> None:
 SAVES = [
     "mkdir -p exports && python3 -c \"import pandas as pd; pd.DataFrame().to_excel('exports/q3.xlsx')\"",
     "cd {w} && python3 - <<'EOF'\nfrom openpyxl import Workbook\nwb = Workbook()\nwb.save('denim_q3.xlsx')\nEOF",
-    "cp /large_tool_results/3dfef05 {w}/S14_sales_2026.csv && wc -l {w}/S14_sales_2026.csv",
+    "cp exports/s.csv {w}/S14_sales_2026.csv && wc -l {w}/S14_sales_2026.csv",
+    "cp -r data/*.csv {w}/exports",
     "python3 -c \"import matplotlib.pyplot as plt; plt.plot([1, 2]); plt.savefig('chart.png')\"",
     "python3 -c \"from pathlib import Path; Path('notes.md').write_text('# Q3')\"",
     "python3 -c \"import json; json.dump({{'a': 1}}, open('out/a.json', 'w'))\"",
@@ -478,6 +670,9 @@ OUTSIDE = [
     "rm q3.xlsx",
     "mv a.csv b.csv",
     "cp -f a.csv b.csv",
+    "cp /etc/passwd a.txt",  # what it copies in is a read
+    "cp /large_tool_results/3dfef05 S14_sales_2026.csv",
+    "cp -* out",
     "touch link/x",  # a link inside the folder to a folder outside it
     "python3 -c \"p = 'c.png'; import matplotlib.pyplot as plt; plt.savefig(p)\"",
     "python3 -c \"import os; os.remove('q3.xlsx')\"",
@@ -515,7 +710,7 @@ OUTSIDE = [
 def test_a_save_inside_the_runs_folder_is_approved(command: str, tmp_path) -> None:
     command = command.format(w=tmp_path)
     assert approvable("Bash", {"command": command}, tmp_path)
-    assert not read_only("Bash", {"command": command})  # without the folder: still a pause
+    assert not read_only("Bash", {"command": command}, tmp_path)  # only to read there: a pause
 
 
 @pytest.mark.parametrize("command", OUTSIDE)
