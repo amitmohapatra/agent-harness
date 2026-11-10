@@ -949,7 +949,10 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     [seen] = recorded(tmp_path)["skills"]
     assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]
     assert seen["files"]["sql-review/rules.md"] == "No SELECT *."
-    assert seen["linked"] == ["config.toml"]  # its own configuration; no credentials kept here
+    # its own configuration (no credentials kept here), and its sessions: kept in its usual
+    # home, where the conversation's next turn finds the one this run ended in
+    assert seen["linked"] == ["config.toml", "sessions"]
+    assert (usual / "sessions").is_dir()
     started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
     gone = not Path(started).exists()  # noqa: ASYNC240
     assert started != str(usual) and gone  # the run's, removed with it

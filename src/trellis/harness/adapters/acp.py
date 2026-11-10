@@ -1363,14 +1363,18 @@ class RunHome:
       resume reads the same ones;
     * **a run that is not sandboxed** keeps this process's environment, and the agent's own
       configuration and login (``config.toml``, ``credentials``) are linked into the run's home
-      from the agent's usual one;
+      from the agent's usual one — and so are its sessions (:data:`SESSIONS`), which stay in
+      the usual home: the conversation's next turn resumes the session this run ends in
+      (``sessions``), where a home removed with its run would have taken the session with it;
     * **a sandboxed run** (:class:`Sandboxed`) gets an environment of :data:`SANDBOXED_ENV`
       and the agent's own ``env`` only, its ``HOME`` the run's too, nothing linked: no
       credential of this machine's reaches it (its model comes through the gateway, or from
-      ``env``)."""
+      ``env``), and its session ends with it (:meth:`closed`)."""
 
     #: what of the agent's usual home a run's home links to (its configuration, its login)
     LINKED: Final = ("config.toml", "credentials")
+    #: the folder of its home the agent keeps its sessions in, linked too (made if missing)
+    SESSIONS: Final = "sessions"
 
     def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
         from trellis.contracts import stable_id
@@ -1399,7 +1403,8 @@ class RunHome:
         return env
 
     def _linked(self, usual: Path) -> None:
-        for name in self.LINKED:
+        (usual / self.SESSIONS).mkdir(parents=True, exist_ok=True)
+        for name in (*self.LINKED, self.SESSIONS):
             found, link = usual / name, self.agent_home / name
             if found.exists() and not link.exists():
                 link.symlink_to(found)
@@ -1415,9 +1420,14 @@ class RunHome:
 
     async def closed(self) -> None:
         """The attempt ended: the run's home and working directory removed with the run (kept
-        while it waits on a person: the next attempt resumes the agent's session from them)."""
+        while it waits on a person: the next attempt resumes the agent's session from them).
+        A sandboxed run's sessions were in that home (nothing of it is linked), so its session
+        is forgotten with it: the conversation's next turn takes its earlier turns from the
+        harness, not from a session that is gone."""
         if self.runtime.pending is None:
             shutil.rmtree(self.root, ignore_errors=True)
+            if self.target.sandbox is not None:
+                self.runtime.replay.journal.session = None
 
 
 class Sandboxed:
