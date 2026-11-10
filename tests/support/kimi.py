@@ -31,6 +31,8 @@ from typing import Any, Final
 
 import pytest
 import uvicorn
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import convert_to_messages
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
@@ -38,7 +40,7 @@ from starlette.routing import Route
 
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
-from trellis.harness.tools.bridge import TURN_STALLED
+from trellis.harness.tools.bridge import STALLED, TURN_STALLED
 
 #: The ``kimi`` program, when it is installed.
 KIMI_BIN: Final = shutil.which("kimi")
@@ -352,6 +354,55 @@ def kimi_env(endpoint: PlannedEndpoint, home: Path) -> dict[str, str]:
         "KIMI_DISABLE_TELEMETRY": "1",
         "KIMI_CODE_NO_AUTO_UPDATE": "1",
     }
+
+
+def answered_by(chat: BaseChatModel) -> Callable[[dict[str, Any]], Turn]:
+    """``PlannedEndpoint(turns=)`` answered by a LangChain chat model (the complex suite's
+    scripted one, ``tests.support.chat_model``): each request's messages as LangChain's, bound
+    with the names of the tools it offers — none once the harness told it to answer (its step
+    limit, a loop, a call it stopped repeating: what a model told so does); its reply's calls
+    are named as Kimi names them.
+    A call Kimi did not run (the run paused on it, or stopped the turn) is left out of what the
+    model is given, as :class:`PlannedEndpoint` counts no result for it: told to make it again,
+    the model makes it again."""
+
+    def turn(body: dict[str, Any]) -> Turn:
+        last = body["messages"][-1] if body["messages"] else {}
+        stalled = last.get("role") == "tool" and _STALLED.search(result_text(last.get("content")))
+        offered = [] if _told_to_answer(body) or stalled else body.get("tools") or ()
+        tools = [t["function"]["name"] for t in offered]
+        reply = chat.invoke(convert_to_messages(_ran(body["messages"])), tools=tools)
+        if reply.tool_calls:
+            return [(c["name"], c["args"]) for c in reply.tool_calls]
+        return text_of(reply.content)
+
+    return turn
+
+
+#: The harness's words to a model whose call it stopped repeating (``bridge.STALLED``).
+_STALLED: Final = re.compile(
+    re.escape(STALLED).replace(r"\{tool\}", r"\S+").replace(r"\{times\}", r"\d+")
+)
+
+
+def _ran(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``messages`` less the calls Kimi did not run (their result says so, :data:`NOT_RUN`, or
+    there is none) and those results."""
+    results = {
+        m.get("tool_call_id"): result_text(m.get("content"))
+        for m in messages
+        if m.get("role") == "tool"
+    }
+    unrun = {i for i, said in results.items() if any(mark in said for mark in NOT_RUN)}
+    kept = []
+    for m in messages:
+        if m.get("role") == "tool" and m.get("tool_call_id") in unrun:
+            continue
+        calls = m.get("tool_calls") or []
+        if calls and all(c.get("id") not in results or c.get("id") in unrun for c in calls):
+            continue
+        kept.append(m)
+    return kept
 
 
 def _told_to_answer(body: dict[str, Any]) -> bool:

@@ -23,6 +23,7 @@ import pytest
 from benchmark.cost import breakfix, history, judge, longtasks, prices, run
 from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
+from tests.support.kimi import needs_kimi
 from trellis import Settings
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
@@ -1147,6 +1148,34 @@ def test_the_probes_check_what_the_model_was_sent() -> None:
     assert len(found) == 9  # the memory-only probe is skipped on thread history
     with pytest.raises(ValueError, match="no probe kind"):
         cx.checked(cx.Turn("q", sent=(cx.Probe("nope"),)), "SUCCESS", sent, 1)
+    # a CLI calling a real model itself (Claude, Kimi): what it sent is not seen, so no probe
+    # of it is checked (a "has" failed, and a "lacks" passed, on nothing); the others are
+    unseen = cx.checked(turn, "SUCCESS", None, 2, calls=[{"tool": "stock_level", "status": "ok"}])
+    assert [(c["check"], c["ok"]) for c in unseen] == [
+        ("ends", True), ("calls 1", False), ("called stock_level", True),
+    ]  # fmt: skip
+
+
+@needs_kimi
+async def test_kimi_follows_the_scripted_model_and_what_it_sent_is_checked(
+    tmp_path: Path, offline: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--scripted`` drives Kimi too: the scripted model behind a local endpoint Kimi calls,
+    each request it sent kept, so the harness's checks of what the model was sent hold there as
+    on the LangChain adapters."""
+    from benchmark.cost import adversarial
+
+    monkeypatch.setenv("KIMI_RUN_ROOT", str(tmp_path / "kimi"))
+    out = tmp_path / "cx"
+    picked = "advconv-01,advconv-09,advexp-01"
+    await cx.bench(_args(out, cases=picked, adapter="kimi"), progress=lambda _: None)
+    rows = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+    assert [row["case"] for row in rows] == picked.split(",")
+    assert [turn for row in rows for turn in adversarial.failing(row)] == []
+    checks = {c["check"] for row in rows for t in row["turns"] for c in t["checks"]}
+    assert {"has SUP-05", "has BX-7731"} <= checks
+    asked = [json.loads(x) for x in _read(Path(f"{out}.requests.jsonl"))]
+    assert {q["case"] for q in asked} == set(picked.split(","))
 
 
 def test_a_grounded_answer_cites_only_figures_it_was_given() -> None:

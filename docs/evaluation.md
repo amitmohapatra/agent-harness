@@ -469,8 +469,12 @@ chat model (no endpoint); `--model` runs the model the `LLM_*` settings serve, `
 stops the run at a spend (from the usage the replies report), `--cases` and `--rerun-failed`
 pick what runs. `--adapter` picks the framework wrapped: `react`, `langgraph` (`create_agent`),
 `deepagents` (`create_deep_agent`), `openai` (the OpenAI Agents SDK on the endpoint's chat
-completions) or `claude` (the Claude Agent SDK); `--history memory` turns the memory service on
-for any of them. `--variant deep` builds `react` on Deep Agents (a backend given:
+completions), `claude` (the Claude Agent SDK) or `kimi` (Kimi Code over ACP); `--history memory`
+turns the memory service on for any of them. `--scripted` drives Kimi too: the scripted model is
+served as a chat completions endpoint Kimi calls, and every request Kimi sent it is kept, so the
+checks of what the model was sent (`Turn.sent`) hold there as on the LangChain adapters. With a
+real model the Claude and Kimi CLIs call it themselves: what they send is not seen, so those
+checks are not made for them (before, a `has` failed and a `lacks` passed on nothing). `--variant deep` builds `react` on Deep Agents (a backend given:
 `benchmark.cost.variants`' `deep`), so `ReAct` as built and `ReAct` on Deep Agents run the same
 cases; each row says its variant. `python -m benchmark.cost.judge` writes each scored turn's judge packet (the
 exact model input, the answer, the ground truth) and reports the judge's verdicts as harness

@@ -3084,10 +3084,14 @@ def _role(message: dict[str, Any]) -> str:
     return str(message.get("role") or "")
 
 
+#: The probes that read what the model was sent (:class:`Probe`).
+SENT_PROBES: Final = ("has", "lacks", "nonblank", "fits", "repeats")
+
+
 def checked(
     turn: Turn,
     status: str,
-    requests: Sequence[dict[str, Any]],
+    requests: Sequence[dict[str, Any]] | None,
     model_calls: int,
     *,
     calls: Sequence[dict[str, Any]] = (),
@@ -3097,7 +3101,9 @@ def checked(
     """A turn's harness checks: how its run ended (``Turn.ends``) and each :class:`Probe` on
     what was sent — each ``{"check", "ok", "why", "found"}``. ``happened``: what the turn's
     run went through (``asks``: it paused for an approval; ``restarts``: another worker
-    finished it)."""
+    finished it). ``requests`` ``None``: what the model was sent is not seen (a CLI calling a
+    real model itself: Claude, Kimi), so no probe of it (:data:`SENT_PROBES`) is checked."""
+    seen = () if requests is None else requests
     out = [
         {
             "check": "ends",
@@ -3109,12 +3115,14 @@ def checked(
     for p in turn.sent:
         if p.when is not None and p.when != history:
             continue
+        if requests is None and p.kind in SENT_PROBES:
+            continue
         found: Any = None
         if p.kind in ("has", "lacks"):
             pattern = re.compile(p.pattern, re.IGNORECASE)
             hits = [
                 m.group(0)
-                for q in requests
+                for q in seen
                 for msg in q.get("messages") or []
                 if p.role is None or _role(msg) == p.role
                 for m in [pattern.search(_texts(msg))]
@@ -3125,7 +3133,7 @@ def checked(
         elif p.kind == "nonblank":
             blank = [
                 repr(_texts(msg))
-                for q in requests
+                for q in seen
                 for msg in q.get("messages") or []
                 if _role(msg) == "user" and not _texts(msg).strip()
             ]
@@ -3137,12 +3145,12 @@ def checked(
                 count_tokens_approximately(
                     [{"role": "user", "content": _texts(m)} for m in q.get("messages") or []]
                 )
-                for q in requests
+                for q in seen
             ]
             ok, found = all(n <= (p.limit or 0) for n in sizes), max(sizes, default=0)
         elif p.kind == "repeats":
             pattern = re.compile(p.pattern, re.IGNORECASE)
-            last = requests[-1].get("messages") or [] if requests else []
+            last = seen[-1].get("messages") or [] if seen else []
             n = sum(
                 bool(pattern.search(_texts(m)))
                 for m in last
@@ -3319,6 +3327,8 @@ def said_in(requests: Sequence[dict[str, Any]], told: Sequence[str]) -> str:
 #: SDK on the ``LLM_*`` endpoint's chat completions), ``claude`` (the Claude Agent SDK, its
 #: CLI on the provider's own API) and ``kimi`` (Kimi Code over ACP, on the endpoint's model).
 ADAPTERS: Final = ("react", "langgraph", "graph", "deepagents", "openai", "claude", "kimi")
+#: The adapters whose CLI calls the model itself: their requests are not the suite's to see.
+CLIS: Final = ("claude", "kimi")
 #: Where a ``kimi`` run keeps its working directory and Kimi's home (``KIMI_RUN_ROOT``), and the
 #: ``kimi`` program it starts (``KIMI_BIN``).
 KIMI_ROOT: Final = "build/kimi"
@@ -3460,7 +3470,7 @@ def target_of(
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     if kind == "kimi":
-        return kimi_target(str(model), tools, skills), {}
+        return kimi_target(model, tools, skills, max_steps=max_steps), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
 
 
@@ -3495,11 +3505,16 @@ def _working(variable: str, default: str) -> Path:
     return folder
 
 
-def kimi_target(model: str, tools: Sequence[Any], skills: Any = None) -> Any:
+def kimi_target(
+    model: Any, tools: Sequence[Any], skills: Any = None, *, max_steps: int | None = None
+) -> Any:
     """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
-    Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one. No system prompt
-    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own.
-    ``skills``: a skill set, in Kimi's own skills folder (``kimi(**skills.kimi())``)."""
+    Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one; or the scripted
+    model (``--scripted``) behind the endpoint :func:`scripted_endpoint` serves. No system
+    prompt crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its
+    own. ``skills``: a skill set, in Kimi's own skills folder (``kimi(**skills.kimi())``).
+    ``max_steps``: Kimi's own step limit per turn (``KIMI_LOOP_MAX_STEPS_PER_TURN``), the
+    suite's step limit as every other adapter is given it in its own slot."""
     import os
     from urllib.parse import urlsplit
 
@@ -3509,21 +3524,24 @@ def kimi_target(model: str, tools: Sequence[Any], skills: Any = None) -> Any:
     root = Path(os.environ.get("KIMI_RUN_ROOT") or KIMI_ROOT).resolve()
     cwd = _working("KIMI_RUN_ROOT", KIMI_ROOT)
     (cwd / "AGENTS.md").write_text(r.SYSTEM)
-    base = os.environ.get("LLM_BASE_URL", "")
+    scripted = not isinstance(model, str)
+    base = model.url if scripted else os.environ.get("LLM_BASE_URL", "")
     anthropic = urlsplit(base).hostname == "api.anthropic.com"
+    name = "scripted" if scripted else model
     env = {
         "KIMI_MODEL_PROVIDER_TYPE": "anthropic" if anthropic else "openai",
         "KIMI_MODEL_BASE_URL": "https://api.anthropic.com" if anthropic else base,
-        "KIMI_MODEL_API_KEY": os.environ.get("LLM_API_KEY") or "none",
-        "KIMI_MODEL_NAME": model,
+        "KIMI_MODEL_API_KEY": "scripted" if scripted else os.environ.get("LLM_API_KEY") or "none",
+        "KIMI_MODEL_NAME": name,
         "KIMI_MODEL_MAX_CONTEXT_SIZE": KIMI_WINDOW,
         "KIMI_MODEL_MAX_OUTPUT_SIZE": KIMI_OUTPUT,
         "KIMI_MODEL_CAPABILITIES": "image_in",
         "KIMI_CODE_HOME": str(root / "home"),
         "KIMI_CODE_NO_AUTO_UPDATE": "1",
+        **({"KIMI_LOOP_MAX_STEPS_PER_TURN": str(max_steps)} if max_steps else {}),
     }
     agent = kimi(
-        model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"),
+        model=name, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"),
         **(skills.kimi() if skills is not None else {}),
     )  # fmt: skip
     object.__setattr__(agent, TOOLS_ATTRIBUTE, list(tools))  # a frozen dataclass
@@ -3545,14 +3563,34 @@ class Accounted(runner.Meter):
         self.spend.add(input_tokens, output_tokens, cached)
 
 
-def scripted_model(case: Case) -> Any:
+async def scripted_endpoint(model: Any, sent: list[dict[str, Any]]) -> Any:
+    """The scripted model behind a chat completions endpoint of this process, for a CLI that
+    calls its model itself (Kimi): ``tests.support.kimi``'s, each request it is sent kept in
+    ``sent`` (what the turn's harness checks read). Stopped by :func:`scripted_detached`."""
+    from tests.support.kimi import PlannedEndpoint, answered_by
+
+    endpoint = await PlannedEndpoint(turns=answered_by(model)).attached()
+    endpoint.requests = sent
+    return endpoint
+
+
+async def scripted_detached() -> None:
+    """The endpoints :func:`scripted_endpoint` served, stopped (this event loop's server)."""
+    from tests.support.kimi import detached
+
+    await detached()
+
+
+def scripted_model(case: Case, *, keyed: bool = False) -> Any:
     """The existing scripted chat model (``tests.support.chat_model``), replaying the case's
     gold calls and reference answers: proves the pipeline, not a model. A ``keyed`` case's
-    answers each call by the message it answers (``KeyedChatModel``). Each reply reports the
-    request it was sent as its input tokens, counted as the harness counts one, and 50 out."""
+    (or any, ``keyed``) answers each call by the message it answers (``KeyedChatModel``): a CLI
+    resumed after a pause is asked again (told to repeat the paused call), which a script in
+    order would answer with the next call's turn. Each reply reports the request it was sent
+    as its input tokens, counted as the harness counts one, and 50 out."""
     from tests.support.chat_model import KeyedChatModel, ScriptedChatModel
 
-    if case.keyed:
+    if case.keyed or keyed:
         script = [
             (
                 t.text,
@@ -3616,6 +3654,10 @@ async def run_case(
     if case.adapters and kind not in case.adapters:
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
     wire: list[dict[str, Any]] = []
+    if kind == "kimi" and not isinstance(model, str):  # the scripted model: Kimi calls it
+        model = await scripted_endpoint(model, wire)
+    #: a CLI calling a real model itself: what it sends is not seen (only what it was given)
+    unseen = kind in CLIS and isinstance(model, str)
     target, options = target_of(
         model, history, case.window or window, max_steps, adapter=kind, wire=wire,
         tools=(*r.TOOLS, *case.tools),
@@ -3792,7 +3834,7 @@ async def run_case(
                 "checks": checked(
                     turn,
                     status,
-                    captured.requests,
+                    None if unseen else captured.requests,
                     captured.calls,
                     calls=calls,
                     history=history,
@@ -4006,7 +4048,9 @@ async def bench(
                 stopped = f"spend cap ${spend.cap} reached before {case.id}"
                 break
             before = spend.usd
-            model = scripted_model(case) if args.scripted else args.model
+            model = (
+                scripted_model(case, keyed=args.adapter in CLIS) if args.scripted else args.model
+            )
             found, requests = await run_case(
                 h, case, model=model, history=args.history, window=args.window, max_steps=args.max_steps,
                 run_seconds=args.timeout, spend=spend, tag=tag, adapter=args.adapter,
@@ -4024,6 +4068,8 @@ async def bench(
     finally:
         if harness is None:
             await h.aclose()
+        if args.scripted:
+            await scripted_detached()
     report = {
         "suite": "complex",
         "model": model_name,

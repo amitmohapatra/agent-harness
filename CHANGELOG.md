@@ -139,6 +139,19 @@ refused: no tool fails at startup.
 
 ### Benchmark
 
+- `--scripted` drives Kimi in the complex suite (`--adapter kimi`): the scripted model is served
+  as a chat completions endpoint Kimi calls, keyed by the message it answers (a resumed Kimi is
+  told to repeat the paused call, which a script in order answered with the next turn), and
+  every request Kimi sent is kept, so `Turn.sent` is checked on Kimi as on the LangChain
+  adapters. Before, a scripted Kimi run hung (Kimi was given the scripted model's text as a
+  model name). Adversarial and break-and-fix: 58 and 70 cases, every strict score right, 1 of
+  400 checks failed (`advconv-05`'s `fits 6000`: Kimi keeps its own context, larger than the
+  case's window). Kimi is given the suite's step limit in its own slot
+  (`KIMI_LOOP_MAX_STEPS_PER_TURN`), as the other adapters are.
+- With a real model the Claude and Kimi CLIs call it themselves: what they send is not seen, so
+  the checks of what was sent (`has`, `lacks`, `nonblank`, `fits`, `repeats`) are not made for
+  them. Before, a `has` failed and a `lacks` passed on nothing (Kimi, Haiku, adversarial: 48 of
+  52 failed checks were these).
 - A history set for the complex suite (`--cases history`): earlier chats recalled, compared,
   trended, merged and explained, and how an answer was got (memory or tool, source and read
   time, after a resume); 10 new cases and 12 existing ones of those kinds.

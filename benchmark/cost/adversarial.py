@@ -2659,9 +2659,10 @@ def scenario_cases() -> list[Any]:
 
 
 # --------------------------------------------------------------------------- what it found
-#: The adapters a scripted run drives (a LangChain chat model; OpenAI Agents and the Claude
-#: Agent SDK need an endpoint: the matrix's adversarial rows drive them).
-SCRIPTED: Final = ("langgraph", "react", "deepagents")
+#: The adapters a scripted run drives (a LangChain chat model; Kimi calls it behind a local
+#: endpoint, ``complex.scripted_endpoint``; OpenAI Agents and the Claude Agent SDK need an
+#: endpoint of their own: the matrix's adversarial rows drive them).
+SCRIPTED: Final = ("langgraph", "react", "deepagents", "kimi")
 #: The harness bugs and gaps this suite found that are not fixed yet — each an entry of
 #: ``docs/research/IMPROVEMENT_BACKLOG.md`` (Adversarial suite) — by id: the turns (``case/n``)
 #: whose harness check or strict score they fail on a scripted run, and on which adapters. A
