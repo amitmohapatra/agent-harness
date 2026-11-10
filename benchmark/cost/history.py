@@ -243,7 +243,7 @@ def cases() -> list[Any]:
             Turn("Where is that number from, and when was it fetched?",
                  expect=cx.grounded(
                      # the source and the read time, in either order
-                     r"(?=.*(?:stock_level|stock (?:count|tool|system|level)))"
+                     r"(?=.*(?:stock[_ -]level|stock (?:count|tool|system)))"
                      r"(?=.*(?:2026-10-30|30 Oct|October 30|09:00))",
                      f"Names the stock_level call for {east.sku} in the east and the count's "
                      f"read time {w.as_of(0)} as the tool gave it; no invented source or time.",

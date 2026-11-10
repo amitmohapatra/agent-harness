@@ -594,10 +594,30 @@ def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() ->
         assert not cx.score(turn.expect, COMPETITOR_REFUSAL + answer, [], turn.text)["correct"]
 
 
-async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
-    """Kimi and Claude: the captured requests do not hold the harness's tool results (the
-    CLI's own requests are not seen), so the error a failed call returned ("503 Service
-    Unavailable") is read from the turn's own calls; a figure nothing returned is still not."""
+def test_a_refusal_that_offers_a_period_of_the_data_is_no_made_up_figure() -> None:
+    """bf3-cantdo-02 (ReAct on Deep Agents, the all-adapter run): a right refusal of the
+    weather that offers "the daily Leeds sales figures for, say, the last 90 days" was scored
+    made up for its 90. A forecast stated as the answer still is."""
+    case = next(c for c in breakfix.cases() if c.id == "bf3-cantdo-02")
+    turn = case.turns[0]
+    assert turn.expect is not None and turn.expect.kind == "abstain"
+    said = (
+        "I can't give you tomorrow's weather for Leeds. None of my tools provide weather "
+        "forecasts. Would you like the daily Leeds sales figures for, say, the last 90 days?"
+    )
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said + " Expect 14 mm of rain.", [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said + " Rain for 12 days.", [], turn.text)["correct"]
+
+
+async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> None:
+    """Kimi and Claude: the captured requests are not the CLI's own, so what the harness gave
+    the conversation's runs is read from the case itself — each call's result (an error, "503
+    Service Unavailable", or a figure, histx-02's 154 on Claude in the all-adapter run, from
+    the turn before) and the memory context each run was pushed (histx-01's budget). A figure
+    nothing gave the conversation is still not."""
+    from types import SimpleNamespace
+
     from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
 
     trace = cx.Trace()
@@ -607,17 +627,49 @@ async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
         ToolOutcome(tool="demand_forecast", status=ToolStatus.ERROR, output=error),
     )
     await trace.after_tool(
-        ToolCall(tool="sku_details", args={"sku": "SKU-00001"}),
-        ToolOutcome(tool="sku_details", status=ToolStatus.OK, output="unit cost 41.20"),
+        ToolCall(tool="stock_level", args={"sku": "SKU-01517"}),
+        ToolOutcome(tool="stock_level", status=ToolStatus.OK, output={"on_hand": {"east": 154}}),
     )
-    told = cx.said_in([], trace.calls)
-    assert "503 Service Unavailable" in told and "41.20" not in told  # errors only
+    run = SimpleNamespace(
+        run_id="r1", used=set(), thread=None, pushed_context="Budget: £50,000 for knitwear"
+    )
+    await trace.on_run_end(run, None)
+    told = cx.said_in([], trace.told[None])
+    assert all(x in told for x in ("503 Service Unavailable", "154", "50,000")), told
+    # a conversation's own: another one's was not told (its memory context is its own)
+    other = SimpleNamespace(run_id="r2", used=set(), thread="b", pushed_context="Budget: £9")
+    await trace.on_run_end(other, None)
+    assert trace.told["b"] == ["Budget: £9"] and "£9" not in cx.said_in([], trace.told[None])
     case = next(c for c in breakfix.cases() if c.id == "bf3-explain-03")
     turn = case.turns[0]
     assert turn.expect is not None
     failed = "I couldn't get the forecast: the service returned 503 Service Unavailable twice."
     assert cx.score(turn.expect, failed, [], turn.text, told)["correct"]
     assert not cx.score(turn.expect, failed + " About 240 units.", [], turn.text, told)["correct"]
+
+
+def test_a_question_the_run_asks_its_user_is_its_answer() -> None:
+    """bf2-clarify-01 (Kimi, the all-adapter run): Kimi asked "which black slim jeans?" with
+    its own question tool, so the run paused on that question and its answer was null, scored
+    as asking nothing. A question the run asks is what it said; an approval it waits on is not
+    an answer, as before."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import Option, RunStatus
+
+    case = next(c for c in breakfix.cases() if c.id == "bf2-clarify-01")
+    turn = case.turns[0]
+    assert turn.expect is not None
+    options = [Option(value="Black Slim Jeans Black"), "Stretch Slim Jeans Black"]
+    asked = SimpleNamespace(question="Which jeans?", options=options, tool_call=None)
+    said = cx.said_by(SimpleNamespace(status=RunStatus.PAUSED, interrupt=asked, answer=None))
+    assert said == "Which jeans?\nBlack Slim Jeans Black\nStretch Slim Jeans Black"
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    approval = SimpleNamespace(question="Run refund?", options=[], tool_call=object())
+    waits = SimpleNamespace(status=RunStatus.PAUSED, interrupt=approval, answer=None)
+    assert cx.said_by(waits) == "null"  # an approval it waits on: no answer, as before
+    done = SimpleNamespace(status=RunStatus.SUCCESS, interrupt=None, answer={"n": 1})
+    assert cx.said_by(done) == '{"n": 1}'
 
 
 def test_a_set_answered_in_prose_may_show_every_candidate_in_a_table() -> None:
@@ -752,6 +804,12 @@ def test_where_a_figure_is_from_needs_its_source_and_its_read_time() -> None:
     on = r.world().on_hand(sku, "east", 0)
     no_time = f"From a stock_level call for {sku}: {on} on hand."
     assert not cx.score(expect, no_time, [], case.turns[1].text, ctx)["correct"]
+    # the LangGraph graph, the all-adapter run: the tool named as words joined by a hyphen
+    said = (
+        f"The {on} units came from a live stock-level lookup I ran for {sku} in the east "
+        "region. The system returned the count with a reading time of 2026-10-30 09:00 UTC."
+    )
+    assert cx.score(expect, said, [], case.turns[1].text, ctx)["correct"]
 
 
 def test_the_derive_and_apply_truths_are_the_fits_worked_by_hand() -> None:
@@ -1241,6 +1299,36 @@ def test_a_fall_said_as_an_amount_or_a_percentage_reads_as_a_negative_change() -
     assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
 
 
+def test_a_drop_of_an_amount_reads_as_a_negative_change() -> None:
+    """explain-06 t1 (ReAct on Deep Agents, the all-adapter run): "4 units ..., down from 14 at
+    my last check ... the drop of 10 units" states the -10 change, and was scored as missing
+    it. A rise of 10, or another amount, still fails; so does a 10 that is only a clock time."""
+    said = (
+        "We now have **4 units** of Merino Crew Sweater Navy (SKU-00001), down from 14 at my "
+        "last check. I can't tell from the data what caused the drop of 10 units."
+    )
+    assert _right("explain-06", 1, said)
+    assert _right("explain-06", 1, said.replace("drop of 10", "decrease of 10"))
+    assert not _right("explain-06", 1, said.replace("drop of 10", "rise of 10"))
+    assert not _right("explain-06", 1, said.replace("drop of 10", "drop of 9"))
+    assert not _right("explain-06", 1, "Now **4 units**, 14 before; read at 10:00 UTC.")
+
+
+def test_a_step_count_written_as_a_word_reads_as_the_count() -> None:
+    """explain-03 t1 (the middleware and the LangGraph graph, the all-adapter run): "I made
+    four tool calls in three steps: find_sku ..., sku_details ..., supplier_info and
+    supplier_portal" was scored as missing the count 4, which only a figure counted. A wrong
+    count still fails."""
+    t = _turn("explain-03", 1)
+    tools = ("find_sku", "sku_details", "supplier_info", "supplier_portal")
+    records = [{"calls": [{"tool": n} for n in tools]}]
+    said = "I made four tool calls in three steps: find_sku, sku_details, supplier_info and "
+    assert cx.score(t.expect, said + "supplier_portal.", records, t.text)["correct"]
+    assert cx.score(t.expect, "I made 4 calls: " + ", ".join(tools), records, t.text)["correct"]
+    wrong = said.replace("four", "five") + "supplier_portal."
+    assert not cx.score(t.expect, wrong, records, t.text)["correct"]
+
+
 def test_which_figure_to_use_names_the_older_source_by_its_date() -> None:
     """bf2-explain-03 t1 (OpenAI Agents, the audit run): "How sure are you, and which figure
     would you use?" answered with the portal's 34 days, naming the master and its 2026-03-02
@@ -1552,8 +1640,12 @@ async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
     from types import SimpleNamespace
 
     trace = cx.Trace()
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}), None)
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"Bash"}), None)  # a resume
+    run = SimpleNamespace(
+        run_id="r1", used={"WebSearch", "store_list"}, thread=None, pushed_context=None
+    )
+    await trace.on_run_end(run, None)
+    run.used = {"Bash"}
+    await trace.on_run_end(run, None)  # a resume
     assert trace.used == {"r1": {"WebSearch", "store_list", "Bash"}}
 
 
