@@ -1669,8 +1669,9 @@ class ReadTools(AgentMiddleware):
 
 
 # --------------------------------------------------------------------------- the window
-#: Tools a narrowing keeps at least, beside the ones the run already used (then the
-#: descriptions are compacted before any of them is dropped).
+#: Tools a narrowing keeps at least, beside the ones it must keep (the run's used ones, the
+#: graph's own state tools): the descriptions are compacted, the longest results cut and the
+#: older turns left out before any of them is dropped.
 FIT_KEEP: Final = 8
 #: A compacted tool description's most characters (its first sentence, at most this).
 FIT_DESCRIPTION: Final = 120
@@ -1760,19 +1761,20 @@ class FitWindow(AgentMiddleware):
     log line) and counted (:data:`FITTED`):
 
     1. ``tools`` — the offered tools narrowed to the most relevant: those the run already used
-       always kept, then those the tool hints chose, then by the words they share with the
-       request, at least :data:`FIT_KEEP`;
+       (and the graph's own state tools) always kept, then those the tool hints chose, then by
+       the words they share with the request, :data:`FIT_KEEP` of them at least besides;
     2. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
        parameter descriptions);
-    3. ``results`` — the tools narrowed past :data:`FIT_KEEP`, then the longest results cut
-       to their head and tail, each kept whole and its cut naming where ``read_file`` reads the
-       rest (clearing older results is LangChain's ``ClearToolUsesEdit``'s, before it: one
-       clearing pass). ``turns=False`` (a Deep Agents summarization after it) leaves the
-       results to it too: it offloads a result whole to its backend and reads it back with its
-       own ``read_file``, so a result is stored once, where its sandbox's code reads it;
-    4. ``turns`` — the older turns left out, the latest kept whole, and the tools step 3
-       narrowed away offered again as far as they fit in the room that frees (``turns=False``
-       leaves the turns to a summarization after it: ``ReAct``'s summarizes them);
+    3. ``results`` — the longest results cut to their head and tail, each kept whole and its
+       cut naming where ``read_file`` reads the rest (clearing older results is LangChain's
+       ``ClearToolUsesEdit``'s, before it: one clearing pass). ``turns=False`` (a Deep Agents
+       summarization after it) leaves the results to it: it offloads a result whole to its
+       backend and reads it back with its own ``read_file``, so a result is stored once, where
+       its sandbox's code reads it;
+    4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves the
+       turns to a summarization after it: ``ReAct``'s summarizes them), and only then the tools
+       narrowed past :data:`FIT_KEEP`, as far as the latest turn leaves no room: the tools the
+       question needs are never dropped for older turns;
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
@@ -1861,36 +1863,28 @@ class FitWindow(AgentMiddleware):
         self,
         request: ModelRequest[Any],
         budget: int,
-        offered: list[Any],
         runtime: Runtime | None,
         before: Collection[str],
     ) -> ModelRequest[Any]:
-        """The older turns left out (none with a summarization after it: ``turns=False``), and
-        the ``offered`` tools given back as far as they fit in the room that frees."""
+        """The older turns left out (none with a summarization after it: ``turns=False``), then
+        the tools narrowed past :data:`FIT_KEEP` only as far as what is left does not fit."""
         latest = _latest(request) if self.turns else request
-        if latest is request:
-            return request
-        return _narrowed(latest.override(tools=offered), budget, runtime, least=0, before=before)
+        return _narrowed(latest, budget, runtime, least=0, before=before)
 
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
-        #: the tools as the ``results`` step found them: offered again, as far as they fit, once
-        #: the older turns are left out (the room they took is free then)
-        offered: list[Any] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
-            lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
-            lambda r, b: self._turns(r, b, offered, runtime, before),
+            self._results,
+            lambda r, b: self._turns(r, b, runtime, before),
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
             if name == "memory" and not self.turns and _size(_latest(request)) <= budget:
                 break  # the summarization after it makes it fit: memory stays whole
-            if name == "results":
-                offered[:] = request.tools
             smaller = step(request, budget)
             if smaller is not request:
                 taken.append(name)
@@ -1907,7 +1901,7 @@ class FitWindow(AgentMiddleware):
                 source="langgraph",
                 details={"budget": budget, "size": size},
             )
-        if runtime is not None and ("tools" in taken or "results" in taken):
+        if runtime is not None and ("tools" in taken or "turns" in taken):
             self._kept[runtime] = frozenset(_named(t) for t in request.tools)
         said = (
             f"the request was made to fit the model's window ({budget} tokens): {', '.join(taken)}"
@@ -1973,7 +1967,7 @@ def _narrowed(
     those an earlier call of the run kept (``before``: the same set call after call, so a
     prompt cache keeps its prefix), those the tool hints chose, then by the words they share
     with the user's latest message — and kept in that order while they fit what the messages
-    leave, at least ``least`` (the used ones always)."""
+    leave, ``least`` of them at least besides those it must keep (the used ones, always)."""
     tools = list(request.tools)
     if not tools:
         return request
@@ -1992,11 +1986,13 @@ def _narrowed(
 
     room = budget - _size(request.override(tools=[]))
     kept: list[BaseTool | dict[str, Any]] = []
+    more = 0  # kept beside those it must keep
     for _, tool in sorted(enumerate(tools), key=rank):
         must = _named(tool) in used or _named(tool) in STATE_TOOLS
         cost = count_tokens_approximately([], tools=[tool])
-        if must or len(kept) < least or cost <= room:
+        if must or more < least or cost <= room:
             kept.append(tool)
+            more += not must
             room -= cost
     if len(kept) == len(tools):
         return request
@@ -2024,10 +2020,21 @@ def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
 
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
     """The request with its leading system messages and its latest turn only (from the user's
-    latest message on)."""
+    latest message in the conversation on — a note appended to this call alone, as the step
+    limit's and the budget's are, is not one: the turn starts at the question before it)."""
     messages = list(request.messages)
     lead = list(itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
-    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None)
+    state = request.state.get("messages") or []
+    said = {id(m) for m in state}
+    named = {m.id for m in state if m.id is not None}
+    asked = max(
+        (
+            n
+            for n, m in enumerate(messages)
+            if isinstance(m, HumanMessage) and (id(m) in said or m.id in named)
+        ),
+        default=None,
+    )
     if asked is None or asked <= len(lead):
         return request
     return request.override(messages=[*lead, *messages[asked:]])

@@ -320,10 +320,10 @@ smaller, step by step, only as far as it must, in this order:
 
 | Step | What goes | Kept |
 |---|---|---|
-| `tools` | the offered tools narrowed to the most relevant | those the run used; then the hinted ones; then by the words they share with the request; at least 8 |
+| `tools` | the offered tools narrowed to the most relevant | those the run used and the graph's own state tools; then the hinted ones; then by the words they share with the request; 8 of them at least besides |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
 | `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
-| `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`) | the latest turn whole |
+| `turns` | the older turns (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); then the tools past the first step's 8, only as far as the latest turn leaves no room | the latest turn whole, from the user's question (not a note the step limit or the budget appends); the tools it must keep |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
 
 Each step taken is said on the run (a `warning` event, code `context_fit`, naming the steps) and
