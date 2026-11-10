@@ -98,11 +98,12 @@ from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
+from trellis.harness.governance.shell import Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
-from trellis.harness.tools import bridge
+from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 
 log = logging.getLogger("trellis.harness")
@@ -385,8 +386,9 @@ class ACPAgent:
     name the gateway serves, where the agent's profile routes it), ``sandbox`` (``sandbox()``:
     the agent's shell commands and file writes go to the run's sandbox, :class:`Sandboxed`),
     ``skills`` (a ``SkillSet``, ``**src.kimi()``: the run's pinned skills in the agent's own
-    skills folder, :class:`RunHome`) and ``profile`` (what the harness knows of it:
-    :data:`KIMI`)."""
+    skills folder, :class:`RunHome`), ``profile`` (what the harness knows of it:
+    :data:`KIMI`) and ``reads`` (folders besides ``cwd`` its shell may read without asking a
+    person: ``governance.shell``)."""
 
     command: tuple[str, ...]
     env: Mapping[str, str] = field(default_factory=dict)
@@ -397,6 +399,7 @@ class ACPAgent:
     sandbox: Any = None
     skills: Any = None
     profile: Profile | None = None
+    reads: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.command:
@@ -415,6 +418,7 @@ def kimi(
     sandbox: Any = None,
     skills: Any = None,
     command: str = "kimi",
+    reads: Sequence[str] = (),
 ) -> ACPAgent:
     """Kimi Code (``@moonshot-ai/kimi-code``, its ``kimi acp`` server) as a target: ``model``
     the gateway's model name (with Bifrost; without, Kimi's own configuration — its login, or
@@ -422,7 +426,8 @@ def kimi(
     ``mcp_servers`` of its own beside the harness's, ``mode`` its session mode (``"default"``
     or ``"plan"``), ``sandbox`` a ``sandbox()`` its ``Bash`` commands and file writes go to
     (its reads do not: :class:`Sandboxed`), ``skills`` a ``SkillSet`` (``**src.kimi()``), its
-    skills for each run, ``command`` the ``kimi`` executable."""
+    skills for each run, ``command`` the ``kimi`` executable, ``reads`` folders besides
+    ``cwd`` a shell command may read without asking a person."""
     return ACPAgent(
         command=(command, "acp"),
         env=dict(env or {}),
@@ -433,6 +438,7 @@ def kimi(
         sandbox=sandbox,
         skills=skills,
         profile=KIMI,
+        reads=tuple(reads),
     )
 
 
@@ -655,6 +661,10 @@ class ACPAdapter:
             env.update(profile.env)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
+        # where its shell works, the folders the target names, the run's own skills, where a
+        # kept result is read (the name the model is told): what a command may read unasked
+        own = [str(home.agent_home / "skills")] if home is not None else []
+        attempt.shell = Shell(cwd, [*target.reads, *own, results.PREFIX], env)
         capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
         async with contextlib.AsyncExitStack() as stack:
             if home is not None:
@@ -812,6 +822,10 @@ class Attempt:
         self.session_id: str | None = None
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.calls: dict[str, _Call] = {}
+        #: the agent's shell: where it works, what else the run may read, its environment
+        #: (``governance.shell``); Kimi Code's starts each command in its folder (or the
+        #: call's ``cwd``)
+        self.shell = Shell(None)
         self.usage: UsageLog | None = None
         #: what the agent is told next, in a prompt of its own, once the turn has stopped
         self.followup: str | None = None
@@ -1253,7 +1267,7 @@ class Attempt:
         spec = found or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
         runtime.model_ended(STEP)
         try:
-            decided = await _permitted(spec, args)
+            decided = await _permitted(spec, args, self.shell)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
@@ -1562,19 +1576,18 @@ def _said_reads(agent_id: str) -> None:
     log.warning("%s: %s", agent_id, READS_NOT_ISOLATED, extra={"agent_id": agent_id})
 
 
-async def _permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+async def _permitted(spec: ToolSpec, args: dict[str, Any], shell: Shell) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
     (``bridge.permitted``: hooks, governance), then — since the agent asks — a person asked
     (``bridge.asked``), unless it only reads (a read tool, or a shell command
-    ``governance.shell.read_only`` reads as read-only) or the run changed its arguments (the
+    ``shell`` reads as read-only: placed from the agent's working folder, or the call's own
+    ``cwd``, and reading only what the run may read) or the run changed its arguments (the
     agent is told to call it again so: that call is the one let through). A pause
     propagates."""
-    from trellis.harness.governance.shell import read_only
-
     decided = await bridge.permitted(spec, args)
     if isinstance(decided, ToolOutcome) or decided.args != args or spec.side_effects == "read":
         return decided
-    if read_only(spec.name, args):
+    if shell.read_only(spec.name, args):
         return decided
     return await bridge.asked(spec, args, KIMI_CODE)
 
