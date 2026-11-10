@@ -15,6 +15,11 @@ read another turn's denim rows (ReAct on Deep Agents, adversarial `advconv-05`; 
 first, then the run's own, then the graph's, which join only while a query runs. Adapters with
 no graph files (OpenAI Agents, Claude, Kimi, `create_agent`) keep the names they had.
 
+And a kept table `FitWindow` cuts to fit the window keeps its note (where it is kept, the table
+to query) whole after the cut, its rest read from the same kept copy: the note was at the end
+and was cut away, so the model guessed `FROM sku_catalog` and read the earlier turn's knitwear
+rows for outerwear (`deepagents` adapter, 6,000 tokens).
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

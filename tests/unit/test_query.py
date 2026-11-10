@@ -306,3 +306,30 @@ def test_a_figure_reads_as_its_digits_not_a_floats_tail(journal: Journal) -> Non
     assert ask(text, "SELECT price * qty v FROM result") == "v\n59.97\n0.3"
     assert ask(text, "SELECT 1.0 / 3 v") == "v\n0.333333333333333"
     assert ask(text, "SELECT 1e300 * 10 v, 2.0 * 3 w") == "v,w\n1e+301,6.0"
+
+
+def test_a_kept_table_cut_to_fit_the_window_keeps_its_note(journal: Journal) -> None:
+    """``FitWindow`` cuts the longest results to their head and tail; a kept table's note — its
+    path and the table to query — is at its end, and was cut away: the model, told no table,
+    queried ``FROM sku_catalog`` and read the earlier turn's knitwear rows for outerwear (the
+    ``deepagents`` adapter at 6,000 tokens). The cut keeps the note whole and points at the
+    same kept copy."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rows = "\n".join(["sku,cat,price", *(f"O{n},outerwear,{100 + n}.00" for n in range(300))])
+    noted = results.tabled(rows, tool="catalog")
+    path = noted.split("also saved at ")[1].split(". ")[0]
+    call = AIMessage(content="", tool_calls=[{"id": "c1", "name": "catalog", "args": {}}])
+    messages = [HumanMessage("how many?"), call, ToolMessage(noted, tool_call_id="c1")]
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages, tools=[])
+    cut = middleware._cut(given, 1).messages[2].text  # as far as it goes
+    assert "characters cut to fit the window" in cut
+    assert cut.endswith(noted[len(rows) :])  # the note whole: the path and the table
+    assert f'file_path="{path}"' in cut  # the rest is read from the same kept copy
+    assert len(run.replay.journal.results) == 1  # type: ignore[union-attr]
