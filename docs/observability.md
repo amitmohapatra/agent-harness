@@ -158,7 +158,8 @@ memory search and recall see the real data. Masking of your own is a hook:
 `agent.stream` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`,
 `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM` (`tool_notice`, `log` from `current().log(...)`,
 `warning`, `decision` — the person's decision an attempt goes on with: `decision`, `reviewer`,
-`comment`, `remember`; or a call approved because its tool was approved for the run —),
+`comment`, `remember`; or a call approved because what a person allowed covers it — for this
+conversation, always, or by the schedule that fired the run: `remembered: true` —),
 `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. Every `RUN_FINISHED` (whatever its outcome) says
 what the run spent in `data.spent`: `tokens` (input and output), `cached_tokens`, `cost` (US
 dollars, as the gateway reported them), `model_calls` and `tool_calls`, its sub-agents' runs

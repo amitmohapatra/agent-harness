@@ -6,8 +6,8 @@
 * your screen is two calls: ``h.inbox("role:dba")`` lists what waits (with the component and
   props to render), and ``agent.resume`` answers — here an ``edit``: the DBA adds a ``WHERE``
   the statement lacked, the tool runs with the edited SQL, the model reads the result;
-* the next change is approved for the rest of the run (``remember="run"``): a third one runs
-  without asking.
+* the next change is approved for the rest of the conversation (``remember="run"``): a third
+  one runs without asking.
 
     python -m examples.06_scenarios.sql_approval_own_screen
 """
@@ -87,7 +87,7 @@ async def main() -> None:
             result.interrupt.interrupt_id,
             "approve",
             reviewer="dba-lee",
-            remember="run",  # the DBA's own later statements in this run are not asked again
+            remember="run",  # the DBA's later statements in this conversation are not asked again
         )
         print(result.status.value, result.answer)
         print("executed:", executed)

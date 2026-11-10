@@ -462,3 +462,47 @@ async def test_an_answer_carries_a_comment_and_an_approval_remembered_for_the_ru
     assert record.last_resolution.comment == "both regions today"
     assert record.last_resolution.remember == "run"
     await harness.aclose()
+
+
+async def test_an_answer_that_allows_always_is_kept_as_always(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """A data part's ``"remember": "always"`` (Always allow, with a memory service) reaches the
+    resolution as itself: the permission is kept for the user, and the next conversation does
+    not ask."""
+    from trellis import tool
+
+    memory_service.tenant = TENANT  # the tenant the callers' identity names
+    calls: list[str] = []
+
+    @tool(side_effects="write")
+    def deploy(region: str) -> str:
+        """Deploy to a region."""
+        calls.append(region)
+        return f"deployed to {region}"
+
+    async def deployer(input: Any, agent: Runtime) -> Any:
+        return await agent.tools.call("deploy", region="eu")
+
+    app = FastAPI()
+    agent = arm(memory_harness.wrap(deployer, id="deployer"), [deploy])
+    agent.serve_a2a(app, URL)
+    async with asgi(app) as http:
+        client = await connect(http)
+        paused = await send(client, "deploy")
+        assert states(paused)[-1] == TaskState.TASK_STATE_INPUT_REQUIRED
+        task_id = task_id_of(paused)
+        unknown = await send(client, "approve", task_id=task_id, data={"remember": "forever"})
+        assert states(unknown)[-1] == TaskState.TASK_STATE_INPUT_REQUIRED and calls == []
+        await send(client, "approve", task_id=task_id, data={"remember": "always"})
+    record = await memory_harness.runs.get(task_id)
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.remember == "always"
+    await memory_harness.writes.drain()
+    assert [(p["tool"], p["assignee"]) for p in memory_service.permissions.values()] == [
+        ("deploy", None)
+    ]
+    user = record.user_id
+    assert user is not None
+    again = await agent.run("deploy", user=user, thread="another-chat")  # not asked again
+    assert again.status is RunStatus.SUCCESS and calls == ["eu", "eu"], again
