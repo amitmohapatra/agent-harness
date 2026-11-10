@@ -55,14 +55,7 @@ from trellis.harness.governance.decision import (
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
-from trellis.harness.tools.base import (
-    UNDECLARED,
-    SideEffects,
-    Tool,
-    declared,
-    execute,
-    invoked,
-)
+from trellis.harness.tools.base import UNDECLARED, SideEffects, Tool, execute, invoked
 from trellis.memory import MemoryClient
 
 #: How a publish is sent: given the entries and the send itself, run it — the harness queues it
@@ -289,8 +282,8 @@ def governed(
 ) -> Callable[..., Awaitable[Any]]:
     """``fn`` (sync or async) as an async callable whose every call — with keyword arguments,
     the tool's arguments — is checked first, as a tool that does ``side_effects`` (``"read"``,
-    ``"write"`` or ``"irreversible"``: it must say; the catalog's word overrides it). A call
-    that asks runs ``on_ask(decision)`` (sync
+    ``"write"`` or ``"irreversible"``; not given, nothing is known of it and each call asks;
+    the catalog's word overrides it). A call that asks runs ``on_ask(decision)`` (sync
     or async): ``True`` runs it, ``False`` raises :class:`Rejected`, a dict runs it with
     those (edited) arguments, and an exception (LangGraph's ``interrupt``) propagates. A call
     that is announced runs ``on_announce(decision)`` first, when given.
@@ -306,10 +299,9 @@ def governed(
     governance says (the decision carries the ``Ask``'s ``assignee``, ``component`` and
     ``props``) —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome (the
     call returns that outcome's output)."""
-    named = name or fn.__name__
-    risk = declared(side_effects, tool=named, add='side_effects="read" to governed(...)')
+    risk = side_effects or UNDECLARED
     tool = Tool(
-        ToolSpec(name=named, side_effects=risk),
+        ToolSpec(name=name or fn.__name__, side_effects=risk),
         lambda args: invoked(fn, **args),
         timeout=timeout,
     )

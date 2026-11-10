@@ -31,15 +31,15 @@ async def test_a_function_becomes_a_validated_tool_and_stays_callable() -> None:
         await resolved.run({"order": "o1", "surprise": 1})
 
 
-def test_a_declared_function_is_a_source_and_anything_else_is_refused() -> None:
+def test_a_bare_function_is_a_source_and_anything_else_is_refused() -> None:
     def lookup(sku: str) -> int:
         return 1
 
     made = tool(lookup, side_effects="read")
     assert as_source(made) is made and made.spec.side_effects == "read"
-    with pytest.raises(ConfigurationError, match="lookup must declare its side effects"):
-        as_source(lookup)  # a bare function says nothing of what it does
-    with pytest.raises(ConfigurationError, match=r"not a tool: 42 — give tool\(fn, side_eff"):
+    bare = as_source(lookup)  # it says nothing of what it does: each call asks
+    assert (bare.spec.name, bare.spec.side_effects) == ("lookup", "unknown")  # type: ignore[attr-defined]
+    with pytest.raises(ConfigurationError, match="not a tool: 42 — give a function"):
         as_source(42)  # type: ignore[arg-type]
 
 

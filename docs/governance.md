@@ -28,12 +28,12 @@ flowchart TB
 The decision starts from the tool's **risk**:
 
 * For a local tool, it is the declared `side_effects`: `"read"`, `"write"` or `"irreversible"`.
-  Every tool says it where it is defined; one that does not is a `ConfigurationError` there.
+  A tool that declares none has no risk of its own (below).
 * For an MCP tool, the risk comes from its server's annotations, read with the protocol's
   defaults: `readOnlyHint` gives `read`; otherwise the tool is `irreversible` unless it says
   `destructiveHint: false`, which gives `write`. A tool with no annotations is `irreversible`.
 * For an OpenAPI operation, the method decides it.
-* A tool nobody could declare (below) has no risk of its own: its calls ask.
+* A tool that says nothing of what it does has no risk of its own: its calls ask.
 
 When the memory service's tool catalog has a `risk` for the tool, that risk wins. The service
 derives it from the annotations the harness published and from what an administrator set.
@@ -47,12 +47,13 @@ derives it from the annotations the harness published and from what an administr
 
 ### A tool that does not say what it does
 
-A risky call never runs on a guess. Where the tool's author can say what it does, they must;
-where nobody can, a person approves each call until the catalog says more.
+A risky call never runs on a guess. No tool is refused for saying nothing — as in Claude,
+ChatGPT or MCP, it needs the person's permission: every call of it asks, whichever way the
+tool came in. Saying what it does is what lets it run, so say it where you can.
 
 | The tool | Where its side effects are said | When they are not |
 |---|---|---|
-| a function (`@tool`, `tool(fn)`, a bare function in `tools=[...]`, `governed(fn, gov)`) | `side_effects=` | `ConfigurationError` where it is defined, naming the tool |
+| a function (`@tool`, `tool(fn)`, a bare function in `tools=[...]`, `governed(fn, gov)`), a source of your own | `side_effects=` (a source: on its `ToolSpec`) | each call asks |
 | an MCP server's tool (`mcp(...)`, the gateway's, a framework's own MCP server) | the server's annotations | `irreversible`: each call asks |
 | a LangChain tool of your graph | `tool.metadata = {"side_effects": "read"}` (or MCP-style `annotations`) | each call asks |
 | an OpenAI Agents `FunctionTool`, a hosted tool, a CLI built-in the harness has no word on | nowhere in code (or build it with the harness: `@tool(side_effects=...)`) | each call asks |
@@ -68,6 +69,9 @@ await scope.advanced.tools.put_catalog([{"name": "docs-search", "side_effects": 
 
 With memory off there is no catalog: such a tool asks at each call, and a reviewer may approve
 it for the rest of the run (`remember="run"`).
+
+The harness says which tools these are: when an agent's tools are listed, one warning
+(`trellis.tools`) names those that declare no side effects, with what to add.
 
 **`approve_when`.** The catalog may also hold an approval rule for the tool. The rule is set by
 an administrator, or by someone who accepted an approval suggestion

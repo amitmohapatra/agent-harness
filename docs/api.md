@@ -391,14 +391,14 @@ the gateway's (Bifrost's virtual-key budgets).
 ### tool
 
 ```text
-tool(fn, *, side_effects, name=None, description=None, idempotent=False,
+tool(fn, *, side_effects=None, name=None, description=None, idempotent=False,
      call_timeout=None, response_format="content")
-@tool(side_effects=...)
+@tool(side_effects=...)  /  @tool
 ```
 
 A Python function (sync or async) as a tool: the schema from its signature (each parameter
-described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`, required (a tool that
-does not say is a `ConfigurationError`, naming it); `idempotent` when a
+described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"` (a tool that does not
+say is asked about at each call: say it); `idempotent` when a
 repeated call with its idempotency key has its effect once; `call_timeout` seconds per call
 ([tools.md](tools.md)). `response_format="content_and_artifact"` (LangChain's): the function
 returns `(content, artifact)` — what the model reads, and where it came from, a

@@ -834,8 +834,7 @@ class Tools:
         """Call one of the run's tools with ``args`` — governed, journaled, recorded, as every
         call is (``tools.bridge``) — and return what it answered: a tool by name (the run's
         toolbox: its builder's tools, the MCP tools the virtual key allows, the memory tools,
-        what :meth:`use` added), or a tool itself (``tool(fn, side_effects=...)``, which joins the
-        run first)."""
+        what :meth:`use` added), or a tool itself (``tool(fn)``, which joins the run first)."""
         from trellis.harness.tools.bridge import call  # noqa: PLC0415 - bridge imports runtime
 
         name = tool if isinstance(tool, str) else (await self.use(tool))[0]
@@ -845,11 +844,10 @@ class Tools:
         return (await call(found, args)).output
 
     async def use(self, *sources: Any) -> list[str]:
-        """Add the tools of ``sources`` — ``tool(fn, side_effects=...)``, ``mcp(...)``,
+        """Add the tools of ``sources`` — ``tool(fn)`` (a function is one), ``mcp(...)``,
         ``openapi(...)``, ``sandbox().tools()``, ``a2a(url)``, a wrapped agent (a sub-agent) —
         to this run's toolbox, for :meth:`call`: the names they add, in order (a function
         target's own tools; a builder's are declared on it)."""
-        from trellis.harness.tools.base import resolved  # noqa: PLC0415 - imports runtime
         from trellis.harness.tools.sources import as_source  # noqa: PLC0415 - imports runtime
 
         names: list[str] = []
@@ -858,10 +856,10 @@ class Tools:
             if known is None:
                 source = as_source(given)
                 self.runtime.added.append(source)
-                found = await resolved(source)
-                for tool in found:
-                    self.runtime.toolbox.setdefault(tool.spec.name, tool)
-                known = self.runtime.joined[id(given)] = (given, [t.spec.name for t in found])
+                resolved = list(await source.resolve())
+                for found in resolved:
+                    self.runtime.toolbox.setdefault(found.spec.name, found)
+                known = self.runtime.joined[id(given)] = (given, [t.spec.name for t in resolved])
             names.extend(known[1])
         return names
 

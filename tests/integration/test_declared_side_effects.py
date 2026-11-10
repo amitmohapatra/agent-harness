@@ -1,12 +1,12 @@
-"""Every tool says what it does, or a person is asked.
+"""A tool says what it does, or a person is asked — one behaviour for every way a tool enters.
 
-A tool defined in code declares its side effects where it is defined (``@tool``, ``tool(fn)``,
-a bare function in ``tools=[...]``, ``governed``): one that does not is a configuration error
-there, naming it and what to add. A tool nobody could declare in code — an MCP server's with no
-annotations, a framework's own tool object that says nothing — is never run on a guess: each
-call waits for a person, on every adapter, and the approval covers that one call. The three
-cases a live test found running unasked are here as planned runs: a purge, a bulk price change
-and another account's data."""
+Nothing refuses a tool that declares no side effects (``@tool`` alone, ``tool(fn)``, a bare
+function in ``tools=[...]`` or given to ``agent.tools``, ``governed``, a source of the team's
+own, an MCP server's tool with no annotations, a framework's own tool object): it is held to
+nothing, so each call waits for a person — the body never runs before, the approval covers
+that one call, a rejected call never runs — on every adapter, and the toolbox names such tools
+once. The three cases a live test found running unasked are here as planned runs: a purge, a
+bulk price change and another account's data."""
 
 from __future__ import annotations
 
@@ -28,9 +28,9 @@ from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from tests.support.planned import Call
 from trellis import Harness, ReAct, Runtime, mcp, stdio, tool
-from trellis.contracts import ConfigurationError, InterruptReason, RunEventType, RunStatus, ToolSpec
+from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolSpec
 from trellis.harness.adapters.langgraph import graph_tools
-from trellis.harness.governance import Governance, governed
+from trellis.harness.governance import Decision, Governance, Rejected, governed
 from trellis.harness.governance.catalog import entry
 from trellis.harness.governance.decision import Action, decide
 from trellis.harness.middleware import GovernTools, declare_files, spec_of
@@ -56,48 +56,116 @@ def lines(ran: Path) -> list[str]:
     return ran.read_text().splitlines() if ran.exists() else []
 
 
-# --------------------------------------------------------------------------- defined in code
+# --------------------------------------------------------------------------- the team's own
+
+#: what ran, in order: each body below adds its name
+done: list[str] = []
 
 
-def purge(table: str) -> str:
+def purge_records(table: str) -> str:
     """Purge every record of a table."""
-    raise AssertionError("a tool that declares nothing never runs")
+    done.append("purge_records")
+    return f"purged {table}"
 
 
-def test_a_function_that_declares_nothing_is_refused_where_it_is_made_a_tool() -> None:
-    ways: dict[str, Any] = {
-        "@tool": lambda: tool(purge),  # pyright: ignore[reportCallIssue]
-        "tool(fn, name=)": lambda: tool(purge, name="wipe"),  # pyright: ignore[reportCallIssue]
-        "tools=[fn]": lambda: as_source(purge),
-        "governed(fn)": lambda: governed(purge, Governance(), on_ask=lambda decision: True),
-        "another word": lambda: tool(purge, side_effects="delete"),  # pyright: ignore
-    }
-    for way, make in ways.items():
-        with pytest.raises(ConfigurationError) as refused:
-            make()
-        said = str(refused.value)
-        named = "wipe" if way == "tool(fn, name=)" else "purge"
-        assert said.startswith(f"{named} must declare its side effects: add side_effects="), way
-        assert '"read"' in said and '"write"' in said and '"irreversible"' in said, way
+def set_prices(percent: int) -> str:
+    """Change every price by a percentage."""
+    done.append("set_prices")
+    return f"prices changed by {percent}%"
 
 
-def test_a_bare_function_among_an_agents_tools_is_refused_when_it_is_wrapped(
-    harness: Harness,
-) -> None:
-    built = ReAct("Tidy up.", model=ScriptedChatModel(turns=["x"]), tools=[purge])
-    with pytest.raises(ConfigurationError, match="purge must declare its side effects"):
-        harness.wrap(built, id="wiper")
+def read_account(account: str) -> str:
+    """Read an account's data."""
+    done.append("read_account")
+    return f"the data of {account}"
 
 
-async def test_a_function_targets_own_tool_that_declares_nothing_is_refused(
-    harness: Harness,
+OWN: dict[str, Any] = {f.__name__: f for f in (purge_records, set_prices, read_account)}
+
+
+@pytest.fixture(autouse=True)
+def _nothing_ran() -> None:
+    done.clear()
+
+
+def test_a_function_made_a_tool_without_side_effects_is_a_tool_that_says_nothing() -> None:
+    bare = as_source(purge_records)
+    for made in (tool(purge_records), tool(purge_records, name="wipe"), bare):
+        assert made.spec.side_effects == "unknown"  # type: ignore[attr-defined]
+    assert tool(purge_records, side_effects="read").spec.side_effects == "read"
+    assert decide("wipe", "unknown", None, {}).asks
+
+
+def test_an_agent_takes_a_bare_function_among_its_tools(harness: Harness) -> None:
+    built = ReAct("Tidy up.", model=ScriptedChatModel(turns=["x"]), tools=[purge_records])
+    agent = harness.wrap(built, id="wiper")
+    assert [s.spec.side_effects for s in agent.sources] == ["unknown"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("given", ["called by name", "given to call", "added in the run"])
+async def test_a_function_targets_own_tool_that_says_nothing_asks(
+    harness: Harness, given: str
 ) -> None:
     async def target(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call(purge, table="orders")
+        if given == "added in the run":
+            await agent.tools.use(purge_records)
+        first = purge_records if given == "given to call" else "purge_records"
+        return [
+            await agent.tools.call(first, table="orders"),
+            await agent.tools.call("purge_records", table="customers"),
+        ]
 
-    result = await harness.wrap(target, id="own").run("go", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "purge must declare its side effects" in result.error.message
+    agent = harness.wrap(target, id="own")
+    if given == "called by name":
+        arm(agent, [purge_records])
+    first = await agent.run("go", user="u")
+    assert first.status is RunStatus.PAUSED and first.interrupt is not None and done == []
+    assert first.interrupt.question == (
+        "Approve purge_records? purge_records has not declared its side effects."
+    )
+    second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
+    assert second.status is RunStatus.PAUSED and second.interrupt is not None, second
+    assert done == ["purge_records"]  # the approved call, once: the next asks again
+    rejected = await agent.resume(second.interrupt.interrupt_id, "reject", reviewer="lee")
+    assert rejected.status is RunStatus.SUCCESS and done == ["purge_records"]
+
+
+async def test_a_governed_function_that_says_nothing_asks_at_each_call() -> None:
+    asked: list[str] = []
+
+    def ask(decision: Decision) -> bool:
+        asked.append(decision.question)
+        return len(asked) == 1  # the first is approved, the second rejected
+
+    run = governed(set_prices, Governance(), on_ask=ask)
+    assert done == [] and await run(percent=-90) == "prices changed by -90%"
+    with pytest.raises(Rejected):
+        await run(percent=-50)
+    assert done == ["set_prices"]  # one approval, one call
+    assert asked == ["Approve set_prices? set_prices has not declared its side effects."] * 2
+
+
+async def test_the_tools_that_say_nothing_are_named_once(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing stops an agent whose tools declare nothing: the toolbox says which they are,
+    and what to add, when it lists them — the harness's and the framework's own alike."""
+
+    @tool(side_effects="read")
+    def count(table: str) -> int:
+        """Count a table's records."""
+        return 3
+
+    async def target(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("count", table="t")
+
+    agent = arm(harness.wrap(target, id="mixed"), [count, set_prices, purge_records])
+    with caplog.at_level("WARNING", logger="trellis.tools"):
+        for _ in range(2):
+            assert (await agent.run("go", user="u")).answer == 3
+    said = [r.getMessage() for r in caplog.records if "do not say what they do" in r.getMessage()]
+    assert len(said) == 1 and "approval: purge_records, set_prices — say it" in said[0]
+    assert '@tool(side_effects="read")' in said[0]
 
 
 async def test_a_declared_tool_runs_as_its_risk_says(harness: Harness) -> None:
@@ -161,32 +229,49 @@ def test_the_catalog_is_told_the_default_of_a_tool_that_says_nothing() -> None:
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
 @pytest.mark.parametrize("risky", RISKY, ids=[name for name, _, _ in RISKY])
-async def test_a_servers_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter(
+@pytest.mark.parametrize("defined", ["an MCP server's", "a bare function"])
+async def test_a_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter(
     harness: Harness,
     framework: str,
     risky: tuple[str, dict[str, Any], dict[str, Any]],
+    defined: str,
     tmp_path: Path,
 ) -> None:
-    """The purge, the bulk price change and another account's data: each call pauses for a
-    person before its body runs; an approval runs that one call, the next asks again, and a
-    rejected call never runs."""
-    name, args, again = risky
+    """The purge, the bulk price change and another account's data — a server's tool with no
+    annotations, or the team's own function given bare: each call pauses for a person before
+    its body runs; an approval runs that one call, the next asks again, and a rejected call
+    never runs."""
+    tool_name, args, again = risky
     ran = tmp_path / "ran"
-    plan: list[Call] = [(f"office-{name}", args), (f"office-{name}", again)]
-    target, tools = await BUILDERS[framework](harness, [back_office(ran)], tmp_path, plan)
+    if defined == "a bare function":
+        name, why, source, ran_so_far = (
+            tool_name,
+            "has not declared its side effects",
+            OWN[tool_name],
+            lambda: list(done),
+        )
+    else:
+        name, why, source, ran_so_far = (
+            f"office-{tool_name}",
+            "is irreversible",
+            back_office(ran),
+            lambda: lines(ran),
+        )
+    plan: list[Call] = [(name, args), (name, again)]
+    target, tools = await BUILDERS[framework](harness, [source], tmp_path, plan)
     agent = arm(harness.wrap(target, id=f"office-{framework}"), tools)
     first = await agent.run("do it", user="ada")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None, first
     assert first.interrupt.reason is InterruptReason.APPROVAL
-    assert first.interrupt.question == f"Approve office-{name}? office-{name} is irreversible."
+    assert first.interrupt.question == f"Approve {name}? {name} {why}."
     assert first.interrupt.tool_call is not None and first.interrupt.tool_call.args == args
-    assert lines(ran) == []  # nothing ran
+    assert ran_so_far() == []  # nothing ran
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
     assert second.status is RunStatus.PAUSED and second.interrupt is not None, second
     assert second.interrupt.tool_call is not None and second.interrupt.tool_call.args == again
-    assert lines(ran) == [name]  # the approved call, once: the approval covers no other
+    assert ran_so_far() == [tool_name]  # the approved call, once: the approval covers no other
     await agent.resume(second.interrupt.interrupt_id, "reject", reviewer="lee")
-    assert lines(ran) == [name]
+    assert ran_so_far() == [tool_name]
 
 
 async def test_the_catalogs_word_on_a_tool_that_says_nothing(
@@ -227,7 +312,9 @@ async def test_the_catalogs_word_on_a_tool_that_says_nothing(
 # --------------------------------------------------------------------------- a framework's own
 
 
-async def test_a_graphs_own_tool_that_declares_nothing_asks(harness: Harness) -> None:
+async def test_a_graphs_own_tool_that_declares_nothing_asks(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
     done: list[str] = []
 
     @lc_tool
@@ -241,7 +328,9 @@ async def test_a_graphs_own_tool_that_declares_nothing_asks(harness: Harness) ->
         model, tools=[purge_records], middleware=[GovernTools()], checkpointer=InMemorySaver()
     )
     agent = harness.wrap(graph, id="graph")
-    paused = await agent.run("purge", user="u", thread="t")
+    with caplog.at_level("WARNING", logger="trellis.tools"):
+        paused = await agent.run("purge", user="u", thread="t")
+    assert "approval: purge_records — say it" in caplog.text  # the framework's own, named too
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
     assert paused.interrupt.question == (
         "Approve purge_records? purge_records has not declared its side effects."
@@ -326,15 +415,14 @@ class Silent:
 
     async def resolve(self) -> list[Tool]:
         async def run(args: dict[str, Any]) -> Any:
-            raise AssertionError("a tool that declares nothing never runs")
+            done.append("wipe")
+            return "wiped"
 
         return [Tool(ToolSpec(name="wipe", description="Wipe the store."), run)]
 
 
 @pytest.mark.parametrize("given", ["declared on the agent", "added in the run"])
-async def test_a_source_of_yours_whose_tool_says_nothing_is_refused(
-    harness: Harness, given: str
-) -> None:
+async def test_a_source_of_yours_whose_tool_says_nothing_asks(harness: Harness, given: str) -> None:
     async def target(input: str, agent: Runtime) -> Any:
         if given == "added in the run":
             await agent.tools.use(Silent())
@@ -343,8 +431,8 @@ async def test_a_source_of_yours_whose_tool_says_nothing_is_refused(
     agent = harness.wrap(target, id="silent")
     if given == "declared on the agent":
         arm(agent, [Silent()])
-    result = await agent.run("go", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert result.error.message.startswith(
-        "wipe must declare its side effects: add side_effects= to its ToolSpec"
-    )
+    paused = await agent.run("go", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
+    assert paused.interrupt.question == "Approve wipe? wipe has not declared its side effects."
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert finished.answer == "wiped" and done == ["wipe"]

@@ -7,8 +7,9 @@ Links. Every relative link in every Markdown file the repository holds must name
 directory that exists, and a ``#fragment`` must name a heading of the target (GitHub's anchor
 rules) or an ``<a id>``. External links (``http(s)://``, ``mailto:``) are not fetched.
 
-Tools. A snippet's ``tool(...)`` or ``governed(...)`` of the platform says ``side_effects=``
-(a tool that does not is refused where it is defined), and no ``@tool`` stands alone.
+Tools. A snippet's ``tool(...)`` or ``governed(...)`` of the platform says ``side_effects=``,
+and no ``@tool`` stands alone: the harness takes a tool that says nothing (it asks a person at
+each call), but our own samples show the declaration.
 
 Snippets. Every ``python`` block must parse (top-level ``await`` allowed, as in a notebook).
 Every ``from M import N`` of the platform (``trellis``, ``bifrost_sdk``) or of a framework the
