@@ -152,12 +152,15 @@ record).
 
 | Pause | How it continues |
 |---|---|
-| governance asks about a call (`irreversible`, a catalog `approve_when`) — a harness tool's or the agent's own `FunctionTool`'s | held at the SDK's own gate: each such tool gets a `needs_approval` policy that asks governance (only the tools the catalog may ask about at the run's start, `Governance.may_ask`; your own `needs_approval` is kept), so the SDK pauses before the call with governance's question and keeps its `RunState`; `approve` continues that state (the call runs, the model is not asked again; `remember="run"` covers the tool's later calls), `reject` and `answer` are the SDK's rejection the model reads, `edit` as below |
+| governance asks about a call (`irreversible`, a catalog `approve_when`) — a harness tool's or the agent's own `FunctionTool`'s | held at the SDK's own gate: each such tool gets a `needs_approval` policy that asks governance (only the tools the catalog may ask about at the run's start, `Governance.may_ask`; your own `needs_approval` is kept), so the SDK pauses before the call with governance's question and keeps its `RunState`; `approve` continues that state (the call runs, the model is not asked again; `remember="run"` covers the tool's later calls, the other calls of the same reply included), `reject` and `answer` are the SDK's rejection the model reads, `edit` as below |
 | `trellis.current().ask` in a tool, a hook's `Ask`, or a call governance starts asking about after the run began | the run re-runs from its input as the next attempt; the journal returns the calls already made and the answer given (the model is asked again) |
 | the SDK's own `function_tool(needs_approval=...)` | the SDK's `RunState` is kept as the run's checkpoint and continued: `approve` runs the call; `reject` (with `answer="why"`) and `answer` are the SDK's rejection with that message, which the model reads; `edit` rejects with a message telling the model to call again with the edited arguments — that call, with exactly those arguments, then runs approved in the same attempt ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
 
 The SDK's `RunState` is JSON in the run's checkpoint, so a `needs_approval` pause can be answered
-from any process or worker. Several approvals in one turn are asked one at a time. Gate a tool
+from any process or worker. Several approvals in one turn are asked one at a time: the SDK keeps
+the other calls of the reply waiting when the run resumes, without asking their gate again, so
+governance decides each one then, after the answer to the one before (with its question and
+choices; a call the person allowed for the conversation runs). Gate a tool
 in one place: a `needs_approval` tool is your own (not a harness tool), so the harness does not
 also ask for it.
 

@@ -173,14 +173,18 @@ def _allowing(entry: ResolutionEntry) -> str | None:
     return reach(call.tool, interrupt.assignee)
 
 
-async def earlier(runtime: Runtime, *, whole: bool = False) -> list[Said]:
+async def earlier(
+    runtime: Runtime, *, whole: bool = False, budget: int | None = None
+) -> list[Said]:
     """The conversation's earlier turns, oldest first, as the run store keeps them: each
     turn's question and answer (a cancelled turn's question alone), of this agent, tenant,
     user and thread — the run's own and other users' left out — at most
     :data:`EARLIER_RUNS` turns. ``whole``: a turn this process kept the transcript of
     (``Agent.results``) is that transcript — its tool calls and their results too, the
-    figures behind its answer — for a follow-up ("why was that?", "redo it with X"). A run
-    with no conversation of its own, or a child run, has none."""
+    figures behind its answer — for a follow-up ("why was that?", "redo it with X").
+    ``budget``: the tokens they may take (``Agent.conversation_budget``), spent as the memory
+    service spends its window's (:func:`_fitted`). A run with no conversation of its own, or a
+    child run, has none."""
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
@@ -201,13 +205,13 @@ async def earlier(runtime: Runtime, *, whole: bool = False) -> list[Said]:
     records.sort(key=lambda r: r.created_at)
     conversation = runtime.conversation
     kept = runtime.agent.results.turns(conversation) if whole else {}
-    history: list[Said] = []
+    turns: list[list[Said]] = []
     previous: Any = None
     for record in records:
         # a run steered into another ran no attempt of its own: it has no transcript kept
         transcript = kept.get(record.run_id) if record.status in ANSWERED else None
         if transcript:
-            history.extend(transcript)
+            turns.append(list(transcript))
             previous = record
             continue
         asked = Said(Speaker.USER, _text(record.input), id=question_id(conversation, record.run_id))
@@ -217,15 +221,54 @@ async def earlier(runtime: Runtime, *, whole: bool = False) -> list[Said]:
             and record.metadata.get(STEERED_INTO) == previous.run_id
             and answer == previous.output
         ):
-            history.insert(len(history) - 1, asked)  # given to that run: its answer is this one's
+            # given to that run: its answer is this one's
+            turns[-1].insert(len(turns[-1]) - 1, asked)
             continue
-        history.append(asked)
+        turns.append([asked])
         if answer not in (None, ""):
-            history.append(
+            turns[-1].append(
                 Said(Speaker.ASSISTANT, _text(answer), id=answer_id(conversation, record.run_id))
             )
         previous = record if answer not in (None, "") else None
-    return history
+    return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
+
+
+def _fitted(turns: Sequence[Sequence[Said]], budget: int) -> list[Sequence[Said]]:
+    """``turns`` (oldest first) within ``budget`` tokens (LangChain's estimate, as the budget
+    and ``FitWindow`` count), spent as the memory service spends its window's (its
+    ``replay_window``): each turn's text — its questions and what the assistant said, without
+    the calls and their results — from the newest back while it fits (the newest always, a
+    window has no gaps), then each of those whole, from the newest back, while it fits."""
+    texts = [[dataclasses.replace(s, tool_calls=()) for s in turn if _spoken(s)] for turn in turns]
+    shown: list[Sequence[Said]] = []
+    used = 0
+    for text in reversed(texts):
+        cost = _tokens(text)
+        if shown and used + cost > budget:
+            break
+        shown.append(text)
+        used += cost
+    for n, text in enumerate(shown):  # newest first
+        turn = turns[len(turns) - 1 - n]
+        more = _tokens(turn) - _tokens(text)
+        if used + more > budget:
+            break
+        shown[n] = turn
+        used += more
+    return shown[::-1]
+
+
+def _spoken(said: Said) -> bool:
+    """Whether ``said`` is a turn's text: a question, or something the assistant said."""
+    return said.role is Speaker.USER or (said.role is Speaker.ASSISTANT and bool(said.content))
+
+
+def _tokens(said: Sequence[Said]) -> int:
+    from langchain_core.messages.utils import count_tokens_approximately  # noqa: PLC0415
+
+    from trellis.harness.adapters.langgraph import langchain_message  # noqa: PLC0415
+
+    return count_tokens_approximately([langchain_message(s) for s in said])
 
 
 def _text(value: Any) -> str:

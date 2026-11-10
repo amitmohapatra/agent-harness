@@ -40,6 +40,7 @@ from trellis.harness.conversation import (
 )
 from trellis.harness.history import Called, Said, Speaker, recorded, said_of
 from trellis.harness.identity import conversation_key
+from trellis.harness.middleware import FITTED
 
 THREAD = "chat-7"
 #: the targets whose model a test reads (a function has none: its own test)
@@ -149,6 +150,61 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
     other = await agent.run("Why so long?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS
     assert "21 days" not in json.dumps(model.requests[-1]["messages"])  # another user's chat
+
+
+async def test_with_memory_off_the_replayed_turns_fit_what_the_window_leaves(
+    harness: Harness,
+) -> None:
+    """On a small window, the earlier turns ``ReAct`` replays with memory off are sized for the
+    request they go into, as memory's window is (``Agent.conversation_budget``): each turn's
+    question and answer from the newest back, then the newest whole while it fits — not every
+    turn's 250-row result, which left the window no room (on Deep Agents, one summary request
+    of 23,000 tokens on a 6,000-token window; on ``create_agent``, every earlier turn left
+    out)."""
+
+    @tool(side_effects="read")
+    def catalog(category: str) -> str:
+        """The SKUs of a category, with their prices."""
+        return "\n".join(f"SKU-{n:05d},{category},{100 + n}.00" for n in range(250))
+
+    categories = ["knitwear", "denim", "shirts", "footwear"]
+    turns: list[Any] = []
+    for n, category in enumerate(categories):
+        turns += [("catalog", {"category": category}), f"{120 + n} {category} SKUs."]
+    model = ScriptedChat([*turns, "Done."])
+    react = ReAct(system_prompt="You work.", model=model, context_window=6_000)
+    agent = arm(harness.wrap(react, id="fitted", without={"memory"}), [catalog])
+    for category in categories:
+        done = await agent.run(f"How many {category} SKUs?", user="ada", thread=THREAD)
+        assert done.status is RunStatus.SUCCESS, done.error
+    fitted = sum(FITTED.values())
+    last = await agent.run("And all of them?", user="ada", thread=THREAD)
+    assert last.status is RunStatus.SUCCESS, last.error
+    sent = json.dumps(model.requests[-1]["messages"])
+    for n, category in enumerate(categories):  # every earlier question and answer
+        assert f"How many {category} SKUs?" in sent and f"{120 + n} {category} SKUs." in sent
+    assert ",shirts," not in sent and ",knitwear," not in sent  # older results: not replayed
+    assert ",footwear," in sent  # the newest turn whole: its result fits
+    assert sum(FITTED.values()) == fitted  # nothing left out or cut to fit the window
+
+
+def test_the_turns_are_spent_from_the_newest_back_question_and_answer_first() -> None:
+    called = Said(Speaker.ASSISTANT, "", tool_calls=(Called("c1", "catalog"),))
+
+    def turn(n: int) -> list[Said]:
+        return [
+            Said(Speaker.USER, f"question {n}"),
+            called,
+            Said(Speaker.TOOL, "row " * 400, tool_call_id="c1"),
+            Said(Speaker.ASSISTANT, f"answer {n}"),
+        ]
+
+    turns = [turn(n) for n in range(3)]
+    said = [[s.content for s in t] for t in conversation._fitted(turns, 1)]
+    assert said == [["question 2", "answer 2"]]  # the newest turn's text, even over the budget
+    said = [[s.content for s in t] for t in conversation._fitted(turns, 60)]
+    assert said == [[f"question {n}", f"answer {n}"] for n in range(3)]  # older ones: their text
+    assert conversation._fitted(turns, 100_000) == turns  # all of it whole, where it fits
 
 
 @pytest.mark.parametrize("framework", MODELLED)
