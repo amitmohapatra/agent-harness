@@ -201,6 +201,32 @@ async def test_an_approval_stops_the_cli_and_a_resume_continues_its_session(
     assert resumed["prompt"] == RESUMED_CALL.format(tool="mcp__trellis__refund")
 
 
+async def test_a_query_that_pauses_counts_what_its_steps_spent(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused query ends before its ``ResultMessage``: the usage its assistant messages
+    carried is on the run's budget, and the query that finishes counts its result's, as
+    before."""
+    from trellis.harness import budget
+
+    counted: list[dict[str, Any]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
+    )
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o3"}}, {"text": "done"}]
+    agent = arm(harness.wrap(options(tmp_path, script, model="m"), id="refunds"), [refund])
+    paused = await agent.run("refund o3", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    step = {"model": "m", "input_tokens": 10, "output_tokens": 5, "cached": 0, "cost": None}
+    assert counted == [step]
+    counted.clear()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    assert [(c["input_tokens"], c["output_tokens"]) for c in counted] == [(20, 10)]
+
+
 async def test_a_denied_call_resumes_the_session_told_it_will_not_run(
     harness: Harness, tmp_path: Path
 ) -> None:
