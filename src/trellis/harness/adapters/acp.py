@@ -98,7 +98,7 @@ from trellis.harness.adapters.claude import RESUMED, RESUMED_CALL, RESUMED_DENIE
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
-from trellis.harness.history import ASKED_WITH, Said, Speaker
+from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
@@ -525,16 +525,44 @@ class ACPAdapter:
         yield Output(items)
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        from acp.schema import AgentMessageChunk, PromptResponse, TextContentBlock, ToolCallStart
+        """The answer (the text after the last call) and the turn as said: each text, each
+        call — a harness tool by its own name, not the agent's ``mcp__trellis__`` one, with its
+        arguments as last told — and each call's result, so what memory keeps of the turn
+        holds its steps."""
+        from acp.schema import (
+            AgentMessageChunk,
+            PromptResponse,
+            TextContentBlock,
+            ToolCallProgress,
+            ToolCallStart,
+        )
 
         transcript: list[Said] = []
         text: list[str] = []
+        at: dict[str, int] = {}  # each call's message in the transcript
         for item in output:
             if isinstance(item, AgentMessageChunk) and isinstance(item.content, TextContentBlock):
                 text.append(item.content.text)
-            elif isinstance(item, ToolCallStart) and text:
-                transcript.append(Said(Speaker.ASSISTANT, "".join(text)))
+            elif isinstance(item, ToolCallStart):
+                call = Called(
+                    item.tool_call_id,
+                    item.title.removeprefix(HARNESS_PREFIX),
+                    _args(item.raw_input, item.content),
+                )
+                last = transcript[-1] if transcript and not text else None
+                if last is not None and last.role is Speaker.ASSISTANT:  # made together
+                    transcript[-1] = Said(Speaker.ASSISTANT, last.content, (*last.tool_calls, call))
+                else:
+                    transcript.append(Said(Speaker.ASSISTANT, "".join(text), (call,)))
                 text = []
+                at[item.tool_call_id] = len(transcript) - 1
+            elif isinstance(item, ToolCallProgress) and item.tool_call_id in at:
+                if item.raw_input is not None:
+                    _argued(transcript, at[item.tool_call_id], item)
+                if item.status in ("completed", "failed"):
+                    transcript.append(
+                        Said(Speaker.TOOL, _output(item), tool_call_id=item.tool_call_id)
+                    )
             elif isinstance(item, PromptResponse) and item.stop_reason in FAILED_STOPS:
                 raise ACPRunError(f"the agent ended the turn: {item.stop_reason}")
         answer = "".join(text)
@@ -1590,6 +1618,17 @@ def _text(content: Any) -> str:
         if isinstance(text, str):
             parts.append(text)
     return "\n".join(parts)
+
+
+def _argued(transcript: list[Said], n: int, update: Any) -> None:
+    """The call ``update`` names, in the transcript's message ``n``, with the arguments it now
+    gives (an agent may tell them after the call starts)."""
+    said = transcript[n]
+    calls = tuple(
+        Called(c.id, c.name, _args(update.raw_input, None)) if c.id == update.tool_call_id else c
+        for c in said.tool_calls
+    )
+    transcript[n] = Said(said.role, said.content, calls)
 
 
 def _output(update: Any) -> str:
