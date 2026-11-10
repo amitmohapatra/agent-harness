@@ -18,6 +18,8 @@ from trellis.harness.automatic import JournalBackend
 WINDOW = 6_000
 #: the server's tokens: dense JSON is about 3 characters a token, not the estimate's 4
 CHARS_PER_TOKEN = 3
+#: the tokens of a summary its request does not bound: a model writes long ones
+SUMMARY = 2_500
 
 
 def tokens(body: dict[str, Any]) -> int:
@@ -27,8 +29,9 @@ def tokens(body: dict[str, Any]) -> int:
 
 class Server(Script):
     """A model server with a ``WINDOW``-token window: each turn's question answered with one
-    catalog call then a reply, a request to summarize with a summary, and a request over the
-    window refused with its count, as Anthropic's is."""
+    catalog call then a reply, a request to summarize with a long summary (as long as its
+    ``max_tokens`` allows, else :data:`SUMMARY` tokens), and a request over the window refused
+    with its count, as Anthropic's is."""
 
     def __init__(self) -> None:
         super().__init__([])
@@ -51,7 +54,9 @@ class Server(Script):
     def next(self, body: dict[str, Any]) -> Any:
         last = body["messages"][-1]
         if "Messages to summarize" in str(last.get("content")):
-            return "SESSION INTENT: count SKUs. The west's Q1 revenue was 41,234."
+            most = body.get("max_completion_tokens") or body.get("max_tokens") or SUMMARY
+            said = "SESSION INTENT: count SKUs. The west's Q1 revenue was 41,234. " + "fact " * most
+            return said[: most * CHARS_PER_TOKEN]
         if last.get("role") == "tool":
             return "12 of them."
         return ("catalog", {"category": str(last.get("content"))[-12:]})

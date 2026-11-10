@@ -1828,21 +1828,24 @@ class FitWindow(AgentMiddleware):
                 learned = ratio * 1.25
             FITTED["refit"] += 1
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
-            return await handler(self._within(request, int(budget / learned))[0])
+            # all of it this time: a summarization after it did not make it fit
+            return await handler(self._within(request, int(budget / learned), whole=True)[0])
 
-    def _within(self, request: ModelRequest[Any], budget: int) -> tuple[ModelRequest[Any], int]:
+    def _within(
+        self, request: ModelRequest[Any], budget: int, *, whole: bool = False
+    ) -> tuple[ModelRequest[Any], int]:
         """The request fitted to ``budget`` (counted tokens), and its count."""
-        if self._size(request) <= budget:
+        if self._size(request, whole=whole) <= budget:
             return request, _size(request)
-        fitted = self._fitted(request, budget)
+        fitted = self._fitted(request, budget, whole=whole)
         return fitted, _size(fitted)
 
-    def _size(self, request: ModelRequest[Any]) -> int:
+    def _size(self, request: ModelRequest[Any], *, whole: bool) -> int:
         """What of the request must fit: all of it — or, with a summarization after it
-        (``turns=False``), its latest turn: the older turns are the summarization's to make
-        fit, counting as the model's server does (:func:`served`), so a tool is not dropped
-        for the size of turns the summary replaces."""
-        return _size(request if self.turns else _latest(request))
+        (``turns=False``), its latest turn, unless it did not make the request fit (``whole``):
+        the older turns are the summarization's to make fit, counting as the model's server
+        does (:func:`served`), so a tool is not dropped for turns a summary replaces."""
+        return _size(request if self.turns or whole else _latest(request))
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
         profile = getattr(request.model, "profile", None)
@@ -1859,7 +1862,7 @@ class FitWindow(AgentMiddleware):
         own overflow handling offloads them whole (Deep Agents')."""
         return _cut(request, budget) if self.turns else request
 
-    def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+    def _fitted(self, request: ModelRequest[Any], budget: int, *, whole: bool) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
@@ -1876,9 +1879,9 @@ class FitWindow(AgentMiddleware):
                 taken.append(name)
                 FITTED[name] += 1
                 request = smaller
-            if self._size(request) <= budget:
+            if self._size(request, whole=whole) <= budget:
                 break
-        size = self._size(request)
+        size = self._size(request, whole=whole)
         if size > budget and _size(_bare(request)) > budget:
             raise ContextTooLarge(
                 f"the instructions and the user's message alone are about "

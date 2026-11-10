@@ -311,10 +311,6 @@ def ReAct(
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
         from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-        from deepagents.middleware.summarization import (
-            DEEPAGENTS_DEFAULT_SUMMARY_PROMPT,
-            create_summarization_middleware,
-        )
         from langchain.agents import create_agent
 
         from trellis.harness import automatic
@@ -407,17 +403,7 @@ def ReAct(
         system_prompt=stored_prompt,
         held=held,
         files=outside or bool(skills) or bool(memory_files),
-        summarization=_placed(
-            create_summarization_middleware(
-                profiled,
-                graph_backend,
-                token_counter=ours.served(profiled),
-                trim_tokens_to_summarize=None
-                if window is None
-                else ours.summarized_at_most(profiled, window, DEEPAGENTS_DEFAULT_SUMMARY_PROMPT),
-            ),
-            PLACED,
-        ),
+        summarization=_placed(_summarization(profiled, graph_backend, window), PLACED),
         card=_card(files_backend),
         scoped=True,
     )
@@ -724,6 +710,29 @@ def _unknown(name: str) -> None:
         "the context window of %s is not known: clearing old tool results and the long-task "
         "tools are off (ReAct(context_window=) turns them on)",
         name,
+    )
+
+
+def _summarization(model: Any, backend: Any, window: int | None) -> Any:
+    """Deep Agents' summarization (``create_summarization_middleware``) counting as the model's
+    server does (``middleware.served``: dense JSON is more tokens than its estimate says) and,
+    the window known, one summary request holding at most what the window holds beside its
+    prompt and the reply (``middleware.summarized_at_most``; on a large window it trims nothing
+    Deep Agents evicts)."""
+    from deepagents.middleware.summarization import (
+        DEEPAGENTS_DEFAULT_SUMMARY_PROMPT,
+        create_summarization_middleware,
+    )
+
+    from trellis.harness import middleware as ours
+
+    at_most = (
+        None
+        if window is None
+        else ours.summarized_at_most(model, window, DEEPAGENTS_DEFAULT_SUMMARY_PROMPT)
+    )
+    return create_summarization_middleware(
+        model, backend, token_counter=ours.served(model), trim_tokens_to_summarize=at_most
     )
 
 
