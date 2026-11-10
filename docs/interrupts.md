@@ -103,7 +103,7 @@ preference or value used is said with its date, a costly or old fill asked about
 |---|---|---|---|---|
 | `component`, `props` (an app's own control) | `ask_user`, `{"kind": "text", "options": [...]}` | `ask_user`, `{"kind": "date", "options": []}` | the same, `date_range` | the same, `number` |
 | `ui` and the schema (any other UI) | `choice` | `form`, `{"type": "string", "format": "date"}`, a date widget | `form`, `{start, end}` dates, or text | `form`, a number or text |
-| What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
+| What plain chat reads | `Which size?`, the options numbered (`(Recommended: why)` on one, which comes first on every surface) | `… (a date, YYYY-MM-DD)` | `… (a date range: its start and end, YYYY-MM-DD)` | `… (a number)` |
 
 A range and a number may be answered in words, so a plain chat can answer them; a choice is
 one of its options or another answer in words ("Other"). Measured (`benchmark/cost/asking.py`:

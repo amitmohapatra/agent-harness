@@ -17,8 +17,9 @@ What a person sees follows from the arguments, for every surface:
 * any other surface: the control the interrupt's ``ui`` names (a choice, a form whose
   ``expects`` is the answer's JSON Schema, ``ui_schema`` its widget hints);
 * plain chat: the question as text, saying what kind of answer it takes (:data:`SAID`): the
-  options numbered, the recommended one marked with why. A typed answer fits too: a date, a
-  range and a number may each be answered in words, and a choice by another answer ("Other").
+  options numbered, the recommended one first (on every surface, wherever the model listed
+  it), marked with why. A typed answer fits too: a date, a range and a number may each be
+  answered in words, and a choice by another answer ("Other").
 
 A form is the same three: the ``ask_user`` component with ``props`` ``{"kind": "form",
 "fields": [...]}``; a form whose ``expects`` is an object of the fields (each its kind's
@@ -106,12 +107,16 @@ class Field(BaseModel):
 
     @property
     def picks(self) -> list[str]:
-        return list(dict.fromkeys(self.options))
+        """Its options, each once, the recommended one first: the one to pick is the one
+        read first, on every surface (a single question's choice, a form's field)."""
+        given = list(dict.fromkeys(self.options))
+        best = self.best
+        return given if best is None else [best, *(p for p in given if p != best)]
 
     @property
     def best(self) -> str | None:
         """The option recommended: the default, when it is one of them and says why."""
-        return self.default if self.default in self.picks and self.why else None
+        return self.default if self.default in self.options and self.why else None
 
     @property
     def expects(self) -> dict[str, Any]:

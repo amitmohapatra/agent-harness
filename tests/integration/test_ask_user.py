@@ -124,6 +124,29 @@ async def test_a_recommended_option_says_why_and_several_may_be_picked(
     assert done["result"] == 'Done. ["north", "east"]'
 
 
+async def test_the_recommended_option_comes_first_wherever_the_model_listed_it(
+    harness: Harness,
+) -> None:
+    """The option to pick is the one a person reads first: in the choice a UI renders, in the
+    app's own control and in the numbered text."""
+    args = {"question": "Which region?", "options": ["north", "south", "west"],
+            "recommended": "west", "why": "least stock"}  # fmt: skip
+    agent = asking(harness, args, "ask-first")
+    said = [{"id": "m", "role": "user", "content": "Send the pallet"}]
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": said}))[-1]["outcome"]["interrupts"]
+    assert entry["metadata"]["options"] == [
+        {"value": "west", "description": "least stock", "recommended": True},
+        "north",
+        "south",
+    ]
+    assert entry["metadata"]["props"]["options"] == ["west", "north", "south"]
+    assert entry["message"] == (
+        "Which region?\n1. west (Recommended: least stock)\n2. north\n3. south"
+        "\n(Pick one, or say another.)"
+    )
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -424,7 +447,8 @@ async def test_one_field_is_the_single_question_it_always_was(harness: Harness) 
             [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
         seen.append({k: entry[k] for k in ("reason", "message", "responseSchema", "metadata")})
     assert seen[0] == seen[1] and seen[0]["reason"] == "choice"
-    assert seen[0]["metadata"]["props"] == {"kind": "text", "options": ["north", "west"]}
+    # the recommended one first, as for any choice
+    assert seen[0]["metadata"]["props"] == {"kind": "text", "options": ["west", "north"]}
 
 
 async def test_a_forms_fields_are_named_once_each(harness: Harness) -> None:
@@ -460,6 +484,15 @@ async def test_ask_user_names_the_apps_own_controls_as_the_ones_to_call(
              (with_tools["ask_user"], plain)]  # fmt: skip
     assert kinds[0] == f"{kinds[1]} {said}"  # and where the kind of answer is chosen
     assert "controls" not in json.dumps(plain)
+
+
+def test_a_forms_option_field_lists_its_recommended_option_first() -> None:
+    from trellis.harness.tools.ask import Field
+
+    region = Field(name="region", options=["north", "west"], default="west", why="least stock")
+    assert region.in_form()["enum"] == ["west", "north"]
+    assert region.shown()["options"] == ["west", "north"]
+    assert region.line("Region") == "Region (west or north): west (least stock)"
 
 
 def test_a_forms_field_with_several_picks_is_an_array_of_its_options() -> None:
