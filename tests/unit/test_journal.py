@@ -19,6 +19,7 @@ from trellis.harness import agent as agent_module
 from trellis.harness import journal as journal_module
 from trellis.harness.journal import (
     Journal,
+    Made,
     Pending,
     Replay,
     apply,
@@ -59,6 +60,88 @@ def test_an_answer_is_filed_under_the_pending_question_and_survives_a_round_trip
     restored = Journal.model_validate(journal.dump())
     answered = Replay(restored).answer("q")
     assert answered is not None and answered.answer == "blue"
+
+
+FOUND = content_key("call", "find", {"q": "a"})
+
+
+def paused_asking(journal: Journal, **replay: Any) -> Made:
+    """An attempt that finds, then asks a person inside its second call: paused, and answered."""
+    attempt = Replay(journal, **replay)
+    found = attempt.made("find", {"q": "a"})
+    attempt.record_call(FOUND, "found", tool="find")
+    attempt.ended(found)
+    asking = attempt.made("ask", {"question": "Which day?"})
+    interrupt = Interrupt(tenant_id="t", run_id="r", question="Which day?")
+    journal.pending = Pending(key="q", interrupt=interrupt, inside=asking)
+    journal.answered(resolution("Friday"))
+    return asking
+
+
+def test_a_call_made_again_in_other_words_runs_as_the_call_the_pause_came_from() -> None:
+    """A run again from its input makes every call again: the one at the paused call's place,
+    of its tool, is it — in this attempt and, the journal read back, in every later one."""
+    journal = Journal()
+    paused = paused_asking(journal)
+    assert (paused.at, journal.place, journal.again) == (1, 1, [paused])
+    for kept in (journal, Journal.model_validate(journal.dump())):
+        again = Replay(kept)
+        assert again.made("find", {"q": "a"}).args == {"q": "a"}
+        assert again.made("ask", {"question": "What day?"}) == paused
+        assert again.made("ask", {"question": "Which room?"}).args == {"question": "Which room?"}
+
+
+def test_only_a_call_of_its_tool_the_journal_does_not_hold_is_the_paused_call() -> None:
+    journal = Journal()
+    paused_asking(journal)
+    first = Replay(journal)  # the paused call's tool, at another place: a new call
+    assert first.made("ask", {"question": "What day?"}).args == {"question": "What day?"}
+    other = Replay(journal)  # another tool at its place: itself
+    other.made("find", {"q": "a"})
+    assert other.made("find", {"q": "b"}).args == {"q": "b"}
+    held = Replay(journal)  # a call the journal holds a record of, made at its place: itself
+    held.record_call(content_key("call", "ask", {"question": "Which room?"}), "Blue", tool="ask")
+    held = Replay(journal)
+    held.made("find", {"q": "a"})
+    assert held.made("ask", {"question": "Which room?"}).args == {"question": "Which room?"}
+
+
+def test_a_session_that_goes_on_makes_the_paused_call_next_and_no_earlier_one() -> None:
+    journal = Journal(session="s1")
+    paused = paused_asking(journal)
+    again = Replay(journal)  # the session holds the first call: the next is the paused one
+    made = again.made("ask", {"question": "What day?"})
+    assert made == paused
+    again.ended(made)
+    assert again.made("ask", {"question": "Which room?"}).at == 2
+    # an attempt after it (a crash): the session holds the paused call too
+    assert Replay(journal).made("ask", {"question": "Which room?"}).at == 2
+
+
+def test_a_session_that_could_not_be_continued_runs_again_from_its_first_call() -> None:
+    """The agent's session is on another machine (Kimi resumed elsewhere): a new one, the
+    prompt again — and every call again, each at its place."""
+    journal = Journal(session="s1")
+    paused = paused_asking(journal)
+    again = Replay(journal)
+    journal.session = "s2"
+    assert again.made("find", {"q": "a"}).at == 0
+    assert again.made("ask", {"question": "What day?"}) == paused
+
+
+def test_a_run_continued_from_its_frameworks_state_goes_on_after_the_calls_made() -> None:
+    """An OpenAI Agents ``RunState`` approved: the SDK runs the call it held, the next after
+    the calls made — not the run's first, where a call was paused in before."""
+    journal = Journal()
+    first = Replay(journal)
+    asking = first.made("ask", {"question": "Which day?"})
+    interrupt = Interrupt(tenant_id="t", run_id="r", question="Which day?")
+    journal.pending = Pending(key="q", interrupt=interrupt, inside=asking)
+    journal.answered(resolution("Friday"))
+    second = Replay(journal)
+    second.ended(second.made("ask", {"question": "What day?"}))
+    approved = Replay(journal, goes_on=True).made("ask", {"question": "Which room?"})
+    assert (approved.at, approved.args) == (1, {"question": "Which room?"})
 
 
 async def test_a_run_without_a_checkpoint_has_an_empty_journal(tmp_path: Path) -> None:

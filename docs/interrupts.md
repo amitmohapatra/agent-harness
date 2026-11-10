@@ -453,7 +453,13 @@ and only a run assigned to that person or to nobody; never a run assigned to a g
 * **Everything else** re-runs from the input as the next attempt, with the **journal**:
   answers already given return where their question is asked, and tool calls already made
   return their recorded outputs instead of running again. Entries are keyed by content (the
-  question; the tool and its arguments) and consumed in order.
+  question; the tool and its arguments) and consumed in order. A model asked for a step again
+  rarely repeats its call word for word, so the tool call a question was asked in is kept as
+  the model made it, and the model is told which call the person answered about (a resumed
+  Claude or Kimi session, an OpenAI agent run again from its input). The call of that tool
+  made at its place among the run's tool calls runs as that call, with the arguments the
+  person saw, and is not asked about again. Any other call with other arguments is a new
+  call, and an approval is always for the exact call.
 
 Per framework — which pauses resume in place, what the model is asked again, the frameworks'
 own gates — see the [framework pages](README.md#which-target). A checkpointed graph resumes in

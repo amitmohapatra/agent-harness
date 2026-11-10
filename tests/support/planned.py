@@ -7,7 +7,12 @@ messages it is given and makes the next planned call, or — every call made —
 an approved call's output). So a framework that re-runs a resumed run from its input, and one
 that resumes in place from its checkpoint, drive the same model the same way, and an answer
 shows what the model read. Each model keeps what it was sent (the pushed memory context is in
-there)."""
+there).
+
+A real model asked for the same step twice rarely repeats its call word for word: a call planned
+with :class:`Reworded` arguments is made with other arguments each time the model makes it
+again, as a framework that runs a resumed run again from its input, or tells its model to
+repeat the paused call, has it do."""
 
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from pydantic import Field
+from pydantic import Field, SkipValidation
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.models import Script, ScriptedChat
@@ -35,20 +40,42 @@ CUT_REPLY: Final = {"role": "assistant", "content": "", "finish_reason": "length
 SUMMARIZE = "Messages to summarize"
 
 
+class Reworded(dict[str, Any]):
+    """A planned call's arguments as the model first words them, and ``again``: as it words
+    them every time it makes that call again."""
+
+    def __init__(self, first: dict[str, Any], *, again: dict[str, Any]) -> None:
+        super().__init__(first)
+        self.again = again
+        self.made = 0
+
+    def worded(self) -> dict[str, Any]:
+        self.made += 1
+        return dict(self) if self.made == 1 else dict(self.again)
+
+
+def worded(call: Call) -> Call:
+    """``call`` as the model makes it now (:class:`Reworded` arguments: as it words them this
+    time)."""
+    name, args = call
+    return (name, args.worded()) if isinstance(args, Reworded) else call
+
+
 def planned(
     plan: Sequence[Call], results: Sequence[str], final: str, *, tools: bool = True
 ) -> str | Call:
     """The next turn of ``plan`` after ``results`` (the tool results so far) — the answer when
     the call offers no tool (``tool_choice="none"``: a provider's model then answers in text)."""
     if tools and len(results) < len(plan):
-        return plan[len(results)]
+        return worded(plan[len(results)])
     return final.replace("{last}", results[-1] if results else "")
 
 
 class PlannedChatModel(ScriptedChatModel):
     """A LangChain chat model (``create_agent``, Deep Agents, a hand-built graph)."""
 
-    plan: list[Call]
+    #: as given (not validated into a copy): a call's :class:`Reworded` arguments stay themselves
+    plan: SkipValidation[list[Call]]
     final: str = FINAL
     turns: list[Any] = Field(default_factory=list)
 

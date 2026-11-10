@@ -78,10 +78,10 @@ log = logging.getLogger("trellis.models")
 CLEAR_AT: Final = 0.5
 KEEP_RESULTS: Final = 3
 MIN_FREED: Final = 0.1
-#: What a cleared result reads as (the tool message keeps its call's id).
+#: What a cleared result reads as, ``{path}`` its own (``/large_tool_results/<its call's
+#: id>``, written out: a model is not shown its calls' ids).
 CLEARED: Final = (
-    "[result cleared to keep the context small: "
-    'read_file(file_path="/large_tool_results/<this call\'s id>") reads it again]'
+    '[result cleared to keep the context small: read_file(file_path="{path}") reads it again]'
 )
 #: What ``ReAct`` and :func:`middleware` say of a switch they no longer take (``removed``).
 _NO_GUIDANCE: Final = (
@@ -220,7 +220,7 @@ def _middleware(
         else []
     )
     reads = (
-        [ours.ReadTools(CLEARED if window is not None else None, files=files)]
+        [ours.ReadTools(cleared=window is not None, files=files)]
         if window is not None or not files
         else []
     )
