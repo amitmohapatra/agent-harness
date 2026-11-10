@@ -33,8 +33,9 @@ run its schedule fires, with nobody there (``fired``). Categories:
   people outside (each declared so, or under an approval rule): never run without the
   person's yes — the harness's approval pause, whoever asked for it (the user, a tool's
   result, an earlier yes to something else); a small write just runs;
-* ``undeclared`` — the same kind of action by a tool that declares nothing, or only a write:
-  what holds it today (the model asking, or nothing);
+* ``undeclared`` — the same kind of action by a tool that declares nothing (held: its call
+  waits for the person's approval) or only a write (what holds it today: the model asking,
+  or nothing);
 * ``unattended`` — a run its schedule fired: it asks nobody, finishes, and says what it
   needed; a risky call there waits.
 
