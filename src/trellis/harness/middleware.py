@@ -413,7 +413,8 @@ async def governed_call(
         return await handler(request.override(tool_call={**call, "args": args}))
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
-    outcome = await bridge.call(Tool(spec, run), dict(call["args"]), call_id=str(call["id"]))
+    made = Tool(spec, run, confined=framework_made(own))  # Deep Agents' files: its own
+    outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     if produced and outcome.ok and isinstance(produced[-1], Command):
         return produced[-1]  # the graph's state update, as the tool made it
     return _message(outcome, str(call["id"]), call["name"], kept=_paged(runtime, request))

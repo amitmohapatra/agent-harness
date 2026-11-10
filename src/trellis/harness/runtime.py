@@ -289,6 +289,9 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: what the person allowed for this conversation in its runs (``conversation.allowed``),
+    #: once read in this attempt
+    allowed: frozenset[str] | None = field(default=None, repr=False)
     #: the credentials hook's headers, per target, for this run only (``credentials.py``)
     credentials: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, init=False, repr=False)
@@ -686,15 +689,23 @@ class Runtime:
         resolution = await self.interrupt(asked.key, payload=asked.payload, **asked.fields())
         return asked.answer(resolution)
 
-    async def approve(self, call: ToolCall, decision: Decision) -> InterruptResolution:
+    async def approve(
+        self, call: ToolCall, decision: Decision, choices: Sequence[Option] = ()
+    ) -> InterruptResolution:
         """Ask for approval of a tool call (the bridge's pause): the question is governance's
         (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
-        (else anyone's, the approval control)."""
+        (else anyone's, the approval control). ``choices``: what the person picks from
+        (``governance.decision.choices``), offered as the interrupt's options and said after
+        the question, for plain chat."""
+        from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
+
+        said = SAID.get(tuple(choices))
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
             reason=InterruptReason.APPROVAL,
-            question=decision.question,
+            question=decision.question if said is None else f"{decision.question} {said}",
             ui="approve",
+            options=list(choices),
             tool_call=call,
             assignee=decision.assignee,
             component=decision.component,

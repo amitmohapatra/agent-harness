@@ -127,6 +127,7 @@ async def main() -> None:
         reviewer = Reviewer(
             {
                 "refund": Decide("approve", comment="checked on refund-review"),
+                "sign": Decide("approve", remember="run"),  # a write: allowed for the chat
                 "Which plans for acme?": ["basic", "pro"],
                 "Where do we ship acme's welcome kit?": {"street": "1 Main St", "city": "Oslo"},
             },

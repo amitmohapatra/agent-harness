@@ -21,7 +21,8 @@ from trellis import Harness, Runtime, openapi, tool
 from trellis.contracts import RunStatus
 from trellis.runs import Job
 
-pytestmark = [pytest.mark.live, needs_runs, needs_memory]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_runs, needs_memory, pytest.mark.usefixtures("writes_unasked")]
 
 #: The ticker sweeps every 5 s and a lapsed lease is queued again after 5 s: a run a dead
 #: worker held is claimable again within ~20 s.

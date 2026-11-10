@@ -63,9 +63,9 @@ from trellis.contracts import (
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.asking import RunCancelled, answer_of
-from trellis.harness.conversation import result_id
+from trellis.harness.conversation import allowed, result_id
 from trellis.harness.events import DECISION, NOTICE
-from trellis.harness.governance.decision import Decision
+from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, Made, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
@@ -211,8 +211,9 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     Agents' ``needs_approval``): whether governance asks a person about this call, as it would
     when the call runs — and if so, asked now (the run's pause, governance's question), so the
     framework keeps its run where it paused and its resume runs the call, instead of a new
-    attempt that asks the model again. Not for a call governance lets run, one approved for
-    the rest of the run, or one already approved or answered: the call decides those as ever."""
+    attempt that asks the model again. Not for a call governance lets run, one allowed for the
+    conversation (or its schedule), or one already approved or answered: the call decides those
+    as ever. Only a tool the harness runs is held (never a confined one: ``_gated``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     governance = runtime.agent.harness._governance(runtime.tenant)
@@ -224,7 +225,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     journal = runtime.replay.journal
     if (
         not decision.asks
-        or _reach(spec.name, decision.assignee) in journal.remembered
+        or await _allowed(runtime, decision, ours=True) is not None
         or content_key("approved", spec.name, args) in journal.approved
         or runtime.replay.answered(content_key("approve", spec.name, args))
     ):
@@ -232,7 +233,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     try:
-        await runtime.approve(call, decision)
+        await runtime.approve(call, decision, choices(decision.risk))
     except Paused:
         return True
     raise AssertionError("an approval not answered yet pauses")  # pragma: no cover
@@ -305,7 +306,9 @@ async def _called(
         refused = denied(tool_call, verdict)
         _events(runtime, ref, tool_call, refused)
         return refused
-    decision, tool_call, rejected = await _decided(runtime, tool.spec, tool_call, verdict)
+    decision, tool_call, rejected = await _decided(
+        runtime, tool.spec, tool_call, verdict, tool=tool
+    )
     # the budget again, then counted at once: the calls of one step are decided together
     rejected = rejected or _over_budget(runtime, tool)
     if rejected is not None:
@@ -505,27 +508,42 @@ async def _hooked(runtime: Runtime, call: ToolCall, key: str) -> tuple[ToolCall,
 
 
 async def _decided(
-    runtime: Runtime, spec: ToolSpec, call: ToolCall, asked: Ask | None
+    runtime: Runtime,
+    spec: ToolSpec,
+    call: ToolCall,
+    asked: Ask | None,
+    *,
+    tool: Tool | None = None,
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
-    before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and
-    not when a reviewer approved the tool for the rest of the run (``remember="run"``) — and
-    what came of it: the call (with an approver's edited arguments), announced when it is to
-    be, or the outcome of a call the approver rejected."""
+    before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and not
+    when the tool was allowed beyond one call (:func:`_allowed`) — and what came of it: the
+    call (with an approver's edited arguments), announced when it is to be, or the outcome of a
+    call the approver rejected. ``tool``: a call the harness runs — a write asks (unless the
+    tool is ``confined``), and the person picks one of ``governance.decision.choices``; none:
+    a call its framework runs under its own permission flow — a write is announced, and an
+    approval reaches the rest of the run only (``remember="run"``)."""
     governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
     )
+    if tool is None or tool.confined:
+        decision = decision.unasked()
     if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
         runtime.events.warning(decision.error.code, decision.error.message)
     if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
-    remembered = runtime.replay.journal.remembered
-    reach = _reach(spec.name, decision.assignee)
-    if decision.asks and reach in remembered:
-        decision = decision.approved(f"{spec.name} was approved for the rest of the run.")
+    ours = tool is not None
+    # a call answered already in this run keeps its answer: a denial stays one
+    answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
+    if (
+        decision.asks
+        and not answered
+        and (why := await _allowed(runtime, decision, ours=ours)) is not None
+    ):
+        decision = decision.approved(why)
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
     gated = content_key("approved", spec.name, call.args)
     approved = runtime.replay.journal.approved
@@ -534,10 +552,16 @@ async def _decided(
         decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
-        resolution = await runtime.approve(call, decision)
+        resolution = await runtime.approve(call, decision, choices(decision.risk) if ours else ())
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
-        if resolution.remember == "run" and reach not in remembered:
-            remembered.append(reach)  # in the journal: later calls of it are not asked
+        remembered = runtime.replay.journal.remembered
+        covered = reach(spec.name, decision.assignee)
+        if (
+            resolution.remember == "run"
+            and decision.risk != "irreversible"
+            and covered not in remembered
+        ):
+            remembered.append(covered)  # in the journal: later calls of it are not asked
         if resolution.decision is InterruptDecision.REJECT or answer is False:
             reason = reason_of(resolution)
             rejected = ToolOutcome(
@@ -555,10 +579,27 @@ async def _decided(
     return decision, call, None
 
 
-def _reach(tool: str, assignee: str | None) -> str:
-    """What an approval remembered for the run covers: the tool's later calls asked of the
-    same person or role (an ``Ask`` naming someone else still asks)."""
-    return tool if assignee is None else f"{tool} for {assignee}"
+async def _allowed(runtime: Runtime, decision: Decision, *, ours: bool) -> str | None:
+    """Why a call that asks runs without asking, or ``None``: its tool was allowed beyond one
+    call — in this run (the journal), and, for a call the harness runs (``ours``), by the
+    schedule that fired the run (``schedules.ALLOWED``) or in an earlier run of the conversation
+    (``conversation.allowed``). Never an ``irreversible`` tool: it asks every call."""
+    if decision.risk == "irreversible":
+        return None
+    covered = reach(decision.tool, decision.assignee)
+    if covered in runtime.replay.journal.remembered:
+        reached = "this conversation" if ours else "the rest of the run"
+        return f"{decision.tool} was approved for {reached}."
+    if not ours:
+        return None
+    root = runtime
+    while root.parent is not None:  # a child run works for its parent's schedule
+        root = root.parent
+    if root.scheduled is not None and covered in root.scheduled.allowed:
+        return f"{decision.tool} was allowed for this schedule."
+    if covered in await allowed(runtime):
+        return f"{decision.tool} was approved for this conversation."
+    return None
 
 
 async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> ToolOutcome:

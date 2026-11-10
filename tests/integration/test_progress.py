@@ -33,6 +33,9 @@ from trellis.runs import (
 )
 from trellis.runs.payloads import SEGMENTS, PayloadRef, decode
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 paid: list[int] = []
 looked: list[str] = []
 exported: list[int] = []

@@ -17,8 +17,7 @@ flowchart TB
   call["a call of tool T with args"] --> rule{"has the catalog an<br/>approve_when for T?"}
   rule -- "no" --> risk{"T's risk: the catalog's,<br/>else T's own side effects"}
   risk -- "read" --> run["run"]
-  risk -- "write" --> announce["announce (tool_notice) and run"]
-  risk -- "irreversible, or none declared" --> ask["ask a person"]
+  risk -- "write, irreversible, or none declared" --> ask["ask a person"]
   rule -- "yes" --> holds{"does it hold on args?<br/>(or cannot be evaluated)"}
   holds -- "yes" --> ask
   holds -- "no, T only reads" --> run
@@ -41,8 +40,8 @@ derives it from the annotations the harness published and from what an administr
 | Risk | Action |
 |---|---|
 | `read` | `run` |
-| `write` | `announce`: runs, and is announced as a `CUSTOM` `tool_notice` event |
-| `irreversible` | `ask`: waits for approval |
+| `write` | `ask`: waits for approval, once a conversation (below) |
+| `irreversible` | `ask`: waits for approval, at every call |
 | none declared | `ask`: waits for approval (`"<tool> has not declared its side effects."`) |
 
 ### A tool that does not say what it does
@@ -67,8 +66,42 @@ overrides everything else and no publish changes it:
 await scope.advanced.tools.put_catalog([{"name": "docs-search", "side_effects": "read"}])
 ```
 
-With memory off there is no catalog: such a tool asks at each call, and a reviewer may approve
-it for the rest of the run (`remember="run"`).
+With memory off there is no catalog: such a tool asks at each call, and the person may allow it
+for the conversation.
+
+### What the person picks
+
+A call of a tool the harness runs that asks offers the person three choices, as Claude Code
+does: **allow once** (this call), **allow for this conversation** (the tool's later calls in
+every later run of the same thread for the same user — a resumed run, another worker and a
+child run included; never another thread, user or tool) and **deny** (the call never runs; the
+model reads why). An `irreversible` tool offers allow once and deny only: it asks at every
+call. The approval's interrupt carries them as `options` (`governance.decision.CHOICES`; their
+values: `once`, `run` — the contracts' `remember="run"` —, `reject`), and plain chat reads them
+after the question ("Allow once, allow for this conversation, or deny.").
+
+What the person allowed is read from the run store's history of every answered interrupt
+(agent-runs' `resolutions`, append-only; `LocalRuns` keeps the same): the runs of the tenant,
+user and thread, whichever agent or worker ran them, once per attempt and only when a call
+asks. Nothing new is configured, and no code can allow a tool in advance: the catalog's risk
+and `approve_when` stay the administrator's.
+
+A write the run keeps to itself is announced as before, not asked: the harness's own schedule
+tools (a schedule is confirmed when it is made, below), its memory tools (`memory_forget` of
+the user's own words asks), its sandbox (`sandbox_exec`, `sandbox_write`), a sub-agent's call
+(the sub-agent's own calls are governed) and Deep Agents' file tools and `execute`. A
+framework's own tools under its own permission flow — Claude Code's and Kimi's built-ins, an
+OpenAI agent's hosted tools — keep their own way: a `write` there is announced, and Claude
+Code or Kimi asks its own way. An MCP tool, an OpenAPI `POST`/`PUT`/`PATCH`, an `a2a(url)`
+agent and your own functions ask.
+
+**A schedule set in chat.** `schedule_task` names the tools its runs will call that change
+something (`tools`); those that would ask (a write, or one that says nothing; never an
+`irreversible` one) are named in its confirmation: schedule it allowing them in its runs,
+schedule it asking at each run, or do not schedule it. What the person allows is kept in the
+schedule's metadata (`schedules.ALLOWED`) and honoured by every run it fires; a write it does
+not cover pauses in the chat's thread, as any approval does. A schedule made from code
+(`agent.schedule()`) allows nothing: its runs' writes ask.
 
 The harness says which tools these are: when an agent's tools are listed, one warning
 (`trellis.tools`) names those that declare no side effects, with what to add.
@@ -184,7 +217,7 @@ through the harness's background writes, so they are kept on disk across an outa
   Your code comes first, for what a rule cannot say: a `before_tool` hook may deny a call, or
   ask about one of an `assignee`, on your own screen
   ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)); it never
-  approves one governance asks about. A tool a reviewer approved for the rest of the run
+  approves one governance asks about. A tool the person allowed for the conversation
   (`remember="run"`) is not asked about again in it.
 
 A call is looked up by its tool's name when it is made. So a rule set after a graph was compiled

@@ -171,8 +171,9 @@ def tool(
     — or ``@tool`` and ``tool(fn)``, which say nothing of what it does.
 
     ``side_effects`` is what a call does — ``"read"`` (it changes nothing: it runs),
-    ``"write"`` (it changes what can be changed back: it runs and is announced) or
-    ``"irreversible"`` (it cannot be undone: a person approves each call). A tool that does
+    ``"write"`` (it changes what can be changed back: a person approves it once, or for
+    the conversation) or ``"irreversible"`` (it cannot be undone: a person approves each
+    call). A tool that does
     not say (a bare function in ``tools=[...]`` too) is held to nothing: a person approves
     each of its calls, and the toolbox says so once, naming it (``tools.toolbox``).
     The schema comes from the signature (pydantic validates the model's arguments), each

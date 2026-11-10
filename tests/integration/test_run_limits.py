@@ -39,6 +39,9 @@ from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import CUT
 from trellis.runs import ConflictError, Job, NotFoundError
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 class Crash(BaseException):
     """The worker process dies: nothing is written, the lease lapses."""

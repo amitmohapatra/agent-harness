@@ -17,7 +17,8 @@ from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 
-pytestmark = [pytest.mark.live, needs_memory]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_memory, pytest.mark.usefixtures("writes_unasked")]
 
 TASK = "Restock SKU A-1 if it is low"
 #: Approvals on one (tool, argument shape) before the service suggests a rule.

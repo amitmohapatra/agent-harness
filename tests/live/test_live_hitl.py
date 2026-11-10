@@ -42,7 +42,7 @@ wired: list[int] = []
 
 
 class WireRule(Hooks):
-    """Up to 10 runs unasked (the tool is ``write``); over 500 is finance's, on its own screen;
+    """Up to 10 is governance's (the tool is ``write``: asked); over 500 is finance's, on its own screen;
     anything between is asked of whoever answers."""
 
     async def before_tool(self, call: ToolCall) -> Ask | None:
@@ -125,15 +125,19 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
             },
             name="live-reviewer",
         )
-        result = await reviewer.answer(agent, paused)  # the plans; 5 runs unasked
+        result = await reviewer.answer(agent, paused)  # the plans; then 5, a write, asks
         assert result.interrupt is not None and result.interrupt.question.startswith(
             "Approve wire?"
         )
-        result = await reviewer.answer(agent, result)  # 50, approved for the run: 60 not asked
+        result = await reviewer.answer(agent, result)  # for the conversation: 50, 60 not asked
         screen = result.interrupt
         assert screen is not None and screen.component == "wire-review"  # 900: finance's
         assert screen.props == {"amount": 900} and screen.assignee == "role:finance"
         result = await agent.resume(screen.interrupt_id, "approve", reviewer="cfo", comment="ok")
+        signing = result.interrupt  # sign is a write: it asks before it waits on the signature
+        assert signing is not None and signing.tool_call is not None
+        assert signing.tool_call.tool == "sign"
+        result = await agent.resume(signing.interrupt_id, "approve", reviewer="live-user")
         outside = result.interrupt
         assert outside is not None and outside.reason is InterruptReason.QUESTION
         assert (outside.component, outside.props) == ("e-signature", {"contract": "c-7"})
@@ -157,6 +161,7 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
             ("ANSWER", None, "once"),
             ("APPROVE", "this account only", "run"),
             ("APPROVE", "ok", "once"),
+            ("APPROVE", None, "once"),
             ("ANSWER", None, "once"),
         ]
 
@@ -266,7 +271,8 @@ async def test_a_pause_reaches_a_webhook_with_what_a_notice_says() -> None:
                 f"https://ops.example/runs/{run.run_id}"
             )
             assert notice == (
-                "Approve wire? Wire over 500? (for role:finance; call wire {'amount': 900}) "
+                "Approve wire? Wire over 500? Allow once, allow for this conversation, or deny. "
+                "(for role:finance; call wire {'amount': 900}) "
                 f"https://ops.example/runs/{paused.run_id}"
             )
             await agent.cancel(paused.run_id)

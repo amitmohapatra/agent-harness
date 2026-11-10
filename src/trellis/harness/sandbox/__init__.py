@@ -153,6 +153,7 @@ class SandboxSource:
                 ),
                 self._exec,
                 timeout=timeout,
+                confined=True,
             ),
             Tool(
                 _spec(READ, "Read a text file of your sandbox.", path, side_effects="read"),
@@ -169,6 +170,7 @@ class SandboxSource:
                 ),
                 self._write,
                 timeout=timeout,
+                confined=True,
             ),
         ]
         self._as_tools = SandboxTools(self)

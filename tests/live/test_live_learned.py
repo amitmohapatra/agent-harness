@@ -25,7 +25,8 @@ from trellis import Runtime, tool
 from trellis.contracts import RunStatus
 from trellis.memory import MemoryClient
 
-pytestmark = [pytest.mark.live, needs_memory]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_memory, pytest.mark.usefixtures("writes_unasked")]
 
 
 def _texts(found: Any) -> list[tuple[str, str | None]]:

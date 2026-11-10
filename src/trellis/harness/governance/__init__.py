@@ -2,8 +2,9 @@
 the tool catalog that decision reads, kept fresh.
 
 The one place the decision is made (:meth:`Governance.check`): a ``read`` tool runs, a
-``write`` tool runs and is announced, an ``irreversible`` tool asks, and so does one that has
-not said what it does; the catalog's ``risk``
+``write`` and an ``irreversible`` tool ask, and so does one that has not said what it does (a
+write the run keeps to itself, or a framework's own, is announced: ``Decision.unasked``); the
+catalog's ``risk``
 overrides the tool's own, and its ``approve_when`` decides when the call asks
 (``decision.py``). Without a catalog (no memory service) the tools' own risks decide.
 

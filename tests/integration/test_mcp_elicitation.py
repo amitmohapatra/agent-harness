@@ -16,6 +16,9 @@ from tests.support.arm import arm
 from trellis import Harness, Runtime, mcp, stdio
 from trellis.contracts import InterruptReason, RunStatus
 
+#: These tests are about what a call does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 SERVER = Path(__file__).parents[1] / "support" / "mcp_asking_server.py"
 
 #: The protocol before 2026-07-28 (the question a request of the server's own, during the

@@ -36,17 +36,21 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import RunStatus
+from trellis.contracts import InterruptDecision, RunStatus
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
+    from trellis.runs import ResolutionEntry
 
 log = logging.getLogger("trellis.harness")
 
 #: The most earlier runs of a conversation :func:`earlier` reads from the run store.
 EARLIER_RUNS: Final = 10
+#: A run's answered interrupts read at once, for what the person allowed (:func:`allowed`).
+RESOLUTIONS_PAGE: Final = 50
 #: The endings whose question and answer are a turn of the conversation; a cancelled run's
 #: question is one too (an ``interrupt`` continues from it), with no answer.
 ANSWERED: Final = frozenset({RunStatus.SUCCESS, RunStatus.PARTIAL})
@@ -122,6 +126,53 @@ def identified(said: Sequence[Said], runtime: Runtime) -> list[Said]:
 
 
 # --------------------------------------------------------------------------- earlier turns
+async def allowed(runtime: Runtime) -> frozenset[str]:
+    """What the person allowed for this conversation: the tools (``governance.decision.reach``)
+    whose approval offered :data:`~trellis.harness.governance.decision.CONVERSATION` and was
+    answered with it, in any run of this tenant, user and thread — whichever agent or worker
+    ran it, a child run's and a resumed run's included — as the run store keeps every answered
+    interrupt (``resolutions``, append-only). Read once per attempt, and only when a call
+    asks; a run with no conversation of its own has none."""
+    if runtime.allowed is None:
+        runtime.allowed = await _allowed(runtime)
+    return runtime.allowed
+
+
+async def _allowed(runtime: Runtime) -> frozenset[str]:
+    thread = runtime.thread
+    if thread is None or thread == runtime.run_id:
+        return frozenset()
+    runs, tenant = runtime.agent.harness.runs, runtime.tenant
+    found: set[str] = set()
+    async for summary in runs.iterate(thread_id=thread, tenant=tenant):
+        record = await runs.get(summary.run_id, tenant=tenant)
+        if record is None or record.user_id != runtime.user or record.last_resolution is None:
+            continue
+        cursor: str | None = None
+        while True:
+            page = await runs.resolutions(
+                record.run_id, cursor=cursor, limit=RESOLUTIONS_PAGE, tenant=tenant
+            )
+            found.update(r for r in map(_allowing, page.items) if r is not None)
+            if (cursor := page.next_cursor) is None:
+                break
+    return frozenset(found)
+
+
+def _allowing(entry: ResolutionEntry) -> str | None:
+    """What one answered interrupt allowed for the conversation, if anything."""
+    interrupt, resolution = entry.interrupt, entry.resolution
+    call = interrupt.tool_call
+    if (
+        call is None
+        or CONVERSATION.value not in interrupt.option_values
+        or resolution.decision is not InterruptDecision.APPROVE
+        or resolution.remember != "run"
+    ):
+        return None
+    return reach(call.tool, interrupt.assignee)
+
+
 async def earlier(runtime: Runtime, *, whole: bool = False) -> list[Said]:
     """The conversation's earlier turns, oldest first, as the run store keeps them: each
     turn's question and answer (a cancelled turn's question alone), of this agent, tenant,

@@ -34,7 +34,13 @@ from trellis.contracts import (
 from trellis.runs import Claimed, Job, LeaseLostError, RunsClient, RunSummary
 from trellis.runs.payloads import SEGMENTS
 
-pytestmark = [pytest.mark.live, needs_runs, needs_memory]  # the key is the memory service's
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [
+    pytest.mark.live,
+    needs_runs,
+    needs_memory,  # the key is the memory service's
+    pytest.mark.usefixtures("writes_unasked"),
+]
 
 ROOT = Path(__file__).resolve().parents[2]
 #: The ticker sweeps every 5 s; a lapsed 5 s lease is re-queued within ~10 s, and claimable

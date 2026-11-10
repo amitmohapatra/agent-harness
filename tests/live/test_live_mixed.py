@@ -23,6 +23,7 @@ from trellis.contracts import InterruptDecision, InterruptResolution, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.evals import EvalCase, EvalScore, EvalServices, judge
 from trellis.harness.governance import governed
+from trellis.harness.governance.decision import CHOICES, SAID
 from trellis.harness.journal import content_key
 
 pytestmark = [pytest.mark.live, needs_memory, needs_runs]
@@ -91,7 +92,9 @@ async def test_one_rule_gates_a_wrapped_agent_and_a_plain_graph() -> None:
                 assert p_paused.status is RunStatus.PAUSED and p_paused.awaiting is not None
                 assert placed == []
                 question = f"Approve {name}? {RULE}."
-                assert w_paused.interrupt.question == p_paused.awaiting.question == question
+                assert p_paused.awaiting.question == question  # Way 2: governance's question
+                # Way 1: the same, with the person's choices said for plain chat
+                assert w_paused.interrupt.question == f"{question} {SAID[CHOICES]}"
 
                 # both wait in the harness's inbox, and in agent-runs' listing of each agent
                 waiting = {r.run_id for r in await h.inbox()}

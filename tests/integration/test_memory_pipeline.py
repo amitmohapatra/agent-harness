@@ -35,6 +35,7 @@ from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
+from trellis.harness.governance.decision import CHOICES, SAID
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import Identity, conversation_key
 from trellis.memory.models import ToolHints
@@ -874,7 +875,7 @@ async def test_the_catalog_decides_tiers_and_approvals(
     assert (await agent.run(50, user="u")).answer == "paid 50"
     paused = await agent.run(500, user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     await memory_harness.writes.drain()
     [put] = memory_service.named("put_catalog")
     assert put.scope["tenant_id"] == "acme" and "user_id" not in put.scope
@@ -1159,7 +1160,7 @@ async def test_an_approval_rule_set_after_a_graph_was_built_governs_its_calls(
     agent = memory_harness.wrap(graph, id="graph-payer")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     assert paid == []
 
 
@@ -1206,7 +1207,7 @@ async def test_a_handoffs_tools_built_by_h_tools_follow_the_catalog_too(
     agent = memory_harness.wrap(triage, id="triage")
     paused = await agent.run("pay the invoice", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused
-    assert paused.interrupt.question == "Approve pay? amount > 100."
+    assert paused.interrupt.question == f"Approve pay? amount > 100. {SAID[CHOICES]}"
     assert paid == []
     # the re-run hands off again; the approved call runs once
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")

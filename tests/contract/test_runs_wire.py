@@ -348,6 +348,7 @@ async def billing(input: dict[str, Any], agent: Runtime) -> Any:
     return f"{receipt}; {size}"
 
 
+@pytest.mark.usefixtures("writes_unasked")  # a write saved as progress, then a question
 async def test_every_run_the_pipeline_records_speaks_the_runs_contract(
     wired: tuple[Harness, RunsService],
 ) -> None:
@@ -431,6 +432,7 @@ async def test_a_runs_limits_version_and_cancel_speak_the_runs_contract(
     assert ("POST", "/v1/runs/{id}/cancel") in service.seen
 
 
+@pytest.mark.usefixtures("writes_unasked")  # a write saved as progress, then a question
 async def test_a_journal_larger_than_a_checkpoint_travels_as_payload_segments(
     wired: tuple[Harness, RunsService],
 ) -> None:

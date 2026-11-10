@@ -120,6 +120,7 @@ async def test_an_answer_responds_for_the_tool(harness: Harness) -> None:
     assert message.content == "I'll call her" and message.status == "success"
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_raw_decisions_still_pass_through(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
     agent = await mailer(harness, model)
@@ -130,6 +131,7 @@ async def test_raw_decisions_still_pass_through(harness: Harness) -> None:
     assert sent == [{"to": "ada", "body": "hi"}]
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_edit_in_the_middlewares_own_words_is_the_middlewares_to_check(
     harness: Harness,
 ) -> None:

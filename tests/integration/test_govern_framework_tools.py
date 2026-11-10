@@ -111,6 +111,7 @@ async def test_an_irreversible_own_tool_asks_and_a_resume_runs_nothing_twice(
     assert ran == ["lookup o1", "refund o1"]  # the read was journaled, not run again
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_own_tool_that_fails_is_an_error_the_model_reads(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("broken", {"x": "1"}), "it failed"])
     agent = harness.wrap(graph(model, broken), id="g")
@@ -208,6 +209,7 @@ def test_a_tools_risk_is_declared_else_annotated_else_none() -> None:
 
 
 # --------------------------------------------------------------------------- OpenAI Agents
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_sdk_agents_own_tool_is_governed_on_a_copy(harness: Harness) -> None:
     @function_tool
     def ship(order: str) -> str:
@@ -228,6 +230,7 @@ async def test_an_sdk_agents_own_tool_is_governed_on_a_copy(harness: Harness) ->
     assert target.tools == tools_before and target.tools[0] is ship  # yours, unchanged
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_error_the_tool_itself_reports_is_an_error_outcome(harness: Harness) -> None:
     from langchain_core.tools import ToolException
 

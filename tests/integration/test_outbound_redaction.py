@@ -43,6 +43,9 @@ from trellis.harness.events import LOG, RunEvents
 from trellis.harness.hooks import WITHHELD, Chain
 from trellis.harness.identity import Identity
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 EMAIL = "ada@example.com"
 SECRET = "sk-live0123456789abcdefghij"
 CARD = "4111 1111 1111 1111"

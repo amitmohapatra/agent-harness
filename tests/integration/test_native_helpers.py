@@ -37,6 +37,9 @@ from trellis.harness.identity import AGENT_GROUP
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job, RunSummary
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 done: list[str] = []
 crashes: list[BaseException] = []

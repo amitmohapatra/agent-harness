@@ -5,6 +5,47 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a write asks, once a conversation, as in Claude Code
+
+A tool the harness runs that says it writes now asks the person before it runs (it ran,
+announced). The person picks, as in Claude Code: **allow once**, **allow for this
+conversation** or **deny**. An `irreversible` tool offers allow once and deny only: it asks at
+every call.
+
+- **"For this conversation"** covers the tool's later calls in every later run of the same
+  thread for the same user — a resumed run, another worker, a child run — never another
+  thread, user or tool. It is read from the run store's history of answered interrupts
+  (agent-runs' `resolutions`; `LocalRuns` keeps the same): no new setting, no contract change.
+  `remember="run"` is that choice; before, it reached the rest of the run only, and covered an
+  `irreversible` tool too.
+- **The choices travel with the approval**: its interrupt's `options` (`once`, `run`,
+  `reject`), and the question says them for plain chat. AG-UI takes the picked value as the
+  resume's `payload`, A2A the choice in words, `agent.resume(id, "answer", answer="run")` too.
+- **What does not ask:** a write the run keeps to itself — the schedule tools, the memory
+  tools, the sandbox, a sub-agent's call, Deep Agents' files and `execute` — is announced as
+  before. A framework's own tools (Claude Code's and Kimi's built-ins, OpenAI hosted tools)
+  keep their own permission flow. The catalog's `risk` and `approve_when` are unchanged: a rule
+  that does not hold still lets the call run, announced.
+- **A schedule set in chat** names the writes its runs will call (`schedule_task(tools=)`);
+  its confirmation allows them for its runs (kept in the schedule's metadata) or leaves them to
+  ask at each run. A write it does not cover pauses in the chat's thread. A schedule made from
+  code allows nothing.
+- An OpenAI agent holds a write at its own gate (`needs_approval`), so the approved call
+  continues the paused run.
+- A call denied earlier in a run stays denied when a later approval in the run allows its tool.
+- Way 2: `governed(fn, gov, side_effects="write")` and `Governance.check` ask about a write
+  too (`on_ask`).
+
+**Upgrading.** Nothing fails at startup. What changes: a write tool now asks once per
+conversation.
+
+| What you see | The fix |
+|---|---|
+| a `write` tool that ran now pauses (`Approve <tool>? <tool> is write. Allow once, allow for this conversation, or deny.`) | nothing: the person allows it once or for the conversation; an app renders the interrupt's `options` |
+| an `irreversible` tool approved with `remember="run"` asks again | nothing: it asks at every call |
+| a scheduled run's write pauses | name the tool in `schedule_task(tools=)` so the person allows it when confirming; a schedule from code: answer the pause |
+| a tool that only reads is declared `write` | `@tool(side_effects="read")`, or its `risk` in the catalog |
+
 ### Changed: a tool that does not say what it does asks a person
 
 A risky call must never run without approval. A tool that declared nothing was taken as
