@@ -503,7 +503,9 @@ and only a run assigned to that person or to nobody; never a run assigned to a g
   (below). A call governance asks about (an `irreversible` tool, a catalog `approve_when`) is
   held at the same gate: the harness gives each tool the catalog may ask about a
   `needs_approval` policy that asks governance, so its approval continues the run too, with
-  governance's question.
+  governance's question. The other calls of the same reply wait at the gate meanwhile, and
+  governance decides each one when the run resumes: one the person allowed for the
+  conversation runs without asking again.
 * **Everything else** re-runs from the input as the next attempt, with the **journal**:
   answers already given return where their question is asked, and tool calls already made
   return their recorded outputs instead of running again. Entries are keyed by content (the
