@@ -292,6 +292,9 @@ class Runtime:
     #: what the person allowed for this conversation in its runs (``conversation.allowed``),
     #: once read in this attempt
     allowed: frozenset[str] | None = field(default=None, repr=False)
+    #: what its user allowed always (the memory service's tool permissions:
+    #: ``tools.bridge._always``), once read in this attempt
+    always: frozenset[str] | None = field(default=None, repr=False)
     #: the credentials hook's headers, per target, for this run only (``credentials.py``)
     credentials: dict[tuple[str, str], dict[str, str]] = field(default_factory=dict, repr=False)
     _state: Any = field(default=None, init=False, repr=False)

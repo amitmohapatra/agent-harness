@@ -678,7 +678,7 @@ def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:
     """The contracts decision a protocol resume entry means: ``cancelled`` abandons the run;
     an approval is answered ``true`` (approve), ``false`` (reject) or with the edited
     arguments, or with the value of one of its options (allow once, for this conversation,
-    deny: ``governance.decision.choices``); anything else answers a question. The
+    always, deny: ``governance.decision.choices``); anything else answers a question. The
     ``decision`` extension names it."""
     if answer.decision is not None:
         return answer.decision

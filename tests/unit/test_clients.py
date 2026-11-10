@@ -463,6 +463,7 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
         run.record(
             "publish_catalog", entries=[{"name": "erp-get", "description": "", "source": "local"}]
         ),
+        run.record("allow_always", tool="refund", assignee=None, allowed_by="cfo"),
     ]
     for record in json.loads(json.dumps(records)):  # through the spool's JSON and back
         work = memory.replay(record)
@@ -475,7 +476,14 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
         "feedback",
         "feedback",
         "put_catalog",
+        "allow_tool",
     ]
+    assert service.named("allow_tool")[0].body == {
+        "user": "ada",
+        "tool": "refund",
+        "assignee": None,
+        "allowed_by": "cfo",
+    }
     assert all(c.scope.get("tenant_id") == "acme" for c in service.calls)
     assert service.named("messages")[0].body["messages"][0]["source_message_id"] == "run_1:user:0"
     call_message, result = service.named("messages")[1].body["messages"]

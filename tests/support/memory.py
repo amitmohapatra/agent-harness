@@ -71,6 +71,8 @@ ROUTES: Final = [
     ("POST", r"/v1/tools/approval-suggestions/(?P<suggestion_id>[^/]+)/accept", "accept"),
     ("PUT", r"/v1/tools/catalog", "put_catalog"),
     ("PUT", r"/v1/agents/model-key", "model_key"),
+    ("GET", r"/v1/tool-permissions", "permissions"),
+    ("PUT", r"/v1/tool-permissions", "allow_tool"),
     ("POST", r"/v1/documents", "add_document"),
     ("GET", r"/v1/documents/(?P<document_id>[^/]+)", "document"),
     ("POST", r"/v1/memories", "remember"),
@@ -178,6 +180,9 @@ class FakeMemoryService:
     #: how an agent's ``memory_forget`` is refused whatever it names (a 403 whose ``reason`` is
     #: this; ``plain``: one with no details); ``None``: as the service decides
     forget_refusal: str | None = None
+    #: the tools users allowed always, by permission id, each with its tenant and user (the
+    #: service's ``tool_permissions``): one per tenant, user, tool and assignee
+    permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         MADE.append(self)
@@ -771,8 +776,42 @@ class FakeMemoryService:
             "reason": "the agent's registered endpoint",
         }
 
+    def _permissions(self, call: Call) -> dict[str, Any]:
+        """The user's permissions in the key's tenant, oldest first, as the service lists
+        them (without the tenant)."""
+        user = call.query["user"]
+        mine = [
+            p for p in self.permissions.values() if (p["tenant"], p["user"]) == (self.tenant, user)
+        ]
+        return {"permissions": [_permission(p) for p in mine]}
+
+    def _allow_tool(self, call: Call) -> dict[str, Any]:
+        """Stored once per tenant, user, tool and assignee; allowing again answers the stored
+        one."""
+        body = call.body
+        key = (self.tenant, body["user"], body["tool"], body.get("assignee"))
+        for found in self.permissions.values():
+            if (found["tenant"], found["user"], found["tool"], found["assignee"]) == key:
+                return _permission(found)
+        permission_id = self._id("tpm")
+        self.permissions[permission_id] = {
+            "permission_id": permission_id,
+            "tenant": self.tenant,
+            "user": body["user"],
+            "tool": body["tool"],
+            "assignee": body.get("assignee"),
+            "allowed_by": body.get("allowed_by") or body["user"],
+            "created_at": NOW,
+        }
+        return _permission(self.permissions[permission_id])
+
     def _id(self, prefix: str) -> str:
         return f"{prefix}_{next(self._ids)}"
+
+
+def _permission(stored: dict[str, Any]) -> dict[str, Any]:
+    """A permission as the service answers it."""
+    return {k: v for k, v in stored.items() if k != "tenant"}
 
 
 def _catalog_tool(name: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -909,7 +948,9 @@ def _scope(request: httpx.Request, body: Any) -> dict[str, Any]:
     """The scope a request carries: in its body, else in its headers and query."""
     if isinstance(body, dict) and isinstance(body.get("scope"), dict):
         return body["scope"]
-    scope: dict[str, Any] = {k: v for k, v in request.url.params.items() if k != "names"}
+    scope: dict[str, Any] = {
+        k: v for k, v in request.url.params.items() if k not in ("names", "user")
+    }
     for header, name in (("x-trellis-tenant", "tenant_id"), ("x-trellis-user", "user_id")):
         if header in request.headers:
             scope[name] = request.headers[header]

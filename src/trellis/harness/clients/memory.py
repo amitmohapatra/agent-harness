@@ -39,6 +39,7 @@ from trellis.memory.models import (
     Feedback,
     KeyInfo,
     PromptContext,
+    ToolPermission,
 )
 
 #: Prompt budget for the pushed context, in tokens, when the model's context window is not
@@ -165,8 +166,8 @@ class Memory:
                 call = ToolCall.model_validate(args["call"])
                 outcome = ToolOutcome.model_validate(args["outcome"])
                 return lambda: run.record_tool(call, outcome)
-            case "run_feedback":
-                return lambda: run.run_feedback(**args)
+            case "run_feedback" | "allow_always":  # the method of that name, its keywords
+                return lambda: getattr(run, record["op"])(**args)
             case "feedback":
                 decision = Decision.model_validate(args["record"])
                 return lambda: run.feedback(decision)
@@ -259,6 +260,17 @@ class RunMemory:
 
     async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
         return await self.ctx.tool_hints(task, available=list(available))
+
+    # ------------------------------------------------------------------ tool permissions
+    async def always_allowed(self) -> list[ToolPermission]:
+        """The tools this scope's user allowed always ("Always allow")."""
+        return await self.ctx.advanced.tool_permissions.list()
+
+    async def allow_always(self, tool: str, assignee: str | None, allowed_by: str) -> None:
+        """Keep the user's Always allow for ``tool`` asked of ``assignee`` (idempotent)."""
+        await self.ctx.advanced.tool_permissions.allow(
+            tool, assignee=assignee, allowed_by=allowed_by
+        )
 
     # ------------------------------------------------------------------ records
     async def record_messages(self, messages: Sequence[Said], run_id: str, attempt: int) -> None:

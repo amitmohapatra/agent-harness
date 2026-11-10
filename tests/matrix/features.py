@@ -164,7 +164,10 @@ async def tiers(w: World) -> None:
     asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
     assert asked == ["note", "refund"], asked  # the write and the irreversible call ask
     assert o.pauses[0].reason is InterruptReason.APPROVAL
-    assert [p.option_values for p in o.pauses] == [["once", "run", "reject"], ["once", "reject"]]
+    # always allow too where the memory service keeps it; never for the irreversible call
+    kept = "memory" in w.switched - o.without
+    write = ["once", "run", "always", "reject"] if kept else ["once", "run", "reject"]
+    assert [p.option_values for p in o.pauses] == [write, ["once", "reject"]]
     assert d.ran("refund") == [{"order": "o1"}] and d.ran("note") == [{"text": "refund o1"}]
     assert o.answer == "Done. refunded o1"
 

@@ -18,7 +18,13 @@ from typing_extensions import TypedDict
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, Settings
-from trellis.contracts import ConfigurationError, HarnessError, ToolCall, ToolSpec
+from trellis.contracts import (
+    ConfigurationError,
+    HarnessError,
+    InterruptDecision,
+    ToolCall,
+    ToolSpec,
+)
 from trellis.harness import writes as writes_module
 from trellis.harness.clients.memory import Memory
 from trellis.harness.governance import (
@@ -40,7 +46,18 @@ from trellis.harness.governance.catalog import (
     Rule,
     entry,
 )
-from trellis.harness.governance.decision import decide
+from trellis.harness.governance.decision import (
+    ALWAYS,
+    CHOICES,
+    CONVERSATION,
+    DENY,
+    EVERY_TIME,
+    ONCE,
+    SAID,
+    choices,
+    chosen,
+    decide,
+)
 from trellis.harness.hooks import Deny, Hooks
 from trellis.harness.writes import SPOOL_FILE, Writes
 from trellis.memory.errors import NotFoundError
@@ -770,3 +787,15 @@ async def test_with_memory_a_tenants_catalog_publishes_through_the_background_wr
     [put] = service.named("put_catalog")
     assert put.body["tools"][0]["name"] == "refund"
     await writes.aclose()
+
+
+def test_always_allow_is_offered_only_where_it_is_kept_and_never_for_an_irreversible_tool() -> None:
+    assert choices("write") == CHOICES == (ONCE, CONVERSATION, DENY)
+    assert choices("write", always=True) == (ONCE, CONVERSATION, ALWAYS, DENY)
+    assert choices("undeclared", always=True) == (ONCE, CONVERSATION, ALWAYS, DENY)
+    assert choices("irreversible", always=True) == choices("irreversible") == EVERY_TIME
+    assert SAID[choices("write", always=True)] == (
+        "Allow once, allow for this conversation, always allow, or deny."
+    )
+    assert chosen(ALWAYS.value) == (InterruptDecision.APPROVE, "always")
+    assert chosen(CONVERSATION.value) == (InterruptDecision.APPROVE, "run")

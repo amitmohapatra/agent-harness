@@ -288,8 +288,9 @@ def _mode(message: Message | None) -> Mode:
 def _decision(interrupt: Interrupt, message: Message | None) -> tuple[InterruptDecision, Any]:
     """A caller's answer as a decision and its value. A data part may name the decision
     (``{"decision": "approve"}``); an approval reads one of its options (its value or its
-    label, as plain chat said them: allow once, for this conversation, deny), approve/reject
-    words, or an object as the edited arguments; anything else answers the question."""
+    label, as plain chat said them: allow once, for this conversation, always, deny),
+    approve/reject words, or an object as the edited arguments; anything else answers the
+    question."""
     text, data = text_and_data(message)
     word = text.strip().lower()
     named = str(data.get(DECISION_KEY) or "").strip().upper()
