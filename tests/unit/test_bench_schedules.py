@@ -124,3 +124,11 @@ def test_a_turn_answers_the_question_the_run_waits_on() -> None:
     assert b.picks(waits, "@0|Update it.") == "update" and b.picks(waits, "@5|x") == "both"
     assert b.picks(waits, "keep both") == "keep both" and b.said_of("@1|Yes.") == "Yes."
     assert b.labels(waits) == ["Update it", "both"]
+
+
+def test_the_scheduling_and_asking_sets_measure_any_adapter_the_complex_suite_wraps() -> None:
+    from benchmark.cost import asking
+
+    for bench in (b, asking):
+        assert bench.arguments(["--model", "m"]).adapter == "react"
+        assert bench.arguments(["--model", "m", "--adapter", "claude"]).adapter == "claude"
