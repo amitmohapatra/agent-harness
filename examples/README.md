@@ -95,7 +95,7 @@ Nothing here imports `trellis.harness`: `trellis.memory`, `trellis.runs` and
 | Example | Shows |
 |---|---|
 | [parallel_subagents_mixed_frameworks.py](06_scenarios/parallel_subagents_mixed_frameworks.py) | a `ReAct` planner calling a LangGraph, an OpenAI Agents and a function sub-agent at once; the function's question answered through the planner; the child runs |
-| [sql_approval_own_screen.py](06_scenarios/sql_approval_own_screen.py) | SQL that changes data asks `role:dba` on a `sql-review` screen: the inbox, an `edit` that adds a `WHERE`, then an approval remembered for the run |
+| [sql_approval_own_screen.py](06_scenarios/sql_approval_own_screen.py) | SQL that changes data asks `role:dba` on a `sql-review` screen: the inbox, an `edit` that adds a `WHERE`, then an approval remembered for the conversation |
 | [worker_crash_resume.py](06_scenarios/worker_crash_resume.py) | a worker dies after a payment; the lease lapses; another worker finishes the run and the payment is not made twice |
 | [scheduled_run_selection_limit.py](06_scenarios/scheduled_run_selection_limit.py) | a schedule with `without=`, `run_timeout=`, `framework_options=` and `priority=`, kept in its metadata and applied to the run it fires |
 | [gateway_code_mode_governed_evals.py](06_scenarios/gateway_code_mode_governed_evals.py) | read-only MCP servers behind Code Mode, a refund behind the catalog's `approve_when`, then `h.evaluate` on the answers and the trajectories |

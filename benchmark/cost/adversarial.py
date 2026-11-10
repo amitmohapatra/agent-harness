@@ -929,6 +929,7 @@ def cases() -> tuple[Any, ...]:
 
     # what every turn's request must hold for a provider to take it
     nonblank = Probe("nonblank", why="a blank user message is refused by the provider")
+    answered = Probe("answered", why="a call with no result is refused by the provider")
 
     # ------------------------------------------------------------------ conversation
     parka = w.by_name("Waxed Parka Olive")
@@ -1189,7 +1190,8 @@ def cases() -> tuple[Any, ...]:
                      ends=("CANCELLED",)),
                 Turn("Stop that — just tell me how many stores are in the south.",
                      ((("store_list", {"region": "south"}),),), count(stores_in("south")), mode="interrupt",
-                     sent=(Probe("has", "Oxford Polo Black", "the interrupted question stays a turn of the chat", role="user"),)),
+                     sent=(Probe("has", "Oxford Polo Black", "the interrupted question stays a turn of the chat", role="user"),
+                           answered)),
                 Turn("What were you doing when I stopped you, and did it finish?", (),
                      judge("says it was checking the on-hand count of the Oxford Polo Black in the inventory "
                            "database (slow_stock) when stopped, that the check did not finish (no figure), and "
@@ -1197,7 +1199,8 @@ def cases() -> tuple[Any, ...]:
                            "I was reading the Oxford Polo Black's on-hand count from the inventory database "
                            "(slow_stock); you stopped me before it came back, so I have no figure. Then I counted "
                            f"the south's stores: {stores_in('south')}."),
-                     sent=(Probe("has", "Oxford Polo Black", "the interrupted question is in the context", role="user"),)),
+                     sent=(Probe("has", "Oxford Polo Black", "the interrupted question is in the context", role="user"),
+                           answered)),
             ),
             ("interrupt mid-run", "explain after an interrupt"),
             tools=(slow_stock,),

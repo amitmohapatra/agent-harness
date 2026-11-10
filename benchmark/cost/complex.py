@@ -162,6 +162,8 @@ class Probe:
       ``tool``, ``system``; an assistant's tool calls count as its text);
     * ``nonblank`` — every user message of every request has text (a provider refuses an
       empty or blank one: the thread could never be continued);
+    * ``answered`` — every tool call of every request has its result right after it (a
+      provider refuses one without: a call a stopped run left would break the thread);
     * ``repeats`` — the turn's last request holds ``pattern`` in at least ``limit`` messages;
     * ``fits`` — every request holds at most ``limit`` tokens (counted approximately);
     * ``calls`` — the turn made at most ``limit`` model calls;
@@ -3084,8 +3086,18 @@ def _role(message: dict[str, Any]) -> str:
     return str(message.get("role") or "")
 
 
+def _unanswered(messages: Sequence[dict[str, Any]]) -> list[str]:
+    """The ids of a request's tool calls with no result in the messages right after theirs."""
+    missing: list[str] = []
+    for n, message in enumerate(messages):
+        ids = [c.get("id") for c in message.get("tool_calls") or []]
+        after = {m.get("tool_call_id") for m in messages[n + 1 : n + 1 + len(ids)]}
+        missing += [i for i in ids if i not in after]
+    return missing
+
+
 #: The probes that read what the model was sent (:class:`Probe`).
-SENT_PROBES: Final = ("has", "lacks", "nonblank", "fits", "repeats")
+SENT_PROBES: Final = ("has", "lacks", "nonblank", "fits", "repeats", "answered")
 
 
 def checked(
@@ -3138,6 +3150,9 @@ def checked(
                 if _role(msg) == "user" and not _texts(msg).strip()
             ]
             ok, found = not blank, blank[:3]
+        elif p.kind == "answered":
+            missing = [i for q in seen for i in _unanswered(q.get("messages") or [])]
+            ok, found = not missing, missing[:3]
         elif p.kind == "fits":
             from langchain_core.messages.utils import count_tokens_approximately
 

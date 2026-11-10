@@ -695,6 +695,39 @@ async def test_a_resume_entry_carries_a_comment_and_the_interrupt_what_to_render
     await harness.aclose()
 
 
+async def test_a_resume_entry_that_allows_always_is_kept_as_always(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """``remember: "always"`` (Always allow, with a memory service) reaches the resolution as
+    itself, and the permission is kept for the user."""
+
+    @tool(side_effects="write")
+    def deploy(region: str) -> str:
+        """Deploy to a region."""
+        return f"deployed to {region}"
+
+    async def deployer(input: Any, agent: Runtime) -> Any:
+        return await agent.tools.call("deploy", region="eu")
+
+    app = FastAPI()
+    arm(memory_harness.wrap(deployer, id="deployer"), [deploy]).serve_chat(app, identity=user_of)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://agui", headers={"x-user": "u1"}
+    ) as http:
+        [approval] = finished(await post(http, body("go")))["outcome"]["interrupts"]
+        resume = {"interruptId": approval["id"], "payload": True, "remember": "always"}
+        done = finished(await post(http, body(resume=[resume])))
+    assert done["result"] == "deployed to eu"
+    record = await memory_harness.runs.get(approval["id"].rsplit(".", 2)[0])
+    assert record is not None and record.last_resolution is not None
+    assert record.last_resolution.remember == "always"
+    await memory_harness.writes.drain()
+    assert [(p["user"], p["tool"]) for p in memory_service.permissions.values()] == [
+        ("u1", "deploy")
+    ]
+
+
 async def test_a_stream_ends_when_its_attempt_returned_so_a_resume_finds_it_done() -> None:
     """A stream ends when its attempt returned — its end hooks, its turn written — not at the
     event announcing the end: the resume (or the next message) finds the attempt done; and an

@@ -201,8 +201,9 @@ class Resume(_Wire):
     )
     remember: InterruptRemember = Field(
         default="once",
-        description="run: an approval of a tool call approves that tool's later calls in the "
-        "run without asking",
+        description="run: an approval of a tool call approves that tool's later calls in this "
+        "conversation without asking; always (with a memory service): in every conversation "
+        "of the user, until revoked; never for an irreversible tool",
     )
 
     @field_validator("decision", mode="before")

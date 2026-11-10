@@ -204,7 +204,10 @@ await agent.resume(interrupt_id, decision, *, answer=None, reviewer, comment=Non
 Answer a pause: `interrupt_id` (or the run's id), `decision` one of `answer`, `approve`,
 `reject`, `edit` (the edited arguments as `answer`), `cancel`; `reviewer` who decided;
 `comment` kept with the decision; `remember="run"` on an approval approves that tool's later
-calls in this run. An answer that does not fit is refused (`ConfigurationError`) and the run
+calls in this conversation (this run and the thread's later runs for the same user), and
+`remember="always"` (with a memory service) in every conversation of the user until revoked;
+neither for an `irreversible` tool, which asks at every call
+([governance.md](governance.md#what-the-person-picks)). An answer that does not fit is refused (`ConfigurationError`) and the run
 keeps waiting ([interrupts.md](interrupts.md#answering)).
 
 ### agent.execute, agent.cancel, agent.events

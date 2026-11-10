@@ -42,13 +42,11 @@ the harness's two tools.
 | Deep Agents (your graph) | `create_deep_agent(model, **src.deep_agent())`; with a sandbox, `**deep_agent(sandbox(), src)` | the same, in its one `backend=`: the sandbox the composite's default, the skills its `/skills/` route |
 | Claude Agent SDK | `ClaudeAgentOptions(**src.claude())` | a local plugin (`plugins=`, `skills="all"`): the harness writes the run's skills into a folder of the run's own before each query and removes it after (the same path for each query of a run: a session resumed after a pause finds a skill's files where it was shown them); the CLI finds them as `trellis:<name>` |
 | Kimi Code | `kimi(**src.kimi())` | Kimi's own skills folder (`$KIMI_CODE_HOME/skills`): the harness writes the run's skills there, in a home of the run's own, before each attempt; Kimi lists them and loads one with its `Skill` tool ([frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |
-| OpenAI Agents SDK, `SandboxAgent` | `capabilities=[..., src.openai()]` | the SDK's `Skills` capability, lazily loaded: listed in its instructions, copied into the sandbox by its `load_skill` |
+| OpenAI Agents SDK, `SandboxAgent` | `capabilities=[Shell(), src.openai()]` ([below](#the-openai-agents-sdks-sandboxagent)) | the SDK's `Skills` capability, lazily loaded: listed in its instructions, copied into the sandbox by its `load_skill` |
 | OpenAI `Agent`, LangGraph, a function | `src.tools()` (`agent.tools.use(...)`) | none: `list_skills` and `load_skill(name, path=None)`, harness tools (governed, journaled, recorded); a run that starts with them is told its skills with its context (below) |
 
-The OpenAI Agents SDK has a skills slot only on a `SandboxAgent` (which needs
-`framework_options={"run_config": RunConfig(sandbox=...)}`); a plain `Agent` has none. The
-Claude Agent SDK's `skills=` only filters what its CLI found on disk: the plugin is how skills
-reach it.
+The Claude Agent SDK's `skills=` only filters what its CLI found on disk: the plugin is how
+skills reach it.
 
 **Where there is no slot, the run is told its skills.** A framework's own slot puts each
 skill's name and description in the model's instructions, so a task a skill covers finds it.
@@ -68,6 +66,38 @@ The skills are the run's own (its scope, pinned), a line each, at most 8,000 cha
 them (then `- and N more: list_skills() lists them all`); both tools stay offered where the
 run's tools are narrowed. A function that adds the tools in its own code
 (`agent.tools.use(src.tools())`) reads the listing with `list_skills`, as before.
+
+### The OpenAI Agents SDK's `SandboxAgent`
+
+The OpenAI Agents SDK has a skills slot only on a `SandboxAgent`; a plain `Agent` has none.
+The SDK runs a `SandboxAgent` only with a sandbox in its `RunConfig`, given to `h.wrap` as
+`framework_options`:
+
+```python
+from agents import RunConfig
+from agents.sandbox import SandboxAgent, SandboxRunConfig
+from agents.sandbox.capabilities import Shell
+from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+agent = h.wrap(
+    SandboxAgent(
+        name="reviewer",
+        instructions="You review SQL.",
+        model=model,
+        capabilities=[Shell(), src.openai()],
+    ),
+    id="reviewer",
+    framework_options={"run_config": box},
+)
+```
+
+`Shell()` runs the commands that read a loaded skill's files. The SDK's default capabilities
+(`Capabilities.default()`: `Filesystem`, `Shell`, `Compaction`) work only on OpenAI's Responses
+API: `Filesystem`'s `apply_patch` is a hosted tool, and a chat completions model refuses it
+(`UserError: Hosted tools are not supported with the ChatCompletions API`): a model name the
+harness routes (its chat completions, `use_responses=False`) or an `OpenAIChatCompletionsModel`
+of your own.
 
 ## Per run
 

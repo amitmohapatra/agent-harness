@@ -162,6 +162,13 @@ checkpointer the run's latest checkpoint (marked `trellis_run_id`), and the next
 continues from it ([runs.md](../runs.md#continuing-where-a-run-stopped)). A graph built with
 `middleware()` and no checkpointer keeps its checkpoint in the run: every process holds it.
 
+A run stopped mid-call (a newer message with `mode="interrupt"`, its time limit) or left paused
+on a call while the user writes again leaves the graph's own thread holding that call with no
+result, which a provider refuses (Anthropic's and OpenAI's APIs answer 400): every later turn of
+the thread would fail. The next turn answers it first, as a failed result that says the call has
+none (`STOPPED_CALL`), unless the graph answers such calls itself: a Deep Agent's
+`PatchToolCallsMiddleware` does, so the harness leaves it to it.
+
 ## The graph's own run options
 
 `framework_options=` (on `h.wrap`, or a run's own on `run`/`stream`/`start`) goes into the config

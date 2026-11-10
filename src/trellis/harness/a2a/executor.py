@@ -161,7 +161,8 @@ class RunExecutor(AgentExecutor):
                 reviewer=user,
                 tenant=tenant,
                 comment=comment if isinstance(comment, str) else None,
-                remember="run" if data.get("remember") == "run" else "once",
+                # as said ("once", "run", "always"); another value is refused and asked again
+                remember=data.get("remember") or "once",
             )
         except (ValueError, ConfigurationError) as exc:
             await self._ask_again(event_queue, task_id, context_id, str(exc), interrupt.question)

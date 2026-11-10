@@ -176,9 +176,9 @@ refused: no tool fails at startup.
   case's window). Kimi is given the suite's step limit in its own slot
   (`KIMI_LOOP_MAX_STEPS_PER_TURN`), as the other adapters are.
 - With a real model the Claude and Kimi CLIs call it themselves: what they send is not seen, so
-  the checks of what was sent (`has`, `lacks`, `nonblank`, `fits`, `repeats`) are not made for
-  them. Before, a `has` failed and a `lacks` passed on nothing (Kimi, Haiku, adversarial: 48 of
-  52 failed checks were these).
+  the checks of what was sent (`has`, `lacks`, `nonblank`, `fits`, `repeats`, `answered`) are
+  not made for them. Before, a `has` failed and a `lacks` passed on nothing (Kimi, Haiku,
+  adversarial: 48 of 52 failed checks were these).
 - A history set for the complex suite (`--cases history`): earlier chats recalled, compared,
   trended, merged and explained, and how an answer was got (memory or tool, source and read
   time, after a resume); 10 new cases and 12 existing ones of those kinds.
@@ -364,6 +364,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A LangGraph graph that keeps its own thread (a checkpointer: `create_agent`, with or
+  without `middleware()`, a hand-built graph) can be continued after a run stopped mid-call
+  (`mode="interrupt"`, a time limit) or left paused on a call while the user wrote again. The
+  thread held the model's call with no result, and Anthropic refused every later turn of it
+  (400: "`tool_use` ids were found without `tool_result` blocks"); the break-it set on Haiku,
+  `advexp-01` and `advfile-02`, ended two turns each ERROR. The next turn now answers such a
+  call first with a failed result saying it has none (`langgraph.STOPPED_CALL`); a Deep Agent
+  answers it itself (its `PatchToolCallsMiddleware`) and is left to. The complex suite's
+  `answered` probe checks it.
 - OpenAI Agents: a write the person allowed for the conversation no longer asks again for the
   other calls of the same model reply. Calls governance holds at the SDK's gate
   (`needs_approval`) wait there together, and a resumed `RunState` keeps each one's pending
