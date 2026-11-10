@@ -2,7 +2,8 @@
 the tool catalog that decision reads, kept fresh.
 
 The one place the decision is made (:meth:`Governance.check`): a ``read`` tool runs, a
-``write`` tool runs and is announced, an ``irreversible`` tool asks; the catalog's ``risk``
+``write`` tool runs and is announced, an ``irreversible`` tool asks, and so does one that has
+not said what it does; the catalog's ``risk``
 overrides the tool's own, and its ``approve_when`` decides when the call asks
 (``decision.py``). Without a catalog (no memory service) the tools' own risks decide.
 
@@ -45,16 +46,23 @@ from trellis.harness.governance.catalog import (
     entry,
 )
 from trellis.harness.governance.decision import (
-    ACTIONS,
     Action,
     ApprovalRuleError,
     Decision,
+    action_of,
     decide,
 )
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
 from trellis.harness.journal import content_key
 from trellis.harness.settings import Settings
-from trellis.harness.tools.base import Tool, execute, invoked
+from trellis.harness.tools.base import (
+    UNDECLARED,
+    SideEffects,
+    Tool,
+    declared,
+    execute,
+    invoked,
+)
 from trellis.memory import MemoryClient
 
 #: How a publish is sent: given the entries and the send itself, run it — the harness queues it
@@ -134,11 +142,12 @@ class Governance:
         tool: str,
         args: Mapping[str, Any],
         *,
-        side_effects: str = "write",
+        side_effects: str = UNDECLARED,
         agent_id: str | None = None,
     ) -> Decision:
         """The decision for a call of ``tool`` with ``args``. ``side_effects`` is what the tool
-        says it does (``read``, ``write``, ``irreversible``); the catalog's word overrides it,
+        says it does (``read``, ``write``, ``irreversible``; not given, nothing is known of it:
+        the call asks); the catalog's word overrides it,
         and while the catalog cannot be read every tool that does more than read asks.
         ``agent_id`` is the agent making the call (else this governance's own): the approval
         rules learned from people's decisions on its calls are accepted for it."""
@@ -272,14 +281,16 @@ def governed(
     governance: Governance,
     *,
     name: str | None = None,
-    side_effects: str = "write",
+    side_effects: SideEffects | None = None,
     timeout: float | None = None,
     on_ask: Callable[[Decision], Any],
     on_announce: Callable[[Decision], Any] | None = None,
     hooks: Sequence[Hooks] = (),
 ) -> Callable[..., Awaitable[Any]]:
     """``fn`` (sync or async) as an async callable whose every call — with keyword arguments,
-    the tool's arguments — is checked first. A call that asks runs ``on_ask(decision)`` (sync
+    the tool's arguments — is checked first, as a tool that does ``side_effects`` (``"read"``,
+    ``"write"`` or ``"irreversible"``: it must say; the catalog's word overrides it). A call
+    that asks runs ``on_ask(decision)`` (sync
     or async): ``True`` runs it, ``False`` raises :class:`Rejected`, a dict runs it with
     those (edited) arguments, and an exception (LangGraph's ``interrupt``) propagates. A call
     that is announced runs ``on_announce(decision)`` first, when given.
@@ -295,8 +306,10 @@ def governed(
     governance says (the decision carries the ``Ask``'s ``assignee``, ``component`` and
     ``props``) —, ``on_error("tool", ...)`` when it fails, ``after_tool`` on its outcome (the
     call returns that outcome's output)."""
+    named = name or fn.__name__
+    risk = declared(side_effects, tool=named, add='side_effects="read" to governed(...)')
     tool = Tool(
-        ToolSpec(name=name or fn.__name__, side_effects=side_effects),
+        ToolSpec(name=named, side_effects=risk),
         lambda args: invoked(fn, **args),
         timeout=timeout,
     )
@@ -309,7 +322,7 @@ def governed(
         if isinstance(verdict, Deny):
             raise Denied(denied(hooked, verdict))
         args = hooked.args
-        decision = await governance.check(tool.name, args, side_effects=side_effects)
+        decision = await governance.check(tool.name, args, side_effects=risk)
         if verdict is not None:
             decision = decision.asking(
                 verdict.question,
@@ -360,5 +373,5 @@ __all__ = [
 def _may_ask(rule: Rule | None, side_effects: str) -> bool:
     """Whether a tool with the catalog's ``rule`` (none: its own ``side_effects``) may ask."""
     if rule is None:
-        return ACTIONS.get(side_effects) is Action.ASK
-    return rule.approve_when is not None or ACTIONS.get(rule.risk) is Action.ASK
+        return action_of(side_effects) is Action.ASK
+    return rule.approve_when is not None or action_of(rule.risk) is Action.ASK

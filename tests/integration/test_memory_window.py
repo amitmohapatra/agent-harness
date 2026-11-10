@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from agents import Agent as OpenAIAgent
 from langchain.agents import create_agent
+from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 
 from benchmark.thread.__main__ import own_thread
@@ -33,7 +34,7 @@ THREAD = "conv-1"
 KEPT = conversation_key("acme", "u1", THREAD)
 
 
-@tool
+@tool(side_effects="read")
 def stock(sku: str) -> int:
     """Units in stock."""
     return 7
@@ -116,10 +117,11 @@ async def test_each_turn_sends_the_last_ones_history_unchanged_and_the_context_w
     model = ScriptedChat(
         [("stock", {"sku": "a"}), "7 units.", ("stock", {"sku": "b"}), "7 too.", "a and b."]
     )
+    own = StructuredTool.from_function(stock.fn, metadata={"side_effects": "read"})
     target: Any = (
         ReAct(system_prompt="s", model=model)
         if kept == "window"
-        else create_agent(model, tools=[stock], system_prompt="s", checkpointer=InMemorySaver())
+        else create_agent(model, tools=[own], system_prompt="s", checkpointer=InMemorySaver())
     )
     agent = memory_harness.wrap(target, id=f"k1-{kept}")
     if kept == "window":
@@ -199,7 +201,7 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
 ) -> None:
     model = ScriptedModel([("lookup", {"q": "a"}), "found a", "you asked about a"])
 
-    @tool
+    @tool(side_effects="read")
     def lookup(q: str) -> str:
         """Look it up."""
         return f"result {q}"

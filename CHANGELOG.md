@@ -5,6 +5,38 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Breaking: every tool says what it does, or a person is asked
+
+A risky call must never run without approval. A tool that declared nothing was taken as
+`write` and ran, only announced: in a live test a purge, a bulk price change and a read of
+another account's data all ran. There is no silent default any more.
+
+- **A function made a tool declares `side_effects`** — `"read"`, `"write"` or
+  `"irreversible"` — where it is defined: `@tool` alone, `tool(fn)`, a bare function in
+  `tools=[...]` (or given to `agent.tools.use`) and `governed(fn, gov)` are a
+  `ConfigurationError` there, naming the tool and what to add.
+- **An MCP tool's annotations are read with the protocol's defaults** (`readOnlyHint` false,
+  `destructiveHint` true): a tool is `irreversible` unless it says it only reads (`read`) or
+  says `destructiveHint: false` (`write`). A tool with no annotations is `irreversible`: each
+  call waits for approval. Before, anything not marked destructive was `write`.
+- **A tool nobody could declare asks**: a LangChain tool of your graph with no
+  `metadata["side_effects"]`, an OpenAI Agents `FunctionTool`, a hosted tool, a built-in of
+  Claude Code or Kimi the harness has no word on, and `Governance.check(tool, args)` given no
+  `side_effects`. Its risk is none (`unknown`), and governance asks about a risk it does not
+  know (it used to announce and run). The catalog is told the same (`destructiveHint: true`,
+  never a `side_effects` of the harness's), so an administrator's risk there stays.
+- A built-in the harness knows only by name (the graph's state tools, Deep Agents' file tools
+  and `execute`, declared a write) is the framework's own: a tool of yours that shares the name
+  (`delete`, `write_file`...) says what it does itself, as any other.
+
+**Upgrading.**
+
+| What you see | The fix |
+|---|---|
+| `ConfigurationError: <tool> must declare its side effects` at startup | `@tool(side_effects="read")` (or `"write"`, `"irreversible"`) on the function; `tool(fn, side_effects=...)` for one given bare; `governed(fn, gov, side_effects=...)` |
+| an MCP tool that ran now pauses (`<server>-<tool> is irreversible.`) | your server: annotate the tool (`readOnlyHint: true`, or `destructiveHint: false` for a change that can be undone); a server you do not own: its risk in the catalog, `put_catalog([{"name": "<server>-<tool>", "side_effects": "read"}])` |
+| a framework's own tool that ran now pauses (`<tool> has not declared its side effects.`) | a LangChain tool: `tool.metadata = {"side_effects": "read"}`; any other: its risk in the catalog (as above), or build the tool with the harness (`@tool(side_effects=...)`) |
+
 ### `query_result` over complex data
 
 - JSON rows held at any depth, each array an object holds (`result_<key>`), JSON Lines, markdown

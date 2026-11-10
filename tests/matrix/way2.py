@@ -432,6 +432,7 @@ async def hook_rewrite(w: World) -> None:
     note = governed(
         _fn(d.note()),
         Governance(),
+        side_effects="write",
         on_ask=lambda _: True,
         hooks=[_Hooked(Rewrite({"text": "[rewritten]"}))],
     )

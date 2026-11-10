@@ -68,7 +68,7 @@ def revenue() -> dict[str, float]:
     return {region: round(total, 2) for region, total in totals.items()}
 
 
-@tool
+@tool(side_effects="read")
 def sales_rows() -> str:
     """Every order of the quarter, as CSV (order_id, region, units, price)."""
     return sales()

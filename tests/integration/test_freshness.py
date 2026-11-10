@@ -75,9 +75,9 @@ def test_a_tool_declares_how_long_its_values_stay_current() -> None:
     assert "5 minutes" in aged.tool.spec.description
     assert plain.tool.spec.description == plain.spec.description
     with pytest.raises(ConfigurationError):
-        tool(lambda: 1, name="bad", freshness="sometimes")  # type: ignore[arg-type]
+        tool(lambda: 1, name="bad", side_effects="read", freshness="sometimes")  # type: ignore[arg-type]
     with pytest.raises(ConfigurationError):
-        tool(lambda: 1, name="bad", max_age=-1)
+        tool(lambda: 1, name="bad", side_effects="read", max_age=-1)
 
 
 def test_a_framework_tool_and_an_mcp_tool_declare_it_beside_their_side_effects() -> None:

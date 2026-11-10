@@ -27,7 +27,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic import ValidationError as PydanticError
@@ -48,10 +48,26 @@ from trellis.harness.tools import pages
 
 SideEffects = Literal["read", "write", "irreversible"]
 
-#: What an unknown tool is assumed to do: something, but nothing a person must approve.
-DEFAULT_SIDE_EFFECTS: SideEffects = "write"
+#: What a tool that has not said what it does is held to do (the contracts' ``ToolSpec``
+#: default): nothing known, so a person approves each of its calls (``governance.decision``).
+#: Only a tool nobody could declare in code has it — a framework's own tool object, a built-in
+#: of a CLI the harness has no word on —: its risk is set in the tool catalog.
+UNDECLARED: Final = "unknown"
 
 Runner = Callable[[dict[str, Any]], Awaitable[Any]]
+
+
+def declared(side_effects: Any, *, tool: str, add: str) -> SideEffects:
+    """What a tool defined in code says it does. Every such tool says it where it is defined:
+    one that does not is refused there, naming the tool and what to ``add``."""
+    if side_effects not in get_args(SideEffects):
+        raise ConfigurationError(
+            f'{tool} must declare its side effects: add {add} — "read" (it changes nothing), '
+            '"write" (it changes what can be changed back) or "irreversible" (it cannot be '
+            "undone: a person approves each call)"
+        )
+    return side_effects
+
 
 #: How long a value a tool returns stays current, as the tool declares it beside its other
 #: metadata (``tool(freshness="live")``, ``tool(max_age=)``, a LangChain tool's ``metadata``,
@@ -250,6 +266,15 @@ class Source(Protocol):
     definitions (``toolbox.TOOLS_TTL_SECONDS``)."""
 
     async def resolve(self) -> list[Tool]: ...
+
+
+async def resolved(source: Source) -> list[Tool]:
+    """The tools ``source`` resolves to, each saying what it does: a source of yours whose
+    tool's ``ToolSpec`` gives no ``side_effects`` is refused, naming the tool."""
+    tools = list(await source.resolve())
+    for tool in tools:
+        declared(tool.spec.side_effects, tool=tool.name, add="side_effects= to its ToolSpec")
+    return tools
 
 
 class ToolTimeout(ToolError):

@@ -57,7 +57,6 @@ ENV = {"MEMORY_URL": "http://memory.test", "TRELLIS_API_KEY": "test"}
         ("read", Action.RUN),
         ("write", Action.ANNOUNCE),
         ("irreversible", Action.ASK),
-        ("unknown", Action.ANNOUNCE),
     ],
 )
 def test_the_action_follows_the_risk(risk: str, expected: Action) -> None:
@@ -160,7 +159,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 async def test_without_a_catalog_the_tools_own_risk_decides() -> None:
     governance = Governance()
     assert (await governance.check("po", {}, side_effects="irreversible")).asks
-    assert (await governance.check("po", {})).announces  # an undeclared tool writes
+    assert (await governance.check("po", {})).asks  # a tool that says nothing asks
     assert await governance.rules(["po"]) == {"po": None}
 
 
@@ -236,7 +235,8 @@ async def test_an_unreadable_catalog_makes_every_tool_that_does_more_than_read_a
     catalog.down = False
     clock.now += GOVERNANCE_TTL_SECONDS + 1
     with caplog.at_level("INFO", logger="trellis.governance"):
-        assert (await governance.check("erp-po", {})).announces  # back to its own risk
+        back = await governance.check("erp-po", {}, side_effects="write")
+        assert back.announces  # back to its own risk
     assert "can be read again" in caplog.text
 
 
@@ -366,7 +366,9 @@ async def test_a_learned_rule_that_stops_asking_never_lifts_a_hooks_deny(clock: 
         ran.append(amount)
         return "ordered"
 
-    call = governed(po, governance, on_ask=lambda decision: True, hooks=[Frozen()])
+    call = governed(
+        po, governance, side_effects="write", on_ask=lambda decision: True, hooks=[Frozen()]
+    )
     with pytest.raises(Denied, match="frozen"):
         await call(amount=50)
     assert ran == []
@@ -568,7 +570,12 @@ async def test_a_governed_call_that_asks_runs_as_the_person_decides(
     async def async_(decision: Decision) -> Any:
         return sync(decision)
 
-    call = governed(create_po, irreversible_catalog(), on_ask=async_ if asynchronous else sync)
+    call = governed(
+        create_po,
+        irreversible_catalog(),
+        side_effects="write",
+        on_ask=async_ if asynchronous else sync,
+    )
     assert await call(sku="A-1", qty=5) == expected
     [decision] = asked
     assert decision.tool == "create_po" and decision.args == {"sku": "A-1", "qty": 5}
@@ -582,14 +589,16 @@ async def test_a_rejected_call_raises_and_does_not_run() -> None:
         ran.append(qty)
         return qty
 
-    call = governed(po, irreversible_catalog(), name="create_po", on_ask=lambda d: False)
+    call = governed(
+        po, irreversible_catalog(), name="create_po", side_effects="write", on_ask=lambda d: False
+    )
     with pytest.raises(Rejected, match="create_po was not run") as rejected:
         await call(qty=5)
     assert rejected.value.decision.asks and ran == []
 
 
 async def test_an_answer_that_is_no_decision_is_refused() -> None:
-    call = governed(create_po, irreversible_catalog(), on_ask=lambda d: "yes")
+    call = governed(create_po, irreversible_catalog(), side_effects="write", on_ask=lambda d: "yes")
     with pytest.raises(TypeError, match="on_ask answered 'yes'"):
         await call(sku="A-1", qty=5)
 
@@ -612,9 +621,13 @@ async def test_a_governed_call_that_is_announced_tells_on_announce_first(
 
     governance = Governance()
     on_announce = async_ if asynchronous else sync
-    call = governed(note, governance, on_ask=lambda d: True, on_announce=on_announce)
+    call = governed(
+        note, governance, side_effects="write", on_ask=lambda d: True, on_announce=on_announce
+    )
     assert await call(text="hi") == "hi" and heard == ["note", "ran"]
-    quiet = governed(note, governance, on_ask=lambda d: True)  # no on_announce: it just runs
+    quiet = governed(
+        note, governance, side_effects="write", on_ask=lambda d: True
+    )  # no on_announce: it just runs
     assert await quiet(text="hi") == "hi"
     read = governed(note, governance, side_effects="read", on_ask=lambda d: True)
     assert await read(text="x") == "x" and heard == ["note", "ran", "ran", "ran"]
@@ -629,7 +642,9 @@ async def test_a_langgraph_node_pauses_a_call_that_asks_with_its_own_interrupt()
     """The pluggable recipe: ``on_ask`` is LangGraph's ``interrupt``, so the graph's
     checkpointer keeps the pause and ``Command(resume=...)`` is the person's decision."""
     governance = irreversible_catalog()
-    call = governed(create_po, governance, on_ask=lambda d: interrupt(d.question))
+    call = governed(
+        create_po, governance, side_effects="write", on_ask=lambda d: interrupt(d.question)
+    )
 
     async def order(state: State) -> dict[str, str]:
         return {"result": await call(sku=state["sku"], qty=5)}

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from agents import Agent, SQLiteSession, Usage, function_tool
 
-from tests.support.arm import arm, native_tools, with_governance
+from tests.support.arm import arm, declaring, native_tools, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
@@ -55,7 +55,8 @@ async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness
         [("eta", {"order": "o1"}), ("ship", {"order": "o1"}), "shipped, arriving tomorrow"]
     )
     target = Agent(name="shipper", instructions="You ship orders.", model=model, tools=[eta])
-    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    wrapped = declaring(harness, eta="read").wrap(target, id="shipper")
+    agent = arm(wrapped, [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS and result.answer == "shipped, arriving tomorrow"
     assert done == ["o1"]
@@ -727,7 +728,8 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
     calls: list[Any] = [("ship", {"order": "o1"}), ("eta", {"order": "o1"})] * 3
     model = ScriptedModel([calls, "shipped, arriving tomorrow"])
     target = Agent(name="shipper", model=model, tools=[eta])
-    agent = arm(harness.wrap(target, id="shipper"), [tool(ship.fn, side_effects="write")])
+    wrapped = declaring(harness, eta="read").wrap(target, id="shipper")
+    agent = arm(wrapped, [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS, result.error
     assert done == ["o1"] and asked == ["o1"]

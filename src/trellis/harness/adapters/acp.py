@@ -103,7 +103,7 @@ from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, SideEffects
+from trellis.harness.tools.base import UNDECLARED, SideEffects
 
 log = logging.getLogger("trellis.harness")
 
@@ -762,7 +762,7 @@ def native_spec(name: str, profile: Profile | None) -> ToolSpec:
     if len(parts) >= 3 and parts[0] == "mcp":
         return ToolSpec(name=name, source="mcp", server=parts[1])
     builtins = profile.builtins if profile is not None else {}
-    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, DEFAULT_SIDE_EFFECTS)))
+    spec = builtin(ToolSpec(name=name, side_effects=builtins.get(name, UNDECLARED)))
     hands_on = profile is not None and name in profile.helpers | profile.swarms
     return helper(spec) if hands_on else spec
 
@@ -1242,7 +1242,7 @@ class Attempt:
             return _chosen(options, "allow_once")
         side_effects = (self.profile.builtins if self.profile else {}).get(name)
         found = runtime.native.get(name)
-        spec = found or ToolSpec(name=name, side_effects=side_effects or DEFAULT_SIDE_EFFECTS)
+        spec = found or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
         runtime.model_ended(STEP)
         try:
             decided = await _permitted(spec, args)

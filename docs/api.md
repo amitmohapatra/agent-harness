@@ -391,13 +391,14 @@ the gateway's (Bifrost's virtual-key budgets).
 ### tool
 
 ```text
-tool(fn, *, name=None, description=None, side_effects="write", idempotent=False,
+tool(fn, *, side_effects, name=None, description=None, idempotent=False,
      call_timeout=None, response_format="content")
-@tool  /  @tool(...)
+@tool(side_effects=...)
 ```
 
 A Python function (sync or async) as a tool: the schema from its signature (each parameter
-described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`; `idempotent` when a
+described by the docstring's `Args:`), the description from its docstring without its sections; `side_effects` `"read"`, `"write"` or `"irreversible"`, required (a tool that
+does not say is a `ConfigurationError`, naming it); `idempotent` when a
 repeated call with its idempotency key has its effect once; `call_timeout` seconds per call
 ([tools.md](tools.md)). `response_format="content_and_artifact"` (LangChain's): the function
 returns `(content, artifact)` — what the model reads, and where it came from, a
@@ -413,7 +414,8 @@ stdio(command, *args, env=None, cwd=None)
 An MCP server's tools as a `tools=[...]` entry: `target` is its URL (`"https://host/mcp"`, over
 streamable HTTP, `headers=` sent with every request) or a local server (`stdio(...)`: the
 harness starts it and talks over its stdin and stdout). Tools are named `<name>-<tool>` (else
-the name the server gives itself); their side effects come from their annotations. The MCP
+the name the server gives itself); their side effects come from their annotations (a tool
+with none is `irreversible`: [governance.md](governance.md#a-tool-that-does-not-say-what-it-does)). The MCP
 tools the virtual key allows are the gateway's: every run has them ([tools.md](tools.md)). The
 `mcp` extra (the official MCP SDK).
 

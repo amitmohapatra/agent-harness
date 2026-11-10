@@ -243,7 +243,7 @@ async def sandbox_exec(command: str) -> dict:
     return (await box.exec(command, timeout=60, env={"PIP_INDEX_URL": index})).model_dump()
 
 
-run_code = governed(sandbox_exec, Governance.from_env(), on_ask=ask_a_person)
+run_code = governed(sandbox_exec, Governance.from_env(), side_effects="write", on_ask=ask_a_person)
 ...
 await provider.delete(box.ref)
 ```

@@ -86,7 +86,7 @@ def test_a_functions_return_annotation_is_its_output_schema() -> None:
     assert set(stock["properties"]) == {"sku_id", "on_hand", "supplier_id"}
     assert reorder_quantity.spec.output_schema == {"type": "integer"}
 
-    @tool
+    @tool(side_effects="read")
     def untyped(x: int):  # type: ignore[no-untyped-def]
         return x
 
@@ -246,7 +246,7 @@ def test_nested_records_references_and_nullable_types() -> None:
     ``id`` is named by the record (``supplier.id`` is a ``supplier_id``); a type list with
     null is its other type."""
 
-    @tool
+    @tool(side_effects="read")
     def get_part(part_id: str) -> Part:
         """A part."""
         return Part(part_id=part_id)

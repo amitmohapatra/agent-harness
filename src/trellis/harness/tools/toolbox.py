@@ -46,7 +46,7 @@ from trellis.harness.clients.bifrost import Gateway, code_mode_tools
 from trellis.harness.fresh import Fresh
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
-from trellis.harness.tools.base import Source, Tool, data_of
+from trellis.harness.tools.base import Source, Tool, data_of, resolved
 from trellis.harness.tools.links import Link, chained, links, related
 from trellis.harness.tools.lint import lint
 from trellis.harness.tools.mcp import MCPSource, side_effects_of
@@ -91,7 +91,7 @@ async def listed(sources: Sequence[Source], *, gateway: Gateway | None) -> Listi
     hints: dict[str, dict[str, Any]] = {}
     servers: Counter[str] = Counter()
     for source in sources:
-        local.extend(await source.resolve())
+        local.extend(await resolved(source))
         if isinstance(source, MCPSource):
             hints.update(source.annotations)
             servers[source.server or ""] += 1

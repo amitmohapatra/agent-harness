@@ -18,7 +18,7 @@ flowchart TB
   rule -- "no" --> risk{"T's risk: the catalog's,<br/>else T's own side effects"}
   risk -- "read" --> run["run"]
   risk -- "write" --> announce["announce (tool_notice) and run"]
-  risk -- "irreversible" --> ask["ask a person"]
+  risk -- "irreversible, or none declared" --> ask["ask a person"]
   rule -- "yes" --> holds{"does it hold on args?<br/>(or cannot be evaluated)"}
   holds -- "yes" --> ask
   holds -- "no, T only reads" --> run
@@ -27,10 +27,13 @@ flowchart TB
 
 The decision starts from the tool's **risk**:
 
-* For an MCP tool, the risk comes from its server's annotations: `readOnlyHint` gives `read`,
-  `destructiveHint` gives `irreversible`, and anything else gives `write`.
-* For a local tool, it is the declared `side_effects` (`"write"` by default).
+* For a local tool, it is the declared `side_effects`: `"read"`, `"write"` or `"irreversible"`.
+  Every tool says it where it is defined; one that does not is a `ConfigurationError` there.
+* For an MCP tool, the risk comes from its server's annotations, read with the protocol's
+  defaults: `readOnlyHint` gives `read`; otherwise the tool is `irreversible` unless it says
+  `destructiveHint: false`, which gives `write`. A tool with no annotations is `irreversible`.
 * For an OpenAPI operation, the method decides it.
+* A tool nobody could declare (below) has no risk of its own: its calls ask.
 
 When the memory service's tool catalog has a `risk` for the tool, that risk wins. The service
 derives it from the annotations the harness published and from what an administrator set.
@@ -40,6 +43,31 @@ derives it from the annotations the harness published and from what an administr
 | `read` | `run` |
 | `write` | `announce`: runs, and is announced as a `CUSTOM` `tool_notice` event |
 | `irreversible` | `ask`: waits for approval |
+| none declared | `ask`: waits for approval (`"<tool> has not declared its side effects."`) |
+
+### A tool that does not say what it does
+
+A risky call never runs on a guess. Where the tool's author can say what it does, they must;
+where nobody can, a person approves each call until the catalog says more.
+
+| The tool | Where its side effects are said | When they are not |
+|---|---|---|
+| a function (`@tool`, `tool(fn)`, a bare function in `tools=[...]`, `governed(fn, gov)`) | `side_effects=` | `ConfigurationError` where it is defined, naming the tool |
+| an MCP server's tool (`mcp(...)`, the gateway's, a framework's own MCP server) | the server's annotations | `irreversible`: each call asks |
+| a LangChain tool of your graph | `tool.metadata = {"side_effects": "read"}` (or MCP-style `annotations`) | each call asks |
+| an OpenAI Agents `FunctionTool`, a hosted tool, a CLI built-in the harness has no word on | nowhere in code (or build it with the harness: `@tool(side_effects=...)`) | each call asks |
+| the harness's own tools, Deep Agents' and Claude Code's built-ins it knows | declared by the harness | — |
+
+For a tool you cannot annotate — an MCP server you do not own, a framework's tool object — the
+one place to say what it does is its `risk` in the catalog, where an administrator's word
+overrides everything else and no publish changes it:
+
+```python
+await scope.advanced.tools.put_catalog([{"name": "docs-search", "side_effects": "read"}])
+```
+
+With memory off there is no catalog: such a tool asks at each call, and a reviewer may approve
+it for the rest of the run (`remember="run"`).
 
 **`approve_when`.** The catalog may also hold an approval rule for the tool. The rule is set by
 an administrator, or by someone who accepted an approval suggestion
@@ -206,7 +234,7 @@ Each is of the run's tool set ([tools.md](tools.md#the-runs-tool-set)) and publi
 tenant's catalog, where an administrator's risk and `approve_when` govern it.
 
 Each call is then decided as a harness tool's is — the catalog's risk, else the tool's declared
-one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else `write` (announced) —
+one (`tool.metadata["side_effects"]`, or MCP-style `annotations`), else none (it asks) —
 asked when governance asks, journaled (a resume does not run it again), timed and traced. The
 graph's state tools (`write_todos`, Deep Agents' file tools on its default
 `StateBackend`) are let through: they change only the run's own state. Deep Agents' file tools

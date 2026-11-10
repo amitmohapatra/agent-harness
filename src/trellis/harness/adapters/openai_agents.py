@@ -81,7 +81,7 @@ from trellis.harness.history import ASKED_WITH, MEMORY_THREAD, Called, Said, Spe
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import DEFAULT_SIDE_EFFECTS, Tool, data_of
+from trellis.harness.tools.base import Tool, data_of
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
@@ -1016,7 +1016,7 @@ async def hosted_calls(runtime: Runtime, items: Sequence[Any], *, started: float
             error_class="HostedToolError" if failed else None,
         )
         source = "local" if server is None else "mcp"
-        spec = ToolSpec(name=name, source=source, server=server, side_effects=DEFAULT_SIDE_EFFECTS)
+        spec = ToolSpec(name=name, source=source, server=server)
         ref = str(getattr(item, "id", None) or f"{runtime.run_id}:{name}")
         await bridge.observed(runtime, spec, args, outcome, ref=ref, started=started)
 

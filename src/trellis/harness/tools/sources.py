@@ -1,5 +1,6 @@
 """The tools the harness runs itself — ``ReAct(tools=[...])``'s, and what a function target
-calls (``agent.tools.call``): ``tool(fn)`` (a bare function is ``tool(fn)``), ``a2a(url)`` (a
+calls (``agent.tools.call``): ``tool(fn, side_effects=...)`` (a bare function says nothing of
+what it does: it is refused, naming it), ``a2a(url)`` (a
 remote agent) and ``openapi(spec)``; a wrapped agent is a sub-agent
 (``trellis.harness.subagents``), and ``mcp(...)`` an MCP server's tools (``tools.mcp``) —
 besides them, every run has the MCP tools the agent's Bifrost virtual key allows, loaded
@@ -30,7 +31,6 @@ from trellis.contracts import ConfigurationError, ToolError, ToolSpec
 from trellis.harness.credentials import Target, headers_for
 from trellis.harness.runtime import current
 from trellis.harness.tools.base import (
-    DEFAULT_SIDE_EFFECTS,
     REMOTE_TIMEOUT_SECONDS,
     SideEffects,
     Source,
@@ -38,6 +38,7 @@ from trellis.harness.tools.base import (
     Tool,
     citations,
     data_of,
+    declared,
     invoked,
 )
 
@@ -58,6 +59,8 @@ METHOD_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
 #: The statuses an OpenAPI operation answers that may pass on their own: a call that only
 #: reads is tried again after one (``tools.base.retried``).
 RETRYABLE_STATUSES: Final = frozenset({408, 425, 429, 500, 502, 503, 504})
+#: How a function says what it does, as a tool without it is told.
+HOW: Final = '@tool(side_effects="read") over the function, or tool(fn, side_effects="read")'
 
 
 # --------------------------------------------------------------------------- local functions
@@ -72,7 +75,7 @@ class FunctionTool:
         *,
         name: str | None = None,
         description: str | None = None,
-        side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+        side_effects: SideEffects | None = None,
         idempotent: bool = False,
         timeout: float | None = None,
         response_format: ResponseFormat = "content",
@@ -85,21 +88,20 @@ class FunctionTool:
                 f"response_format is 'content' or 'content_and_artifact', not {response_format!r}"
             )
         self.fn = fn
+        named = name or fn.__name__
+        risk = declared(side_effects, tool=named, add=f"side_effects= where it is defined ({HOW})")
         self.response_format = response_format
         self.model = _arguments_model(fn)
         said, params = documented(inspect.getdoc(fn) or "")
         self.spec = ToolSpec(
-            name=name or fn.__name__,
+            name=named,
             description=description or said,
             input_schema=_described(self.model.model_json_schema(), params),
             output_schema=output_schema(fn),
             source="local",
-            side_effects=side_effects,
+            side_effects=risk,
             idempotent=idempotent,
-            **data_of(
-                {"freshness": freshness, "max_age": max_age, "paged": paged},
-                name=name or fn.__name__,
-            ),
+            **data_of({"freshness": freshness, "max_age": max_age, "paged": paged}, name=named),
         )
         self.tool = Tool(self.spec, self._run, timeout=timeout)
         functools.update_wrapper(self, fn)
@@ -133,7 +135,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -146,7 +148,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -160,7 +162,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    side_effects: SideEffects = DEFAULT_SIDE_EFFECTS,
+    side_effects: SideEffects | None = None,
     idempotent: bool = False,
     call_timeout: float | None = None,
     response_format: ResponseFormat = "content",
@@ -168,8 +170,13 @@ def tool(
     max_age: float | None = None,
     paged: bool = False,
 ) -> FunctionTool | Callable[[Callable[..., Any]], FunctionTool]:
-    """A function as a tool: ``tool(fn)``, ``@tool`` or ``@tool(side_effects="irreversible")``.
+    """A function as a tool: ``@tool(side_effects="read")`` or ``tool(fn, side_effects="read")``.
 
+    ``side_effects`` is what a call does — ``"read"`` (it changes nothing: it runs),
+    ``"write"`` (it changes what can be changed back: it runs and is announced) or
+    ``"irreversible"`` (it cannot be undone: a person approves each call) — and every tool
+    says it: one that does not (``@tool`` alone, ``tool(fn)``, a bare function in
+    ``tools=[...]``) is a ``ConfigurationError`` where it is defined, naming it.
     The schema comes from the signature (pydantic validates the model's arguments), each
     parameter described by the docstring's ``Args:`` (or ``:param x:``) unless an
     ``Annotated[..., Field(description=...)]`` says; the description is the docstring without
@@ -543,7 +550,8 @@ def _sub_agent(item: Any) -> Source:
 
 #: The kinds of tool entry, registered here and only here, tried in this order: a wrapped
 #: agent (a sub-agent), anything that resolves to tools itself (``tool``, ``mcp``, ``a2a``,
-#: ``openapi``, ``sandbox().tools()``, a source of yours), a bare function.
+#: ``openapi``, ``sandbox().tools()``, a source of yours), a bare function — which says
+#: nothing of what it does, so making it a tool refuses it, naming it and what to add.
 ENTRY_KINDS: Final[tuple[EntryKind, ...]] = (
     EntryKind("agent", _is_agent, _sub_agent),
     EntryKind("source", lambda item: hasattr(item, "resolve"), lambda item: item),
@@ -557,6 +565,6 @@ def as_source(item: Source | Callable[..., Any] | Any) -> Source:
         if kind.accepts(item):
             return kind.source(item)
     raise ConfigurationError(
-        f"not a tool: {item!r} — give a function, tool(...), mcp(...), a2a(...), openapi(...), "
-        "sandbox().tools() or a wrapped agent"
+        f"not a tool: {item!r} — give tool(fn, side_effects=...), mcp(...), a2a(...), "
+        "openapi(...), sandbox().tools() or a wrapped agent"
     )

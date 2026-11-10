@@ -104,7 +104,12 @@ class NoArguments:
     """An MCP server's tool that takes no argument: its schema is ``{"type": "object"}``."""
 
     async def resolve(self) -> list[Tool]:
-        spec = ToolSpec(name="now", description="The time.", input_schema={"type": "object"})
+        spec = ToolSpec(
+            name="now",
+            description="The time.",
+            input_schema={"type": "object"},
+            side_effects="read",
+        )
 
         async def run(args: dict[str, Any]) -> Any:
             asked.append(args)
@@ -606,7 +611,10 @@ async def test_mcp_servers_the_team_configured_as_a_file_or_json_stay(
     script = [{"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
     for configured in (config, str(config), json.dumps({"mcpServers": {"erp": erp}})):
         target = options(tmp_path, script, mcp_servers=configured)
-        agent = arm(harness.wrap(target, id=f"mcp-{len(harness.agents)}"), [tool(refund.fn)])
+        agent = arm(
+            harness.wrap(target, id=f"mcp-{len(harness.agents)}"),
+            [tool(refund.fn, side_effects="write")],
+        )
         assert (await agent.run("refund o9", user="u1")).answer == "done"
         servers = json.loads(started_with(tmp_path)["mcp_config"])["mcpServers"]
         assert servers["erp"] == erp and servers["trellis"]["type"] == "sdk"

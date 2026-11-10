@@ -94,7 +94,7 @@ def test_the_native_tools_are_kimis_own_by_their_risk() -> None:
     assert acp.native_spec("Read", KIMI).tags == ["builtin"]  # the framework's: not counted
     assert acp.native_spec("mcp__crm__find", KIMI).server == "crm"
     assert acp.native_spec("mcp__crm__find", KIMI).tags == []  # its servers' tools: the run's
-    assert acp.native_spec("Other", None).side_effects == "write"
+    assert acp.native_spec("Other", None).side_effects == "unknown"  # nothing said: it asks
 
 
 def test_a_usage_log_reads_from_where_the_attempt_began(tmp_path: Any) -> None:
