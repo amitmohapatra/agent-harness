@@ -753,8 +753,10 @@ def test_where_a_figure_is_from_needs_its_source_and_its_read_time() -> None:
     no_time = f"From a stock_level call for {sku}: {on} on hand."
     assert not cx.score(expect, no_time, [], case.turns[1].text, ctx)["correct"]
     # the LangGraph graph, the all-adapter run: the tool named as words joined by a hyphen
-    said = (f"The {on} units came from a live stock-level lookup I ran for {sku} in the east "
-            "region. The system returned the count with a reading time of 2026-10-30 09:00 UTC.")
+    said = (
+        f"The {on} units came from a live stock-level lookup I ran for {sku} in the east "
+        "region. The system returned the count with a reading time of 2026-10-30 09:00 UTC."
+    )
     assert cx.score(expect, said, [], case.turns[1].text, ctx)["correct"]
 
 
@@ -1245,20 +1247,19 @@ def test_a_fall_said_as_an_amount_or_a_percentage_reads_as_a_negative_change() -
     assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
 
 
-def test_what_changed_since_the_last_look_is_the_difference_either_way_it_is_said() -> None:
-    """explain-06 t1 (ReAct on Deep Agents, the middleware and the LangGraph graph, the
-    all-adapter run): "4 units ..., down from 14 ... the drop of 10 units" and "Stock was 14 at
-    my last check, so 10 units have left" state the change, and were scored as missing it: the
-    change is a difference, as the history set's own "how far is it from" is. The count now
-    stated wrongly, or another difference, still fails."""
-    for said in (
-        "We now have **4 units**, down from 14 at my last check: the drop of 10 units.",
-        "We now have **4 units**. Stock was 14 at my last check, so 10 units have left.",
-        "We now have **4 units** (-10 since my last check).",
-    ):
-        assert _right("explain-06", 1, said), said
-    assert not _right("explain-06", 1, "We now have **5 units**, 10 fewer than before.")
-    assert not _right("explain-06", 1, "We now have **4 units**, 9 fewer than before.")
+def test_a_drop_of_an_amount_reads_as_a_negative_change() -> None:
+    """explain-06 t1 (ReAct on Deep Agents, the all-adapter run): "4 units ..., down from 14 at
+    my last check ... the drop of 10 units" states the -10 change, and was scored as missing
+    it. A rise of 10, or another amount, still fails; so does a 10 that is only a clock time."""
+    said = (
+        "We now have **4 units** of Merino Crew Sweater Navy (SKU-00001), down from 14 at my "
+        "last check. I can't tell from the data what caused the drop of 10 units."
+    )
+    assert _right("explain-06", 1, said)
+    assert _right("explain-06", 1, said.replace("drop of 10", "decrease of 10"))
+    assert not _right("explain-06", 1, said.replace("drop of 10", "rise of 10"))
+    assert not _right("explain-06", 1, said.replace("drop of 10", "drop of 9"))
+    assert not _right("explain-06", 1, "Now **4 units**, 14 before; read at 10:00 UTC.")
 
 
 def test_a_step_count_written_as_a_word_reads_as_the_count() -> None:

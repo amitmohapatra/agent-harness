@@ -1779,7 +1779,7 @@ def cases() -> tuple[Case, ...]:
                 Turn(
                     "Check again — what changed since you last looked?",
                     ((("stock_level", {"sku": navy}),),),
-                    record({"now": v1, DIFFERENCE: v1 - v0}, tol={"now": 0, DIFFERENCE: 0}),
+                    record({"now": v1, "change": v1 - v0}, tol={"now": 0, "change": 0}),
                     ticks=1,
                 ),
             ),
@@ -2808,10 +2808,11 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     return any(abs(n - value) <= tol + 1e-9 for n in found)
 
 
-#: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917") or before
-#: one ("a 0.92% drop", "£1,917 lower").
+#: A figure said as a fall: after a word of falling ("down 0.92%", "fell by £1,917", "a drop of
+#: 10") or before one ("a 0.92% drop", "£1,917 lower").
 _FALL: Final = re.compile(
-    r"\b(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?[\s*_£$€]{0,6}"
+    r"\b(?:(?:down|fell|fallen|dropped|declined|decreased|lower|less)\b(?: by)?|"
+    r"(?:drop|decline|decrease|fall) of)[\s*_£$€]{0,6}"
     # the amount it fell by, then the percentage: "down £1,917.02 or 0.92%", "(0.92%)"
     r"(\d[\d,]*(?:\.\d+)?)(?:[*_]*\s*(?:or|,|\()\s*[*_]*(\d[\d,]*(?:\.\d+)?)\s?%)?|"
     r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s?(?:%|per ?cent)?[*_\s]*"
