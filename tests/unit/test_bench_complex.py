@@ -596,7 +596,8 @@ def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() ->
 
 async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> None:
     """Kimi and Claude: the captured requests are not the CLI's own, so what the harness gave
-    the conversation's runs is read from the case itself — each call's result (an error, "503
+    the conversation's runs is read from the case itself — each user message (histx-01's 120
+    units, asked a turn before), each call's result (an error, "503
     Service Unavailable", or a figure, histx-02's 154 on Claude in the all-adapter run, from
     the turn before) and the memory context each run was pushed (histx-01's budget). A figure
     nothing gave the conversation is still not."""
@@ -618,8 +619,9 @@ async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> No
         run_id="r1", used=set(), thread=None, pushed_context="Budget: £50,000 for knitwear"
     )
     await trace.on_run_end(run, None)
+    await trace.on_run_start(SimpleNamespace(thread=None, task="Reorder 120 units of SKU-00001"))
     told = cx.said_in([], trace.told[None])
-    assert all(x in told for x in ("503 Service Unavailable", "154", "50,000")), told
+    assert all(x in told for x in ("503 Service Unavailable", "154", "50,000", "120")), told
     # a conversation's own: another one's was not told (its memory context is its own)
     other = SimpleNamespace(run_id="r2", used=set(), thread="b", pushed_context="Budget: £9")
     await trace.on_run_end(other, None)

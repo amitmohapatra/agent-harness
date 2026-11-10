@@ -3198,8 +3198,8 @@ class Captured(runner.Meter):
 
 class Trace(Hooks):
     """Every tool call of the current turn: its name, arguments, status and run; ``started``
-    is set once a call of the turn starts; ``told``: what the harness gave the case's runs, by
-    conversation (each call's result, each run's pushed memory context), which
+    is set once a call of the turn starts; ``told``: what the case's runs were given, by
+    conversation (each user message, each call's result, each run's pushed memory context), which
     :func:`said_in` reads: a later turn of a conversation was told its earlier turns too."""
 
     def __init__(self) -> None:
@@ -3209,6 +3209,10 @@ class Trace(Hooks):
         #: every tool each run (by id) used, its framework's own too (Claude's WebSearch,
         #: Kimi's Bash): those run outside the tool hooks (``bridge.observed``)
         self.used: dict[str, set[str]] = {}
+
+    async def on_run_start(self, run: Any) -> None:
+        if run.task:  # the user's message: a later turn may cite its figures
+            self.told.setdefault(run.thread, []).append(str(run.task))
 
     async def on_run_end(self, run: Any, result: Any) -> None:
         self.used.setdefault(run.run_id, set()).update(run.used)
