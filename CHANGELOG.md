@@ -324,6 +324,15 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A LangGraph graph that keeps its own thread (a checkpointer: `create_agent`, with or
+  without `middleware()`, a hand-built graph) can be continued after a run stopped mid-call
+  (`mode="interrupt"`, a time limit) or left paused on a call while the user wrote again. The
+  thread held the model's call with no result, and Anthropic refused every later turn of it
+  (400: "`tool_use` ids were found without `tool_result` blocks"); the break-it set on Haiku,
+  `advexp-01` and `advfile-02`, ended two turns each ERROR. The next turn now answers such a
+  call first with a failed result saying it has none (`langgraph.STOPPED_CALL`); a Deep Agent
+  answers it itself (its `PatchToolCallsMiddleware`) and is left to. The complex suite's
+  `answered` probe checks it.
 - A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
   tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
   graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell
