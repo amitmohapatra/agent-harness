@@ -752,6 +752,10 @@ def test_where_a_figure_is_from_needs_its_source_and_its_read_time() -> None:
     on = r.world().on_hand(sku, "east", 0)
     no_time = f"From a stock_level call for {sku}: {on} on hand."
     assert not cx.score(expect, no_time, [], case.turns[1].text, ctx)["correct"]
+    # the LangGraph graph, the all-adapter run: the tool named as words joined by a hyphen
+    said = (f"The {on} units came from a live stock-level lookup I ran for {sku} in the east "
+            "region. The system returned the count with a reading time of 2026-10-30 09:00 UTC.")
+    assert cx.score(expect, said, [], case.turns[1].text, ctx)["correct"]
 
 
 def test_the_derive_and_apply_truths_are_the_fits_worked_by_hand() -> None:
@@ -1239,6 +1243,37 @@ def test_a_fall_said_as_an_amount_or_a_percentage_reads_as_a_negative_change() -
     assert _right("bf2-mixed-05", 1, said.replace(" or **0.92%**", " (**0.92%**)"))
     assert not _right("bf2-mixed-05", 1, said.replace("down", "up"))
     assert not _right("bf2-mixed-05", 1, said.replace("0.92%", "1.92%"))
+
+
+def test_what_changed_since_the_last_look_is_the_difference_either_way_it_is_said() -> None:
+    """explain-06 t1 (ReAct on Deep Agents, the middleware and the LangGraph graph, the
+    all-adapter run): "4 units ..., down from 14 ... the drop of 10 units" and "Stock was 14 at
+    my last check, so 10 units have left" state the change, and were scored as missing it: the
+    change is a difference, as the history set's own "how far is it from" is. The count now
+    stated wrongly, or another difference, still fails."""
+    for said in (
+        "We now have **4 units**, down from 14 at my last check: the drop of 10 units.",
+        "We now have **4 units**. Stock was 14 at my last check, so 10 units have left.",
+        "We now have **4 units** (-10 since my last check).",
+    ):
+        assert _right("explain-06", 1, said), said
+    assert not _right("explain-06", 1, "We now have **5 units**, 10 fewer than before.")
+    assert not _right("explain-06", 1, "We now have **4 units**, 9 fewer than before.")
+
+
+def test_a_step_count_written_as_a_word_reads_as_the_count() -> None:
+    """explain-03 t1 (the middleware and the LangGraph graph, the all-adapter run): "I made
+    four tool calls in three steps: find_sku ..., sku_details ..., supplier_info and
+    supplier_portal" was scored as missing the count 4, which only a figure counted. A wrong
+    count still fails."""
+    t = _turn("explain-03", 1)
+    tools = ("find_sku", "sku_details", "supplier_info", "supplier_portal")
+    records = [{"calls": [{"tool": n} for n in tools]}]
+    said = "I made four tool calls in three steps: find_sku, sku_details, supplier_info and "
+    assert cx.score(t.expect, said + "supplier_portal.", records, t.text)["correct"]
+    assert cx.score(t.expect, "I made 4 calls: " + ", ".join(tools), records, t.text)["correct"]
+    wrong = said.replace("four", "five") + "supplier_portal."
+    assert not cx.score(t.expect, wrong, records, t.text)["correct"]
 
 
 def test_which_figure_to_use_names_the_older_source_by_its_date() -> None:

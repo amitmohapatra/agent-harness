@@ -1779,7 +1779,7 @@ def cases() -> tuple[Case, ...]:
                 Turn(
                     "Check again — what changed since you last looked?",
                     ((("stock_level", {"sku": navy}),),),
-                    record({"now": v1, "change": v1 - v0}, tol={"now": 0, "change": 0}),
+                    record({"now": v1, DIFFERENCE: v1 - v0}, tol={"now": 0, DIFFERENCE: 0}),
                     ticks=1,
                 ),
             ),
@@ -2988,10 +2988,9 @@ def score(
         if not names:
             missing.append("the earlier turn called no tool")
         missing += [n for n in names if n not in a]
-        if k == "steps" and len(held.get("calls", [])) not in [
-            int(n) for n in numbers(a) if n == int(n)
-        ]:
-            missing.append(f"count {len(held.get('calls', []))}")
+        calls = len(held.get("calls", []))
+        if k == "steps" and not _has_number(a, calls, 0):
+            missing.append(f"count {calls}")
     elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
         pass  # done after all: the file the run saved for the user (``query_result``, #97)
     elif k == "cannot" and ran:
