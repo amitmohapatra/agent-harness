@@ -759,7 +759,8 @@ def cases() -> list[Case]:
 
 # --------------------------------------------------------------------------- the trace
 class Seen(Calls):
-    """A turn's trace: each harness tool call (``Calls``) and the events of its runs — the
+    """A turn's trace: each harness tool call (``Calls``) and the events of its runs (every
+    attempt's, from its start: :meth:`heard` follows a run as ``Agent.events`` does) — the
     calls a framework ran itself (Claude Code's and Kimi Code's own tools are on the stream,
     ``bridge.observed``), the skill versions each run pinned and its ``skills_unavailable``
     warnings."""
@@ -768,8 +769,10 @@ class Seen(Calls):
         super().__init__()
         self.events: list[RunEvent] = []
 
-    async def on_run_start(self, run: Any) -> None:
-        run.events.listen(self.events.append)
+    def heard(self, event: RunEvent | None) -> None:
+        """An event of a run followed (``None``: the run ended with no attempt to say so)."""
+        if event is not None:
+            self.events.append(event)
 
     def made(self) -> list[tuple[str, dict[str, Any]]]:
         """Every call on the stream: its tool and its arguments."""
@@ -923,6 +926,8 @@ async def _chatted(
         else:
             thread = f"sk-{tag}-{case.id}-{turn.thread}"
             record = await agent._opened(turn.text, user=user, thread=thread, tenant=None, app=app)
+            # every attempt of the run is followed from its start (a pin made as it starts)
+            agent._watching.setdefault(record.run_id, []).append(seen.heard)
             result = await pipeline.attempt(agent, record, turn.text)
         result = await _settled(agent, result, case, shelf=shelf, chat=chat, adapter=adapter)
         waits = result.interrupt if result.status is RunStatus.PAUSED else None

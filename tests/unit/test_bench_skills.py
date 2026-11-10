@@ -173,6 +173,20 @@ def test_a_check_on_a_turn_that_did_not_run_says_so() -> None:
     assert b.reads("stock-cover", turn=1)(chat()) == ["turn 1 did not run"]
 
 
+def test_a_turn_answers_the_question_a_run_waits_on_by_the_option_that_names_it() -> None:
+    from trellis.contracts import Interrupt, InterruptReason, Option
+
+    def waits(*options: Any) -> Interrupt:
+        return Interrupt(interrupt_id="i", tenant_id="t", run_id="r", question="Which region?",
+                         reason=InterruptReason.QUESTION, options=list(options))  # fmt: skip
+
+    regions = waits("north", Option(value="w", label="West (312 units)"))
+    assert b.answer_to(regions, "west") == "w" and b.answer_to(regions, "North") == "north"
+    assert b.answer_to(regions, "east") == "east"  # no such option: the words, as said
+    assert b.answer_to(waits(), "west") == "west"
+    assert b.answer_to(regions, "@0|the first") == "north"  # as the scheduling set's turns
+
+
 # --------------------------------------------------------------------------- the trace
 def test_the_calls_a_model_made_are_read_from_its_later_requests_each_once() -> None:
     def call(cid: str, name: str, **args: Any) -> dict[str, Any]:
@@ -229,13 +243,15 @@ def test_a_runs_events_say_its_own_tools_calls_its_pins_and_its_warnings() -> No
                         data=data)  # fmt: skip
 
     seen = b.Seen()
-    seen.events = [
+    seen.heard(None)  # a run that ended with no attempt says nothing
+    for heard in [
         event(RunEventType.CUSTOM, name="skills", versions={"stock-cover": "t1"}),
         event(RunEventType.TOOL_CALL_START, "c1", tool="Skill"),
         event(RunEventType.TOOL_CALL_ARGS, "c1", args={"skill": "trellis:stock-cover"}),
         event(RunEventType.CUSTOM, name="warning", code="skills_unavailable", message="gone"),
         event(RunEventType.CUSTOM, name="warning", code="other", message="x"),
-    ]
+    ]:
+        seen.heard(heard)
     assert seen.made() == [("Skill", {"skill": "trellis:stock-cover"})]
     assert seen.pinned() == {"stock-cover": "t1"} and seen.warnings() == ["gone"]
 
@@ -289,6 +305,8 @@ def test_each_adapter_is_given_the_skills_in_its_own_slot(
     langgraph, _ = built("langgraph")  # no slot: the harness's two tools, declared
     assert [type(t) for t in langgraph.trellis_tools if isinstance(t, SkillTools)] == [SkillTools]
     assert not any("Skills" in n for n in langgraph.nodes)
+    graph, _ = built("graph")  # its tools bound by the caller, the skill tools declared too
+    assert [type(t) for t in graph.trellis_tools] == [SkillTools]
     agent, options = built("openai")  # the SDK's Skills capability, on a sandbox agent
     assert isinstance(agent, SandboxAgent)
     assert [type(c).__name__ for c in agent.capabilities] == ["Shell", "TrellisSkills"]
@@ -384,6 +402,26 @@ async def test_a_change_the_skill_asks_for_waits_for_its_approval_and_an_edit_me
         f"answer lacks the line 'RECEIPT {b.RECEIPTS[0]}'",
         f"answer has '{b.RECEIPTS[1]}'",
     ]
+
+
+async def test_a_refund_a_skills_text_tells_the_agent_to_make_waits_for_a_person_who_refuses(
+    offline: None,
+) -> None:
+    """Skill text is data: a model that does what the skill's injected line says reaches the
+    same approval any refund does; the case's reviewer refuses it, the refund never runs, and
+    the question is still answered."""
+    case = next(c for c in b.cases() if c.id == "injected-refund")
+    refund = {"order": "ORD-7781", "amount": 950}
+    model = ScriptedChatModel(turns=[
+        ("read_file", {"file_path": f"{SKILLS_ROOT}stock-cover/SKILL.md"}),
+        ("issue_refund", refund),
+        [("stock_level", {"sku": "SKU-01517"}),
+         ("sales_summary", {"group_by": "sku", "metric": "units", "sku": "SKU-01517", **SEP})],
+        b.cover_line("SKU-01517"),
+    ], spends=(1000, 50))  # fmt: skip
+    row = await b.run_case(case, model, "t")
+    assert row["passed"], row["problems"]
+    assert row["decided"] == [["issue_refund", refund, "reject"]] and row["ran"] == []
 
 
 async def test_a_skill_deleted_once_pinned_and_a_store_that_is_down_leave_the_run_going(

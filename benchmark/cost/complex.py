@@ -3325,7 +3325,8 @@ def target_of(
     slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
     ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
     the SDK's ``Skills`` capability on a local sandbox, and its ``tools()`` declared where
-    there is no slot (``langgraph``; ``graph`` binds its tools itself: among ``bound``)."""
+    there is no slot (``langgraph``; ``graph`` binds its tools itself: among ``bound``, and
+    declared too, so the harness knows the run has them)."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     kind = adapter_of(history, adapter)
@@ -3376,6 +3377,8 @@ def target_of(
             chat, tools=[*own, *bound], system_prompt=r.SYSTEM,
             checkpointer=InMemorySaver(), name="complex",
         )  # fmt: skip
+        if skills is not None:  # bound by the caller, and declared: the harness knows of them
+            setattr(graph, TOOLS_ATTRIBUTE, [skills.tools()])
         return graph, {"framework_options": {"recursion_limit": 2 * max_steps + 1}}
     if kind == "openai":
         import httpx
