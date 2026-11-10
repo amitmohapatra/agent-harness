@@ -80,7 +80,13 @@ the user Claude Code would ask:
   that only reads runs — a read tool, or a `Bash` command the harness reads as read-only (`ls`,
   `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`, read with
   `shlex` and `ast`); any other asks a person. Approved (or edited), it runs once; rejected or
-  denied, Claude reads why.
+  denied, Claude reads why. A read-only command reads only what the run may read: the CLI's
+  `cwd`, the folders `add_dirs` adds (Claude Code reads and works there itself: name a folder
+  of yours there, such as the tool results the CLI saves), the run's skills, and where a kept
+  result is read. Claude Code's shell keeps the folder a `cd` left it in, so after a `cd` a
+  relative read is placed from every folder the shell may be in; where that cannot be followed
+  (`cd $DIR`, `pushd`, `eval`), every read of a file asks until the next query. The
+  environment the CLI is given (`env`: its `PATH`, `PYTHONPATH`) is the one read.
 * **Claude's questions** (`AskUserQuestion`) are the run's questions, asked as `ask_user` asks
   them: each a choice (several picks with `multiSelect`, the option labelled "(Recommended)"
   recommended with its description as why, another answer in words); Claude reads the answers

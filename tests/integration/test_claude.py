@@ -385,6 +385,45 @@ async def test_built_in_tools_are_governed_and_not_run_again_after_a_pause(
     assert refunds == ["o3"]
 
 
+async def test_a_read_outside_the_working_folder_asks_a_person(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A command that only reads runs unasked inside the folder Claude Code works in; a file
+    anywhere else on the machine (``/etc/passwd``) changes nothing, but asks a person."""
+    script = [
+        {"builtin": "Bash", "args": {"command": "ls"}},
+        {"builtin": "Bash", "args": {"command": "cat /etc/passwd"}},
+        {"text": "done"},
+    ]
+    agent = harness.wrap(options(tmp_path, script), id="ops")
+    asked = await agent.run("look around", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == {"command": "cat /etc/passwd"}
+    assert [b["args"] for b in built_ins(tmp_path)] == [{"command": "ls"}]  # ls: not asked
+
+
+async def test_a_read_after_a_cd_is_placed_from_where_the_shell_may_be(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code's shell keeps the folder a ``cd`` left it in: once it went to a folder the
+    options add (``add_dirs``: readable, so the ``cd`` runs unasked), a relative read is placed
+    from there too, and one that leads out of what the run may read from there asks."""
+    run, kept = tmp_path / "a" / "run", tmp_path / "b" / "kept"
+    run.mkdir(parents=True)
+    kept.mkdir(parents=True)
+    script = [
+        {"builtin": "Bash", "args": {"command": f"cd {kept}"}},
+        {"builtin": "Bash", "args": {"command": "cat x.csv"}},
+        {"builtin": "Bash", "args": {"command": "cat ../run/x.csv"}},  # b/run, not a/run
+        {"text": "done"},
+    ]
+    target = options(tmp_path, script, cwd=str(run), add_dirs=[str(kept)])
+    asked = await harness.wrap(target, id="ops").run("look around", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == {"command": "cat ../run/x.csv"}
+    assert [b["args"]["command"] for b in built_ins(tmp_path)] == [f"cd {kept}", "cat x.csv"]
+
+
 async def test_a_command_claudes_own_rules_allow_runs_without_asking_a_person(
     harness: Harness, tmp_path: Path
 ) -> None:

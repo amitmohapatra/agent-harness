@@ -32,7 +32,7 @@ from trellis.contracts import InterruptReason, RunStatus, ToolSpec
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.governance import Decision, Governance, Rejected, governed
 from trellis.harness.governance.catalog import entry
-from trellis.harness.governance.decision import CHOICES, EVERY_TIME, SAID, Action, decide
+from trellis.harness.governance.decision import CHOICES, EVERY_TIME, KEPT, SAID, Action, decide
 from trellis.harness.middleware import GovernTools, declare_files, spec_of
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.mcp import MCPSource
@@ -218,9 +218,11 @@ def test_the_catalog_is_told_the_default_of_a_tool_that_says_nothing() -> None:
     ``side_effects`` of its own — an administrator's word in the catalog stays."""
     silent = ToolSpec(name="office-purge_records", source="mcp", server="office")
     assert entry(silent, None)["annotations"] == {"destructiveHint": True}
-    assert entry(ToolSpec(name="native"), None)["annotations"] == {"destructiveHint": True}
     for sent in (entry(silent, None), entry(ToolSpec(name="native"), None)):
         assert "side_effects" not in sent
+    # not an MCP tool: no protocol default to say, so nothing is said (the catalog keeps no
+    # risk, and the harness's own rule decides: it asks with the three choices)
+    assert "annotations" not in entry(ToolSpec(name="native"), None)
     assert entry(silent, {"readOnlyHint": True})["annotations"] == {"readOnlyHint": True}
     assert entry(silent, {"destructiveHint": False})["annotations"] == {"destructiveHint": False}
     said = entry(ToolSpec(name="count", side_effects="read"), None)
@@ -307,6 +309,39 @@ async def test_the_catalogs_word_on_a_tool_that_says_nothing(
     )
     assert done.status is RunStatus.SUCCESS and done.answer == "the data of ours"
     assert lines(ran) == ["read_account"]
+
+
+async def test_with_the_catalog_a_function_that_declares_nothing_asks_with_the_choices(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The catalog keeps no risk for a function that declares nothing, so the harness's own
+    rule decides: it asks with allow once, for this conversation (always allow, with a memory
+    service), deny, and an allowance for the conversation covers its next call."""
+
+    async def purger(input: str, agent: Runtime) -> Any:
+        return [await agent.tools.call("purge_records", table=t) for t in ("a", "b")]
+
+    agent = arm(memory_harness.wrap(purger, id="purger"), [purge_records])
+    await agent.run("warm up", user="u", thread="t0")  # published; the catalog says nothing yet
+    await memory_harness.writes.drain()
+    [published] = [
+        t
+        for call in memory_service.named("put_catalog")
+        for t in call.body["tools"]
+        if t["name"] == "purge_records"
+    ]
+    assert "side_effects" not in published and "annotations" not in published, published
+    memory_service.catalog["purge_records"] = dict(published)  # as the service keeps it
+    done.clear()
+    agent = arm(memory_harness.wrap(purger, id="purger-2"), [purge_records])
+    first = await agent.run("purge", user="u", thread="t1")
+    asked = first.interrupt
+    assert asked is not None and done == [], first
+    assert asked.question == (
+        f"Approve purge_records? purge_records has not declared its side effects. {SAID[KEPT]}"
+    )
+    second = await agent.resume(asked.interrupt_id, "answer", answer="run", reviewer="u")
+    assert second.status is RunStatus.SUCCESS and done == ["purge_records", "purge_records"]
 
 
 # --------------------------------------------------------------------------- a framework's own

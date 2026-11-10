@@ -54,6 +54,7 @@ from trellis.harness.governance.decision import (
     EVERY_TIME,
     ONCE,
     SAID,
+    UNSAID,
     choices,
     chosen,
     decide,
@@ -197,6 +198,25 @@ async def test_the_catalog_overrides_the_risk_and_sets_the_approval_rule() -> No
         "erp-get_stock": Rule(risk="irreversible"),
         "other": None,
     }
+
+
+async def test_a_catalog_entry_with_no_risk_leaves_the_tools_own() -> None:
+    """The catalog's risk overrides the tool's own only where someone declared one: an entry
+    whose risk nobody declared (``None``) leaves the tool's own, and a tool that declares
+    nothing either asks with the three choices, as without a catalog."""
+    catalog = FakeCatalog(
+        {"po": Rule(risk=None), "pay": Rule(risk=None, approve_when="amount > 100")}
+    )
+    governance = Governance(catalog)
+    assert (await governance.check("po", {}, side_effects="read")).runs
+    each_time = await governance.check("po", {}, side_effects="irreversible")
+    assert each_time.asks and choices(each_time.risk) == EVERY_TIME
+    undeclared = await governance.check("po", {})
+    assert undeclared.asks and choices(undeclared.risk) == CHOICES
+    assert undeclared.reason == f"po {UNSAID}"
+    assert (await governance.check("pay", {"amount": 5})).announces  # the rule still decides
+    assert await governance.may_ask([ToolSpec(name="po", side_effects="read")]) == frozenset()
+    assert await governance.may_ask([ToolSpec(name="po")]) == {"po"}
 
 
 async def test_rules_are_read_again_within_seconds_conditionally(clock: Clock) -> None:
