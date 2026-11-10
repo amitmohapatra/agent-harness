@@ -40,9 +40,9 @@ class _Agent:
         return _Run(self.next.pop(0))
 
 
-async def test_a_pause_on_a_read_is_resumed_approved_until_the_run_answers() -> None:
+async def test_a_pause_on_a_read_is_resumed_approved_until_the_run_answers(tmp_path) -> None:
     agent = _Agent("head -3 s.csv", None)
-    result, approved = await approved_reads(agent, _Run("wc -l s.csv"), "reviewer")
+    result, approved = await approved_reads(agent, _Run("wc -l s.csv"), "reviewer", tmp_path)
     assert result.interrupt is None and approved == ["wc -l s.csv", "head -3 s.csv"]
     assert agent.resumed == [
         ("int-wc -l s.csv", "approve", "reviewer"),
@@ -50,18 +50,18 @@ async def test_a_pause_on_a_read_is_resumed_approved_until_the_run_answers() -> 
     ]
 
 
-async def test_a_pause_on_a_write_stays_a_pause() -> None:
+async def test_a_pause_on_a_write_stays_a_pause(tmp_path) -> None:
     agent = _Agent()
-    result, approved = await approved_reads(agent, _Run("rm s.csv"), "reviewer")
+    result, approved = await approved_reads(agent, _Run("rm s.csv"), "reviewer", tmp_path)
     assert result.interrupt is not None and approved == [] and agent.resumed == []
     agent = _Agent("rm s.csv")
-    result, approved = await approved_reads(agent, _Run("cat s.csv"), "reviewer")
+    result, approved = await approved_reads(agent, _Run("cat s.csv"), "reviewer", tmp_path)
     assert result.interrupt is not None and approved == ["cat s.csv"]  # then a write: a pause
 
 
-async def test_a_run_that_reads_over_and_over_is_left_paused_past_the_limit() -> None:
+async def test_a_run_that_reads_over_and_over_is_left_paused_past_the_limit(tmp_path) -> None:
     agent = _Agent(*["cat s.csv"] * APPROVALS_MAX)
-    result, approved = await approved_reads(agent, _Run("cat s.csv"), "reviewer")
+    result, approved = await approved_reads(agent, _Run("cat s.csv"), "reviewer", tmp_path)
     assert result.interrupt is not None and len(approved) == APPROVALS_MAX
 
 
@@ -92,3 +92,5 @@ async def test_a_run_saving_in_its_folder_is_resumed_and_the_save_listed(tmp_pat
     agent = _Agent(None)
     result, approved = await approved_reads(agent, _Run("mkdir -p exports"), "r")
     assert result.interrupt is not None and approved == []  # no folder given: a pause
+    result, approved = await approved_reads(agent, _Run("cat s.csv"), "r")
+    assert result.interrupt is not None and approved == []  # nor is a read placed: a pause
