@@ -1770,8 +1770,9 @@ class FitWindow(AgentMiddleware):
        clearing pass). ``turns=False`` (a Deep Agents summarization after it) leaves the
        results to it too: it offloads a result whole to its backend and reads it back with its
        own ``read_file``, so a result is stored once, where its sandbox's code reads it;
-    4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves them
-       to a summarization after it: ``ReAct``'s summarizes them);
+    4. ``turns`` — the older turns left out, the latest kept whole, and the tools step 3
+       narrowed away offered again as far as they fit in the room that frees (``turns=False``
+       leaves the turns to a summarization after it: ``ReAct``'s summarizes them);
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
@@ -1856,20 +1857,40 @@ class FitWindow(AgentMiddleware):
         own overflow handling offloads them whole (Deep Agents')."""
         return _cut(request, budget) if self.turns else request
 
+    def _turns(
+        self,
+        request: ModelRequest[Any],
+        budget: int,
+        offered: list[Any],
+        runtime: Runtime | None,
+        before: Collection[str],
+    ) -> ModelRequest[Any]:
+        """The older turns left out (none with a summarization after it: ``turns=False``), and
+        the ``offered`` tools given back as far as they fit in the room that frees."""
+        latest = _latest(request) if self.turns else request
+        if latest is request:
+            return request
+        return _narrowed(latest.override(tools=offered), budget, runtime, least=0, before=before)
+
     def _fitted(self, request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
         taken: list[str] = []
+        #: the tools as the ``results`` step found them: offered again, as far as they fit, once
+        #: the older turns are left out (the room they took is free then)
+        offered: list[Any] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
             lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: self._results(_narrowed(r, b, runtime, least=0, before=before), b),
-            lambda r, b: _latest(r) if self.turns else r,
+            lambda r, b: self._turns(r, b, offered, runtime, before),
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
             if name == "memory" and not self.turns and _size(_latest(request)) <= budget:
                 break  # the summarization after it makes it fit: memory stays whole
+            if name == "results":
+                offered[:] = request.tools
             smaller = step(request, budget)
             if smaller is not request:
                 taken.append(name)

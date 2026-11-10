@@ -324,6 +324,14 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
+  window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
+  turns left out — and the tools stayed out, though the room the turns took was free. Every
+  turn after that offered the model no tool (`create_agent` with `middleware()`, a 6,000-token
+  window, Haiku, `advconv-05`: from the fourth turn on, 567 tokens a request, "I only have a
+  file-reading tool"). The tools the narrowing dropped are now offered again as far as they
+  fit: the same case on Haiku fetched the figure again on its last turn and passed every check
+  (0 of 16 failed; 1 of 16 and the answer before).
 - A question a tool asks (`ask_user`, a schedule tool's "update it?", any `Runtime.ask` in a
   tool, Claude's `AskUserQuestion`) is asked once on every adapter (#203). OpenAI Agents and a
   graph with no checkpointer run a resumed run again from its input, and Claude and Kimi tell

@@ -353,3 +353,21 @@ def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:
     assert "characters cut to fit the window" in out.messages[4].text
     small = request([HumanMessage("go"), calls[0], ToolMessage("z" * 50, tool_call_id="c1")], [])
     assert ours._cut(small, 1) is small  # too short to cut
+
+
+async def test_tools_dropped_to_fit_come_back_once_the_older_turns_are_left_out() -> None:
+    """A long chat on a small window: the tools are narrowed (to none, past ``FIT_KEEP``) before
+    the older turns are left out, and leaving them out frees the room; the tools that fit then
+    are offered again — a request with no tool left the model nothing to fetch with (a 6,000-token
+    window, Haiku: every turn after the fourth offered no tool, the model saying it had none)."""
+    older = []
+    for n in range(20):
+        older += [HumanMessage(f"question {n}: {LONG}"), AIMessage(content=f"answer {n}: {LONG}")]
+    messages = [*older, HumanMessage("How many footwear SKUs are priced above £100?")]
+    tools = [lc(name) for name in ("sku_catalog", "sales_summary", "stock_level", "store_list")]
+    out = await sent(FitWindow(3000), request(messages, tools))
+    assert [m.text for m in out.messages] == [messages[-1].text]  # the older turns left out
+    assert [t["function"]["name"] if isinstance(t, dict) else t.name for t in out.tools] == [
+        "sku_catalog", "sales_summary", "stock_level", "store_list",
+    ]  # fmt: skip
+    assert _size(out) <= int(3000 * 0.95)
