@@ -162,7 +162,7 @@ async def test_an_error_that_will_not_pass_is_not_retried(harness: Harness) -> N
 
 def test_a_timeout_is_a_number_of_seconds_over_zero() -> None:
     with pytest.raises(ConfigurationError, match="never: a timeout is a number of seconds over 0"):
-        tool(lambda: None, name="never", call_timeout=0)
+        tool(lambda: None, name="never", side_effects="read", call_timeout=0)
     with pytest.raises(ConfigurationError, match="call_timeout is a number of seconds over 0"):
         ReAct(system_prompt="s", model="m", call_timeout=-1)
 
@@ -186,7 +186,7 @@ async def test_governed_code_gets_the_same_timeouts_and_retries() -> None:
 
     reads = governed(lookup, governance, side_effects="read", on_ask=lambda d: True)
     assert await reads(sku="A") == "A: 4" and len(tries) == 2
-    writes = governed(ship, governance, timeout=0.05, on_ask=lambda d: True)
+    writes = governed(ship, governance, side_effects="write", timeout=0.05, on_ask=lambda d: True)
     with pytest.raises(ToolTimeout, match="may or may not have taken effect") as raised:
         await writes(order="o1")
     assert raised.value.unknown
@@ -195,7 +195,7 @@ async def test_governed_code_gets_the_same_timeouts_and_retries() -> None:
         raise ValueError("no such order")
 
     with pytest.raises(ValueError, match="no such order"):
-        await governed(fails, governance, on_ask=lambda d: True)(order="o2")
+        await governed(fails, governance, side_effects="write", on_ask=lambda d: True)(order="o2")
 
 
 # --------------------------------------------------------------------------- OpenAPI, A2A, MCP

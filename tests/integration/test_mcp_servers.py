@@ -191,7 +191,7 @@ def test_what_mcp_takes() -> None:
     with pytest.raises(ConfigurationError, match="needs the command"):
         stdio("")
     assert server_name("Notes Box!") == "notes_box"
-    assert side_effects_of(None) == "write"
+    assert side_effects_of(None) == "irreversible"  # a tool that says nothing
     assert repr(mcp("https://h/mcp")) == "mcp('https://h/mcp')"
 
 

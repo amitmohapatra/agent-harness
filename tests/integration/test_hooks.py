@@ -387,7 +387,7 @@ async def test_governed_code_gets_the_same_tool_hooks() -> None:
     secret = governed(quote.fn, gov, side_effects="read", on_ask=asked.append, hooks=[Guard()])
     with pytest.raises(Denied, match="quote was not run: secret SKUs are not quoted"):
         await secret(sku="secret")
-    paying = governed(pay.fn, gov, on_ask=lambda d: True, hooks=[Guard()])
+    paying = governed(pay.fn, gov, side_effects="write", on_ask=lambda d: True, hooks=[Guard()])
     assert await paying(amount=500) == "paid 100 (checked)" and paid == [100]
 
     class Asking(Hooks):

@@ -8,7 +8,9 @@
   harness's bridge — a graph built with them, armed with the same sources, is governed as a
   ``ReAct`` is;
 * :func:`with_governance` makes ``governance`` the harness's for every tenant (a catalog in process,
-  instead of the memory service's).
+  instead of the memory service's);
+* :func:`declaring` gives a harness a catalog that says what tools nobody could declare in code
+  do (an OpenAI Agents ``FunctionTool``): without it each of their calls asks a person.
 """
 
 from __future__ import annotations
@@ -16,11 +18,13 @@ from __future__ import annotations
 from collections.abc import Collection, Sequence
 from typing import Any, Final
 
+from tests.support.catalog import FakeCatalog
 from trellis import Harness
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.features import features
 from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.tools.sources import as_source
 
@@ -44,6 +48,13 @@ def with_governance[H: Harness](harness: H, governance: Governance) -> H:
     """``harness`` with ``governance`` for every tenant."""
     harness._governance_given = governance
     return harness
+
+
+def declaring[H: Harness](harness: H, **risks: Any) -> H:
+    """``harness`` with a catalog in process that says each named tool's risk (``read``,
+    ``write``, ``irreversible``)."""
+    rules = {name: Rule(risk) for name, risk in risks.items()}
+    return with_governance(harness, Governance(FakeCatalog(rules)))
 
 
 async def resolved(h: Harness, *sources: Any, without: Collection[str] = ()) -> list[Any]:

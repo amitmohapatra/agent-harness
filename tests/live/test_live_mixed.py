@@ -76,7 +76,13 @@ async def test_one_rule_gates_a_wrapped_agent_and_a_plain_graph() -> None:
                 p_thread = f"live-mixed-plain-{suffix}"
                 record = await team.start(f"Order 500 x {sku}", user=user, thread=p_thread)
                 tools = {
-                    name: governed(place_order_plain, team.governance, name=name, on_ask=team.ask)
+                    name: governed(
+                        place_order_plain,
+                        team.governance,
+                        side_effects="write",
+                        name=name,
+                        on_ask=team.ask,
+                    )
                 }
                 model = PlannedChatModel(plan=[(name, args)], final="{last}")
                 memory = team.scope(user, p_thread, record.run_id)

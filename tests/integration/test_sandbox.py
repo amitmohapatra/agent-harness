@@ -634,7 +634,7 @@ async def test_way_2_a_provider_and_governed_without_a_harness() -> None:
     async def sandbox_exec(command: str) -> dict[str, Any]:
         return (await box.exec(command, timeout=10, env={"TOKEN": "t"})).model_dump()
 
-    run = governed(sandbox_exec, Governance(), on_ask=lambda decision: True)
+    run = governed(sandbox_exec, Governance(), side_effects="write", on_ask=lambda decision: True)
     assert await run(command="echo hi") == {"exit_code": 0, "stdout": "hi TOKEN=t", "stderr": ""}
     await provider.delete(box.ref)
     assert provider.boxes == {}

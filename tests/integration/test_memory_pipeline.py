@@ -66,7 +66,9 @@ def graph_tools(n: int) -> list[Any]:
         def lookup(key: str) -> str:
             return f"t{i}:{key}"
 
-        return StructuredTool.from_function(lookup, name=f"t{i}", description=f"Tool {i}.")
+        return StructuredTool.from_function(
+            lookup, name=f"t{i}", description=f"Tool {i}.", metadata={"side_effects": "read"}
+        )
 
     return [make(i) for i in range(n)]
 
@@ -356,6 +358,8 @@ async def test_the_hints_narrow_what_a_create_agent_graph_is_offered_per_call(
     def own(key: str) -> str:
         """The graph's own tool, not the harness's."""
         return key
+
+    own.metadata = {"side_effects": "read"}
 
     memory_service.candidates = ["t3", "t1"]
     memory_service.candidates_for = {"archive it": ["t5"]}

@@ -23,5 +23,5 @@ def test_citations_are_a_citation_or_a_list_of_them() -> None:
 
 def test_a_tools_response_format_is_langchains() -> None:
     with pytest.raises(ConfigurationError, match="content_and_artifact"):
-        tool(lambda: "x", response_format="artifact")  # type: ignore[arg-type]
-    assert tool(lambda: "x").response_format == "content"
+        tool(lambda: "x", side_effects="read", response_format="artifact")  # type: ignore[arg-type]
+    assert tool(lambda: "x", side_effects="read").response_format == "content"

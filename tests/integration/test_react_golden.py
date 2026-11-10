@@ -39,7 +39,12 @@ def _other(n: int) -> Any:
         """
         return "nothing unusual"
 
-    return tool(report, name=f"report_{n}", description=f"Report number {n} of one store.")
+    return tool(
+        report,
+        name=f"report_{n}",
+        description=f"Report number {n} of one store.",
+        side_effects="read",
+    )
 
 
 TOOLS = [stock, *(_other(n) for n in range(4))]

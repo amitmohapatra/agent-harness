@@ -87,7 +87,8 @@ async def test_a_listing_reads_every_page_up_to_the_most(
 async def test_no_read_tool_over_the_servers_own() -> None:
     client = Resourceful(count=1, per_page=5, own=(resources.READ,))
     tools = await connected(mcp("https://h/mcp", name="h"), client).resolve()
-    assert [t.name for t in tools] == ["h-read_resource"] and tools[0].spec.side_effects == "write"
+    assert [t.name for t in tools] == ["h-read_resource"]
+    assert tools[0].spec.side_effects == "irreversible"  # the server's own, which says nothing
 
 
 def test_what_a_read_says() -> None:

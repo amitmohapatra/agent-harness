@@ -1,7 +1,8 @@
 """What happens to one tool call: it runs, it runs and is announced, or it waits for a person.
 
 The action follows from the tool's risk — what it does: ``read`` runs, ``write`` runs and is
-announced, ``irreversible`` asks — unless an approval rule (``approve_when``: an
+announced, ``irreversible`` asks, and so does a tool that has not said what it does (any other
+risk: nothing known is never a reason to run) — unless an approval rule (``approve_when``: an
 administrator's, or an accepted approval suggestion) governs the tool: then the call asks
 exactly when the rule holds on its arguments. The rule language is the memory service's own
 (:mod:`trellis.memory.approval`, which writes and validates these rules): there is one
@@ -28,6 +29,9 @@ from trellis.memory.approval import evaluate
 
 log = logging.getLogger("trellis.harness")
 
+#: Why a call of a tool that has not said what it does asks, after the tool's name.
+UNSAID: Final = "has not declared its side effects."
+
 
 class ApprovalRuleError(HarnessError):
     """A tool's approval rule (``approve_when``) could not be evaluated on a call: the call
@@ -43,12 +47,18 @@ class Action(StrEnum):
     ASK = "ask"
 
 
-#: The action of each risk when no rule governs the tool (an unknown risk is announced).
+#: The action of each risk when no rule governs the tool.
 ACTIONS: Final[dict[str, Action]] = {
     "read": Action.RUN,
     "write": Action.ANNOUNCE,
     "irreversible": Action.ASK,
 }
+
+
+def action_of(risk: str) -> Action:
+    """The action of ``risk`` when no rule governs the tool: any risk that is none of
+    :data:`ACTIONS` — a tool that has not said what it does — asks."""
+    return ACTIONS.get(risk, Action.ASK)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +132,8 @@ def decide(tool: str, risk: str, rule: str | None, args: Mapping[str, Any]) -> D
         return Decision(tool, args, action, reason, risk, rule)
 
     if rule is None:
-        return decided(ACTIONS.get(risk, Action.ANNOUNCE), f"{tool} is {risk}.")
+        known = f"{tool} is {risk}."
+        return decided(action_of(risk), known if risk in ACTIONS else f"{tool} {UNSAID}")
     if rule == CATALOG_UNREAD:
         return decided(
             Action.ASK,

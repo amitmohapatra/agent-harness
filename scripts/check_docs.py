@@ -7,6 +7,10 @@ Links. Every relative link in every Markdown file the repository holds must name
 directory that exists, and a ``#fragment`` must name a heading of the target (GitHub's anchor
 rules) or an ``<a id>``. External links (``http(s)://``, ``mailto:``) are not fetched.
 
+Tools. A snippet's ``tool(...)`` or ``governed(...)`` of the platform says ``side_effects=``,
+and no ``@tool`` stands alone: the harness takes a tool that says nothing (it asks a person at
+each call), but our own samples show the declaration.
+
 Snippets. Every ``python`` block must parse (top-level ``await`` allowed, as in a notebook).
 Every ``from M import N`` of the platform (``trellis``, ``bifrost_sdk``) or of a framework the
 harness supports must import, and ``M`` must have ``N``. A call of a name the platform exports
@@ -377,6 +381,12 @@ def check_python(block: Block, api: Surface) -> list[Finding]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             findings += _call(block, node, platform, api)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            findings += [
+                Finding(block.path, block.line + d.lineno, f"@{d.id}: {UNDECLARED}")
+                for d in node.decorator_list
+                if isinstance(d, ast.Name) and _declares(platform.get(d.id))
+            ]
     return findings
 
 
@@ -399,6 +409,17 @@ def _imports(block: Block, tree: ast.AST) -> tuple[list[Finding], dict[str, Any]
     return findings, platform
 
 
+#: what a snippet's tool that says nothing of what it does is told
+UNDECLARED = 'say side_effects= ("read", "write" or "irreversible")'
+
+
+def _declares(target: Any) -> bool:
+    """Whether ``target`` is the platform's ``tool`` or ``governed``: what makes a function a
+    tool, which says its side effects there."""
+    made = getattr(target, "__name__", None) in ("tool", "governed")
+    return made and getattr(target, "__module__", "").startswith("trellis.")
+
+
 def _call(block: Block, node: ast.Call, platform: dict[str, Any], api: Surface) -> list[Finding]:
     """A call's name and keywords, against the platform's signatures."""
     where = (block.path, block.line + node.lineno)
@@ -406,6 +427,8 @@ def _call(block: Block, node: ast.Call, platform: dict[str, Any], api: Surface) 
     if isinstance(node.func, ast.Name) and node.func.id in platform:
         target = platform[node.func.id]
         name, accepted = node.func.id, _params(target) if callable(target) else None
+        if _declares(target) and "side_effects" not in given:
+            return [Finding(*where, f"{name}(...): {UNDECLARED}")]
     elif isinstance(node.func, ast.Attribute):
         name = node.func.attr
         if name not in api.attributes and name not in FOREIGN_CALLS:
