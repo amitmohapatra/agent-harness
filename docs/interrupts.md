@@ -142,10 +142,12 @@ own way; the harness changes neither:
 A risky action is not a question of the model's: governance pauses the call for the person's
 approval whatever the model does ([governance.md](governance.md)). The same benchmark's
 `risky` cases check that on every adapter; its `undeclared` cases show what a tool that
-declares no `side_effects` gets (it runs, announced).
+declares no `side_effects` gets (it asks).
 
-An approval (an `irreversible` tool, a catalog `approve_when` that holds, a hook's `Ask`) is
-the same pause with `reason=APPROVAL` and the tool call attached.
+An approval (a `write` or `irreversible` tool, a catalog `approve_when` that holds, a hook's
+`Ask`) is the same pause with `reason=APPROVAL`, the tool call attached and the person's
+choices as its `options`: allow once, allow for this conversation, deny
+([governance.md](governance.md#what-the-person-picks)).
 
 ## Who reviews, on which screen: a `before_tool` hook
 
@@ -206,26 +208,31 @@ later calls a hook asks of the same `assignee`.
 
 **On failure.** A hook that raises fails the call (the framework sees the error).
 
-## Comments, and approving for the rest of the run
+## Comments, and allowing for this conversation
 
 **What.** `agent.resume(..., comment="Fine this once; over 500 needs finance")` keeps the
-reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call approves
-that tool's later calls in the same run without asking.
+reviewer's remark with the decision; `remember="run"` on an `approve` of a tool call (the
+choice "allow for this conversation") approves that tool's later calls in this run and in
+every later run of the same thread for the same user without asking — never an
+`irreversible` tool's, which asks at every call.
 
 **When.** A comment whenever a decision needs its why (it reaches the feedback approval
-patterns are learned from). `remember="run"` when a reviewer trusts the rest of this run with
-the tool (a batch of refunds of one customer).
+patterns are learned from). "For this conversation" when the person trusts the chat with the
+tool (a batch of refunds of one customer).
 
-**Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`), an A2A answer's
-data part (`{"comment": ..., "remember": "run"}`), an inbox of your own; every adapter and
-`ReAct`. Way 2: `InterruptResolution(comment=, remember=)`.
+**Where.** `agent.resume`, the AG-UI resume entry (`"comment"`, `"remember"`, or the picked
+option's value as `payload`: `"once"`, `"run"`, `"reject"`), an A2A answer (a data part
+`{"comment": ..., "remember": "run"}`, or the choice in words, as plain chat said it), an inbox
+of your own; every adapter and `ReAct`. `agent.resume(id, "answer", answer="run")` picks an
+option too. Way 2: `InterruptResolution(comment=, remember=)`.
 
 **Automatic.** The comment is on the run record (`last_resolution`, agent-runs' resolution
 history), on the `decision` event and the span attributes of the attempt that goes on after
 it, and in the feedback record; a rejection's comment is what the model reads as why, when the
-reject carries no `answer`. A remembered approval is kept in the run's journal: every later
-call of that tool in the run — after a pause, a crash, on another worker — runs without asking,
-with a `decision` event (`remembered: true`); another run asks again. It covers the tool's
+reject carries no `answer`. An approval for the conversation is kept in the run's journal and
+the run store's resolutions: every later call of that tool in the conversation — after a pause,
+a crash, on another worker, in a later run of the thread — runs without asking, with a
+`decision` event (`remembered: true`); another thread or user asks again. It covers the tool's
 later approvals asked of the same person or role (governance's, or a hook's `Ask` with the
 same `assignee`): an `Ask` that names someone else — finance, for a large amount — still
 asks.

@@ -39,6 +39,9 @@ from trellis.harness.tools.bridge import STALLED
 from trellis.harness.tools.query import GONE
 from trellis.harness.tools.results import PREFIX as READ_PREFIX
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 @tool(side_effects="read")
 def look(item: str) -> str:
@@ -205,8 +208,8 @@ async def test_a_pause_in_a_step_keeps_what_finished_and_the_later_writes_wait(
     assert sorted(asked, key=str) == sorted(
         [
             ("Is a right?", None),
-            ("Approve ship? ship is irreversible.", 1),
-            ("Approve bill? bill is irreversible.", 4),
+            ("Approve ship? ship is irreversible. Allow once, or deny.", 1),
+            ("Approve bill? bill is irreversible. Allow once, or deny.", 4),
         ],
         key=str,
     )

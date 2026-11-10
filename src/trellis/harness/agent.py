@@ -93,6 +93,7 @@ from trellis.harness.evals import (
 )
 from trellis.harness.features import COVERS, WITHOUT, Feature, features, run_without
 from trellis.harness.frontend import FRONTEND, Frontend
+from trellis.harness.governance.decision import chosen as choice
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
@@ -719,6 +720,10 @@ class Agent:
                 f"run {run_id} waits on {record.awaiting.interrupt_id}, not {interrupt_id}"
             )
         chosen = InterruptDecision(str(decision).upper())
+        awaiting = record.awaiting
+        picked = choice(answer) if answer in awaiting.option_values else None
+        if chosen is InterruptDecision.ANSWER and awaiting.tool_call is not None and picked:
+            (chosen, remember), answer = picked, None  # an approval's choice: what it names
         edited = chosen is InterruptDecision.EDIT
         try:
             resolution = InterruptResolution(

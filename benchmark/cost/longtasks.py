@@ -888,6 +888,7 @@ def flow_cases() -> list[Any]:  # noqa: PLR0915 - one list of cases, each a few 
                   *exactly("open_tender"), *exactly("award_tender"),
                   Probe("called", "carrier_quote", "every lane was quoted", limit=len(LANES[3]))),
             restart=True,
+            approve=True,  # the tender's writes ask: the person allows each
         ),),
         ("a worker restart mid-run", "the write before the crash not done again"),
         tools=(open_tender, carrier_quote, award_tender),
@@ -977,6 +978,7 @@ def flow_cases() -> list[Any]:  # noqa: PLR0915 - one list of cases, each a few 
                 sent=(*exactly("open_tender"), *exactly("award_tender"),
                       Probe("called", "carrier_quote", "every lane was quoted",
                             limit=len(LANES[group]))),
+                approve=True,
             ),),
             (edge, "tried again, nothing done twice"),
             tools=(open_tender, carrier_quote, award_tender),
@@ -999,6 +1001,7 @@ def flow_cases() -> list[Any]:  # noqa: PLR0915 - one list of cases, each a few 
             sent=(*exactly("open_tender"), *exactly("award_tender"),
                   Probe("called", "carrier_quote", "every other lane was quoted",
                         limit=len(LANES[2]) - 1)),
+            approve=True,
         ),),
         ("a tool down for good", "what was done and what was not, said"),
         tools=(open_tender, carrier_quote, award_tender),

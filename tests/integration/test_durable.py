@@ -17,6 +17,9 @@ from trellis.harness.runs import LocalRuns
 from trellis.harness.worker.__main__ import load, main
 from trellis.runs import Job
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 async def approve_then_finish(input: dict[str, str], agent: Runtime) -> str:
     ok = await agent.ask(f"Send the report on {input['topic']}?", assignee="role:editor")

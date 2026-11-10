@@ -1,7 +1,8 @@
 """Scenario: a worker dies in the middle of a run; another worker finishes it, and nothing the
 first one did happens twice.
 
-* a queued run is claimed by worker A under a short lease; it pays an invoice (a write: its
+* a queued run asks before it pays an invoice (a write asks): the person approves it;
+* worker A claims it under a short lease; it pays the invoice (its
   result is saved as the run's progress checkpoint on the heartbeat right after) and then the
   process dies — no finish, no release, nothing written;
 * the lease lapses; agent-runs (here the in-process store) puts the run back on the queue as
@@ -48,6 +49,10 @@ async def main() -> None:
     async with Harness() as h:
         agent = h.wrap(billing, id="billing")
         handle = await agent.start("invoice 7", user="ada")
+        assert await h.worker([agent]).run_once()  # the payment asks first
+        awaiting = (await handle.status()).awaiting
+        print("asked:", awaiting.question if awaiting else None)
+        await agent.resume(handle.id, "approve", reviewer="ada")  # queued again
 
         claimed = await h.runs.claim("worker-a", [agent.id], lease_seconds=LEASE_SECONDS)
         assert claimed is not None

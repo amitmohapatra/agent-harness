@@ -47,6 +47,7 @@ def _reset() -> None:
     done.clear()
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_the_agent_gets_the_harness_tools_next_to_its_own(harness: Harness) -> None:
     @function_tool
     def eta(order: str) -> str:
@@ -107,16 +108,18 @@ async def test_a_rejected_governance_approval_tells_the_model_and_does_not_run(
     assert len(model.inputs) == 2
 
 
-async def test_a_governance_approval_for_the_run_covers_the_tools_later_calls(
+async def test_an_irreversible_tools_approval_covers_one_call_only(
     harness: Harness,
 ) -> None:
     model = ScriptedModel([("ship", {"order": "o1"}), ("ship", {"order": "o2"}), "both"])
     agent = arm(harness.wrap(Agent(name="shipper", model=model), id="shipper"), [ship])
     paused = await agent.run("ship o1 and o2", user="u1")
     assert paused.interrupt is not None
-    finished = await agent.resume(
+    again = await agent.resume(
         paused.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
     )
+    assert again.interrupt is not None and done == ["o1"], again  # asked at every call
+    finished = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert finished.status is RunStatus.SUCCESS and finished.answer == "both"
     assert done == ["o1", "o2"] and len(model.inputs) == 3
 
@@ -751,6 +754,7 @@ async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_durat
     assert sorted(results) == sorted(recorded)
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
     harness: Harness,
 ) -> None:
@@ -847,6 +851,7 @@ async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) ->
     assert "Max turns (2) exceeded" in result.error.message
 
 
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_a_tool_the_model_made_up_is_an_error_it_reads_and_the_run_goes_on(
     harness: Harness,
 ) -> None:

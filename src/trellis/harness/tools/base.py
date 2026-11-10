@@ -164,6 +164,11 @@ class Tool:
     #: A call cut by a crash continues where it was when it runs again (a sub-agent: its run
     #: keeps a journal of its own), so it is run again rather than reported of unknown effect.
     resumable: bool = False
+    #: Its writes keep to what the run owns, so they are announced rather than asked (governance
+    #: ``Decision.unasked``): a harness built-in — its sandbox, its schedules (confirmed when
+    #: made), its memory, a sub-agent (whose own calls are governed) — or a framework's own tool
+    #: (Deep Agents' files and ``execute``). Set by the harness only.
+    confined: bool = False
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:

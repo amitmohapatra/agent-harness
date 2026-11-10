@@ -20,7 +20,8 @@ from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness.agui.sse import decode
 from trellis.runs import RunsClient
 
-pytestmark = [pytest.mark.live, needs_runs, needs_memory]
+#: about what a write does once it runs, not whether it asks: ``writes_unasked``
+pytestmark = [pytest.mark.live, needs_runs, needs_memory, pytest.mark.usefixtures("writes_unasked")]
 
 
 @tool(side_effects="write")

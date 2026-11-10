@@ -10,6 +10,8 @@ import asyncio
 import itertools
 from typing import Any
 
+import pytest
+
 from tests.support.arm import arm
 from tests.support.journals import journal_of
 from tests.support.models import ScriptedChat
@@ -19,6 +21,9 @@ from trellis.harness import budget
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.bridge import SAME_CALL
 from trellis.runs import Lease
+
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
 
 
 def told(model: ScriptedChat, request: int) -> list[tuple[str, str]]:
@@ -112,7 +117,10 @@ async def test_a_pause_in_a_batch_keeps_what_finished_and_numbers_calls_in_order
         result = await agent.resume(interrupt.interrupt_id, decision, answer=answer, reviewer="r")
     assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
     # the two pauses of one step, one after the other; the call numbered in the model's order
-    assert asked == {"Is a right?": None, "Approve ship? ship is irreversible.": 1}
+    assert asked == {
+        "Is a right?": None,
+        "Approve ship? ship is irreversible. Allow once, or deny.": 1,
+    }
     assert sorted(ran) == ["confirmed a", "looked b", "shipped c"]  # nothing ran twice
     assert len(model.requests) == 2  # resumed in place: the first step was not asked again
     assert told(model, 1) == [

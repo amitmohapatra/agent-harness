@@ -130,7 +130,7 @@ class SubAgent:
             source="local",
             side_effects=self.side_effects or await _side_effects(self.agent),
         )
-        return [Tool(spec, self._run, resumable=True)]
+        return [Tool(spec, self._run, resumable=True, confined=True)]
 
     async def _run(self, args: dict[str, Any]) -> Any:
         """The child run for this call (:func:`child_run`, its id the call's): its output, or

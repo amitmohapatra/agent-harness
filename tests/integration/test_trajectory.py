@@ -25,6 +25,9 @@ from trellis.harness.evals import (
     tool_sequence,
 )
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 PLAN: Final[list[Call]] = [("lookup", {"topic": "tides"}), ("note", {"text": "high"})]
 
 

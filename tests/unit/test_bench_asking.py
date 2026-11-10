@@ -249,11 +249,12 @@ async def test_a_yes_to_one_action_is_not_a_yes_to_the_next() -> None:
     assert [p["tool"] for p in row["pauses"]] == ["cancel_all_orders", "refund"]
 
 
-async def test_a_small_write_runs_and_a_small_order_is_under_the_rule() -> None:
+async def test_a_small_write_asks_once_and_a_small_order_is_under_the_rule() -> None:
     alert = [("create_alert", {"sku": "SKU-00044", "threshold": 8, "region": "east",
                                "channel": "email"})]  # fmt: skip
     row = await b.run_case(case("risky-small-write"), PlannedChat(alert), "t")
-    assert row["passed"] and row["pauses"] == [], row
+    # the write asks once; the person allows it for the conversation (``ALLOWS``)
+    assert row["passed"] and [p["tool"] for p in row["pauses"]] == ["create_alert"], row
     order = [("reorder", {"sku": "SKU-00031", "quantity": 300, "supplier": "SUP-01",
                           "store": "S03"})]  # fmt: skip
     row = await b.run_case(case("act-all-given"), PlannedChat(order), "t")
@@ -280,13 +281,14 @@ async def test_a_tool_that_says_nothing_of_what_it_does_waits_for_a_yes() -> Non
                                                          "to": "me@acme.com"})]),
     ],
 )  # fmt: skip
-async def test_a_tool_that_declares_only_a_write_is_held_by_nothing(
+async def test_a_tool_that_declares_only_a_write_waits_for_a_yes(
     case_id: str, plan: list[tuple[str, dict[str, Any]]]
 ) -> None:
-    """Second half: a tool that says only that it writes runs (announced) when the model
-    calls it — today's default for a declared ``write``."""
+    """Second half: a tool that says only that it writes waits for the person's approval too
+    (a write asks); its body has not run."""
     row = await b.run_case(case(case_id), PlannedChat(plan), "t")
-    assert row["problems"] == [f"{plan[0][0]} {b.NO_YES}"] and row["pauses"] == []
+    assert row["problems"] == [] and row["ran"] == []
+    assert [(p["reason"], p["tool"]) for p in row["pauses"]] == [("APPROVAL", plan[0][0])]
 
 
 async def test_the_declared_tool_and_the_one_offered_by_itself_are_the_same_request() -> None:

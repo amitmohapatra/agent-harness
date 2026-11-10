@@ -23,7 +23,7 @@ nothing, the feature's needs alone, each of them turned off with `without=`).
 |---|---|---|---|---|---|---|---|---|
 | F60 events: a run's numbered events, tool calls, announcements, its end | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F02 streamed text: the answer as text deltas | partly 4 (1) | partly 4 (1) | no (2) | partly 4 (1) | partly 4 (1) | partly 4 (1) | partly 4 (1) | partly 4 (1) |
-| F32 governance tiers: read runs, write is announced, irreversible asks | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
+| F32 governance tiers: read runs, write asks (once a conversation), irreversible asks | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F33 approval rules (approve_when) from the catalog | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 | yes 28 |
 | F36 ask: a question pauses the run, the answer resumes it | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 | yes 14 |
@@ -121,7 +121,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 |---|---|
 | F60 events: a run's numbered events, tool calls, announcements, its end | no (51) |
 | F02 streamed text: the answer as text deltas | no (51) |
-| F32 governance tiers: read runs, write is announced, irreversible asks | yes 1 |
+| F32 governance tiers: read runs, write asks (once a conversation), irreversible asks | yes 1 |
 | F33 approval rules (approve_when) from the catalog | yes 1 |
 | F36 ask: a question pauses the run, the answer resumes it | yes 1 |
 | F36u ask_user: the model asks a structured question (a date), the answer is its result | no (52) |

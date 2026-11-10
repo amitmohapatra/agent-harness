@@ -93,6 +93,13 @@ CHOICES: Final = 3
 UPDATE: Final = "update"
 BOTH: Final = "both"
 NEITHER: Final = "none"
+#: The values of the options a schedule whose task names writes is confirmed with: schedule it
+#: allowing them in its runs, or schedule it asking at each run (or :data:`NEITHER`).
+ALLOW: Final = "allow"
+EACH_TIME: Final = "ask"
+#: The schedule metadata key of the writes the user allowed its runs when they confirmed it:
+#: a fired run calls them without asking (``tools.bridge``); any other write still asks.
+ALLOWED: Final = "trellis_allowed"
 #: How alike two tasks' words are (``difflib``'s ratio, digits left out) for one to be the
 #: other with a different time or value, where they name no identifier in common.
 ALIKE: Final = 0.8
@@ -131,6 +138,8 @@ class Fired:
     touched: datetime | None = None
     #: whether this run found the condition holding (set when it answers)
     met: bool | None = None
+    #: the writes the user allowed its runs when they confirmed it (:data:`ALLOWED`)
+    allowed: tuple[str, ...] = ()
 
     @classmethod
     def of(cls, metadata: dict[str, Any]) -> Fired | None:
@@ -146,6 +155,7 @@ class Fired:
             task=str(task.get("task") or ""),
             failures=int(metadata.get(FAILURES) or 0),
             touched=datetime.fromisoformat(touched) if isinstance(touched, str) else None,
+            allowed=tuple(str(name) for name in metadata.get(ALLOWED) or ()),
         )
 
 
@@ -347,6 +357,12 @@ SPECS: Final = (
                 "type": "string",
                 "description": "An IANA zone, only when the user names one; default theirs.",
             },
+            "tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Tools its runs will call that change something: the user "
+                "allows them now.",
+            },
         },
         ["task"],
     ),
@@ -390,7 +406,7 @@ def schedule_tools(runtime: Runtime | None = None) -> list[Tool]:
     if runtime is not None:
         dated = f"{specs[0].description} {now_said(runtime)}"
         specs[0] = specs[0].model_copy(update={"description": dated})
-    return [Tool(spec, _RUN[spec.name], feature="schedules") for spec in specs]
+    return [Tool(spec, _RUN[spec.name], feature="schedules", confined=True) for spec in specs]
 
 
 async def _schedule_task(args: dict[str, Any]) -> Any:
@@ -414,16 +430,20 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
         return refused
     mine = await _mine(runtime)
     about = {"task": task, "condition": condition, "once": once}
-    if (said := await _twin_asked(runtime, mine, about, when, zone)) is not None:
+    twin = await _twin_asked(runtime, mine, about, when, zone)
+    if (said := twin or _full(mine, max_per_user)) is not None:
         return said
-    if len(mine) >= max_per_user:
-        return (
-            f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
-        )
     agent = runtime.agent
     metadata = {**agent._metadata(runtime.without, None), TASK: about, TOUCHED: _now()}
     if runtime.conversation != runtime.run_id:  # the chat it was set in
         metadata[THREAD] = runtime.identity.thread
+    writes = await _asking(runtime, args.get("tools") or [])
+    if writes:
+        picked = await _writes_asked(runtime, _said(about, when, zone), writes)
+        if picked == NEITHER:
+            return "Nothing scheduled: the user did not want it."
+        if picked == ALLOW:
+            metadata[ALLOWED] = writes
     try:
         spec = ScheduleSpec(
             tenant_id=runtime.tenant,
@@ -441,6 +461,47 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
     except (ValueError, ValidationError, ConflictError) as exc:
         return f"That schedule was refused: {exc}"
     return f"Scheduled {made.schedule_id}: {_described(made)}{counted}"
+
+
+def _full(mine: list[Schedule], max_per_user: int) -> str | None:
+    """What the user is told when they have as many schedules as they may, else ``None``."""
+    if len(mine) < max_per_user:
+        return None
+    return f"You have {len(mine)} of {max_per_user} schedules: cancel one before adding another."
+
+
+async def _asking(runtime: Runtime, names: list[Any]) -> list[str]:
+    """Of the tools ``names`` says a schedule's runs will call, those a call of would ask a
+    person about because they write (or say nothing of what they do), in the run's own tool
+    set: never an ``irreversible`` one, which asks every call, nor one that does not ask."""
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    asking: list[str] = []
+    for name in dict.fromkeys(str(n) for n in names):
+        found = runtime.toolbox.get(name)
+        spec = found.spec if found is not None else runtime.native.get(name)
+        if spec is None or name not in runtime.own_tools():
+            continue
+        decision = await governance.check(
+            name, {}, side_effects=spec.side_effects, agent_id=runtime.agent_id
+        )
+        confined = found is not None and found.confined  # announced, never asked
+        if decision.asks and decision.risk != "irreversible" and not confined:
+            asking.append(name)
+    return asking
+
+
+async def _writes_asked(runtime: Runtime, said: str, writes: list[str]) -> Any:
+    """The user's confirmation of a schedule whose runs will call ``writes``: schedule it
+    allowing them, schedule it asking at each run, or not at all."""
+    named = ", ".join(writes)
+    return await runtime.ask(
+        f"Schedule {said}? Its runs will call {named}, which change things.",
+        options=[
+            Option(value=ALLOW, label=f"Schedule it, allowing {named} in its runs"),
+            Option(value=EACH_TIME, label="Schedule it, asking me at each run"),
+            Option(value=NEITHER, label="Do not schedule it"),
+        ],
+    )
 
 
 async def _twin_asked(

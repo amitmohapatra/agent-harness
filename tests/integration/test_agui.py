@@ -114,6 +114,8 @@ async def test_an_approval_is_answered_with_true(client: httpx.AsyncClient) -> N
     entry = paused["outcome"]["interrupts"][0]
     assert entry["reason"] == "approval"
     assert entry["metadata"]["tool_call"]["tool"] == "refund"
+    # what an app renders: an irreversible tool's choices (allow once, deny)
+    assert [o["value"] for o in entry["metadata"]["options"]] == ["once", "reject"]
 
     rejected = await client.post(
         f"{PATH}/run", json=body(resume=[{"interruptId": entry["id"], "payload": "maybe"}])
@@ -507,8 +509,10 @@ async def test_without_a_user_message_the_agent_gets_the_state(client: httpx.Asy
             {"payload": "too much", "decision": "reject"},
             "refund was not run: the approver rejected it (too much)",
         ),
+        ({"payload": "reject"}, "refund was not run: the approver rejected it"),
+        ({"payload": "once"}, "refunded o1"),
     ],
-    ids=["false-rejects", "object-edits", "decision-named"],
+    ids=["false-rejects", "object-edits", "decision-named", "deny-picked", "once-picked"],
 )
 async def test_an_approval_is_rejected_edited_or_decided_outright(
     client: httpx.AsyncClient, resume: dict[str, Any], result: str
@@ -648,7 +652,7 @@ def test_an_app_that_named_itself_keeps_its_name(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_a_resume_entry_carries_a_comment_and_the_interrupt_what_to_render() -> None:
-    @tool(side_effects="irreversible")
+    @tool(side_effects="write")  # allowed for the conversation
     def deploy(region: str) -> str:
         """Deploy to a region."""
         return f"deployed to {region}"

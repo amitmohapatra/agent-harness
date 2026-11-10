@@ -55,7 +55,7 @@ ENV = {"MEMORY_URL": "http://memory.test", "TRELLIS_API_KEY": "test"}
     ("risk", "expected"),
     [
         ("read", Action.RUN),
-        ("write", Action.ANNOUNCE),
+        ("write", Action.ASK),
         ("irreversible", Action.ASK),
     ],
 )
@@ -185,18 +185,18 @@ async def test_the_catalog_overrides_the_risk_and_sets_the_approval_rule() -> No
 async def test_rules_are_read_again_within_seconds_conditionally(clock: Clock) -> None:
     catalog = FakeCatalog({"po": Rule(risk="write")})
     governance = Governance(catalog)
-    assert (await governance.check("po", {"amount": 50})).announces
+    assert (await governance.check("po", {"amount": 50})).asks  # a write asks
     clock.now += GOVERNANCE_TTL_SECONDS / 2
     await governance.check("po", {"amount": 50})
     assert len(catalog.asked) == 1  # fresh: not asked again
     clock.now += GOVERNANCE_TTL_SECONDS
-    assert (await governance.check("po", {"amount": 50})).announces  # a 304: the same rules
+    assert (await governance.check("po", {"amount": 50})).asks  # a 304: the same rules
     assert catalog.etags_sent == [None, '"v1"']
     # an administrator adds a rule: the next read (seconds later, not minutes) has it
-    catalog.rules["po"] = Rule(risk="write", approve_when="amount > 10")
+    catalog.rules["po"] = Rule(risk="write", approve_when="amount > 100")
     catalog.version = 2
     clock.now += GOVERNANCE_TTL_SECONDS + 1
-    assert (await governance.check("po", {"amount": 50})).asks
+    assert (await governance.check("po", {"amount": 50})).announces  # the rule decides
 
 
 async def test_a_tool_asked_about_for_the_first_time_is_read_at_once_with_the_others(
@@ -236,7 +236,7 @@ async def test_an_unreadable_catalog_makes_every_tool_that_does_more_than_read_a
     clock.now += GOVERNANCE_TTL_SECONDS + 1
     with caplog.at_level("INFO", logger="trellis.governance"):
         back = await governance.check("erp-po", {}, side_effects="write")
-        assert back.announces  # back to its own risk
+        assert back.asks and back.reason == "erp-po is write."  # back to its own risk
     assert "can be read again" in caplog.text
 
 
@@ -619,7 +619,8 @@ async def test_a_governed_call_that_is_announced_tells_on_announce_first(
         heard.append("ran")
         return text
 
-    governance = Governance()
+    # a rule that does not hold lets a write run, announced
+    governance = Governance(FakeCatalog({"note": Rule(risk="write", approve_when='text == "x"')}))
     on_announce = async_ if asynchronous else sync
     call = governed(
         note, governance, side_effects="write", on_ask=lambda d: True, on_announce=on_announce

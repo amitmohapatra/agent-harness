@@ -53,6 +53,8 @@ async def main() -> None:
     async with Harness() as h:
         buyer = h.wrap(buy, id="buyer", version="2026.10")
         result = await buyer.run("A-1", user="ada")
+        if result.interrupt is not None:  # the order is a write: it asks first
+            result = await buyer.resume(result.run_id, "approve", reviewer="ada")
         print(result.status.value, result.answer)  # the price, then: may or may not have ordered
 
         thinker = h.wrap(ponder, id="thinker")

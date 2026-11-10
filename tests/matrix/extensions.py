@@ -23,7 +23,8 @@ from trellis.contracts import ToolCall
 
 
 class _OverHundred(Hooks):
-    """An approval rule in code: a payment over 100 asks; a smaller one runs unasked."""
+    """An approval rule in code: a payment over 100 asks on its own question; a smaller one is
+    governance's (a write: asked)."""
 
     async def before_tool(self, call: ToolCall) -> Ask | None:
         return Ask("Over 100: pay it?") if call.args.get("amount", 0) > 100 else None
@@ -37,8 +38,8 @@ async def approval_rule(w: World) -> None:
 
     plan = [("pay", {"amount": 500}), ("pay", {"amount": 50})]
     o = (await w.go([pay], plan, hooks=[_OverHundred()])).succeeded()
-    assert len(o.pauses) == 1, o.pauses  # the big payment asks; the small one runs
-    assert "Over 100: pay it?" in o.pauses[0].question, o.pauses
+    asked = ["Over 100: pay it?" in p.question for p in o.pauses]
+    assert asked == [True, False], o.pauses  # the hook's question, then governance's
 
 
 async def hitl_v2(w: World) -> None:

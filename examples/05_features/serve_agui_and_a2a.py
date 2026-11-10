@@ -82,8 +82,14 @@ async def main() -> None:
         async with Harness() as caller:
             helper = caller.wrap(assistant, id="assistant")
             result = await helper.run("book a table", user="ada")
-            while result.interrupt is not None:  # the concierge's question, asked here
-                print("the remote agent asks:", result.interrupt.question)
+            while result.interrupt is not None:
+                if result.interrupt.tool_call is not None:  # calling an agent asks first
+                    print("asked:", result.interrupt.question)
+                    result = await helper.resume(
+                        result.run_id, "answer", answer="run", reviewer="ada"
+                    )  # allow for this conversation
+                    continue
+                print("the remote agent asks:", result.interrupt.question)  # asked here
                 result = await helper.resume(
                     result.run_id, "answer", answer="friday", reviewer="ada"
                 )

@@ -25,6 +25,9 @@ from trellis.harness.evals import tool_coverage
 from trellis.harness.tools.convert import langchain as lc
 from trellis.harness.tools.lint import lint
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 RULE = {"item": "a", "low": 2, "high": 6}
 
 

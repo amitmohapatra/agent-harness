@@ -28,7 +28,7 @@ await gov.aclose()
 | Environment | Governance |
 |---|---|
 | `MEMORY_URL` and `TRELLIS_API_KEY` | the memory service's tool catalog, in `tenant` (or the key's own tenant): risks and `approve_when` rules as an administrator set them |
-| `MEMORY_URL` unset | no catalog: each tool's own side effects decide (`read` runs, `write` is announced, `irreversible` asks) |
+| `MEMORY_URL` unset | no catalog: each tool's own side effects decide (`read` runs, `write` and `irreversible` ask) |
 | `MEMORY_URL` without a key | a `ConfigurationError` |
 
 `agent_id` and `tenant` are whom `decided` attributes a person's decision to; everything else

@@ -31,6 +31,9 @@ from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 
+#: These tests are about what a call does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 @pytest.fixture
 async def served() -> AsyncIterator[tuple[httpx.AsyncClient, Harness]]:

@@ -27,6 +27,9 @@ from trellis.harness.journal import content_key
 from trellis.harness.tools import base
 from trellis.harness.tools.base import ToolTimeout
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 UNKNOWN_TEXT: Final = (
     "transfer timed out after 0.05s; it may or may not have taken effect: check before "
     "calling it again"

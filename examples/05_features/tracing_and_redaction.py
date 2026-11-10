@@ -46,6 +46,8 @@ async def main() -> None:
     async with Harness() as h:
         agent = h.wrap(mailer, id="mailer")
         result = await agent.run("Your order shipped.", user="ada", thread="orders")
+        if result.interrupt is not None:  # sending is a write: it asks first
+            result = await agent.resume(result.run_id, "approve", reviewer="ada")
         print(result.status.value, result.answer)
     for span in exporter.get_finished_spans():
         attributes = span.attributes or {}

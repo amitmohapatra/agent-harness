@@ -126,8 +126,10 @@ async def events(w: World) -> None:
     o.succeeded()
     assert o.answer == "Done. noted high", o.answer
     called = [c for c in o.called() if c != CONFIRM[0]]
-    assert called == ["lookup", "note"], called
-    assert [n["tool"] for n in o.custom("tool_notice")] == ["note"]  # a write is announced
+    # a target run again from its input after the write's pause replays lookup's call
+    assert list(dict.fromkeys(called)) == ["lookup", "note"], called
+    asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
+    assert "note" in asked and not o.custom("tool_notice"), asked  # a write asks, then runs
     assert d.ran("note") == [{"text": "high"}]
     if w.mode == "stream":
         assert [e.type for e in o.surface][-1] is RunEventType.RUN_FINISHED
@@ -160,9 +162,9 @@ async def tiers(w: World) -> None:
     ]
     o = (await w.go([d.lookup(), d.note(), d.refund()], plan)).succeeded()
     asked = [p.tool_call.tool for p in o.pauses if p.tool_call is not None]
-    assert asked == ["refund"], asked  # only the irreversible call asks
+    assert asked == ["note", "refund"], asked  # the write and the irreversible call ask
     assert o.pauses[0].reason is InterruptReason.APPROVAL
-    assert [n["tool"] for n in o.custom("tool_notice")] == ["note"]
+    assert [p.option_values for p in o.pauses] == [["once", "run", "reject"], ["once", "reject"]]
     assert d.ran("refund") == [{"order": "o1"}] and d.ran("note") == [{"text": "refund o1"}]
     assert o.answer == "Done. refunded o1"
 
@@ -177,7 +179,7 @@ async def approve_when(w: World) -> None:
         assert asked == [{"text": "big"}], asked  # the rule, not the tool's risk, asks
         assert 'text == "big"' in o.pauses[0].question
     else:
-        assert asked == [], asked  # no catalog: a write runs, announced
+        assert asked == [{"text": "small"}, {"text": "big"}], asked  # no catalog: a write asks
     assert d.ran("note") == [{"text": "small"}, {"text": "big"}]
 
 
@@ -508,6 +510,10 @@ async def parallel_writes(w: World) -> None:
 
 
 async def repeated_calls(w: World) -> None:
+    from trellis.harness.governance import decision
+
+    # the repeats are the subject, not the write's approval (``writes_unasked``)
+    w.monkeypatch.setitem(decision.ACTIONS, "write", decision.Action.ANNOUNCE)
     d = Desk()
     step: list[Call] = [("pw", {"key": "1"}), ("pw", {"key": "2"})] + [("pw", {"key": "1"})] * 2
     o = await w.go([d.parallel("pw", "write")], [step], target=_parallel_target(w))  # type: ignore[list-item]
@@ -1199,7 +1205,7 @@ FEATURES: Final[list[Feature]] = [
     ),
     Feature(
         "F32",
-        "governance tiers: read runs, write is announced, irreversible asks",
+        "governance tiers: read runs, write asks (once a conversation), irreversible asks",
         "F32",
         "always on; per tool through side_effects",
         tiers,
@@ -1994,8 +2000,8 @@ async def sandboxed(w: World) -> None:
 
 # --------------------------------------------------------------------------- the selection
 async def selection(w: World) -> None:
-    """One run that does a bit of everything (a read retried, a write announced, an approval)
-    under the cell's selection: what is on works together, what is off leaves no trace
+    """One run that does a bit of everything (a read retried, a write and an irreversible call
+    approved) under the cell's selection: what is on works together, what is off leaves no trace
     (``World.verify``, after every scenario)."""
     d = Desk()
     plan: list[Call] = [
@@ -2006,7 +2012,7 @@ async def selection(w: World) -> None:
     o = (await w.go([d.quote(), d.note(), d.refund()], plan)).succeeded()
     assert o.answer == "Done. refunded o1", o.answer
     assert d.quotes == 3 and d.ran("refund") == [{"order": "o1"}]
-    assert [p.tool_call.tool for p in o.pauses if p.tool_call is not None] == ["refund"]
+    assert [p.tool_call.tool for p in o.pauses if p.tool_call is not None] == ["note", "refund"]
 
 
 SELECTION: Final = Feature(

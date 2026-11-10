@@ -43,6 +43,9 @@ from trellis.harness.middleware import GovernTools, RunCheckpointer
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job, LeaseLostError
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 ROOT = Path(__file__).resolve().parents[2]
 
 #: A window with room for the long-task tools.
@@ -447,7 +450,7 @@ async def test_a_later_steps_identical_call_is_asked_about_again_after_a_pause(
         )
     assert result.status is RunStatus.SUCCESS and result.answer == "twice", result.error
     # the first approval is the first call's: the second is asked about, and wired
-    wire = "Approve lc_wire? lc_wire is irreversible."
+    wire = "Approve lc_wire? lc_wire is irreversible. Allow once, or deny."
     assert asked == [wire, "Go on?", wire]
     assert done == ["wire ada", "wire ada"]
     assert results(model, 3) == ["wired ada", "yes", "wired ada"]

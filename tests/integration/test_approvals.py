@@ -1,7 +1,7 @@
 """W5 approvals on every adapter, ``ReAct`` and Way 2: an approval rule in code — a
 ``before_tool`` hook asking by the call's arguments (whose it is, on its own screen), journaled,
 beside the tool's ``side_effects`` and the catalog's ``approve_when``; a reviewer's comment, kept
-with the decision; an approval remembered for the rest of the run, never for another; a result
+with the decision; an approval for the conversation, never an irreversible tool's; a result
 from outside the run, which an ``ask`` in the tool waits for and the model reads as the tool's
 output."""
 
@@ -29,8 +29,11 @@ from trellis.contracts import (
 )
 from trellis.harness.events import DECISION
 from trellis.harness.governance import Decision, Governance, Rejected, governed
+from trellis.harness.governance.decision import CHOICES, DENY, ONCE, SAID
 from trellis.testing import Decide, Reviewer
 
+#: what plain chat reads after an approval's question: allow once, for this conversation, deny
+THREE = SAID[CHOICES]
 refunded: list[int] = []
 #: what was paid, in order (the approval rules in code below)
 paid: list[int] = []
@@ -99,13 +102,13 @@ async def test_a_hook_and_the_catalog_rule_by_arguments_on_every_adapter(
     agent = arm(memory_harness.wrap(target, id=f"payer-{framework}", hooks=[rule]), tools)
     first = await agent.run("pay three", user="ada")
     assert first.interrupt is not None, first
-    assert first.interrupt.question == "Approve pay? amount > 20."  # the catalog's rule
+    assert first.interrupt.question == f"Approve pay? amount > 20. {THREE}"  # the catalog's rule
     assert first.interrupt.assignee is None and first.interrupt.component is None
     assert paid == [5]  # small: nobody asked
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
     asked = second.interrupt
     assert asked is not None and asked.reason is InterruptReason.APPROVAL, second
-    assert asked.question == "Approve pay? Pay 500?"
+    assert asked.question == f"Approve pay? Pay 500? {THREE}"
     assert asked.tool_call is not None and asked.tool_call.args == {"amount": 500}
     assert (asked.assignee, asked.component, asked.props) == (
         "role:finance",
@@ -140,7 +143,7 @@ async def test_remembering_a_hooks_ask_covers_later_asks_of_the_same_assignee_on
     )
     asked = finance.interrupt  # 60 was not asked; 900 is finance's: still asked
     assert asked is not None and asked.assignee == "role:finance", finance
-    assert asked.question == "Approve pay? Pay 900?" and paid == [50, 60]
+    assert asked.question == f"Approve pay? Pay 900? {THREE}" and paid == [50, 60]
     done = await agent.resume(asked.interrupt_id, "approve", reviewer="cfo", remember="run")
     assert done.status is RunStatus.SUCCESS and done.answer == "Done. paid 950", done
     assert paid == [50, 60, 900, 950]  # 950: finance's again, remembered
@@ -149,8 +152,8 @@ async def test_remembering_a_hooks_ask_covers_later_asks_of_the_same_assignee_on
 
 
 async def test_governed_asks_by_arguments_with_a_hook() -> None:
-    """Way 2: ``governed(..., hooks=)`` — a small amount runs unasked, a large one is asked
-    on finance's screen (``on_ask`` gets the ``Ask``'s assignee, component and props), and
+    """Way 2: ``governed(..., hooks=)`` — a small amount is governance's (a write: asked), a
+    large one is asked on finance's screen (``on_ask`` gets the ``Ask``'s assignee, component and props), and
     an ``irreversible`` tool the hook leaves alone is governance's to ask about."""
     asked: list[Decision] = []
 
@@ -163,12 +166,13 @@ async def test_governed_asks_by_arguments_with_a_hook() -> None:
 
     gov = Governance()
     small = governed(settle, gov, side_effects="write", on_ask=on_ask, hooks=[Threshold()])
-    assert await small(amount=5) == "settled 5"  # nobody asked
+    assert await small(amount=5) == "settled 5"  # governance asked: a write
     with pytest.raises(Rejected):
         await small(amount=500)  # the hook asked, on finance's screen
     risky = governed(settle, gov, side_effects="irreversible", on_ask=on_ask, hooks=[Threshold()])
     assert await risky(amount=50) == "settled 50"  # governance asked
     assert [(d.question, d.assignee, d.component, d.props) for d in asked] == [
+        ("Approve settle? settle is write.", None, None, None),
         ("Approve settle? Pay 500?", "role:finance", "pay-review", {"amount": 500}),
         ("Approve settle? settle is irreversible.", None, None, None),
     ]
@@ -178,7 +182,7 @@ async def test_governed_asks_by_arguments_with_a_hook() -> None:
 
 
 @pytest.mark.parametrize("framework", list(BUILDERS))
-async def test_an_approval_remembered_for_the_run_covers_the_tools_later_calls_only_there(
+async def test_an_irreversible_tool_asks_at_every_call_even_when_remembered(
     harness: Harness, framework: str, tmp_path: Path
 ) -> None:
     plan: list[Call] = [("wire", {"amount": 50}), ("wire", {"amount": 60})]
@@ -186,14 +190,18 @@ async def test_an_approval_remembered_for_the_run_covers_the_tools_later_calls_o
     agent = arm(harness.wrap(target, id=f"wires-{framework}"), tools)
     first = await agent.run("wire twice", user="ada")
     assert first.interrupt is not None, first
-    resumed = await agent.resume(
+    assert first.interrupt.question == "Approve wire? wire is irreversible. Allow once, or deny."
+    assert list(first.interrupt.options) == [ONCE, DENY]  # never for this conversation
+    second = await agent.resume(
         first.interrupt.interrupt_id, "approve", reviewer="lee", remember="run", comment="fine"
     )
+    assert second.interrupt is not None and refunded == [50], second  # asked again
+    resumed = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="lee")
     assert resumed.status is RunStatus.SUCCESS and resumed.answer == "Done. wired 60", resumed
-    assert refunded == [50, 60]  # the second call was not asked about
+    assert refunded == [50, 60]
     record = await harness.runs.get(first.run_id)
     assert record is not None and record.last_resolution is not None
-    assert (record.last_resolution.remember, record.last_resolution.comment) == ("run", "fine")
+    assert record.last_resolution.remember == "once"
     other = await agent.run("wire twice", user="ada")  # never across runs
     assert other.status is RunStatus.PAUSED
 
@@ -202,9 +210,9 @@ async def test_a_remembered_approval_and_a_comment_are_events_of_the_next_attemp
     harness: Harness,
 ) -> None:
     async def fn(input: str, agent: Runtime) -> Any:
-        return [await agent.tools.call("wire", amount=a) for a in (1, 2)]
+        return [await agent.tools.call("pay", amount=a) for a in (1, 2)]
 
-    agent = arm(harness.wrap(fn, id="wiring"), [wire])
+    agent = arm(harness.wrap(fn, id="wiring"), [pay])
     paused = await agent.run("go", user="ada")
     assert paused.interrupt is not None
     seen: list[Any] = []
@@ -232,8 +240,8 @@ async def test_a_remembered_approval_and_a_comment_are_events_of_the_next_attemp
         "comment": "ok for today",
         "remember": "run",
     }
-    assert said[1] == {"name": DECISION, "tool": "wire", "decision": "APPROVE", "remembered": True}
-    assert seen[-1].data["result"] == ["wired 1", "wired 2"]
+    assert said[1] == {"name": DECISION, "tool": "pay", "decision": "APPROVE", "remembered": True}
+    assert seen[-1].data["result"] == ["paid 1", "paid 2"]
 
 
 async def test_a_rejection_with_a_comment_tells_the_model_why(harness: Harness) -> None:
@@ -305,7 +313,10 @@ async def test_a_result_from_outside_is_an_ask_in_the_tool_on_every_adapter(
     plan: list[Call] = [("sign", {"contract": "c-1"})]
     target, tools = await BUILDERS[framework](harness, [sign], tmp_path, plan)
     agent = arm(harness.wrap(target, id=f"signing-{framework}"), tools)
-    paused = await agent.run("get c-1 signed", user="ada")
+    approval = await agent.run("get c-1 signed", user="ada")
+    assert approval.interrupt is not None, approval  # a write: approved first
+    assert approval.interrupt.reason is InterruptReason.APPROVAL
+    paused = await agent.resume(approval.run_id, "approve", reviewer="ada")
     asked = paused.interrupt
     assert asked is not None and asked.reason is InterruptReason.QUESTION, paused
     assert asked.expects == {"type": "string"}

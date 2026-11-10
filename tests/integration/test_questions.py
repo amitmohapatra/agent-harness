@@ -273,7 +273,8 @@ async def test_without_agent_runs_a_run_hook_tells_whoever_waits() -> None:
     assert done.answer == "a: wired"
     assert telling.told == [
         f"Which plan? (for role:sales) /runs/{done.run_id}",
-        f"Approve wire? wire is irreversible. (for None; call wire) /runs/{done.run_id}",
+        f"Approve wire? wire is irreversible. Allow once, or deny. (for None; call wire) "
+        f"/runs/{done.run_id}",
     ]
 
 

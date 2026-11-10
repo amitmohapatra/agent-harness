@@ -447,7 +447,8 @@ async def _gated(run: Invocation) -> dict[str, ToolSpec]:
     runtime = run.runtime
     if runtime.agent.hooks:  # a tool hook may rewrite the call, deny it or ask its own question
         return {}  # first: its calls pause as the harness's do
-    specs = {s.name: s for s in [*runtime.native.values(), *(t.spec for t in run.tools)]}
+    own = [t.spec for t in run.tools if not t.confined]  # a confined write is announced
+    specs = {s.name: s for s in [*runtime.native.values(), *own]}
     governance = runtime.agent.harness._governance(runtime.tenant)
     asks = await governance.may_ask(list(specs.values()), agent_id=runtime.agent_id)
     return {name: specs[name] for name in asks}

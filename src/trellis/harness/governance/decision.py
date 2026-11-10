@@ -1,8 +1,8 @@
 """What happens to one tool call: it runs, it runs and is announced, or it waits for a person.
 
-The action follows from the tool's risk — what it does: ``read`` runs, ``write`` runs and is
-announced, ``irreversible`` asks, and so does a tool that has not said what it does (any other
-risk: nothing known is never a reason to run) — unless an approval rule (``approve_when``: an
+The action follows from the tool's risk — what it does: ``read`` runs, ``write`` and
+``irreversible`` ask, and so does a tool that has not said what it does (any other risk: nothing
+known is never a reason to run) — unless an approval rule (``approve_when``: an
 administrator's, or an accepted approval suggestion) governs the tool: then the call asks
 exactly when the rule holds on its arguments. The rule language is the memory service's own
 (:mod:`trellis.memory.approval`, which writes and validates these rules): there is one
@@ -10,6 +10,13 @@ implementation of it, and governance evaluates rather than re-invents it. A rule
 evaluated on a call asks, and so does :data:`~trellis.harness.governance.catalog.CATALOG_UNREAD`
 — the decision fails closed. A rule that cannot be evaluated is an :class:`ApprovalRuleError`
 too: logged once per rule, and carried on the decision (``error``) for the run to record.
+
+A write that asks only because it writes is announced instead where something else already
+answers for it (:meth:`Decision.unasked`): a framework's own tool under its own permission flow,
+or a harness built-in that keeps to what the run owns. A person asked about a call of a tool the
+harness runs picks one of :data:`CHOICES`, as in Claude Code — allow once, allow for this
+conversation, deny — and about an ``irreversible`` one of :data:`EVERY_TIME`: it asks every
+call (:func:`choices`, :func:`chosen`).
 """
 
 from __future__ import annotations
@@ -22,7 +29,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Final
 
-from trellis.contracts import ErrorCategory, HarnessError
+from trellis.contracts import (
+    ErrorCategory,
+    HarnessError,
+    InterruptDecision,
+    InterruptRemember,
+    Option,
+)
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.governance.catalog import CATALOG_UNREAD
 from trellis.memory.approval import evaluate
@@ -50,9 +63,46 @@ class Action(StrEnum):
 #: The action of each risk when no rule governs the tool.
 ACTIONS: Final[dict[str, Action]] = {
     "read": Action.RUN,
-    "write": Action.ANNOUNCE,
+    "write": Action.ASK,
     "irreversible": Action.ASK,
 }
+
+#: The choices of a person asked about a call the harness runs. A value is what an answer that
+#: picks it carries; "for this conversation" is the contracts' ``remember="run"``, which covers
+#: the tool's later calls in every later run of the same thread for the same user.
+ONCE: Final = Option(value="once", label="Allow once")
+CONVERSATION: Final = Option(value="run", label="Allow for this conversation")
+DENY: Final = Option(value="reject", label="Deny")
+CHOICES: Final = (ONCE, CONVERSATION, DENY)
+#: An ``irreversible`` tool's: never allowed beyond the call asked about.
+EVERY_TIME: Final = (ONCE, DENY)
+#: What plain chat reads after the question, for each set of choices.
+SAID: Final[dict[tuple[Option, ...], str]] = {
+    CHOICES: "Allow once, allow for this conversation, or deny.",
+    EVERY_TIME: "Allow once, or deny.",
+}
+
+
+def choices(risk: str) -> tuple[Option, ...]:
+    """The choices offered on a call of a tool with ``risk``."""
+    return EVERY_TIME if risk == "irreversible" else CHOICES
+
+
+def reach(tool: str, assignee: str | None) -> str:
+    """What an approval allowed beyond its call covers: the tool's later calls asked of the
+    same person or role (an ``Ask`` naming someone else still asks)."""
+    return tool if assignee is None else f"{tool} for {assignee}"
+
+
+def chosen(value: Any) -> tuple[InterruptDecision, InterruptRemember] | None:
+    """The decision a picked choice names, and how far it reaches; ``None``: no choice's
+    value."""
+    picks: dict[Any, tuple[InterruptDecision, InterruptRemember]] = {
+        ONCE.value: (InterruptDecision.APPROVE, "once"),
+        CONVERSATION.value: (InterruptDecision.APPROVE, "run"),
+        DENY.value: (InterruptDecision.REJECT, "once"),
+    }
+    return picks.get(value) if isinstance(value, str) else None
 
 
 def action_of(risk: str) -> Action:
@@ -117,9 +167,17 @@ class Decision:
             props=props,
         )
 
+    def unasked(self) -> Decision:
+        """This call as a write announced rather than asked, when only its risk asks (no rule):
+        for a framework's own tool, under its own permission flow, and a harness built-in that
+        keeps to what the run owns (``Tool.confined``)."""
+        if self.asks and self.risk == "write" and self.rule is None:
+            return dataclasses.replace(self, action=Action.ANNOUNCE)
+        return self
+
     def approved(self, why: str) -> Decision:
-        """This call approved without asking, for ``why`` (a reviewer approved the tool for
-        the rest of the run): it runs, announced unless it only reads."""
+        """This call approved without asking, for ``why`` (a person allowed the tool for this
+        conversation, or a schedule's runs): it runs, announced unless it only reads."""
         action = Action.RUN if self.risk == "read" else Action.ANNOUNCE
         return dataclasses.replace(self, action=action, reason=why)
 

@@ -677,13 +677,14 @@ def _frontend_now(metadata: Mapping[str, Any], body: RunAgentInput) -> Frontend 
 def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:
     """The contracts decision a protocol resume entry means: ``cancelled`` abandons the run;
     an approval is answered ``true`` (approve), ``false`` (reject) or with the edited
-    arguments; anything else answers a question. The
+    arguments, or with the value of one of its options (allow once, for this conversation,
+    deny: ``governance.decision.choices``); anything else answers a question. The
     ``decision`` extension names it."""
     if answer.decision is not None:
         return answer.decision
     if answer.status is ResumeStatus.CANCELLED:
         return InterruptDecision.CANCEL
-    if awaiting.reason is not InterruptReason.APPROVAL:
+    if awaiting.reason is not InterruptReason.APPROVAL or answer.payload in awaiting.option_values:
         return InterruptDecision.ANSWER
     if answer.payload is True:
         return InterruptDecision.APPROVE
@@ -691,7 +692,9 @@ def _decision(answer: Resume, awaiting: Interrupt) -> InterruptDecision:
         return InterruptDecision.REJECT
     if isinstance(answer.payload, dict):
         return InterruptDecision.EDIT
-    raise ValueError("an approval is answered with true, false or the edited arguments")
+    raise ValueError(
+        "an approval is answered with true, false, the edited arguments or one of its options"
+    )
 
 
 def _ending(result: Any, thread_id: str, run_id: str, message: str) -> AGUIEvent:

@@ -28,17 +28,19 @@ from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from tests.support.planned import Call
 from trellis import Harness, ReAct, Runtime, mcp, stdio, tool
-from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolSpec
+from trellis.contracts import InterruptReason, RunStatus, ToolSpec
 from trellis.harness.adapters.langgraph import graph_tools
 from trellis.harness.governance import Decision, Governance, Rejected, governed
 from trellis.harness.governance.catalog import entry
-from trellis.harness.governance.decision import Action, decide
+from trellis.harness.governance.decision import CHOICES, EVERY_TIME, SAID, Action, decide
 from trellis.harness.middleware import GovernTools, declare_files, spec_of
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.mcp import MCPSource
 from trellis.harness.tools.sources import as_source
 
 SERVER = Path(__file__).parents[1] / "support" / "mcp_undeclared_server.py"
+#: What plain chat reads after an approval's question: allow once, for this conversation, deny.
+THREE = SAID[CHOICES]
 #: The three calls the live test saw run unasked, each with the arguments of a second call.
 RISKY: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
     ("purge_records", {"table": "orders"}, {"table": "customers"}),
@@ -121,7 +123,7 @@ async def test_a_function_targets_own_tool_that_says_nothing_asks(
     first = await agent.run("go", user="u")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None and done == []
     assert first.interrupt.question == (
-        "Approve purge_records? purge_records has not declared its side effects."
+        f"Approve purge_records? purge_records has not declared its side effects. {THREE}"
     )
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
     assert second.status is RunStatus.PAUSED and second.interrupt is not None, second
@@ -188,13 +190,11 @@ async def test_a_declared_tool_runs_as_its_risk_says(harness: Harness) -> None:
         return [count, await agent.tools.call("archive", table="t")]
 
     agent = arm(harness.wrap(target, id="declared"), [count, archive])
-    events = [e async for e in agent.stream("go", user="u")]
-    notices = [
-        e.data["tool"]
-        for e in events
-        if e.type is RunEventType.CUSTOM and e.data.get("name") == "tool_notice"
-    ]
-    assert done == ["count", "archive"] and notices == ["archive"]  # nobody asked
+    paused = await agent.run("go", user="u")
+    assert done == ["count"] and paused.interrupt is not None  # the read ran; the write asks
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "archive"
+    await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done == ["count", "archive"]
 
 
 # --------------------------------------------------------------------------- nobody's to declare
@@ -246,14 +246,14 @@ async def test_a_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter
     if defined == "a bare function":
         name, why, source, ran_so_far = (
             tool_name,
-            "has not declared its side effects",
+            f"has not declared its side effects. {THREE}",
             OWN[tool_name],
             lambda: list(done),
         )
     else:
         name, why, source, ran_so_far = (
             f"office-{tool_name}",
-            "is irreversible",
+            f"is irreversible. {SAID[EVERY_TIME]}",
             back_office(ran),
             lambda: lines(ran),
         )
@@ -263,7 +263,7 @@ async def test_a_tool_that_declares_nothing_never_runs_unapproved_on_any_adapter
     first = await agent.run("do it", user="ada")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None, first
     assert first.interrupt.reason is InterruptReason.APPROVAL
-    assert first.interrupt.question == f"Approve {name}? {name} {why}."
+    assert first.interrupt.question == f"Approve {name}? {name} {why}"
     assert first.interrupt.tool_call is not None and first.interrupt.tool_call.args == args
     assert ran_so_far() == []  # nothing ran
     second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="lee")
@@ -333,7 +333,7 @@ async def test_a_graphs_own_tool_that_declares_nothing_asks(
     assert "approval: purge_records — say it" in caplog.text  # the framework's own, named too
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
     assert paused.interrupt.question == (
-        "Approve purge_records? purge_records has not declared its side effects."
+        f"Approve purge_records? purge_records has not declared its side effects. {THREE}"
     )
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert finished.answer == "purged" and done == ["orders"]
@@ -370,7 +370,7 @@ async def test_an_sdk_agents_own_tool_asks(harness: Harness) -> None:
     paused = await agent.run("cut prices", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
     assert paused.interrupt.question == (
-        "Approve set_prices? set_prices has not declared its side effects."
+        f"Approve set_prices? set_prices has not declared its side effects. {THREE}"
     )
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert finished.answer == "changed" and done == [-90]
@@ -391,7 +391,9 @@ async def test_a_graphs_own_tool_named_as_a_built_in_is_not_the_built_in(harness
     graph = create_agent(model, tools=[delete], checkpointer=InMemorySaver())
     paused = await harness.wrap(graph, id="named").run("delete it", user="u", thread="t")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
-    assert paused.interrupt.question == "Approve delete? delete has not declared its side effects."
+    assert paused.interrupt.question == (
+        f"Approve delete? delete has not declared its side effects. {THREE}"
+    )
 
 
 def test_deep_agents_execute_is_declared_a_write_and_a_tool_of_that_name_is_not() -> None:
@@ -433,6 +435,8 @@ async def test_a_source_of_yours_whose_tool_says_nothing_asks(harness: Harness, 
         arm(agent, [Silent()])
     paused = await agent.run("go", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
-    assert paused.interrupt.question == "Approve wipe? wipe has not declared its side effects."
+    assert paused.interrupt.question == (
+        f"Approve wipe? wipe has not declared its side effects. {THREE}"
+    )
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert finished.answer == "wiped" and done == ["wipe"]

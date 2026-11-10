@@ -67,6 +67,9 @@ async def main() -> None:
         assert result.interrupt is not None  # the account manager's choice
         print("asks", result.interrupt.assignee, "->", result.interrupt.question)
         result = await agent.resume(result.run_id, "answer", answer="credit", reviewer="lee")
+        if result.interrupt is not None:  # a write asks: allow once, for the chat, or deny
+            print("asks", result.interrupt.question)
+            result = await agent.resume(result.run_id, "approve", reviewer="ada")
         print(result.status.value, result.answer)
 
         bare = await agent.run("T-9", user="ada", without={"memory"})  # no context, no reads

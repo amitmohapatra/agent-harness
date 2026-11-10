@@ -39,6 +39,9 @@ from trellis.harness.sandbox import DELIVERS_HERE
 from trellis.harness.tools.base import Tool
 from trellis.harness.tools.convert.claude import _schema
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 refunds: list[str] = []
 

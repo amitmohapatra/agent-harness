@@ -27,6 +27,9 @@ from trellis.harness.runlog import BATCH, RunLog
 from trellis.harness.runs import LocalRuns
 from trellis.runs import LeaseLostError, RateLimitedError
 
+#: These tests are about what a write does once it runs, not whether it asks.
+pytestmark = pytest.mark.usefixtures("writes_unasked")
+
 
 @tool(side_effects="write")
 def charge(order: str) -> str:
