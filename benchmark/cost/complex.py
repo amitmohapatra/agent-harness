@@ -2716,14 +2716,16 @@ _TABLE_ROW: Final = re.compile(r"^[ \t]*\|[^\n]*\|[ \t]*$", re.MULTILINE)  # a l
 _ISO_DATE: Final = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _DAY_FIRST: Final = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?(?=\s+{_MONTH}\b)", re.IGNORECASE)
 _DAY_AFTER: Final = re.compile(rf"\b({_MONTH})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE)
-#: A count of the data's own things ("the 50 leggings SKUs", "14 matches"): in a refusal it says
-#: what the run could use instead, not a figure of what was asked (#162: a right refusal scored
-#: made up for its "50"). A figure with a currency, a decimal, or after a word such as "average"
-#: is no count and is still read.
+#: A count of the data's own things ("the 50 leggings SKUs", "14 matches", "the last 90 days"):
+#: in a refusal it says what the run could use instead, not a figure of what was asked (#162: a
+#: right refusal scored made up for its "50"). A figure with a currency, a decimal, or after a
+#: word such as "average" is no count and is still read.
 _COUNTED: Final = re.compile(
     r"(?<![£$€.\d])\b\d{1,3}(?:,\d{3})*(?![.,]\d)\s+(?:[a-z][\w-]*\s+){0,2}"
     r"(?:skus?|products?|items?|rows?|lines?|stores?|suppliers?|matches|results?|records?|"
-    r"styles?|colou?rs?|sources?|tools?)\b",
+    r"styles?|colou?rs?|sources?|tools?)\b"
+    # a period of the data offered, not a duration stated as an answer ("lead time 30 days")
+    r"|\b(?:last|past|previous)\s+\d{1,3}\s+(?:days|weeks|months)\b",
     re.IGNORECASE,
 )
 #: A small count written as a word ("**One** store"), and not as a pronoun ("the one you mean",

@@ -594,6 +594,22 @@ def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() ->
         assert not cx.score(turn.expect, COMPETITOR_REFUSAL + answer, [], turn.text)["correct"]
 
 
+def test_a_refusal_that_offers_a_period_of_the_data_is_no_made_up_figure() -> None:
+    """bf3-cantdo-02 (ReAct on Deep Agents, the all-adapter run): a right refusal of the
+    weather that offers "the daily Leeds sales figures for, say, the last 90 days" was scored
+    made up for its 90. A forecast stated as the answer still is."""
+    case = next(c for c in breakfix.cases() if c.id == "bf3-cantdo-02")
+    turn = case.turns[0]
+    assert turn.expect is not None and turn.expect.kind == "abstain"
+    said = (
+        "I can't give you tomorrow's weather for Leeds. None of my tools provide weather "
+        "forecasts. Would you like the daily Leeds sales figures for, say, the last 90 days?"
+    )
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said + " Expect 14 mm of rain.", [], turn.text)["correct"]
+    assert not cx.score(turn.expect, said + " Rain for 12 days.", [], turn.text)["correct"]
+
+
 async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
     """Kimi and Claude: the captured requests do not hold the harness's tool results (the
     CLI's own requests are not seen), so the error a failed call returned ("503 Service
