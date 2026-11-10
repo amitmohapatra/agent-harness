@@ -503,5 +503,6 @@ async def test_an_answer_that_allows_always_is_kept_as_always(
         ("deploy", None)
     ]
     user = record.user_id
+    assert user is not None
     again = await agent.run("deploy", user=user, thread="another-chat")  # not asked again
     assert again.status is RunStatus.SUCCESS and calls == ["eu", "eu"], again
