@@ -34,7 +34,9 @@ The decision starts from the tool's **risk**:
 * For an OpenAPI operation, the method decides it.
 * A tool that says nothing of what it does has no risk of its own: its calls ask.
 
-When the memory service's tool catalog has a `risk` for the tool, that risk wins. The service
+When the memory service's tool catalog has a `risk` for the tool, that risk wins. An entry
+whose risk nobody declared (no `side_effects`, no `readOnlyHint` or `destructiveHint`) has none
+(`null`), and the tool's own decides. The service
 derives it from the annotations the harness published and from what an administrator set.
 
 | Risk | Action |
@@ -66,8 +68,10 @@ overrides everything else and no publish changes it:
 await scope.advanced.tools.put_catalog([{"name": "docs-search", "side_effects": "read"}])
 ```
 
-With memory off there is no catalog: such a tool asks at each call, and the person may allow it
-for the conversation.
+Until someone declares it there, the catalog keeps no risk for such a tool (an MCP tool that
+says nothing is the exception: the harness publishes the protocol's `destructiveHint: true`),
+and the harness's own rule decides: it asks at each call, and the person may allow it for the
+conversation. With memory off there is no catalog, and the same holds.
 
 ### What the person picks
 

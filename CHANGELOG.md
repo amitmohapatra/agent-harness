@@ -89,8 +89,13 @@ refused: no tool fails at startup.
 - **The tools that say nothing are named once**: when an agent's tools are listed, one warning
   (`trellis.tools`) lists those that declare no side effects, with what to add.
 - The catalog is told the same (`destructiveHint: true`, never a `side_effects` of the
-  harness's) for a tool whose risk no code declares, so an administrator's risk there stays:
-  it is the place to say what a tool you cannot annotate does.
+  harness's) for an MCP tool that says nothing, so an administrator's risk there stays: it is
+  the place to say what a tool you cannot annotate does. Any other tool that declares nothing
+  is published saying nothing of it: the catalog keeps no risk (`null`, trellis-memory 0.6.6)
+  and the tool's own rule decides, so it asks with allow once, for this conversation, deny
+  (always allow with a memory service). A catalog entry with no risk leaves the tool's own
+  declared risk; before, it was read as one (`write`, then `irreversible`), and an undeclared
+  tool asked every call with no "for this conversation".
 - A built-in the harness knows only by name (the graph's state tools, Deep Agents' file tools
   and `execute`, declared a write) is the framework's own: a tool of yours that shares the name
   (`delete`, `write_file`...) says what it does itself, as any other.
