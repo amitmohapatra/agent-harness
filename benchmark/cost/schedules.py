@@ -3,7 +3,7 @@ time, and do the runs a schedule fires report what they should, once?
 
 Each case is one chat (one or more turns) with the retail tools (``retail.py``) and the
 built-in schedule tools (``trellis.harness.schedules``), ``ReAct`` on the in-process run store,
-memory off. Categories:
+memory off (``--adapter``: any framework the ``complex`` suite wraps). Categories:
 
 * ``schedule`` — a request to schedule (daily, weekdays, weekly, monthly, once, relative,
   with and without a condition, Hindi/English, a skill that asks for one, the user's zone
@@ -46,6 +46,7 @@ from croniter import croniter
 from benchmark.cost import prices
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
+from benchmark.cost.complex import ADAPTERS, target_of
 from trellis import Hooks
 from trellis.contracts import (
     Interrupt,
@@ -713,8 +714,9 @@ async def _seed(h: Any, agent: Any, user: str, thread: str, seed: Seed, *, zone:
     return await h.runs.schedules.create(spec)
 
 
-async def run_case(case: Case, model: str, tag: str, max_steps: int = 12) -> dict[str, Any]:
-    from benchmark.cost.complex import target_of
+async def run_case(
+    case: Case, model: str, tag: str, max_steps: int = 12, *, adapter: str = "react"
+) -> dict[str, Any]:
 
     h = runner.harness()
     if case.limits is not None:
@@ -726,7 +728,7 @@ async def run_case(case: Case, model: str, tag: str, max_steps: int = 12) -> dic
         h.schedule_limits = hook
     async with h:
         assert isinstance(h.runs, LocalRuns)
-        target, options = target_of(model, "thread", None, max_steps, adapter="react")
+        target, options = target_of(model, "thread", None, max_steps, adapter=adapter)
         trace = Calls()
         agent = h.wrap(target, id=f"sched-{case.id}", hooks=[trace], run_timeout=300, **options)
         user, thread = f"sched-{tag}-{case.id}", f"sched-{tag}-{case.id}"
@@ -735,7 +737,7 @@ async def run_case(case: Case, model: str, tag: str, max_steps: int = 12) -> dic
         chat.seeded = [await _seed(h, agent, user, thread, s, zone=zone) for s in case.seeds]
         app = Frontend(context=case.context, timezone=case.zone)
         started = time.monotonic()
-        with runner.metered() as meter:
+        with runner.metered(adapter=adapter) as meter:
             waits: Interrupt | None = None
             for text in case.turns:
                 trace.calls = []
@@ -818,7 +820,7 @@ async def bench(args: argparse.Namespace) -> dict[str, Any]:
         for case in chosen:
             if args.max_usd is not None and spent >= args.max_usd:
                 break
-            row = await run_case(case, args.model, f"{tag}{repeat}")
+            row = await run_case(case, args.model, f"{tag}{repeat}", adapter=args.adapter)
             row["repeat"] = repeat
             spent += row["usd"]
             rows.append(row)
@@ -841,6 +843,7 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python -m benchmark.cost.schedules", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)  # fmt: skip
     p.add_argument("--model", default=env("TRELLIS_BENCH_MODEL") or env("TRELLIS_LIVE_MODEL"))
+    p.add_argument("--adapter", choices=ADAPTERS, default="react", help="the framework wrapped")
     p.add_argument("--cases", default="", help="case ids or categories, comma-separated")
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--max-usd", type=float, default=None)

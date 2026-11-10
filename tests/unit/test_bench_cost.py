@@ -238,6 +238,30 @@ def test_the_meter_counts_every_call_its_tokens_and_failures() -> None:
     assert (meter.cached_tokens, meter.written_tokens, meter.cache_reported) == (60, 10, True)
 
 
+def test_an_adapter_not_on_langchain_is_metered_by_what_the_harness_accounts() -> None:
+    """OpenAI Agents, Claude and Kimi report their usage to the run's budget, not LangChain's
+    callbacks: ``metered(adapter=)`` counts it there, a sub-agent's reply once, through its
+    parent's run."""
+    from trellis.harness import budget
+
+    def runtime(parent: Any = None) -> Any:
+        journal = SimpleNamespace(spent={})
+        return SimpleNamespace(parent=parent, budget=None, replay=SimpleNamespace(journal=journal))
+
+    top = runtime()
+    with run.metered(adapter="openai") as meter:
+        budget.account(top, model="m", input_tokens=100, output_tokens=7, cached=60)
+        budget.account(runtime(top), model="m", input_tokens=5, output_tokens=1)
+    budget.account(top, model="m", input_tokens=9, output_tokens=9)  # after the block
+    assert (meter.calls, meter.input_tokens, meter.output_tokens, meter.cached_tokens) == (
+        1, 100, 7, 60,
+    )  # fmt: skip
+    assert top.replay.journal.spent["model_calls"] == 3  # the run's own accounting unchanged
+    with run.metered(adapter="react") as langchain:  # LangChain's callbacks count these
+        budget.account(top, model="m", input_tokens=100, output_tokens=7)
+    assert langchain.calls == 0
+
+
 # --------------------------------------------------------------------------- a whole cell
 class Counted(ScriptedChatModel):
     """The script, each reply reporting its usage as a provider does."""

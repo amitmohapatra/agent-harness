@@ -4,7 +4,8 @@ should, only then, in the right shape, and does it say the remembered values it 
 Each case is one chat with the retail tools (``retail.py``), four write tools of its own
 (alerts, reorders, reports), ``ask_user`` and the case's memory context as the memory service
 renders it (``## Profile``, dated ``standing_rules``, ``preferences`` and ``about_user``),
-answered by an in-process memory service (``tests.support.memory``), ``ReAct``. Categories:
+answered by an in-process memory service (``tests.support.memory``), ``ReAct`` (``--adapter``: any
+framework the ``complex`` suite wraps). Categories:
 
 * ``act`` — a clear request, a safe default, a decided value, "just do it": no question, the
   write made;
@@ -41,6 +42,7 @@ from tests.support.memory import FakeMemoryService
 
 from benchmark.cost import prices
 from benchmark.cost import run as runner
+from benchmark.cost.complex import ADAPTERS, target_of
 from benchmark.cost.schedules import Calls, _kept
 from trellis import Harness, Settings, ask_user, tool
 from trellis.contracts import Interrupt, RunStatus
@@ -365,16 +367,21 @@ def cases() -> list[Case]:
 
 
 async def run_case(
-    case: Case, model: str, tag: str, *, ask_tool: bool = True, max_steps: int = 12
+    case: Case,
+    model: str,
+    tag: str,
+    *,
+    ask_tool: bool = True,
+    max_steps: int = 12,
+    adapter: str = "react",
 ) -> dict[str, Any]:
     from benchmark.cost import retail as r
-    from benchmark.cost.complex import target_of
 
     service = FakeMemoryService(context_text=case.memory, shown=[])
     config = Settings.from_env().model_copy(update={"runs_url": None, "otlp_endpoint": None})
     tools = [*r.TOOLS, *TOOLS, *([ask_user()] if ask_tool else [])]
     async with Harness(config=config, memory=service.client(), gateway=False) as h:
-        target, options = target_of(model, "thread", None, max_steps, adapter="react", tools=tools)
+        target, options = target_of(model, "thread", None, max_steps, adapter=adapter, tools=tools)
         trace = Calls()
         agent = h.wrap(target, id=f"ask-{case.id}", hooks=[trace], run_timeout=300,
                        without=["tool_search"], **options)  # fmt: skip
@@ -382,7 +389,7 @@ async def run_case(
         app = Frontend(tools=case.frontend)
         chat = Chat()
         started = time.monotonic()
-        with runner.metered() as meter:
+        with runner.metered(adapter=adapter) as meter:
             for text in case.turns:
                 trace.calls = []
                 record = await agent._opened(text, user=user, thread=thread, tenant=None, app=app)
@@ -441,7 +448,9 @@ async def bench(args: argparse.Namespace) -> dict[str, Any]:
     for case in chosen:
         if args.max_usd is not None and sum(x["usd"] for x in rows) >= args.max_usd:
             break
-        row = await run_case(case, args.model, tag, ask_tool=not args.no_ask_tool)
+        row = await run_case(
+            case, args.model, tag, ask_tool=not args.no_ask_tool, adapter=args.adapter
+        )
         rows.append(row)
         _kept(f"{args.out}.jsonl", row, append=True)
         mark = "ok  " if row["passed"] else "FAIL"
@@ -456,6 +465,7 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="python -m benchmark.cost.asking", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)  # fmt: skip
     p.add_argument("--model", default=env("TRELLIS_BENCH_MODEL") or env("TRELLIS_LIVE_MODEL"))
+    p.add_argument("--adapter", choices=ADAPTERS, default="react", help="the framework wrapped")
     p.add_argument("--cases", default="", help="case ids or categories, comma-separated")
     p.add_argument("--note", choices=("on", "off"), default="on")
     p.add_argument("--no-ask-tool", action="store_true", help="offer no ask_user")
