@@ -13,7 +13,8 @@ What a person sees follows from the arguments, for every surface:
 * any other surface: the control the interrupt's ``ui`` names (a choice, a form whose
   ``expects`` is the answer's JSON Schema, ``ui_schema`` its widget hints);
 * plain chat: the question as text, saying what kind of answer it takes (:data:`SAID`): the
-  options numbered, the recommended one marked with why. A typed answer fits too: a date, a
+  options numbered, the recommended one first (on every surface, wherever the model listed
+  it), marked with why. A typed answer fits too: a date, a
   range and a number may each be answered in words, and a choice by another answer ("Other").
 """
 
@@ -90,6 +91,8 @@ async def ask_question(
         raise ConfigurationError("ask_user asks a person: it runs inside a harness run")
     picks = list(dict.fromkeys(options or []))
     best = recommended if recommended in picks and why else None
+    if best is not None:  # the one to pick is the one read first
+        picks = [best, *(p for p in picks if p != best)]
     choices = [
         Option(value=p, description=why, recommended=True) if p == best else p for p in picks
     ]
