@@ -3261,9 +3261,6 @@ CLAUDE_ROOT: Final = "build/claude"
 #: a provider refuses), and the window it is told.
 KIMI_OUTPUT: Final = "16000"
 KIMI_WINDOW: Final = "200000"
-#: The adapters whose model calls are LangChain's (metered by its callbacks); the others are
-#: metered by what the harness accounts to the run's budget (``trellis.harness.budget``).
-LANGCHAIN_ADAPTERS: Final = frozenset({"react", "langgraph", "graph", "deepagents"})
 
 
 def adapter_of(history: str, adapter: str | None) -> str:
@@ -3432,46 +3429,19 @@ def kimi_target(model: str, tools: Sequence[Any]) -> Any:
     return agent
 
 
-class Accounted:
+class Accounted(runner.Meter):
     """What the harness accounted to the run's budget while it is current (``budget.account``,
-    every adapter's path): the meter of the adapters whose calls are not LangChain's."""
+    every adapter's path; :func:`~benchmark.cost.run.metered`): the meter of the adapters whose
+    calls are not LangChain's, each reply also added to the run's :class:`Spend`."""
 
     def __init__(self, spend: Spend) -> None:
+        super().__init__()
         self.spend = spend
-        self.calls = 0
-        self.input_tokens = 0
-        self.output_tokens = 0
-        self.cached_tokens = 0
         self.requests: list[dict[str, Any]] = []
 
-
-_ACCOUNTED: list[Accounted] = []
-
-
-def _accounting_hook() -> None:
-    """``budget.account`` also reports to the current :class:`Accounted` (patched once)."""
-    from trellis.harness import budget
-
-    if getattr(budget.account, "_complex", False):
-        return
-    original = budget.account
-
-    def account(runtime: Any, **kw: Any) -> None:
-        original(runtime, **kw)
-        if _ACCOUNTED and runtime.parent is None:
-            a = _ACCOUNTED[-1]
-            a.calls += 1
-            a.input_tokens += int(kw.get("input_tokens") or 0)
-            a.output_tokens += int(kw.get("output_tokens") or 0)
-            a.cached_tokens += int(kw.get("cached") or 0)
-            a.spend.add(
-                int(kw.get("input_tokens") or 0),
-                int(kw.get("output_tokens") or 0),
-                int(kw.get("cached") or 0),
-            )
-
-    account._complex = True  # type: ignore[attr-defined]
-    budget.account = account  # type: ignore[assignment]
+    def accounted(self, input_tokens: int, output_tokens: int, cached: int) -> None:
+        super().accounted(input_tokens, output_tokens, cached)
+        self.spend.add(input_tokens, output_tokens, cached)
 
 
 def scripted_model(case: Case) -> Any:
@@ -3603,17 +3573,15 @@ async def run_case(
         trace.used = {}
         trace.started.clear()
         wire.clear()
-        captured: Any = Captured(spend) if kind in LANGCHAIN_ADAPTERS else Accounted(spend)
+        on_langchain = kind in runner.LANGCHAIN_ADAPTERS
+        captured: Captured | Accounted = Captured(spend) if on_langchain else Accounted(spend)
         began = time.monotonic()
         ended: list[tuple[str, str, str | None, str | None]] = []
         try:
             if spend.reached:
                 raise SpendCapReached(f"spend cap ${spend.cap} reached (${spend.usd:.4f})")
-            if isinstance(captured, Accounted):
-                _accounting_hook()
-                _ACCOUNTED.append(captured)
             try:
-                with runner.metered(captured if isinstance(captured, Captured) else None):
+                with runner.metered(captured, adapter=kind):
                     first = asyncio.create_task(asked(t))
                     tasks = [first]
                     if len(together) == 2:
@@ -3625,7 +3593,6 @@ async def run_case(
                     results = await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 if isinstance(captured, Accounted):
-                    _ACCOUNTED.remove(captured)
                     captured.requests = list(wire)
             for result in results:
                 if isinstance(result, SpendCapReached):
