@@ -6,6 +6,8 @@ room are in — and the turn under way never clears the replayed turn's results
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -89,7 +91,23 @@ def test_the_turn_under_way_clears_only_its_own_older_results() -> None:
     )
     results = [m.content for m in messages if isinstance(m, ToolMessage)]
     assert results[0] == "x" * 4000  # the replayed turn's result, kept
-    assert results[1] == CLEARED and results[2:] == ["y" * 400] * 3
+    assert results[2:] == ["y" * 400] * 3
+    # the cleared one says where it is read again: a model is not shown its calls' ids
+    assert results[1] == (
+        "[result cleared to keep the context small: "
+        'read_file(file_path="/large_tool_results/b0") reads it again]'
+    )
+
+
+def test_each_cleared_result_names_its_own_path() -> None:
+    messages = _turns()
+    ThisTurnsResults(trigger=100, keep=1, placeholder=CLEARED).apply(
+        messages, count_tokens=count_tokens_approximately
+    )
+    cleared = [m.content for m in messages if isinstance(m, ToolMessage)][1:4]
+    assert [re.findall(r'file_path="([^"]+)"', str(c)) for c in cleared] == [
+        [f"/large_tool_results/b{n}"] for n in range(3)
+    ]
 
 
 def test_a_request_under_the_trigger_is_left_as_it_is() -> None:
