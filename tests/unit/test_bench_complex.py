@@ -610,10 +610,15 @@ def test_a_refusal_that_offers_a_period_of_the_data_is_no_made_up_figure() -> No
     assert not cx.score(turn.expect, said + " Rain for 12 days.", [], turn.text)["correct"]
 
 
-async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
-    """Kimi and Claude: the captured requests do not hold the harness's tool results (the
-    CLI's own requests are not seen), so the error a failed call returned ("503 Service
-    Unavailable") is read from the turn's own calls; a figure nothing returned is still not."""
+async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> None:
+    """Kimi and Claude: the captured requests are not the CLI's own, so what the harness gave
+    the conversation's runs is read from the case itself: each user message (histx-01's 120
+    units, asked a turn before), each answer a run gave (the £6,946.80 it worked out), each
+    call's result (an error, "503 Service Unavailable", or a figure, histx-02's 154 on Claude
+    in the all-adapter run, from the turn before) and the memory context each run was pushed
+    (histx-01's budget). A figure nothing gave the conversation is still not."""
+    from types import SimpleNamespace
+
     from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
 
     trace = cx.Trace()
@@ -623,17 +628,51 @@ async def test_a_failed_call_s_error_is_part_of_what_the_run_was_told() -> None:
         ToolOutcome(tool="demand_forecast", status=ToolStatus.ERROR, output=error),
     )
     await trace.after_tool(
-        ToolCall(tool="sku_details", args={"sku": "SKU-00001"}),
-        ToolOutcome(tool="sku_details", status=ToolStatus.OK, output="unit cost 41.20"),
+        ToolCall(tool="stock_level", args={"sku": "SKU-01517"}),
+        ToolOutcome(tool="stock_level", status=ToolStatus.OK, output={"on_hand": {"east": 154}}),
     )
-    told = cx.said_in([], trace.calls)
-    assert "503 Service Unavailable" in told and "41.20" not in told  # errors only
+    run = SimpleNamespace(
+        run_id="r1", used=set(), thread=None, pushed_context="Budget: £50,000 for knitwear"
+    )
+    await trace.on_run_end(run, SimpleNamespace(answer="That costs £6,946.80."))
+    await trace.on_run_start(SimpleNamespace(thread=None, task="Reorder 120 units of SKU-00001"))
+    told = cx.said_in([], trace.told[None])
+    said = ("503 Service Unavailable", "154", "50,000", "120", "6,946.80")
+    assert all(x in told for x in said), told
+    # a conversation's own: another one's was not told (its memory context is its own)
+    other = SimpleNamespace(run_id="r2", used=set(), thread="b", pushed_context="Budget: £9")
+    await trace.on_run_end(other, None)
+    assert trace.told["b"] == ["Budget: £9"] and "£9" not in cx.said_in([], trace.told[None])
     case = next(c for c in breakfix.cases() if c.id == "bf3-explain-03")
     turn = case.turns[0]
     assert turn.expect is not None
     failed = "I couldn't get the forecast: the service returned 503 Service Unavailable twice."
     assert cx.score(turn.expect, failed, [], turn.text, told)["correct"]
     assert not cx.score(turn.expect, failed + " About 240 units.", [], turn.text, told)["correct"]
+
+
+def test_a_question_the_run_asks_its_user_is_its_answer() -> None:
+    """bf2-clarify-01 (Kimi, the all-adapter run): Kimi asked "which black slim jeans?" with
+    its own question tool, so the run paused on that question and its answer was null, scored
+    as asking nothing. A question the run asks is what it said; an approval it waits on is not
+    an answer, as before."""
+    from types import SimpleNamespace
+
+    from trellis.contracts import Option, RunStatus
+
+    case = next(c for c in breakfix.cases() if c.id == "bf2-clarify-01")
+    turn = case.turns[0]
+    assert turn.expect is not None
+    options = [Option(value="Black Slim Jeans Black"), "Stretch Slim Jeans Black"]
+    asked = SimpleNamespace(question="Which jeans?", options=options, tool_call=None)
+    said = cx.said_by(SimpleNamespace(status=RunStatus.PAUSED, interrupt=asked, answer=None))
+    assert said == "Which jeans?\nBlack Slim Jeans Black\nStretch Slim Jeans Black"
+    assert cx.score(turn.expect, said, [], turn.text)["correct"]
+    approval = SimpleNamespace(question="Run refund?", options=[], tool_call=object())
+    waits = SimpleNamespace(status=RunStatus.PAUSED, interrupt=approval, answer=None)
+    assert cx.said_by(waits) == "null"  # an approval it waits on: no answer, as before
+    done = SimpleNamespace(status=RunStatus.SUCCESS, interrupt=None, answer={"n": 1})
+    assert cx.said_by(done) == '{"n": 1}'
 
 
 def test_a_set_answered_in_prose_may_show_every_candidate_in_a_table() -> None:
@@ -1604,8 +1643,12 @@ async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
     from types import SimpleNamespace
 
     trace = cx.Trace()
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}), None)
-    await trace.on_run_end(SimpleNamespace(run_id="r1", used={"Bash"}), None)  # a resume
+    run = SimpleNamespace(
+        run_id="r1", used={"WebSearch", "store_list"}, thread=None, pushed_context=None
+    )
+    await trace.on_run_end(run, None)
+    run.used = {"Bash"}
+    await trace.on_run_end(run, None)  # a resume
     assert trace.used == {"r1": {"WebSearch", "store_list", "Bash"}}
 
 
