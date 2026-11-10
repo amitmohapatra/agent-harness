@@ -3347,6 +3347,7 @@ def target_of(
     tools: Sequence[Any] = r.TOOLS,
     bound: Sequence[Any] = (),
     variant: str = "main",
+    skills: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """The agent under test, built as each framework's team builds it, with the retail tools
     declared for the harness to run (``TOOLS_ATTRIBUTE``): ``react`` — ``ReAct`` as built;
@@ -3358,7 +3359,13 @@ def target_of(
     ``openai`` — an OpenAI Agents ``Agent`` on the endpoint's chat completions (``wire``
     collects each request it sends); ``claude`` — ``ClaudeAgentOptions`` on the model. With
     ``history="memory"`` the memory service is on for every adapter. ``variant``: the
-    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents)."""
+    ``benchmark.cost.variants`` entry ``react`` is built as (``deep``: on Deep Agents).
+    ``skills``: a skill set (``trellis.skills``) given to each framework in its own skills
+    slot, as docs/skills.md says — ``ReAct(skills=)``, ``create_deep_agent(**deep_agent())``,
+    ``ClaudeAgentOptions(**claude())``, ``kimi(**kimi())``, an OpenAI ``SandboxAgent`` with
+    the SDK's ``Skills`` capability on a local sandbox, and its ``tools()`` declared where
+    there is no slot (``langgraph``; ``graph`` binds its tools itself: among ``bound``, and
+    declared too, so the harness knows the run has them)."""
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
 
     kind = adapter_of(history, adapter)
@@ -3366,8 +3373,9 @@ def target_of(
         from benchmark.cost.variants import VARIANTS, Setup
 
         setup = Setup(
-            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools)
-        )
+            system=r.SYSTEM, model=model, window=window, max_steps=max_steps, tools=tuple(tools),
+            skills=skills,
+        )  # fmt: skip
         return VARIANTS[variant].build(setup)
     if kind in ("langgraph", "deepagents"):
         from langgraph.checkpoint.memory import InMemorySaver
@@ -3384,12 +3392,14 @@ def target_of(
                 chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=InMemorySaver(), name="complex",
             )  # fmt: skip
+            tools = [*tools, *([skills.tools()] if skills is not None else [])]
         else:
             from deepagents import create_deep_agent
 
             graph = create_deep_agent(
                 model=chat, tools=[], system_prompt=r.SYSTEM, middleware=stack,
                 checkpointer=InMemorySaver(), name="complex",
+                **(skills.deep_agent() if skills is not None else {}),
             )  # fmt: skip
         setattr(graph, TOOLS_ATTRIBUTE, list(tools))
         return graph, {}
@@ -3406,6 +3416,8 @@ def target_of(
             chat, tools=[*own, *bound], system_prompt=r.SYSTEM,
             checkpointer=InMemorySaver(), name="complex",
         )  # fmt: skip
+        if skills is not None:  # bound by the caller, and declared: the harness knows of them
+            setattr(graph, TOOLS_ATTRIBUTE, [skills.tools()])
         return graph, {"framework_options": {"recursion_limit": 2 * max_steps + 1}}
     if kind == "openai":
         import httpx
@@ -3427,13 +3439,14 @@ def target_of(
             api_key=env.llm_api_key or "none",
             http_client=DefaultAsyncHttpxClient(event_hooks={"request": [sent]}),
         )
-        agent = Agent(
-            name="complex",
-            instructions=r.SYSTEM,
-            model=OpenAIChatCompletionsModel(model=str(model), openai_client=client),
-        )
+        served = OpenAIChatCompletionsModel(model=str(model), openai_client=client)
+        given: dict[str, Any] = {"max_turns": 2 * max_steps}
+        if skills is None:
+            agent = Agent(name="complex", instructions=r.SYSTEM, model=served)
+        else:
+            agent, given["run_config"] = _sandbox_agent(served, skills)
         setattr(agent, TOOLS_ATTRIBUTE, list(tools))
-        return agent, {"framework_options": {"max_turns": 2 * max_steps}}
+        return agent, {"framework_options": given}
     if kind == "claude":
         from claude_agent_sdk import ClaudeAgentOptions
 
@@ -3442,12 +3455,29 @@ def target_of(
         options = ClaudeAgentOptions(
             model=str(model), system_prompt=r.SYSTEM, max_turns=2 * max_steps,
             setting_sources=[], cwd=str(work_folder("claude")),
+            **(skills.claude() if skills is not None else {}),
         )  # fmt: skip
         setattr(options, TOOLS_ATTRIBUTE, list(tools))
         return options, {}
     if kind == "kimi":
-        return kimi_target(str(model), tools), {}
+        return kimi_target(str(model), tools, skills), {}
     raise SystemExit(f"no adapter {kind!r}: one of {', '.join(ADAPTERS)}")
+
+
+def _sandbox_agent(chat: Any, skills: Any) -> tuple[Any, Any]:
+    """An OpenAI ``SandboxAgent`` with the SDK's own ``Skills`` capability over ``skills`` and
+    its ``Shell`` (how it reads a skill it loaded), and the run configuration that gives it a
+    sandbox on this machine. The SDK's default capabilities are left out: ``Filesystem``'s
+    ``apply_patch`` is a hosted tool, which the chat completions API does not take."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    agent = SandboxAgent(
+        name="complex", instructions=r.SYSTEM, model=chat, capabilities=[Shell(), skills.openai()]
+    )
+    return agent, RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
 
 
 def work_folder(kind: str) -> Path | None:
@@ -3465,10 +3495,11 @@ def _working(variable: str, default: str) -> Path:
     return folder
 
 
-def kimi_target(model: str, tools: Sequence[Any]) -> Any:
+def kimi_target(model: str, tools: Sequence[Any], skills: Any = None) -> Any:
     """Kimi Code (``kimi()``) on the ``LLM_*`` endpoint's model: Anthropic's own API through
     Kimi's ``anthropic`` provider, any other endpoint through its ``openai`` one. No system prompt
-    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own."""
+    crosses ACP: the suite's instructions are the AGENTS.md of a working directory of its own.
+    ``skills``: a skill set, in Kimi's own skills folder (``kimi(**skills.kimi())``)."""
     import os
     from urllib.parse import urlsplit
 
@@ -3491,7 +3522,10 @@ def kimi_target(model: str, tools: Sequence[Any]) -> Any:
         "KIMI_CODE_HOME": str(root / "home"),
         "KIMI_CODE_NO_AUTO_UPDATE": "1",
     }
-    agent = kimi(model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"))
+    agent = kimi(
+        model=model, cwd=str(cwd), env=env, command=os.environ.get("KIMI_BIN", "kimi"),
+        **(skills.kimi() if skills is not None else {}),
+    )  # fmt: skip
     object.__setattr__(agent, TOOLS_ATTRIBUTE, list(tools))  # a frozen dataclass
     return agent
 
