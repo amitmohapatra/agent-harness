@@ -596,9 +596,10 @@ def test_a_refusal_that_counts_what_it_can_use_instead_is_no_made_up_figure() ->
 
 async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> None:
     """Kimi and Claude: the captured requests are not the CLI's own, so what the harness gave
-    the run is read from the turn itself — each call's result (an error, "503 Service
-    Unavailable", or a figure, histx-02's 154 on Claude in the all-adapter run) and the memory
-    context it pushed (histx-01's budget). A figure nothing gave the run is still not."""
+    the conversation's runs is read from the case itself — each call's result (an error, "503
+    Service Unavailable", or a figure, histx-02's 154 on Claude in the all-adapter run, from
+    the turn before) and the memory context each run was pushed (histx-01's budget). A figure
+    nothing gave the conversation is still not."""
     from types import SimpleNamespace
 
     from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
@@ -613,10 +614,16 @@ async def test_what_the_harness_gave_the_run_is_part_of_what_it_was_told() -> No
         ToolCall(tool="stock_level", args={"sku": "SKU-01517"}),
         ToolOutcome(tool="stock_level", status=ToolStatus.OK, output={"on_hand": {"east": 154}}),
     )
-    run = SimpleNamespace(run_id="r1", used=set(), pushed_context="Budget: £50,000 for knitwear")
+    run = SimpleNamespace(
+        run_id="r1", used=set(), thread=None, pushed_context="Budget: £50,000 for knitwear"
+    )
     await trace.on_run_end(run, None)
-    told = cx.said_in([], trace.told)
+    told = cx.said_in([], trace.told[None])
     assert all(x in told for x in ("503 Service Unavailable", "154", "50,000")), told
+    # a conversation's own: another one's was not told (its memory context is its own)
+    other = SimpleNamespace(run_id="r2", used=set(), thread="b", pushed_context="Budget: £9")
+    await trace.on_run_end(other, None)
+    assert trace.told["b"] == ["Budget: £9"] and "£9" not in cx.said_in([], trace.told[None])
     case = next(c for c in breakfix.cases() if c.id == "bf3-explain-03")
     turn = case.turns[0]
     assert turn.expect is not None
@@ -1557,7 +1564,9 @@ async def test_the_trace_keeps_the_frameworks_own_tools_each_run_used() -> None:
     from types import SimpleNamespace
 
     trace = cx.Trace()
-    run = SimpleNamespace(run_id="r1", used={"WebSearch", "store_list"}, pushed_context=None)
+    run = SimpleNamespace(
+        run_id="r1", used={"WebSearch", "store_list"}, thread=None, pushed_context=None
+    )
     await trace.on_run_end(run, None)
     run.used = {"Bash"}
     await trace.on_run_end(run, None)  # a resume
