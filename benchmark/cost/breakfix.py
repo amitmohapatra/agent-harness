@@ -820,7 +820,8 @@ def cases() -> list[Any]:
             # is approved, and goes on; the approve-then-revoke history stays for the last turn
             Turn("Hold on: revoke my SUP-12 renewal approval until the audit is done.",
                  ((("memory_forget", {"id": SUP12_APPROVAL}),),),
-                 reply="Noted: revoked pending the audit.", thread="b", approve=True),
+                 reply="Noted: revoked pending the audit.", thread="b", approve=True,
+                 sent=(cx.ASKS_MEMORY,)),
             Turn("SUP-12's renewal is approved.", user=OTHER_USER, reply="Noted.", thread="c"),
             Turn("Have I approved the SUP-12 renewal right now?",
                  expect=cx.judge("Says no: the user approved it, then revoked the approval "
