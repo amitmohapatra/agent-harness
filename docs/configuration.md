@@ -238,8 +238,10 @@ await agent.run(question, user="ada", without={"memory"})  # this run: no memory
 | `code_mode` | `LLM_GATEWAY=bifrost`, enough read-only Code Mode servers | their tools behind Bifrost's Code Mode meta-tools (one script instead of many calls) | those servers' tools offered one by one |
 | `judges` | `h.wrap(judges=[...])`, each on its share of runs (`llm_judge(sample=)`) | the online judges | not judged |
 | `grounding` | `MEMORY_URL`, a fixed tenth of the runs given a context | the grounding check (`/v1/verify`) and its score on the run's trace | not checked |
+| `schedules` | always (agent-runs' schedules with `RUNS_URL`, else in process) | the four tools a user schedules tasks with in chat ([runs.md](runs.md#schedules-users-set-in-chat)) | no schedule tools |
+| `ask` | a run a chat front end started (`serve_chat`), on a framework with no question tool of its own | `ask_user`, the model's question to the person, offered with nothing declared ([interrupts.md](interrupts.md#asking)) | no `ask_user` by itself: one the agent declares stays, and the model asks in its reply |
 
-These six, and only these, are names: any other is refused (`ConfigurationError`, naming
+These eight, and only these, are names: any other is refused (`ConfigurationError`, naming
 them). `without={"memory"}` is per agent or per run: the rest of the deployment keeps memory,
 and the tenant, `h.add_document` and `h.feedback` keep working. `Harness(memory=False)` is the
 whole deployment with no memory service: no client even with `MEMORY_URL` set, the local

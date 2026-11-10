@@ -55,7 +55,10 @@ and a `TOOL_CALL_RESULT` its result's (`result:<call>`): the ids the memory serv
 messages under ([ADR 0005](adr/0005-conversations-across-runs.md)).
 
 **What the front end gives the run** (a CopilotKit-style client: `frontend.py`). The request's
-`tools`, `context` and `state` are kept with the run, so a resume on any replica has them.
+`tools`, `context` and `state` are kept with the run, so a resume on any replica has them. A
+run this surface starts has a person reading it, who answers its pauses: the model is given
+`ask_user` by itself ([interrupts.md](interrupts.md#asking); off: `without=["ask"]`), and
+uses a tool of the app's when one fits the question.
 
 - `tools` (each `{name, description, parameters}`, `name` letters, digits, `_` and `-`, at most
   64): offered to the model beside the agent's own; one of the agent's tools by the same name

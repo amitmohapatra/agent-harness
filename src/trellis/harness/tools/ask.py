@@ -4,7 +4,9 @@ a ``date``, a ``date_range`` or a ``number`` — through the run's own pause (``
 and reads the answer as the call's result. When to ask at all is the harness's note with the
 memory context (``agent.ASKING``); the model decides each question's shape.
 
-Opt-in (``ReAct(tools=[ask_user()])``, ``h.wrap(target, tools=[ask_user()])``).
+A run a person is known to read (``Runtime.attended``: a chat front end's) is offered it by
+itself (:func:`offered`; off: ``without=["ask"]``); any other run only when its agent declares
+it (``ReAct(tools=[ask_user()])``), since a pause there may have nobody to answer it.
 
 What a person sees follows from the arguments, for every surface:
 
@@ -19,10 +21,12 @@ What a person sees follows from the arguments, for every surface:
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Final, Literal
 
 from trellis.contracts import ConfigurationError, Option
 from trellis.harness.runtime import current
+from trellis.harness.tools.base import Tool
 from trellis.harness.tools.sources import FunctionTool, tool
 
 #: What kind of answer a question takes.
@@ -114,4 +118,10 @@ def ask_user() -> FunctionTool:
     return tool(ask_question, name=ASK_USER, side_effects="read")
 
 
-__all__ = ["ASK_USER", "ask_question", "ask_user"]
+def offered() -> Tool:
+    """``ask_user`` as the harness offers it by itself (``Agent.tools_for``): the same tool,
+    part of the ``ask`` feature (``without=["ask"]`` turns it off)."""
+    return dataclasses.replace(ask_user().tool, feature="ask")
+
+
+__all__ = ["ASK_USER", "ask_question", "ask_user", "offered"]

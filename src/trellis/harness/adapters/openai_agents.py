@@ -177,6 +177,9 @@ class OpenAIAgentsAdapter:
         (``RunConfig.call_model_input_filter``, :func:`_steering`)."""
         return True
 
+    def asks(self, target: Any) -> bool:
+        return False  # the SDK pauses for an approval, never for a question of the model's
+
     def prepare_input(
         self, target: Any, input: Any, context: str | None, history: Sequence[Said] = ()
     ) -> Any:

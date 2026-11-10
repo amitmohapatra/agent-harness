@@ -14,12 +14,13 @@ from fastapi import FastAPI
 
 from tests.support.arm import arm
 from tests.support.planned import PlannedChat
-from trellis import Harness, ReAct, Runtime, Settings, ask_user, tool
+from trellis import Harness, Hooks, ReAct, Runtime, Settings, ask_user, tool
 from trellis.contracts import ConfigurationError
 from trellis.harness.agui.sse import decode
 from trellis.harness.tools.ask import EXPECTS
 
 PATH = "/agui"
+SAID = [{"id": "m", "role": "user", "content": "Order a shirt"}]
 
 
 @pytest.fixture
@@ -199,3 +200,121 @@ async def test_a_call_replayed_on_resume_is_counted_once(harness: Harness) -> No
         e["content"]["tools"] for e in [*first, *resumed] if e["type"] == "ACTIVITY_SNAPSHOT"
     ]
     assert counted == [1, 1]  # the replayed lookup has the same id: the line says 1 again
+
+
+# --------------------------------------------------------------------------- offered by itself
+SIZE = {"question": "Which size?", "options": ["S", "L"]}
+
+
+class Seen:
+    """A function target that keeps the names of the tools each of its runs was offered, and
+    calls the tools it is told to."""
+
+    def __init__(self) -> None:
+        self.toolboxes: list[set[str]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def __call__(self, input: Any, agent: Runtime) -> str:
+        self.toolboxes.append(set(agent.toolbox))
+        said = [str(await agent.tools.call(name, **args)) for name, args in self.calls]
+        return said[-1] if said else "ok"
+
+
+async def test_a_chat_front_ends_run_is_offered_ask_user_by_itself(harness: Harness) -> None:
+    """A person reads a chat front end's run (``serve_chat``) and answers its pauses: the model
+    is given ``ask_user`` with nothing declared, whatever the app sent besides the message."""
+    agent = harness.wrap(ReAct(system_prompt="Help.", model=PlannedChat([("ask_user", SIZE)])),
+                         id="auto")  # fmt: skip
+    async with served(agent) as http:
+        [entry] = (await post(http, {"messages": SAID}))[-1]["outcome"]["interrupts"]
+        assert entry["metadata"]["component"] == "ask_user"
+        assert entry["metadata"]["props"] == {"kind": "text", "options": ["S", "L"]}
+        done = (await post(http, {"resume": [{"interruptId": entry["id"], "payload": "L"}]}))[-1]
+    assert done["result"] == "Done. L"
+
+
+async def test_a_run_nobody_is_known_to_read_is_offered_none(harness: Harness) -> None:
+    """Started from code (``run``, ``stream``), queued for a worker (``start``) or started by
+    another run, nobody is known to answer: a pause there may never be resumed, so the tool is
+    the developer's to add."""
+    seen = Seen()
+    agent = harness.wrap(seen, id="code")
+
+    async def parent(input: Any, runtime: Runtime) -> str:
+        return str((await agent.run("child", user="u1")).answer)
+
+    await agent.run("hi", user="u1")
+    assert [e.type async for e in agent.stream("hi", user="u1")]
+    await agent.start("hi", user="u1")
+    assert await harness.worker([agent]).run_once() is True
+    async with served(harness.wrap(parent, id="parent")) as http:  # a chat's run starts it
+        await post(http, {"messages": SAID})
+    assert len(seen.toolboxes) == 4 and not any("ask_user" in t for t in seen.toolboxes)
+
+
+async def test_a_schedule_set_in_the_chat_fires_without_it(harness: Harness) -> None:
+    """The chat's run has it; the run its schedule fires — nobody is there then — has not."""
+    seen = Seen()
+    agent = harness.wrap(seen, id="desk")
+    seen.calls = [("schedule_task", {"task": "check stock", "when": "0 8 * * *"})]
+    async with served(agent) as http:
+        await post(http, {"messages": SAID})
+    seen.calls = []
+    [schedule] = harness.runs._schedules.values()  # type: ignore[union-attr]
+    await harness.runs.schedules.fire(schedule.schedule_id)
+    assert await harness.worker([agent]).run_once() is True
+    assert ["ask_user" in t for t in seen.toolboxes] == [True, False]
+
+
+async def test_without_ask_turns_it_off(harness: Harness) -> None:
+    seen = Seen()
+    async with served(harness.wrap(seen, id="quiet", without=["ask"])) as http:
+        await post(http, {"messages": SAID})
+    assert seen.toolboxes and "ask_user" not in seen.toolboxes[-1]
+
+
+async def test_the_agents_own_ask_user_wins_and_is_offered_once(harness: Harness) -> None:
+    """A tool of the agent's named ``ask_user`` is the one the model calls — its own function,
+    or ``ask_user()`` passed as before — and the harness adds no second."""
+
+    @tool(name="ask_user", side_effects="read")
+    async def own(question: str) -> str:
+        """Ask the person."""
+        return f"asked my way: {question}"
+
+    seen = Seen()
+    seen.calls = [("ask_user", {"question": "Which size?"})]
+    async with served(arm(harness.wrap(seen, id="own"), [own])) as http:
+        done = (await post(http, {"messages": SAID}))[-1]
+    assert done["result"] == "asked my way: Which size?"
+    explicit, offered = ask_user(), []
+
+    class Offered(Hooks):
+        async def on_run_start(self, run: Runtime) -> None:
+            offered.extend(run.toolbox.values())
+
+    given = harness.wrap(seen, id="given", hooks=[Offered()])
+    seen.calls = []
+    async with served(arm(given, [explicit])) as http:
+        await post(http, {"messages": SAID})
+    assert [t for t in offered if t.name == "ask_user"] == [explicit.tool]
+
+
+async def test_a_framework_with_a_question_tool_of_its_own_keeps_that_one() -> None:
+    """Claude Code and Kimi Code ask with their own ``AskUserQuestion``, asked as the run's
+    question: such a target says so, and its runs get no second tool."""
+    from agents import Agent as SDKAgent
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from tests.support.planned import PlannedModel
+    from trellis.harness.adapters import detect
+    from trellis.harness.adapters.acp import ACPAgent, kimi
+
+    async def function(input: Any, agent: Runtime) -> str:
+        return "ok"
+
+    plain = ACPAgent(command=("some-agent", "acp"))
+    sdk = SDKAgent(name="a", model=PlannedModel([]))
+    graph = ReAct(system_prompt="x", model=PlannedChat([]))
+    targets = [ClaudeAgentOptions(), kimi(), plain, function, graph, sdk]
+    assert [detect(t).asks(t) for t in targets] == [True, True, False, False, False, False]

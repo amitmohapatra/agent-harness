@@ -103,7 +103,8 @@ from trellis.harness.runtime import Runtime, current, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
-from trellis.harness.tools import query
+from trellis.harness.tools import ask, query
+from trellis.harness.tools.ask import ASK_USER
 from trellis.harness.tools.base import Source, Tool, arguments_problem
 from trellis.harness.tools.results import Conversations
 from trellis.harness.tools.sources import as_source
@@ -912,11 +913,13 @@ class Agent:
 
     async def tools_for(self, runtime: Runtime) -> list[Tool]:
         """The toolbox (kept fresh per tenant: ``tools/toolbox.py``), the memory pull
-        tools — none, with a warning, when the memory service cannot list them — and the
-        schedule tools (``schedules.py``; a target whose tools are fixed gets neither), less the
-        tools of what the run is without (``without=``: its MCP tools...); and the tools the
-        run's front end declared (``frontend.py``), but one named as one of those, which is
-        said in a warning."""
+        tools — none, with a warning, when the memory service cannot list them —, the
+        schedule tools (``schedules.py``) and, in a run a person is known to read
+        (``Runtime.attended``) whose framework has no question tool of its own
+        (``Adapter.asks``), ``ask_user`` (``tools/ask.py``; a target whose tools are fixed
+        gets none of the three), less the tools of what the run is without (``without=``: its
+        MCP tools...); and the tools the run's front end declared (``frontend.py``), but one
+        named as one of those, which is said in a warning."""
         box = self._toolbox(runtime.tenant)
         tools = await box.tools(code_mode=runtime.uses("code_mode"))
         if (
@@ -932,6 +935,8 @@ class Agent:
         if not self.adapter.fixed_tools and runtime.scheduled is None:
             named = {t.name for t in tools}
             tools.extend(t for t in schedule_tools(runtime) if t.name not in named)
+            if runtime.attended and ASK_USER not in named and not self.adapter.asks(self.target):
+                tools.append(ask.offered())
         tools = [t for t in tools if t.feature is None or runtime.uses(t.feature)]
         if runtime.frontend is not None and runtime.frontend.tools:
             theirs, taken = runtime.frontend.offered({t.name for t in tools})
@@ -1454,8 +1459,8 @@ class Agent:
             ends = [d for d in (deadline, parent.deadline) if d is not None]
             deadline = min(ends) if ends else None
         metadata = self._metadata(turned_off, framework_options, document_ids, budget)
-        if app is not None and (kept := app.kept()):
-            metadata[FRONTEND] = kept
+        if app is not None:  # kept even when it gave nothing: the run has a front end
+            metadata[FRONTEND] = app.kept()
         if parent is not None:
             metadata[AGENT_GROUP] = parent.identity.own_group
         given = {

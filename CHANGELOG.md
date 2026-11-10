@@ -83,6 +83,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   "update it" choice is recommended by the flag, not by its label.
 - `schedule_task(in_minutes=)` says the minute it counted from (the tool's text says only the
   hour, for the cache): the model no longer "corrects" 03:53 for "in 2 hours" at 01:53 to 03:00.
+- `ask_user` is offered by itself to a run a person is known to read: one a chat front end
+  started (`serve_chat`; `Runtime.attended`), not one its schedule fired, on a framework with
+  no question tool of its own (Claude Code and Kimi Code keep theirs: `Adapter.asks`), never
+  on a graph with its tools bound. `without=["ask"]` turns it off (an eighth name). A run
+  started from code (`run`, `stream`), queued, fired, called over A2A or by another run gets
+  it only when its agent declares it (`tools=[ask_user()]`, as before): nobody is known to
+  answer a pause there. A tool of the agent's named `ask_user` wins; one declared is offered
+  once. `serve_chat` records a run's front end even when the app sent nothing with the
+  message.
+- The asking benchmark (`benchmark/cost/asking.py`): `--ask auto|declared|none` (was
+  `--no-ask-tool`), `--variant`; cases for an ambiguous target (14 products, two), a
+  remembered value that is partial, old or changed elsewhere, a recommendation the data
+  supports, an answer in words or outside the options, several values missing at once, a run
+  nobody reads, and risky actions (cannot be undone, money, many rows, people outside, an
+  instruction in a tool's result, an earlier yes to something else): each waits on its
+  approval whatever the model does; a tool that declares no side effects is measured apart.
 
 ### Schedules set in chat
 
