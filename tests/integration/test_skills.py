@@ -240,6 +240,41 @@ async def test_claude_reads_the_runs_skills_as_a_local_plugin_written_for_the_ru
     assert options.skills == "all"
 
 
+async def test_a_resumed_claude_run_finds_its_skills_where_they_were(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude's session holds the paths of the skill files it was shown; a run resumed after a
+    pause continues that session, so its plugin is written where it was (and removed again)."""
+    from dataclasses import replace
+
+    @tool(side_effects="irreversible")
+    def publish(text: str) -> str:
+        """Publish a text."""
+        return f"published {text}"
+
+    src = combine(store_with(files={"rules.md": "No SELECT *."}))
+    plan = [("publish", {"text": "x"})]
+    options, _ = await BUILDERS["claude_agent_sdk"](harness, [], tmp_path, plan)
+    options = replace(options, **src.claude())
+    record = Path(options.env["FAKE_CLAUDE_RECORD"])
+
+    def started() -> dict[str, dict[str, str]]:
+        return json.loads(record.read_text())["plugins"]
+
+    agent = arm(harness.wrap(options, id="claude-resumed"), [publish])
+    paused = await agent.run("go", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    [first] = await asyncio.to_thread(started)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS, done.error
+    [(again, files)] = (await asyncio.to_thread(started)).items()
+    assert again == first  # the same folder for each query of the run
+    assert files["skills/sql-review/rules.md"] == "No SELECT *."
+    assert not await asyncio.to_thread(Path(again).exists)  # removed when the query ended
+    other = await agent.run("go", user="ada")  # another run: a folder of its own
+    assert other.status is RunStatus.PAUSED and list(await asyncio.to_thread(started)) != [first]
+
+
 # --------------------------------------------------------------------------- OpenAI
 async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: Harness) -> None:
     from agents import RunConfig

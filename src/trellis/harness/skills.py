@@ -55,7 +55,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
-from trellis.contracts import ConfigurationError, ToolError, ToolSpec
+from trellis.contracts import ConfigurationError, ToolError, ToolSpec, stable_id
 from trellis.harness import telemetry
 from trellis.harness.bounded import LRU
 from trellis.harness.journal import content_key
@@ -87,8 +87,10 @@ DEFAULT_TENANT: Final = "default"
 #: Where a Deep Agent finds the skills (its ``skills=`` source, a route of its backend).
 SKILLS_ROOT: Final = "/skills/"
 SKILL_MD: Final = "SKILL.md"
-#: The Claude plugin the skills are a local plugin of (``trellis:<skill>``).
+#: The Claude plugin the skills are a local plugin of (``trellis:<skill>``), and what the
+#: folder a run's plugin is written in is named with, before the run's own part.
 PLUGIN: Final = "trellis"
+RUN_FOLDER: Final = "trellis-skills-"
 #: The event, and the span attribute ``trellis.skills``, a run's pinned versions are said with;
 #: the code of the warning a source that is down, or a skill that is gone, is said with.
 EVENT: Final = "skills"
@@ -696,19 +698,32 @@ def _written(root: Path, files: Mapping[str, str]) -> None:
 
 
 async def for_run(plugins: Sequence[Any]) -> tuple[list[Any], list[Path]]:
-    """``plugins`` with each :class:`ClaudeSkills` written for the run in a folder of its own,
-    and the folders to remove when the query ends."""
+    """``plugins`` with each :class:`ClaudeSkills` written for the run in a folder of the
+    run's own (:func:`_run_folder`), and the folders to remove when the query ends."""
     made: list[Path] = []
     given: list[Any] = []
-    for plugin in plugins:
+    for n, plugin in enumerate(plugins):
         if not isinstance(plugin, ClaudeSkills):
             given.append(plugin)
             continue
-        root = Path(tempfile.mkdtemp(prefix="trellis-skills-"))
+        root = _run_folder(n)
         made.append(root)
         await write_plugin(plugin.skills, root)
         given.append({"type": "local", "path": str(root)})
     return given, made
+
+
+def _run_folder(n: int) -> Path:
+    """The folder the run's ``n``-th plugin is written in, made empty and its owner's alone:
+    the same path for every query of the run. Claude's session holds the paths of the skill
+    files it was shown, and a run resumed after a pause continues that session — on any worker:
+    the path is the run's, not the process's."""
+    runtime = current()
+    assert runtime is not None  # the adapter writes them inside the run it works for
+    root = Path(tempfile.gettempdir()) / f"{RUN_FOLDER}{stable_id(runtime.run_id, n)}"
+    shutil.rmtree(root, ignore_errors=True)  # an earlier query's that a crash left
+    root.mkdir(mode=0o700)
+    return root
 
 
 def removed(folders: Sequence[Path]) -> None:
