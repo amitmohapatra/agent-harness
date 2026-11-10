@@ -107,7 +107,8 @@ Kimi's own tools run again.
   written into Kimi's own skills folder (`$KIMI_CODE_HOME/skills/<name>/SKILL.md` and its files)
   in a home of the run's own, before each attempt; Kimi lists them to its model and loads one
   with its `Skill` tool. Your Kimi configuration and login (`config.toml`, `credentials`) are
-  linked into that home; your own skill folders (`.agents/skills`, `.kimi-code/skills` of the
+  linked into that home, and so are its sessions, which stay in your Kimi home: the
+  conversation's next turn resumes the session this run ended in; your own skill folders (`.agents/skills`, `.kimi-code/skills` of the
   project) stay Kimi's to find.
 * **Hooks:** the run's hooks (`h.wrap(hooks=[...])`: `before_tool`, `after_tool`,
   `on_run_start`, `on_run_end`, `on_error`, `on_output`) apply to the harness's tools and to every
