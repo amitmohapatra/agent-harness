@@ -293,13 +293,15 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     harness: Harness,
 ) -> None:
     """A file for the user written with ``write_file`` to an ``outputs`` that is not the kept
-    folder (the root's: the live chart case), or left by code beside the kept folder (a chart
-    saved in the working directory), is said with that call's result, with the kept folder's
-    whole path — once per file, and a file the sandbox started with is not the model's."""
+    folder (the root's: the live chart case), or left by a command beside the kept folder (a
+    chart saved in the working directory), is said with that call's result, with the kept
+    folder's whole path — once per file; a file the sandbox started with, or one the model
+    wrote by a path of its own choice, is not one a command left."""
     provider = FakeSandboxes()
     model = ScriptedChatModel(
         turns=[
             ("write_file", {"file_path": "/outputs/chart.svg", "content": "<svg/>"}),
+            ("write_file", {"file_path": "/workspace/plot.py", "content": "pass"}),
             ("execute", {"command": "touch chart.png"}),
             ("execute", {"command": "echo 42"}),
             ("write_file", {"file_path": "/workspace/outputs/chart.svg", "content": "<svg/>"}),
@@ -309,14 +311,13 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     made = sandbox(provider, spec=SandboxSpec(files={"given.csv": "n\n1\n"}))
     agent = harness.wrap(ReAct("s", model, backend=made), id="charter")
     assert (await agent.run("chart it", user="u")).answer == "saved"
-    root, beside, plain, kept = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
+    root, own, beside, plain, kept = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
+    assert own == "Updated file /workspace/plot.py"  # a place of its own choice: no surprise
     assert root.endswith(
         "No file is in /workspace/outputs/ yet: only a file written directly there is given "
         "to the user."
     ), root
-    assert beside.endswith(
-        "Not in /workspace/outputs/, so not given to the user: chart.png."
-    ), beside
+    assert "Not in /workspace/outputs/, so not given to the user: chart.png." in beside, beside
     assert "outputs" not in plain, plain  # said once, and never of the file it started with
     assert kept.endswith("In /workspace/outputs/ for the user: chart.svg (6 bytes)."), kept
 
@@ -329,7 +330,9 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     done = await harness.wrap(work, id="charter-tools").run("go", user="u")
     assert done.status is RunStatus.SUCCESS, done.error
     wrote, ran, then = done.answer
-    assert wrote.endswith("No file is in /workspace/outputs/ yet: only a file written directly "
-                          "there is given to the user."), wrote
+    assert wrote.endswith(
+        "No file is in /workspace/outputs/ yet: only a file written directly "
+        "there is given to the user."
+    ), wrote
     assert ran["outputs"] == "Not in /workspace/outputs/, so not given to the user: b.png.", ran
     assert "outputs" not in then, then

@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
 from deepagents.backends.protocol import (
+    ExecuteOffloadResult,
     ExecuteResponse,
     FileDownloadResponse,
     FileOperationError,
@@ -30,7 +31,10 @@ from deepagents.backends.protocol import (
 )
 from deepagents.backends.sandbox import BaseSandbox
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.types import Command
 
 from trellis.contracts import ConfigurationError, ToolError
 from trellis.harness.runtime import Runtime, current
@@ -38,6 +42,8 @@ from trellis.harness.sandbox.base import hint
 from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 from trellis.harness.tools.results import EXECUTE
 
+#: Deep Agents' tool that writes a whole file.
+WRITE_FILE: Final = "write_file"
 #: Said by a synchronous operation (a graph run with ``invoke``): the harness runs ``ainvoke``.
 ASYNC_ONLY: Final = "the sandbox backend runs in a harness run's graph, asynchronously (ainvoke)"
 
@@ -71,9 +77,36 @@ class SandboxBackend(BaseSandbox):
         bounds = [s for s in (timeout, self.call_timeout, runtime.remaining()) if s is not None]
         result = await box.exec(command, timeout=min(bounds))
         why = hint(result.exit_code, result.stderr, self.source.spec)
-        kept = await self.source.outputs_said(box, command)
-        output = "\n".join(part for part in (result.stdout, result.stderr, why, kept) if part)
+        output = "\n".join(part for part in (result.stdout, result.stderr, why) if part)
         return ExecuteResponse(output=output, exit_code=result.exit_code)
+
+    async def aexecute_with_offload(
+        self,
+        command: str,
+        capture_path: str,
+        *,
+        max_inline_bytes: int,
+        max_capture_bytes: int | None = None,
+        timeout: int | None = None,  # noqa: ASYNC109 - the command's, killed past it
+    ) -> ExecuteOffloadResult:
+        """The model's own command: Deep Agents' ``execute`` tool runs it here, and its file
+        tools' commands in :meth:`aexecute`. Told with its result what the user gets of what
+        it wrote (``SandboxSource.outputs_said``) — which a file tool's parsed output must
+        not carry."""
+        runtime = _running(self)
+        box = await self.source.opened(runtime, changes=True)
+        await self.source.seen(runtime, box)
+        ran = await super().aexecute_with_offload(
+            command,
+            capture_path,
+            max_inline_bytes=max_inline_bytes,
+            max_capture_bytes=max_capture_bytes,
+            timeout=timeout,
+        )
+        said = await self.source.outputs_said(runtime, box, command)
+        if said:
+            ran.response.output = "\n".join(part for part in (ran.response.output, said) if part)
+        return ran
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         runtime = _running(self)
@@ -139,6 +172,28 @@ class SandboxCard(AgentMiddleware):
             for t in request.tools
         ]
         return await handler(request.override(tools=tools))
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        """A file the model wrote with ``write_file`` is told, as its command is
+        (``SandboxBackend.aexecute_with_offload``), what the user gets of it when its path
+        names an ``outputs`` folder: nothing, when that is not the kept one."""
+        runtime = current()
+        if runtime is None or request.tool_call["name"] != WRITE_FILE:
+            return await handler(request)
+        box = await self.source.opened(runtime, changes=True)
+        await self.source.seen(runtime, box)
+        result = await handler(request)
+        if not isinstance(result, ToolMessage) or result.status == "error":
+            return result
+        path = str(request.tool_call["args"].get("file_path", ""))
+        said = await self.source.written_said(runtime, box, path)
+        return (
+            result.model_copy(update={"content": f"{result.content}\n{said}"}) if said else result
+        )
 
 
 def _running(backend: SandboxBackend) -> Runtime:
