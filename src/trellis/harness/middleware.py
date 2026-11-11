@@ -390,7 +390,7 @@ async def governed_call(
         repeat = bridge.same(
             runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
         )
-        return _message(repeat, str(call["id"]), call["name"], kept=_paged(runtime, request))
+        return _message(repeat, request, kept=_paged(runtime, request))
     if converted.made(own) or call["name"] in runtime.toolbox:
         # the harness's own: its call goes through the bridge
         return _kept_own(runtime, request, await handler(request))
@@ -417,23 +417,52 @@ async def governed_call(
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     if produced and outcome.ok and isinstance(produced[-1], Command):
         return produced[-1]  # the graph's state update, as the tool made it
-    return _message(outcome, str(call["id"]), call["name"], kept=_paged(runtime, request))
+    return _message(outcome, request, kept=_paged(runtime, request))
 
 
-def _message(outcome: ToolOutcome, call_id: str, name: str, *, kept: bool = False) -> ToolMessage:
+def _message(outcome: ToolOutcome, request: ToolCallRequest, *, kept: bool = False) -> ToolMessage:
     """A harness call's outcome as the tool message the model reads — ``kept``: a large one
     kept in the run and previewed, ``read_file`` paging it (``tools.results``); a table of
-    many rows read whole is kept too, for ``query_result`` (``results.tabled``)."""
+    many rows read whole is kept too, for ``query_result`` (``results.tabled``) — its table
+    named by what the call asked (:func:`_table`)."""
+    call = request.tool_call
+    table = _table(_step_of(request)[1], call)
     return ToolMessage(
         content=(
-            results.readable(outcome.output, name)
+            results.readable(outcome.output, table)
             if kept
-            else results.tabled(text_of(outcome.output), name)
+            else results.tabled(text_of(outcome.output), table)
         ),
-        tool_call_id=call_id,
-        name=name,
+        tool_call_id=str(call["id"]),
+        name=call["name"],
         status="error" if outcome.status in FAILED else "success",
     )
+
+
+#: The most characters of a call's arguments a kept result's table is named with.
+TABLE_SAID: Final = 40
+
+
+def _table(reply: AIMessage, call: Mapping[str, Any]) -> str:
+    """What a kept result of ``call`` is named as a table (``tools.query.tables``): its tool —
+    and, where the model's ``reply`` calls that tool more than once, the values of the
+    arguments that differ between those calls (``sales_summary_revenue``,
+    ``sales_summary_units``). Calls made side by side answer in any order: numbered by which
+    answered first, the model took ``sales_summary_2`` for its second call and joined revenue
+    as units. Values that are not plain (a list, an object), or longer than :data:`TABLE_SAID`
+    together, leave the tool's name: numbered as the results arrive."""
+    name, args = str(call["name"]), call.get("args") or {}
+    others = [
+        c.get("args") or {} for c in reply.tool_calls if c["name"] == name and c["id"] != call["id"]
+    ]
+    apart = [
+        str(args[key])
+        for key in sorted(args)
+        if isinstance(args[key], str | int | float)
+        and any(other.get(key) != args[key] for other in others)
+    ]
+    said = "_".join(apart)
+    return f"{name}_{said}" if said and len(said) <= TABLE_SAID else name
 
 
 def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
@@ -541,7 +570,7 @@ def _graph_results(state: Any) -> tuple[dict[str, str], dict[str, str]]:
         if str(p).startswith(prefix) and (text := _state_file(held, str(p))) is not None
     }
     calls = {
-        str(c["id"]): str(c["name"])
+        str(c["id"]): _table(m, c)
         for m in held.get("messages") or ()
         if isinstance(m, AIMessage)
         for c in m.tool_calls
@@ -564,7 +593,8 @@ def _kept_own(
     ``HarnessTools`` keeps them (:func:`_message`); elsewhere as it is."""
     if runtime not in _PAGED or not isinstance(done, ToolMessage) or done.status == "error":
         return done
-    name, said = request.tool_call["name"], text_of(done.content)
+    call, said = request.tool_call, text_of(done.content)
+    name = _table(_step_of(request)[1], call)
     kept = results.readable(said, name) if _paged(runtime, request) else results.tabled(said, name)
     return done.model_copy(update={"content": kept})
 
@@ -778,6 +808,7 @@ class HarnessTools(AgentMiddleware):
             request = request.override(messages=messages)
             if runtime.offered is not None:
                 runtime.offered |= stale
+        request = _stubs_tabled(runtime, request)
         own = [t for t in request.tools if _named(t) not in runtime.toolbox]
         offered = [t for name, t in harness.items() if runtime.offers(name)]
         offered.extend(_readers(runtime, request.state, {_named(t) for t in own}))
@@ -819,7 +850,7 @@ class HarnessTools(AgentMiddleware):
                 )
         else:
             outcome = await bridge.call(tool, call["args"], call_id=call_id, step=step.first + n)
-        return _message(outcome, call_id, tool.name, kept=_paged(runtime, request))
+        return _message(outcome, request, kept=_paged(runtime, request))
 
     def _step(self, runtime: Runtime, request: ToolCallRequest) -> tuple[_Step, int]:
         """The model step the call is one of (numbered on its first call's arrival), and the
@@ -974,8 +1005,43 @@ async def _narrow(
         readers = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
         if readers:
             request = request.override(tools=[*request.tools, *readers])
+        request = _stubs_tabled(runtime, request)
     asked = history_marked(with_question(_offered(request, runtime)))
     return await handler(_dated(asked, runtime))
+
+
+#: What the stub of each result Deep Agents saved says of its table (``results.table_said``),
+#: by run, path and the table's name: a saved file does not change, so it is parsed once.
+_STUB_TABLES: LRU[tuple[str, str, str], str] = LRU(SAID_ONCE)
+
+
+def _stubs_tabled(runtime: Runtime, request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with Deep Agents' stub of each result it saved in the graph's state saying
+    which table its rows are in a query, and its columns, as the harness's own stubs do
+    (``results.readable``): ``query_result`` reads it as that table (:func:`_kept_read`), and a
+    model not told its name took ``result`` for it in another file's query (the priced pilot's
+    ``long-data-02`` on ``ReAct`` with a backend: a failed query, one step more over 80,000
+    tokens of results). The request's copy says it, once, never the graph's state."""
+    files, tools = _graph_results(request.state)
+    if not files:
+        return request
+    with query.graph_results(files, tools):
+        named = query.tables(runtime)
+    messages = list(request.messages)
+    for n, m in enumerate(messages):
+        if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
+            continue
+        path = f"{results.PREFIX}/{m.tool_call_id}"
+        text = files.get(path)
+        if text is None or not m.content.startswith(results.EVICTED):
+            continue
+        said = _STUB_TABLES.setdefault(
+            (runtime.run_id, path, named[path]),
+            lambda path=path, text=text: results.table_said(path, text, named[path]),
+        )
+        if said not in m.content:
+            messages[n] = m.model_copy(update={"content": results.stub_tabled(m.content, said)})
+    return request.override(messages=messages)
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
