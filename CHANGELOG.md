@@ -42,6 +42,16 @@ to query) whole after the cut, its rest read from the same kept copy: the note w
 and was cut away, so the model guessed `FROM sku_catalog` and read the earlier turn's knitwear
 rows for outerwear (`deepagents` adapter, 6,000 tokens).
 
+### Fixed: a failed `query_result` names the closest tables, and stays short
+
+A failed query's error listed every table the run keeps with its columns. With twenty saved
+results it was about 1,000 characters, `FitWindow` cut its middle on a small window, and the
+table the query meant went with it. The error now names the five tables closest to those the
+query reads (DuckDB's own `get_table_names`, ranked with `difflib`; `result` is the queried
+file's), each with its columns, then how many more there are and the query that lists them all
+(`SELECT table_name FROM information_schema.tables`): about 500 characters however many
+results the run keeps.
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

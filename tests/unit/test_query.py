@@ -225,6 +225,45 @@ def test_two_results_of_one_tool_are_two_tables(journal: Journal) -> None:
     assert list(query.tables(run).values()) == ["rows", "rows_2", "rows_3"]
 
 
+def test_a_failed_query_is_told_the_closest_tables_first_and_stays_short(
+    journal: Journal,
+) -> None:
+    """A failed query's error named every table the run keeps with its columns: with twenty
+    of them it was long enough that a small window cut its middle (``FitWindow``), and the
+    table the query meant with it. It names those closest to the tables the query reads first,
+    :data:`query.TOLD_TABLES` of them, then how many more there are and the query that lists
+    them all: as many with forty tables as with twenty."""
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    kinds = ("orders", "order_items", "customers", "refunds", "stock")
+
+    def kept(n: int) -> str:
+        path = results.keep(f"id,col_{n}\n1,{n}", tool=f"{kinds[n % 5]}_{n}")
+        assert path is not None
+        return path
+
+    def failed(sql: str) -> str:
+        return asyncio.run(query.query({"file_path": paths[0], "sql": sql}))
+
+    paths = [kept(n) for n in range(20)]
+    said = failed("SELECT * FROM order_item_6")  # one letter off
+    there = said.split("saved results: ")[1]
+    assert there.startswith("order_items_6 (id, col_6); "), said
+    assert there.count("(id, col_") == query.TOLD_TABLES
+    assert "customers_" not in there and "refunds_" not in there and "stock_" not in there
+    assert there.endswith(f"and {20 - query.TOLD_TABLES} more ({query.ALL_TABLES} lists them all).")
+    # a query that names a table there is, and fails on a column: that table's columns first
+    assert failed("SELECT nope FROM stock_19").split("saved results: ")[1].startswith("stock_19 (")
+    own = asyncio.run(query.query({"file_path": paths[7], "sql": "SELECT nope FROM result"}))
+    assert own.split("saved results: ")[1].startswith("customers_7 (id, col_7); ")
+    # the rest is one query away
+    listed = failed(f"{query.ALL_TABLES} ORDER BY 1").splitlines()
+    assert {f"{kinds[n % 5]}_{n}" for n in range(20)} <= set(listed)
+    paths += [kept(n) for n in range(20, 40)]
+    again = failed("SELECT * FROM order_item_6").split("saved results: ")[1]
+    assert again.count("(id, col_") == query.TOLD_TABLES and "; and 35 more (" in again
+
+
 def test_a_result_is_queried_under_the_table_its_note_named(journal: Journal) -> None:
     """A kept table's note names its table (``results.tabled``) before the query runs; the
     results a Deep Agents graph saved in its state join the query only while it runs
