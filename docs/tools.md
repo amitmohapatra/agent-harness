@@ -368,12 +368,41 @@ where a number came from and when, and the result's own text is never stamped. A
 tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
 same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
 fetches the value again instead of answering from the old one, and the fresh result, with the
-older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). A repeated
+older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). Only a call
+that returned a value is marked: one that failed, or was stopped before it came back, has no
+value to be out of date, in memory's replay and in a thread the framework keeps alike. A repeated
 call is answered from an earlier one only within its own model step and run, never across
 turns; `memory_search` items carry `observed_on`. The
 memory service never turns a tool's result into a long-term fact (it forms memories from what
 it was told, not from tool output), so the user's facts and preferences stay and live values do
 not.
+
+### What day it is
+
+Fetch times, memories and earlier conversations carry dates, which mean something only against
+the day it is. The harness says it in the model's instructions, one line after them:
+
+```text
+It is now Wed 2026-11-11 (Asia/Kolkata, the user's zone).
+It is now Wed 2026-11-11 (UTC; the user's zone is not known).
+```
+
+It is to the day, in the zone the user's app sends (AG-UI `forwardedProps.timezone`:
+[surfaces.md](surfaces.md)), else in UTC, said as not theirs. It is the day the run started, so
+every model call of a run reads the same line, and the instructions before it are the same from
+day to day, as a prompt cache keeps them; instructions given as content blocks keep their
+blocks, the day one more after them. It states the date and nothing else. `schedule_task`'s
+description says the hour too, in the same words ([runs.md](runs.md)).
+
+| Target | The day |
+|---|---|
+| `ReAct` (on `create_agent` and on Deep Agents), a `create_agent` or `create_deep_agent` graph of yours (with the harness's `middleware()` or without) | after the system prompt |
+| OpenAI Agents | after each agent's `instructions` (the run's `call_model_input_filter`, after your own) |
+| Claude Agent SDK | Claude Code says it itself ("Today's date is ...", with the first prompt, with a preset and with a prompt of your own): the harness adds none |
+| Kimi Code | Kimi says it itself (a reminder at the start of the conversation and when the date changes): the harness adds none |
+| A hand-built `StateGraph`, a function | none: its model is called in your own code, which the harness does not reach |
+
+Claude Code and Kimi Code say the day of the machine they run on, not of the user's zone.
 
 ## The run's tool set
 

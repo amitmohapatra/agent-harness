@@ -59,6 +59,27 @@ def test_a_result_with_no_recorded_or_an_unreadable_fetch_time_is_left_as_it_is(
     assert stale == []  # fetched just now: not older than 0 seconds
 
 
+@pytest.mark.parametrize("status", ["error", "timeout"])
+def test_a_failed_call_has_no_value_to_be_out_of_date(clock: list[datetime], status: str) -> None:
+    """A call that failed returned no value: its replayed result ("Error: ...") was told
+    "[out of date: call get_stock again for the current value]" all the same, and its tool
+    counted as one whose earlier values are out of date. Only a call that returned a value is
+    marked."""
+    failed = turn(result="Error: the warehouse is down")
+    failed[2] = Said(
+        Speaker.TOOL,
+        failed[2].content,
+        tool_call_id="c1",
+        facts={"status": status, snapshots.FETCHED: "2026-10-30T09:00:00Z"},
+    )
+    clock[0] = T0 + timedelta(hours=1)
+    assert snapshots.out_of_date(failed, {"get_stock": 0.0}.get) == (failed, [])
+    marked, stale = snapshots.out_of_date(failed + turn(call="c2"), {"get_stock": 0.0}.get)
+    assert stale == ["get_stock"]  # the call that returned 40 still is
+    assert marked[2].content == "Error: the warehouse is down"
+    assert marked[6].content == snapshots.STALE.format(tool="get_stock") + "\n40"
+
+
 def test_a_tools_declared_age_is_read_from_the_run() -> None:
     live = ToolSpec(name="get_stock", description="d", input_schema={"type": "object"})
     runtime = SimpleNamespace(toolbox={"get_stock": SimpleNamespace(spec=live)}, native={})

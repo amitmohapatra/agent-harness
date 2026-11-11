@@ -23,6 +23,7 @@ from tests.support.adapters import BUILDERS
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.planned import Call, PlannedChat, PlannedChatModel, PlannedModel
+from tests.support.today import dated
 from trellis import Ask, Deny, Harness, Hooks, ReAct, Rewrite, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolCall, ToolOutcome
 from trellis.harness.governance import Decision, Denied, Governance, governed
@@ -339,7 +340,7 @@ async def test_openai_agents_model_calls_are_its_own_agent_hooks_s(harness: Harn
     model = PlannedModel([])
     target = OpenAIAgent(name="quoter", instructions="You quote.", model=model, hooks=Watching())
     result = await harness.wrap(target, id="oai").run("quote A", user="u")
-    assert result.answer == "Done. " and seen == ["You quote.", "replied"]
+    assert result.answer == "Done. " and seen == [dated("You quote."), "replied"]
 
 
 class Legacy(Hooks):

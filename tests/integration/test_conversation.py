@@ -23,6 +23,7 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from tests.support.planned import PlannedChat
+from tests.support.today import dated
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import conversation, snapshots
@@ -723,4 +724,4 @@ async def test_the_runs_own_model_input_filter_goes_first(harness: Harness, awai
     config = RunConfig(call_model_input_filter=own_async if awaited else own)
     result = await agent.run("hi", user="ada", framework_options={"run_config": config})
     assert result.status is RunStatus.SUCCESS
-    assert model.system == ["Answer briefly."]  # theirs ran, ours after it
+    assert model.system == [dated("Answer briefly.")]  # theirs ran, ours after it

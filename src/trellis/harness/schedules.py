@@ -52,6 +52,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import croniter
 
 from trellis.contracts import AgentError, Option, RunStatus, Schedule, ScheduleSpec, ToolSpec
+from trellis.harness import snapshots
 from trellis.harness.runs import THREAD
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools.base import Tool
@@ -173,19 +174,11 @@ def zone_of(name: Any) -> str | None:
     return name.strip()
 
 
-def _zone(runtime: Runtime) -> str | None:
-    """The user's zone, as their app said it."""
-    return runtime.frontend.timezone if runtime.frontend is not None else None
-
-
 def now_said(runtime: Runtime) -> str:
     """When it is, as ``schedule_task``'s description says it: the day and the hour in the
     user's zone (not the minute: the tool's text stays the same for an hour, as a prompt cache
     keeps it; ``in_minutes`` counts from the minute), or in UTC, said as not theirs."""
-    zone = _zone(runtime)
-    now = datetime.now(ZoneInfo(zone or "UTC"))
-    whose = f"{zone}, the user's zone" if zone else "UTC; the user's zone is not known"
-    return f"It is now {now:%a %Y-%m-%d}, {now:%H}:00-{now:%H}:59 ({whose})."
+    return snapshots.said(snapshots.now(), snapshots.zone(runtime), hour=True)
 
 
 # --------------------------------------------------------------------------- fired runs
@@ -415,7 +408,7 @@ async def _schedule_task(args: dict[str, Any]) -> Any:
         return await _chosen(runtime, args, list(choices)[:CHOICES])
     task, when = str(args["task"]).strip(), str(args.get("when") or "").strip()
     condition = (args.get("condition") or "").strip() or None
-    zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
+    zone = str(args.get("timezone") or "").strip() or snapshots.zone(runtime) or "UTC"
     once = bool(args.get("once"))
     counted = ""
     if minutes := args.get("in_minutes"):  # once, at that minute
@@ -536,7 +529,7 @@ async def _twin_asked(
 
 async def _chosen(runtime: Runtime, args: dict[str, Any], choices: list[Any]) -> Any:
     """The schedule the user picked among ``choices`` (the best first), made; or none."""
-    zone = str(args.get("timezone") or "").strip() or _zone(runtime) or "UTC"
+    zone = str(args.get("timezone") or "").strip() or snapshots.zone(runtime) or "UTC"
     options = [
         Option(value=str(n), label=_said(c, str(c.get("when") or ""), zone))
         for n, c in enumerate(choices)

@@ -20,6 +20,7 @@ from tests.support.adapters import BUILDERS
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
+from tests.support.today import dated
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.harness import LOCAL_TENANT
@@ -85,7 +86,7 @@ async def test_a_graphs_own_checkpointer_keeps_each_users_conversation_apart(
     await agent.run("ada's secret is tides", user="ada", thread=THREAD)
     await agent.run("what is the secret?", user="bob", thread=THREAD)
     told_bob = [str(m.content) for m in model.seen[1]]
-    assert told_bob == ["what is the secret?"]  # ada's thread is not bob's
+    assert told_bob == [dated(), "what is the secret?"]  # ada's thread is not bob's
     for user, said in (("ada", "ada's secret is tides"), ("bob", "what is the secret?")):
         key = await harness.conversation(user=user, thread=THREAD)
         assert key == conversation_key(LOCAL_TENANT, user, THREAD)

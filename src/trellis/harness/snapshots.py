@@ -7,11 +7,16 @@ conversation that replays it in a later turn says so.
   result's own text is never stamped with it.
 * **out of date** — a tool's data is live unless it declares otherwise (``tools.base.max_age``:
   0 by default, ``max_age`` seconds, or none for ``freshness="static"`` reference data), so an
-  earlier result replayed past that age says it is out of date (:data:`STALE`), the run's
+  earlier result replayed past that age — of a call that returned a value: a failed call has
+  none — says it is out of date (:data:`STALE`), the run's
   context says the same in one line naming the tool (:func:`note`), and the tool stays offered
   — the model fetches the value again instead of answering from the old one. Memory is never
   the source of a tool's data; a repeated call is served from an earlier one only within its
   own model step (``tools.bridge.same``) and run (the journal), never across turns.
+* **today** — the dates all of these carry mean something only against the day it is, which
+  the run's model is told once, in its instructions (:func:`today`: the run's start, to the
+  day), where its framework does not say it itself; ``schedule_task`` says the hour too
+  (:func:`said`, the one wording of when it is).
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import dataclasses
 from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from trellis.harness.history import Said, Speaker
 
@@ -60,19 +66,44 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+def zone(runtime: Any) -> str | None:
+    """The user's zone, as their app said it (``Frontend.timezone``: a valid one, or none)."""
+    return runtime.frontend.timezone if runtime.frontend is not None else None
+
+
+def said(when: datetime, zone: str | None, *, hour: bool = False) -> str:
+    """When it is, as a model reads it: the day — ``hour``: and the hour, as a range — in the
+    user's ``zone``, or in UTC, said as not theirs. Never the minute: the text stays the same
+    for the day (the hour), as a prompt cache keeps it."""
+    local = when.astimezone(ZoneInfo(zone or "UTC"))
+    at = f", {local:%H}:00-{local:%H}:59" if hour else ""
+    whose = f"{zone}, the user's zone" if zone else "UTC; the user's zone is not known"
+    return f"It is now {local:%a %Y-%m-%d}{at} ({whose})."
+
+
+def today(runtime: Any) -> str:
+    """The day it is, as ``runtime``'s model is told in its instructions: the day its run
+    started (``Runtime.started_at``), so every model call of the run reads the same line."""
+    return said(runtime.started_at or now(), zone(runtime))
+
+
 def out_of_date(
     history: Sequence[Said], max_age: Callable[[str], float | None]
 ) -> tuple[list[Said], list[str]]:
     """``history`` with each tool result whose recorded fetch time (``Said.facts``,
     :data:`FETCHED`) is past its tool's ``max_age`` (seconds; ``None``: the tool did not say)
-    starting with :data:`STALE`, and those tools, in the order met."""
+    starting with :data:`STALE`, and those tools, in the order met. The result of a call that
+    failed (its recorded status) is left as it is: it returned no value to be out of date."""
+    from trellis.harness.tools.base import FAILED  # noqa: PLC0415 - the tools import this
+
     at = now()
     tools = {c.id: c.name for m in history for c in m.tool_calls}
     stale: dict[str, None] = {}
 
     def one(m: Said) -> Said:
         tool = tools.get(m.tool_call_id or "") if m.role is Speaker.TOOL else None
-        when = _parsed((m.facts or {}).get(FETCHED))
+        facts = m.facts or {}
+        when = None if facts.get("status") in FAILED else _parsed(facts.get(FETCHED))
         limit = None if tool is None else max_age(tool)
         if tool is None or when is None or limit is None or (at - when).total_seconds() <= limit:
             return m
@@ -110,4 +141,7 @@ __all__ = [
     "note",
     "now",
     "out_of_date",
+    "said",
+    "today",
+    "zone",
 ]

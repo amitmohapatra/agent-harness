@@ -2,7 +2,7 @@
   {
     "messages": [
       {
-        "content": "You answer stock questions.",
+        "content": "You answer stock questions.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
         "role": "system"
       },
       {
@@ -266,7 +266,7 @@
   {
     "messages": [
       {
-        "content": "You answer stock questions.",
+        "content": "You answer stock questions.\n\nIt is now <day, hour> (UTC; the user's zone is not known).",
         "role": "system"
       },
       {

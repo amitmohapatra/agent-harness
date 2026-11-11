@@ -50,13 +50,15 @@ def _other(n: int) -> Any:
 TOOLS = [stock, *(_other(n) for n in range(4))]
 
 
-#: ``schedule_task``'s day and hour (``schedules.now_said``): what changes from run to run.
+#: The day the instructions say and ``schedule_task``'s day and hour (``snapshots.said``): what
+#: changes from run to run.
 NOW = re.compile(r"It is now [^(]*\(")
 
 
 def wire(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """What the model was sent, without what changes from run to run: the day and hour
-    ``schedule_task`` says (the scripted model's call ids are numbered)."""
+    """What the model was sent, without what changes from run to run: the day the instructions
+    say, and the day and hour ``schedule_task`` says (the scripted model's call ids are
+    numbered)."""
     return json.loads(NOW.sub("It is now <day, hour> (", json.dumps(requests)))
 
 

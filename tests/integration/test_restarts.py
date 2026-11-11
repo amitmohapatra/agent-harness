@@ -36,6 +36,7 @@ from tests.support.durable import SharedSaver
 from tests.support.journals import journal_of
 from tests.support.openai_model import ScriptedModel
 from tests.support.shared_runs import FileRuns
+from tests.support.today import dated
 from trellis import Budget, Harness, Hooks, ReAct, Runtime, Settings, current, middleware, tool
 from trellis.contracts import RunStatus
 from trellis.harness import runtime as runtime_module
@@ -628,7 +629,9 @@ async def test_a_new_version_continues_a_run_an_old_one_started(
     result = await handle.result(wait=5)
     assert result.status is RunStatus.SUCCESS and result.answer == "refunded", result.error
     assert done == ["refund o1"]
-    assert model.seen[-1][0].content == "v2"  # the new version's prompt, the old checkpoint
+    assert model.seen[-1][0].content == dated(
+        "v2"
+    )  # the new version's prompt, the old one's checkpoint
     assert f"run {handle.id} was started by refunds 1 and continues on 2" in caplog.text
 
 
