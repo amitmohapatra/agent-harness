@@ -58,6 +58,16 @@ day at most; the date only, no instruction with it.
 - One wording of when it is (`snapshots.said`): `schedule_task` keeps its day and hour, from
   the same function. A run's start and its seconds read the one clock (`snapshots.now`).
 
+### Fixed: a failed `query_result` names the closest tables, and stays short
+
+A failed query's error listed every table the run keeps with its columns. With twenty saved
+results it was about 1,000 characters, `FitWindow` cut its middle on a small window, and the
+table the query meant went with it. The error now names the five tables closest to those the
+query reads (DuckDB's own `get_table_names`, ranked with `difflib`; `result` is the queried
+file's), each with its columns, then how many more there are and the query that lists them all
+(`SELECT table_name FROM information_schema.tables`): about 500 characters however many
+results the run keeps.
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,
