@@ -89,3 +89,30 @@ async def test_a_long_chat_on_a_small_window_never_goes_over_it(harness: Harness
         done = await agent.run(asked, user="u", thread="t1")
         assert done.status is RunStatus.SUCCESS, (turn, done.error)
     assert max(server.sizes) <= WINDOW, server.sizes
+
+
+async def test_below_the_window_deep_agents_needs_the_harness_fits_the_turns(
+    harness: Harness,
+) -> None:
+    """One owner of a small window. Under ``automatic.MIN_WINDOW`` Deep Agents' own tools are
+    not offered from the first step (no room), and its summarization is not placed either:
+    ``FitWindow`` fits the request, as on ``ReAct`` alone. With both, a table the run kept was
+    saved a second time by the summarization (its offload of the message) and the turns were
+    summarized by one more model call: the priced pilot's small-window cases were 6 of 8 right
+    with a backend against 8 of 8 alone, one of them out of time."""
+    from tests.support.chat_model import ScriptedChatModel
+
+    rows = [{"key": f"SKU-{n:05d}", "value": round(n * 1.37, 2)} for n in range(1900)]
+
+    @tool(side_effects="read")
+    def sales(group_by: str) -> str:
+        """Sales by a key."""
+        return json.dumps({"group_by": group_by, "rows": rows})
+
+    model = ScriptedChatModel(turns=[("sales", {"group_by": "sku"}), "done"], spends=(None, 50))
+    graph = ReAct("s", model, tools=[sales], backend=JournalBackend(), context_window=16_000)
+    result = await harness.wrap(graph, id="small").run("sales by sku?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
+    assert len(model.seen) == 2  # no model call of a summary's
+    said = "\n".join(str(m.content) for m in model.seen[1])
+    assert "has been summarized" not in said and "/conversation_history/" not in said

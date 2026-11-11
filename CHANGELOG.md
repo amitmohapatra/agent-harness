@@ -488,6 +488,14 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `ReAct` given a Deep Agents capability has one owner of a small window. Under 32,000
+  tokens (`automatic.MIN_WINDOW`: no room for Deep Agents' tools from the first step) its
+  summarization is no longer placed either, and `FitWindow` fits the request as on `ReAct`
+  alone. With both, the summarization saved a second copy of each table the run kept and spent
+  model calls on summaries: the small-window cases were 6 of 8 right with a backend against
+  8 of 8 alone. Haiku, a backend, after: `long-data-02` at 16,000 tokens right in 12 s (out
+  of time at 420 s), `long-multi-02` at 8,000 right in 24 s (wrong, 125 s), the 14-turn chat
+  at 6,000 right in 69 s (113 s). From 32,000 tokens up nothing changes.
 - `query_result` no longer runs a run out of its time on a small window with a backend. A
   table read whole is kept and sent with its note; Deep Agents then saved that whole message
   as a file of its own, and the query loaded the copy as one more table: a JSON result
@@ -497,6 +505,14 @@ own model work follows the harness's configuration.
   a result the run keeps is now that result (one table; asked by the copy's path, the kept
   rows), and typing counts 64 columns a statement with the load's time looked at between two,
   so `LOAD_SECONDS` holds for any table. The same case now ends in 69 s.
+
+- A file meant for the user that a sandbox command wrote outside the kept folder is said at
+  once. Only `outputs/` of the working directory is kept; a model copied its export to
+  `/outputs/` at the root, nothing was kept, and its answer said the file was saved (`ReAct`
+  with a sandbox, `bf2-mixed-04`). A command that names an `outputs` folder is now told with
+  its result what the kept folder holds, with its whole path, or that it holds no file yet
+  (`SandboxSource.outputs_said`: Deep Agents' `execute` and `sandbox_exec`); a command that
+  names none costs nothing more.
 - `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
   window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
   turns left out — and the tools stayed out, though the room the turns took was free. Every

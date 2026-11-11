@@ -153,6 +153,12 @@ is deleted. The file is named in the run's journal and announced with the `file`
 take is left behind and reported in a warning: a name that is not one safe path part, or a file
 over 50 MiB. A run that fails keeps none.
 
+A command that names an `outputs` folder is told with its result what the kept folder holds and
+where it is ("In /workspace/outputs/ for the user: report.csv (85731 bytes)." or "No file is in
+/workspace/outputs/ yet: only a file written directly there is given to the user."). A file
+copied to another `outputs` (the root's `/outputs/`) is then known at once not to be the user's,
+before the answer says it was saved. It costs one listing in the sandbox, only for such a command.
+
 Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
 so after its system prompt, Kimi in a block before its prompt; when the run succeeds each file
