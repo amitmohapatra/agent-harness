@@ -1,6 +1,7 @@
-"""``ReAct(...)``: a tool-calling agent for teams with no framework — LangChain's
-``create_agent`` with the harness's middleware, and, when a Deep Agents capability is asked for,
-Deep Agents' ``create_deep_agent``, every feature of it native:
+"""``ReAct(...)``: a tool-calling agent for teams with no framework — Deep Agents'
+``create_deep_agent`` with the harness's middleware: lean alone, its Deep Agents machinery held
+until the run shows a long task, and Deep Agents from the first step when a Deep Agents
+capability is asked for:
 
     agent = h.wrap(
         ReAct("You answer stock questions.", "gpt-4o", tools=[quote], subagents=[research]),
@@ -10,17 +11,20 @@ Deep Agents' ``create_deep_agent``, every feature of it native:
 It returns the compiled graph (a LangGraph target: ``LangGraphAdapter`` runs it); nothing of the
 loop is the harness's. What it is built with:
 
-* **LangChain's loop** — ``create_agent``, dangling tool calls answered (Deep Agents'
-  ``PatchToolCallsMiddleware``), ``response_format``, parallel tool calls: the base measured
-  best on a small model (``docs/frameworks/react.md#the-base``); Anthropic's prompt cache
+* **LangChain's loop** — ``create_agent`` under Deep Agents' graph, dangling tool calls
+  answered (Deep Agents' ``PatchToolCallsMiddleware``), ``response_format``, parallel tool
+  calls; alone, ``ReAct`` sends what ``create_agent`` with ``middleware()`` sends, the base
+  measured best on a small model (``docs/frameworks/react.md#the-base``): large results kept by
+  the run, the window fitted by ``FitWindow``, Deep Agents' own tools offered once the
+  conversation is past half the window (``automatic.long_task``); Anthropic's prompt cache
   (LangChain's ``AnthropicPromptCachingMiddleware``) for an Anthropic chat model, a model name
   too (``middleware.PromptCache``, in Deep Agents' graph in its own one's place);
-* **Deep Agents, on demand** — given ``backend=`` (its file tools on the graph's state, a disk, a
+* **Deep Agents, on purpose** — given ``backend=`` (its file tools on the graph's state, a disk, a
   store, a composite, or the run's sandbox: ``sandbox()``), a sub-agent of its own
   (``subagents=``: the ``task`` tool), ``skills=``, ``memory_files=`` (its ``AGENTS.md``-style
   memory) or ``permissions=``, it is ``create_deep_agent``: a large tool result saved as a file
-  with a preview in its place, summarization near the window's end, prompt caching, and, on a
-  long task, its scratch tools and general-purpose helper;
+  with a preview in its place, summarization near the window's end, prompt caching, and its
+  tools and planning from the first call;
 * **the harness's** — :func:`middleware`, what neither has a piece for: the run's tools per
   model call (narrowed per turn: the tool hints, the memory and gateway MCP tools), governed
   with full parity; the model call's span, ``call_timeout`` and model routing; ``max_steps`` then a
@@ -75,7 +79,7 @@ log = logging.getLogger("trellis.models")
 #: The share of the window past which older tool results are cleared from the request, the
 #: last :data:`KEEP_RESULTS` kept, and the share a clearing frees at least (the cached prompt
 #: breaks only when it pays).
-CLEAR_AT: Final = 0.5
+CLEAR_AT: Final = 0.5  # where a task is long, too: ``automatic.LONG_AT``
 KEEP_RESULTS: Final = 3
 MIN_FREED: Final = 0.1
 #: What a cleared result reads as, ``{path}`` its own (``/large_tool_results/<its call's
@@ -177,15 +181,16 @@ def _middleware(
     context_window: int | None,
     system_prompt: Stored | None,
     held: frozenset[str] = frozenset(),
+    planned: bool = False,
     files: bool = True,
     summarization: Any = None,
     card: Any = None,
     scoped: bool = False,
 ) -> list[Any]:
-    """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools a long task is
-    offered (``held``: on its own backend, the scratch file tools, and its general-purpose
-    ``task`` helper when it has no sub-agents of its own), whether ``read_file`` is offered
-    from the start (``files``: its files are not in the graph's state), and Deep Agents'
+    """:func:`middleware`, and what only ``ReAct`` knows: the Deep Agents tools held until a
+    long task (``held``: with no Deep Agents capability asked for, the scratch file tools and
+    the general-purpose ``task`` helper), whether planning and ``read_file`` are offered from
+    the start (``planned``, ``files``: a capability was asked for), and Deep Agents'
     ``summarization``, placed after what narrows the tools so it counts what the model is
     sent; and whether its thread is the run (``scoped``: ``max_steps`` counts the run, a
     resume included — :func:`~.middleware.step_limit`)."""
@@ -226,7 +231,7 @@ def _middleware(
     )
     return [
         # what a long task is offered, decided before anything reads the request's tools
-        automatic.Planning(window=window),
+        automatic.Planning(window=window, always=planned),
         *([automatic.LongTaskTools(window=window, tools=held)] if held else []),
         ours.HarnessTools(),
         ours.GovernTools(),
@@ -275,9 +280,10 @@ def ReAct(
     effort: str | None = None,
     middleware: Sequence[Any] = (),
 ) -> Any:
-    """A LangChain agent graph (``create_agent``; ``create_deep_agent`` when a Deep Agents
+    """A Deep Agents graph (``create_deep_agent``) — lean alone, its Deep Agents machinery
+    offered once the run shows a long task; Deep Agents from the first step when a Deep Agents
     capability is asked for: ``backend``, a sub-agent of its own, ``skills``, ``memory_files``,
-    ``permissions``) answering with ``system_prompt`` (its
+    ``permissions`` — answering with ``system_prompt`` (its
     instructions: a string, or ``stored("name", **vars)``, a stored prompt of the gateway pinned
     for each run) and ``model`` (a model name, routed per call — Bifrost, else the provider's own
     key — or a LangChain chat model), its answer a ``response_format`` (a pydantic model or a
@@ -297,7 +303,8 @@ def ReAct(
 
     ``skills`` is a skill source (``trellis.skills``: a store's skills, pinned per run, read by Deep
     Agents' own skills middleware through a route of the backend), or Deep Agents' own skill source
-    paths. Deep Agents' own, passed as they are, any of them making it Deep Agents' graph:
+    paths. Deep Agents' own, passed as they are, any of them making it Deep Agents from its
+    first step:
     ``memory_files`` (its ``memory``: ``AGENTS.md``-style files loaded into the instructions),
     ``permissions``, ``backend`` (``JournalBackend()``: the graph's state, kept in the run's
     journal); LangChain's: ``state_schema``, ``context_schema``, ``cache``. Its checkpoint is kept
@@ -310,9 +317,7 @@ def ReAct(
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
-        from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
         from deepagents.middleware.summarization import create_summarization_middleware
-        from langchain.agents import create_agent
 
         from trellis.harness import automatic
         from trellis.harness import middleware as ours
@@ -348,53 +353,31 @@ def ReAct(
     cached, middleware = ours.prompt_cache(middleware)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
     instructions = system_prompt if not isinstance(system_prompt, Stored) else None
-    if not _deep(
+    asked = _deep(
         backend=backend,
         native=native,
         skills=skills,
         memory_files=memory_files,
         permissions=permissions,
-    ):
-        # no Deep Agents capability asked for: LangChain's loop with the harness's part — the
-        # base measured best (docs/frameworks/react.md#the-base)
-        graph = create_agent(
-            profiled,
-            tools=own,
-            system_prompt=instructions,
-            middleware=[
-                PatchToolCallsMiddleware(),
-                *stacked(
-                    _middleware(
-                        max_steps=max_steps,
-                        max_repeats=max_repeats,
-                        call_timeout=call_timeout,
-                        context_window=window,
-                        system_prompt=stored_prompt,
-                        scoped=True,
-                    ),
-                    middleware,
-                ),
-                cached,  # last of what changes the request, where Deep Agents puts its own
-            ],
-            response_format=cast(Any, response_format),  # a JSON schema too, at run time
-            state_schema=state_schema,
-            context_schema=context_schema,
-            checkpointer=ours.RunCheckpointer(),
-            cache=cache,
-            name="react",
-        )
-        return _described(graph, named, window, instructions, [*run, *helpers])
+    )
     files_backend = backend if backend is not None else automatic.JournalBackend()
     graph_backend = files_backend
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
-    # files outside the graph's state (a disk, a store, a sandbox) are the agent's from the
-    # start, and governed; in its state, a long task is offered the scratch tools — and the
-    # general-purpose helper, when the agent has no sub-agent of its own
+    # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
+    # outside the graph's state — a disk, a store, a sandbox — governed), unless the window is
+    # known to have no room for them. None asked for: the same graph, its scratch tools, its
+    # general-purpose helper and planning held until the run shows a long task
+    # (``automatic.long_task``), large results kept by the run and the window fitted by
+    # ``FitWindow``, as on ``create_agent`` with ``middleware()``
     outside = not isinstance(files_backend, StateBackend)
-    held = (frozenset() if outside else automatic.SCRATCH) | (
-        frozenset() if native else frozenset({automatic.TASK})
+    first = asked and (window is None or window >= automatic.MIN_WINDOW)
+    held = (
+        frozenset()
+        if first
+        else (frozenset() if outside else automatic.SCRATCH)
+        | (frozenset() if native else frozenset({automatic.TASK}))
     )
     defaults = _middleware(
         max_steps=max_steps,
@@ -403,8 +386,13 @@ def ReAct(
         context_window=window,
         system_prompt=stored_prompt,
         held=held,
-        files=outside or bool(skills) or bool(memory_files),
-        summarization=_placed(create_summarization_middleware(profiled, graph_backend), PLACED),
+        planned=first,
+        files=first or outside or bool(skills) or bool(memory_files),
+        summarization=(
+            _placed(create_summarization_middleware(profiled, graph_backend), PLACED)
+            if asked
+            else None
+        ),
         card=_card(files_backend),
         scoped=True,
     )
@@ -427,7 +415,7 @@ def ReAct(
         cache=cache,
         name="react",
     )
-    _declared(graph, backend=graph_backend, outside=outside, helper_only=not native)
+    _declared(graph, backend=graph_backend, outside=outside, helper_only=not native, kept=not asked)
     return _described(graph, named, window, instructions, [*run, *helpers])
 
 
@@ -440,7 +428,7 @@ def _deep(
     permissions: Sequence[Any] | None,
 ) -> bool:
     """Whether a Deep Agents capability is asked for — files on a backend, a sub-agent of its
-    own, skills, memory files, permissions — so ``ReAct`` is ``create_deep_agent``'s."""
+    own, skills, memory files, permissions — so ``ReAct`` is Deep Agents from its first step."""
     return backend is not None or bool(native or skills or memory_files or permissions)
 
 
@@ -588,7 +576,9 @@ def _asking(tool: Any) -> Any:
     )
 
 
-def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> None:
+def _declared(
+    graph: Any, *, backend: Any, outside: bool, helper_only: bool, kept: bool = False
+) -> None:
     """What the harness reads of Deep Agents' tools — the agent's and its sub-agents' — set on
     them: on a ``backend`` outside the graph's state (``outside``) the file tools are governed
     as any tool, reading or writing (``middleware.OUTSIDE_STATE``); ``execute`` on a backend
@@ -598,7 +588,14 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
-    from trellis.harness.middleware import FILE_TOOLS, MACHINERY, framework_made, outside_state
+    from trellis.harness.middleware import (
+        FILE_TOOLS,
+        KEPT_BY_RUN,
+        MACHINERY,
+        READ_FILE,
+        framework_made,
+        outside_state,
+    )
 
     runs = supports_execution(backend)
     for tool in graph_tools(graph):
@@ -609,6 +606,8 @@ def _declared(graph: Any, *, backend: Any, outside: bool, helper_only: bool) -> 
             marks = outside_state(tool.name)
         elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
             marks = {MACHINERY: True}
+        elif kept and tool.name == READ_FILE:
+            marks = {KEPT_BY_RUN: True}
         if marks:
             tool.metadata = {**(tool.metadata or {}), **marks}
 
@@ -698,7 +697,8 @@ def _named_class(base: type, name: str) -> type:
 
 def window_of(model: Any, given: int | None = None) -> tuple[int | None, str]:
     """The context window ``ReAct`` builds with, and what said so: ``given``, else the chat
-    model's LangChain profile (``profile``); ``(None, "unknown")`` when neither says."""
+    model's profile (``profile``: LangChain's, or for a model name it has none of, what the
+    route says — ``gateways.routed_chat_model``); ``(None, "unknown")`` when neither says."""
     if given is not None:
         return given, "given"
     found = context_window(model)

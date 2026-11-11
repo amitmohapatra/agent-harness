@@ -10,6 +10,7 @@ middleware) — the SKU scenario: a tool answers 10,000 SKUs, and every row stay
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -564,6 +565,123 @@ async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:
     assert (await agent.run("x", user="u")).status is RunStatus.SUCCESS
     assert last(model.requests[1]) == "date,sku,units\n" + "\n".join(LINES.splitlines()[1:4])
     assert "query_result" not in names(model.requests[1])
+
+
+def totals(metric: str, rows: int = 40) -> str:
+    """Each SKU's total of ``metric``, as CSV: revenue is ten times units."""
+    times = 10 if metric == "revenue" else 1
+    return "key,value\n" + "\n".join(f"SKU-{n:05d},{n * times}" for n in range(1, rows + 1))
+
+
+@tool(side_effects="read")
+async def summary(metric: str, start: str = "2026-01-01") -> str:
+    """Each SKU's total of a metric (revenue, units) from a date, as CSV."""
+    if metric == "revenue":  # asked first, answered last
+        await asyncio.sleep(0.05)
+    return totals(metric)
+
+
+@tool(side_effects="read")
+async def big_summary(metric: str) -> str:
+    """Each of 10,000 SKUs' total of a metric (revenue, units), as CSV."""
+    if metric == "revenue":
+        await asyncio.sleep(0.05)
+    return totals(metric, rows=10_000)
+
+
+def table_said(text: str) -> str:
+    return re.search(r"Its rows are the table (\w+) ", text).group(1)  # type: ignore[union-attr]
+
+
+SIDE_BY_SIDE: Final = (
+    "SELECT sum(r.value) AS revenue, sum(u.value) AS units "
+    "FROM {tool}_revenue r JOIN {tool}_units u USING (key)"
+)
+
+
+@pytest.mark.parametrize(
+    ("backend", "tool_name", "rows"),
+    [(False, "summary", 40), (False, "big_summary", 10_000), (True, "big_summary", 10_000)],
+    ids=["read-whole", "kept", "deep-agents-saved"],
+)
+async def test_tables_of_one_tools_calls_made_side_by_side_say_what_each_asked(
+    harness: Harness, backend: bool, tool_name: str, rows: int
+) -> None:
+    """A reply that calls one tool twice — revenue, then units — and the second answers first:
+    each kept table is named by its tool and the argument that tells the calls apart, whichever
+    finished first, so a join reads revenue as revenue (numbered by arrival, the model took
+    ``sales_summary_2`` for its second call and computed a profit from swapped columns: the
+    priced pilot's ``aggregate-04``, on three of four frameworks)."""
+    both = [(tool_name, {"metric": "revenue"}), (tool_name, {"metric": "units"})]
+    sql = SIDE_BY_SIDE.format(tool=tool_name)
+    asked = {"sql": sql, "results": [f"{tool_name}_revenue"]}  # a kept result, by its table
+    model = ScriptedChat([both, ("query_result", asked), "done"])
+    target = ReAct(system_prompt="s", model=model, backend=JournalBackend() if backend else None)
+    agent = arm(harness.wrap(target, id=f"side-{tool_name}-{backend}"), [summary, big_summary])
+    result = await agent.run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    revenue, units = (m["content"] for m in model.requests[1]["messages"][-2:])
+    assert table_said(revenue) == f"{tool_name}_revenue"
+    assert table_said(units) == f"{tool_name}_units"
+    n = rows * (rows + 1) // 2
+    assert last(model.requests[2]).splitlines()[-2:] == ["revenue,units", f"{n * 10},{n}"]
+
+
+def test_a_stub_of_deep_agents_says_its_table_once() -> None:
+    """A graph whose model call passes the harness's tools and the adapter's narrowing both
+    (a Deep Agents graph of your own with ``middleware()``): the stub names its table once."""
+    from dataclasses import dataclass, replace
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness import middleware
+
+    @dataclass
+    class Request:
+        state: dict[str, Any]
+        messages: list[Any]
+
+        def override(self, **changed: Any) -> Any:
+            return replace(self, **changed)
+
+    path = "/large_tool_results/c1"
+    stub = results.STUB.format(
+        tool_call_id="c1", file_path=path, preview_note=f"{results.PREVIEW}:", content_sample="1  k"
+    )
+    call = {"name": "big_summary", "args": {}, "id": "c1"}
+    said = [AIMessage(content="", tool_calls=[call]), ToolMessage(content=stub, tool_call_id="c1")]
+    files = {path: {"content": totals("revenue").splitlines()}}
+    journal = SimpleNamespace(results={})
+    runtime: Any = SimpleNamespace(run_id="once", replay=SimpleNamespace(journal=journal))
+    request: Any = Request({"files": files, "messages": said}, said)
+    once = middleware._stubs_tabled(runtime, request)
+    twice = middleware._stubs_tabled(runtime, once)
+    told = str(once.messages[1].content)
+    assert table_said(told) == "big_summary" and told.index("Its rows") < told.index(
+        results.PREVIEW
+    )
+    assert twice.messages[1].content == told
+
+
+async def test_a_tools_calls_one_after_another_are_numbered_as_before(harness: Harness) -> None:
+    """One call of a tool in a reply is named by its tool alone; the next reply's call of it is
+    numbered after it: the model made them in that order. Arguments that are not plain values,
+    or too long for a name, leave the tool's name too."""
+    long = "2026-01-01 " * 5
+    model = ScriptedChat(
+        [
+            ("summary", {"metric": "revenue"}),
+            ("summary", {"metric": "units"}),
+            [("summary", {"metric": "units", "start": long}), ("summary", {"metric": "revenue"})],
+            "done",
+        ]
+    )
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="in-turn"), [summary])
+    assert (await agent.run("x", user="u")).status is RunStatus.SUCCESS
+    said = [table_said(m["content"]) for m in model.requests[3]["messages"] if m["role"] == "tool"]
+    # the same rows are kept once (a path names its content): their first table stays theirs
+    assert said == ["summary", "summary_2", "summary_2", "summary"]
 
 
 @pytest.mark.parametrize(

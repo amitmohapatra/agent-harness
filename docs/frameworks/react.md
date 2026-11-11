@@ -1,13 +1,22 @@
 # ReAct: a tool-calling agent with no framework of yours
 
-For a team with no agent framework: `ReAct(system_prompt, model)` returns LangChain's
-`create_agent` graph with the harness's own middleware — [`middleware()`](#middleware-on-your-own-graph)
-— and dangling-call repair. Ask for a Deep Agents capability — `backend=` (file tools), a
-sub-agent of its own (`subagents=`), `skills=`, `memory_files=`, `permissions=` — and it is a
-Deep Agents `create_deep_agent` graph instead, every Deep Agents feature native (large results
-saved as files, summarization near the window's end, sub-agents, skills, memory files,
-permissions, prompt caching), the same middleware on top. Both bases were measured; the plain one
-was as good or better on every class of task ([the base](#the-base)). `h.wrap` runs it as it runs
+For a team with no agent framework: `ReAct(system_prompt, model)` returns a Deep Agents
+`create_deep_agent` graph with the harness's own middleware —
+[`middleware()`](#middleware-on-your-own-graph) — on top. There are two ways to run it, and
+`ReAct()` already takes what says which ([two ways](#two-ways-to-run-it)):
+
+* **`ReAct` alone** is lean: an ordinary task is sent the agent's tools and nothing else, a
+  large result is kept by the run and the window is fitted by `FitWindow`, as on LangChain's
+  `create_agent` with `middleware()`. Deep Agents' machinery — planning, scratch files, its
+  general-purpose helper — is held, and offered by itself once the run shows a long task: its
+  conversation has outgrown half the model's window.
+* **`ReAct` on Deep Agents, on purpose** — ask for a Deep Agents capability: `backend=` (file
+  tools), a sub-agent of its own (`subagents=`), `skills=`, `memory_files=`, `permissions=` —
+  is Deep Agents from its first step, every feature native (its tools and planning from the
+  first call, large results saved as files, summarization near the window's end, sub-agents,
+  skills, memory files, permissions, prompt caching).
+
+The lean base was measured as good or better on every class of task ([the base](#the-base)). `h.wrap` runs it as it runs
 any LangGraph graph ([langgraph.md](langgraph.md)): nothing of the loop is the harness's. Install
 the `react` extra (`pip install 'trellis-harness[react]'`: LangGraph, LangChain,
 `langchain-openai` and Deep Agents).
@@ -113,10 +122,14 @@ The names are Deep Agents' where both have one. In four tiers:
   its attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)); a spent
   budget asks the model for one last answer.
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
-  LangChain profile (`model.profile["max_input_tokens"]`). When neither says, the window-scaled
+  LangChain profile (`model.profile["max_input_tokens"]`); for a model name LangChain has no
+  profile of (one released after the installed package, a local one) the route is asked once,
+  when the agent is built: Anthropic's Models API (`max_input_tokens`), an OpenAI-compatible
+  endpoint's `/models` (the field its server names the window with: Bifrost, OpenRouter, Groq,
+  vLLM, Mistral), within 5 seconds, with the route's auth. When none says, the window-scaled
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
-  Deep Agents' summarization uses its own thresholds: give it for a local model (a llama.cpp
-  server's `-c`) or a prefixed vendor name.
+  Deep Agents' summarization uses its own thresholds: give it for a server whose model list
+  names no window (Ollama, llama.cpp's `-c`) and for a chat model object without a profile.
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
@@ -134,11 +147,51 @@ Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../gove
 sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
 `name` (the wrap's `id`) and `debug`.
 
+## Two ways to run it
+
+**`ReAct` alone: lean, Deep Agents' machinery by itself when the run needs it.**
+
+```python
+from trellis import Harness, ReAct
+
+h = Harness()
+agent = h.wrap(ReAct("You answer stock questions.", "provider/model", tools=[quote]), id="stock")
+```
+
+An ordinary task costs what `create_agent` with `middleware()` costs: the same tools sent, the
+same instructions. The switch is the run's own behaviour, never the request's wording and never
+a model call made to classify: once the conversation is past half the model's window — where
+old tool results start being cleared, so the request is rewritten anyway and a provider's prompt
+cache is not broken a second time — the model is offered `write_todos`, the scratch file tools
+(`ls`, `write_file`, `edit_file`, `delete`, `glob`, `grep`) and Deep Agents' general-purpose
+`task` helper, for the rest of the thread. It needs a known window of 32,000 tokens or more.
+
+**`ReAct` on Deep Agents, on purpose: Deep Agents from the first step.**
+
+```python
+from trellis import Harness, ReAct
+from trellis.harness.automatic import JournalBackend
+
+h = Harness()
+target = ReAct(
+    "You research and write reports.",
+    "provider/model",
+    tools=[quote],
+    backend=JournalBackend(),  # or a disk, a store, sandbox(); or subagents=, skills=, ...
+)
+agent = h.wrap(target, id="reports")
+```
+
+Its tools, planning and `read_file` are offered from the first call (about 2,600 tokens a
+call), a large result is saved as a file by Deep Agents, and the older turns are summarized
+near the window's end. On a window known to be under 32,000 tokens the long-task tools are
+held: there is no room for them.
+
 ## The base
 
 Three bases were measured on Granite 3.3 2B (CPU, llama.cpp behind Bifrost, an 8,192-token
 window), each with `middleware()` and `FitWindow`, ten different tasks per class:
-**A** `create_agent` (today's `ReAct`), **B** `create_deep_agent`, **C** `create_agent` with Deep
+**A** `create_agent` (what `ReAct` alone sends), **B** `create_deep_agent`, **C** `create_agent` with Deep
 Agents' pieces attached and offered per call.
 
 | Class (ten tasks each) | Base | Completed | Answered right | Input tokens / run (± 95% CI) | Model calls | p50 s |
@@ -172,21 +225,21 @@ general-purpose helper). Cached-token share, cost at hosted prices and CPU secon
 each other's intervals in every class but the large result, where A read a third of B's tokens.
 
 A simple task costs the same on all three — the same instructions (Deep Agents' main agent
-adds no base prompt) and tools. A is `ReAct`: no less accurate on any class, and on a large
+adds no base prompt) and tools. A is what `ReAct` alone sends (the same tools, large results kept by the run, the window
+fitted by `FitWindow`; Deep Agents' own tools held): no less accurate on any class, and on a large
 result it completed every run where B and C stalled half of theirs, after Deep Agents saved the
 result as a file and the model went looking. Deep Agents' capabilities stay a parameter away:
 
 | Capability | When |
 |---|---|
-| planning (`write_todos`) | a long task: the model's third call, or a request asking for steps, on a window of 32,000 tokens or more |
+| planning (`write_todos`), the scratch file tools, the general-purpose `task` helper | `ReAct` alone: a long task — the conversation past half the window, on a known window of 32,000 tokens or more. Asked for a Deep Agents capability: from the first call |
 | `read_file` | once an older result was cleared past half the window (by its call's id: `/large_tool_results/<call id>`), a large result was kept, or the graph's state holds a file |
 | file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
-| `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict; on a long task, Deep Agents' general-purpose helper too |
+| `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
 
-On Deep Agents, the scratch files and the general-purpose helper are offered on a long task only
-(on the graph's state), `read_file` once a result was saved as a file, and each capability's
-guidance travels in its tool's description, offered that turn — never in the instructions — so
+Each capability's guidance travels in its tool's description, offered that turn — never in the
+instructions — so
 the system prompt is the same from the first call to the last and a provider's prompt cache
 keeps its prefix. A run's first scratch write on the graph's state says, in its result, that the file is the
 run's own scratch copy, which the user cannot open or download (`middleware.SCRATCH_NOTE`):
@@ -215,7 +268,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 
 | Middleware | What it does |
 |---|---|
-| `TodoListMiddleware` (LangChain), `LongTaskTools` | a long task — from the model's third call of an invocation, or at once when the request asks for steps (a list of three items or more, "step by step", "a plan"), on a known window of at least 32,000 tokens — is offered planning (`write_todos`) and, on the default backend, Deep Agents' scratch file tools and its general-purpose helper; a shorter task is sent none of them (together about 2,600 tokens a call) |
+| `TodoListMiddleware` (LangChain), `LongTaskTools` | `ReAct` alone: a long task — a conversation past half the window (counted as LangChain's context editing counts it; where old results start being cleared), on a known window of at least 32,000 tokens — is offered planning (`write_todos`), Deep Agents' scratch file tools and its general-purpose helper, for the rest of the thread; a shorter task is sent none of them (together about 2,600 tokens a call), whatever its wording or the calls it made. `ReAct` asked for a Deep Agents capability offers them from the first call. On your own graph, `middleware()` offers planning the same way |
 | `HarnessTools` | the run's tools — your own, memory, skills, the MCP tools, what a `tool_search` found — offered per model call (narrowed once per run by the tool hints, then only growing: a `tool_search` find, a long task's tools; in the order first offered — the first call's by name, the later ones after them — so a provider's prompt cache keeps its prefix) and run through the harness: governed, journaled (a resume does not run a finished call again), traced. The calls whose tool only reads run at once; the others in the model's order. With no `read_file` of the graph's own (no backend), a result over 80,000 characters is kept in the run and previewed, and `read_file` and `query_result` (read-only SQL over its rows) are offered once one is ([tools.md](../tools.md#large-results)); with a backend, `query_result` runs over the result Deep Agents saved in the state |
 | `GovernTools` | the graph's own tools — your LangChain tools, Deep Agents' `task`, its file tools on a backend outside the state, a sub-agent's tools — governed as the harness's are (catalog, approval, journal, records) |
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed and a failure was met again (the same tool, the same error): the model is told so and called once more with no tool (`tool_choice="none"`), so the user is told what went wrong; no answer then stops the run with a `ModelError`. Failures that each differ are a model correcting itself, bounded by `max_steps` |
@@ -395,7 +448,7 @@ the run's, its pauses asked through the run, its crash continued, its cancel wit
   calls governed and recorded under its run. A declarative one gets the loop's guards and its
   model name routed as `ReAct`'s; a tool it names in `interrupt_on` asks a person — its risk,
   as the catalog says (a name that is none of its tools stays Deep Agents' approval, asked once
-  through the run). With no sub-agent of its own, the general-purpose helper is a long task's.
+  through the run). With no Deep Agents capability asked for, the general-purpose helper is a long task's.
 * **Wrapped agents and `a2a(url)`** — each a tool named after the agent's id (described by
   `h.wrap(description=)`, else its docstring; an A2A agent by its card), any framework, local or
   remote. The reads among them run at once, the writes one at a time.
@@ -438,8 +491,9 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
   a sub-agent with its name and description (`{"name", "description", "runnable"}`).
 * Building a `ReAct` costs what `create_deep_agent` costs (it compiles its general-purpose helper
   as well): about 26 ms against 13 ms for `create_agent` — once per agent, not per run.
-* Without a known window (`context_window=`, or the model's LangChain profile), clearing old
-  tool results and the long-task tools are off, said once.
+* Without a known window (`context_window=`, the model's LangChain profile, or the route's
+  own record of the model), clearing old tool results and the long-task tools are off, said
+  once.
 * Skills and memory files on the default backend must be in the graph's state; give a
   `FilesystemBackend` (or a store) that holds them.
 * The harness runs the graph asynchronously (`ainvoke`): the sandbox backend has no synchronous

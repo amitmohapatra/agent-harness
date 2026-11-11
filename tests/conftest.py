@@ -4,6 +4,7 @@ whose memory service is the in-process fake."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -101,6 +102,36 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
             super().__init__(**kwargs)
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", OnHttpx)
+
+
+@pytest.fixture(autouse=True)
+def anthropic_models(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Anthropic's Models API, answered here: where the harness asks it of a model's context
+    window (``gateways._anthropic_window``), a test never reaches the real one. ``records`` are
+    the models it knows by name (none: every model is a 404), ``asked`` the requests it got.
+    Live tests ask the real API."""
+    if request.node.get_closest_marker("live") is not None:
+        return None
+    import anthropic
+    import httpx2
+
+    api = SimpleNamespace(records={}, asked=[])
+
+    def answer(asked: httpx2.Request) -> httpx2.Response:
+        api.asked.append(asked)
+        record = api.records.get(asked.url.path.rpartition("/")[2])
+        if record is None:
+            error = {"type": "not_found_error", "message": "no such model"}
+            return httpx2.Response(404, json={"type": "error", "error": error})
+        return httpx2.Response(200, json=record)
+
+    class Answered(anthropic.Anthropic):
+        def __init__(self, **kwargs: Any) -> None:
+            client = anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(answer))
+            super().__init__(http_client=client, **kwargs)
+
+    monkeypatch.setattr(anthropic, "Anthropic", Answered)
+    return api
 
 
 def _unwrapped(client: Any) -> httpx.Auth | None:

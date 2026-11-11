@@ -127,6 +127,20 @@ KEYLESS: Final[dict[str, str]] = {BEARER: NO_KEY}
 BIFROST_CLIENT_RETRIES: Final = 0
 #: How many chat models made of routed names are kept (per route, name, effort, event loop).
 ROUTED_KEPT: Final = 64
+#: The fields of a model's record that name its context window in tokens, as the servers that
+#: say it name it: Anthropic's Models API and Bifrost (``max_input_tokens``), OpenRouter and
+#: Bifrost (``context_length``), Groq (``context_window``), vLLM (``max_model_len``), Mistral
+#: (``max_context_length``).
+WINDOW_FIELDS: Final = (
+    "max_input_tokens",
+    "context_length",
+    "context_window",
+    "max_model_len",
+    "max_context_length",
+)
+#: How long a route is given to say a model's window, in seconds (asked when a model name
+#: LangChain has no profile of is made a chat model: once per route and model).
+WINDOW_ASKED: Final = 5.0
 #: Anthropic's own API. As an OpenAI-compatible endpoint (``LLM_BASE_URL`` its ``/v1``) it is
 #: its OpenAI SDK compatibility layer, which drops prompt caching ("Prompt caching is not
 #: supported, but it is supported in the Anthropic SDKs":
@@ -187,6 +201,12 @@ class ModelGateway(ABC):
         is ``model`` (``None``: not known; the service picks): this route's endpoint, its key
         only when it is a bearer key, and the model's profile as LangChain knows it.
         ``None``: there is none to tell (the service uses its own settings)."""
+
+    def window(self, model: str) -> int | None:
+        """The context window of ``model`` in tokens, as this route's own record of the model
+        says it (a request to the endpoint); ``None``: it says none (the default: a route with
+        no such record)."""
+        return None
 
     def gateway_client(self, key: str | None = None) -> Gateway | None:
         """The client of the gateway's own API (MCP tools, stored prompts, skills, the judge
@@ -289,6 +309,25 @@ def _anthropic(model: str, effort: str | None, url: str, key: str | None) -> Any
     return ChatAnthropic(model_name=model, base_url=url, api_key=key, **effort_given)  # type: ignore[call-arg,arg-type]
 
 
+def _anthropic_window(model: str, **client: Any) -> int | None:
+    """The context window Anthropic's Models API says ``model`` has (``max_input_tokens``),
+    asked with Anthropic's own client made of ``client`` (none: its SDK's own key and
+    endpoint)."""
+    import anthropic  # noqa: PLC0415 - the anthropic extra's
+
+    with anthropic.Anthropic(max_retries=0, timeout=WINDOW_ASKED, **client) as asked:
+        return asked.models.retrieve(model).max_input_tokens
+
+
+def _window_said(record: Mapping[str, Any]) -> int | None:
+    """The context window a model's record names (:data:`WINDOW_FIELDS`); ``None``: none."""
+    for field in WINDOW_FIELDS:
+        said = record.get(field)
+        if isinstance(said, int) and said > 0:
+            return said
+    return None
+
+
 class OpenAICompatible(ModelGateway):
     """An OpenAI-compatible endpoint (``LLM_BASE_URL``): model names as given, on its chat
     completions, authenticated by ``LLM_AUTH``'s strategy; models only, the client's own
@@ -387,6 +426,19 @@ class OpenAICompatible(ModelGateway):
             api_key=self.key or NO_KEY,
             **self.client_options(),
         )
+
+    def window(self, model: str) -> int | None:
+        """Anthropic's API is asked of the model (its Models API); any other endpoint's model
+        list (``/models``) is read for the model as the route names it."""
+        name = self.routed(model)
+        if self.anthropic:
+            return _anthropic_window(name, base_url=self.origin, api_key=self.key)
+        import httpx  # noqa: PLC0415
+
+        url = f"{self.url.rstrip('/')}/models"
+        listed = httpx.get(url, auth=self.http_auth, timeout=WINDOW_ASKED).raise_for_status()
+        records = (r for r in listed.json()["data"] if r.get("id") == name)
+        return next((_window_said(record) for record in records), None)
 
     def judge(self, model: str) -> OpenAICompatibleJudge:
         from trellis.harness.evals import OpenAICompatibleJudge  # noqa: PLC0415
@@ -501,6 +553,12 @@ class ProviderSDK(ModelGateway):
 
         return init_chat_model(name, model_provider=provider)
 
+    def window(self, model: str) -> int | None:
+        """Anthropic's SDK asks its Models API, with its own key; no other provider's is asked
+        (OpenAI's model records name no window)."""
+        provider, _, name = self.routed(model).partition(":")
+        return _anthropic_window(name) if provider == "anthropic" else None
+
     def judge(self, model: str) -> OpenAICompatibleJudge:
         """``model`` as a judge asks it: an OpenAI model on the OpenAI SDK's own endpoint."""
         from trellis.harness.evals import OpenAICompatibleJudge  # noqa: PLC0415
@@ -593,6 +651,9 @@ def missing(gateway: ModelGateway, capability: Capability, what: str) -> str | N
 _MADE: weakref.WeakKeyDictionary[Any, LRU[tuple[Any, ...], Any]] = weakref.WeakKeyDictionary()
 #: The ones made outside an event loop.
 _MADE_NO_LOOP: LRU[tuple[Any, ...], Any] = LRU(ROUTED_KEPT)
+#: What each route answered when asked a model's window (``None``: it says none), by route
+#: and model.
+_WINDOWS: LRU[tuple[Any, ...], int | None] = LRU(ROUTED_KEPT)
 
 
 def per_loop(kept: weakref.WeakKeyDictionary[Any, LRU[Any, Any]], size: int) -> LRU[Any, Any]:
@@ -610,9 +671,17 @@ def routed_chat_model(model: str, *, effort: str | None = None) -> Any:
     """A LangChain chat model of the name ``model`` that each call routes as the harness of the
     run making it says (:attr:`Harness.model_gateway`: the settings given in code over the
     environment's), outside a run as the environment does (:func:`model_gateway`) — the name
-    mapped to the route's form. Its ``profile`` is the provider's model's (its
-    context window), when LangChain knows it."""
-    return _routed_class()(model_name=model, effort=effort, profile=_profile_of(model))
+    mapped to the route's form. Its ``profile`` is the provider's model's as LangChain knows it
+    (:func:`_profile_of`); where that names no context window — a model newer than the
+    installed LangChain package, a local one — the route is asked for it (:func:`_window_of`),
+    so what is scaled by the window (``FitWindow``, clearing old results, the long-task tools,
+    the memory context's and the replayed conversation's budgets) has one."""
+    profile = _profile_of(model)
+    if not (profile or {}).get("max_input_tokens"):
+        window = _window_of(model)
+        if window is not None:
+            profile = {**(profile or {}), "max_input_tokens": window}
+    return _routed_class()(model_name=model, effort=effort, profile=profile)
 
 
 def routed(model: Any) -> bool:
@@ -645,6 +714,23 @@ def _resolved(model: str, effort: str | None) -> Any:
     if found is None:
         found = made[key] = gateway.chat_model(model, effort=effort)
     return found
+
+
+def _window_of(model: str) -> int | None:
+    """The context window the route a call made now takes (:func:`route_now`) says ``model``
+    has (:meth:`ModelGateway.window`), asked once per route and model: its answer is kept, a
+    window or none. ``None`` too when the route cannot be asked — no route configured, no key,
+    no answer within :data:`WINDOW_ASKED` — and the next chat model made of the name asks
+    again."""
+    try:
+        gateway = route_now()
+        key = (gateway.name, gateway.url, gateway.key, gateway.auth, model)
+        if key not in _WINDOWS:
+            _WINDOWS[key] = gateway.window(model)
+    except Exception as exc:
+        log.debug("the context window of %s was not asked: %s", model, exc)
+        return None
+    return _WINDOWS[key]
 
 
 def _profile_of(model: str) -> dict[str, Any] | None:

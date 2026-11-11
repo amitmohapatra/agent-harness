@@ -1034,7 +1034,8 @@ class Agent:
         question and answer; whole — its tool calls and their results too, as kept here — for a
         target that takes messages and fits each request to a known window: ``ReAct``'s
         ``FitWindow`` and clearing, a result past its tool's age marked out of date as memory's
-        window marks it) — only where nothing else keeps them (ADR 0005): not where the
+        window marks it, and the context saying so in one line: ``snapshots.note``) — only
+        where nothing else keeps them (ADR 0005): not where the
         framework keeps its own thread (a checkpointer, a session of the run's, a conversation
         on OpenAI's servers) or continues the session it kept for the conversation's last turn
         (``Runtime.continued``). A target that takes messages (``Adapter.history_in ==
@@ -1054,9 +1055,12 @@ class Agent:
         if not earlier:
             return
         if self.adapter.history_in == "messages":
-            runtime.history, _ = snapshots.out_of_date(
+            runtime.history, stale = snapshots.out_of_date(
                 earlier, lambda name: snapshots.declared_max_age(runtime, name)
             )
+            # as memory's replay says it (:meth:`remembered`): the run's context names the
+            # tools whose earlier values are out of date — sent with the question
+            runtime.context = snapshots.note(stale)
         else:
             runtime.context = conversation.rendered(earlier)
 

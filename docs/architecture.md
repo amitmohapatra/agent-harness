@@ -447,8 +447,9 @@ entry point (`graph.ainvoke`, `Runner.run`, `query`) is not intercepted: call
 
 ## The middleware
 
-`ReAct(...)` is LangChain's `create_agent` graph with the harness's `middleware()` — a Deep Agents
-`create_deep_agent` graph when a Deep Agents capability is asked for (`backend=`, a sub-agent of
+`ReAct(...)` is a Deep Agents `create_deep_agent` graph with the harness's `middleware()` — its
+Deep Agents machinery held until the run shows a long task, or offered from the first step when
+a Deep Agents capability is asked for (`backend=`, a sub-agent of
 its own, `skills=`, `memory_files=`, `permissions=`) — (`react.py`); any `create_agent` or Deep
 Agents graph may take `middleware()` too. The stack `ReAct` builds on Deep Agents, in order — each `wrap_model_call` wraps the ones after it, so the first is
 outermost; Deep Agents' own first, then the harness's (Deep Agents' summarization placed after

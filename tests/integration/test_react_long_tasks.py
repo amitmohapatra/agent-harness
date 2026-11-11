@@ -1,9 +1,10 @@
-"""What ``ReAct`` on Deep Agents (a backend given: here the journal's) offers a long task
-(``trellis.harness.automatic``): LangChain's
+"""Deep Agents' machinery in ``ReAct`` (``trellis.harness.automatic``): LangChain's
 ``TodoListMiddleware`` (``planning``), Deep Agents' scratch files on the journal and its
-general-purpose helper (``files``) — offered from the model's :data:`LONG_AFTER`-th call or when
-the request asks for steps, on a known window with room for them; a short task is offered none
-of them, nor a model whose window is not known."""
+general-purpose helper (``files``). ``ReAct`` asked for a Deep Agents capability (a backend:
+here the journal's) offers them from its first step. ``ReAct`` alone holds them until the run
+shows a long task — its conversation has outgrown half the window, where old tool results start
+being cleared — on a known window with room for them; a shorter task is offered none of them,
+whatever its wording or the calls it made, nor a model whose window is not known."""
 
 from __future__ import annotations
 
@@ -19,8 +20,8 @@ from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
-from trellis.harness import middleware
-from trellis.harness.automatic import LONG_AFTER, MIN_WINDOW, SCRATCH, TASK, JournalBackend
+from trellis.harness import middleware, react
+from trellis.harness.automatic import LONG_AT, MIN_WINDOW, SCRATCH, TASK, JournalBackend
 from trellis.harness.middleware import SCRATCH_NOTE
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
@@ -70,65 +71,85 @@ def result_of(messages: list[BaseMessage], call: str | None = None) -> str:
 
 
 # --------------------------------------------------------------------------- triggers
-async def test_the_long_task_tools_come_with_the_models_long_after_th_call(
+#: A text that alone outgrows half of the smallest window with room (about 17,000 tokens).
+LONG_TEXT = "stock report line. " * 3_600
+
+
+@tool(side_effects="read")
+def report() -> str:
+    """The whole stock report."""
+    return LONG_TEXT
+
+
+async def test_react_alone_is_offered_them_once_its_conversation_outgrows_half_the_window(
     harness: Harness,
 ) -> None:
-    turns: list[Any] = [("stock", {"sku": f"a-{n}"}) for n in range(LONG_AFTER + 1)]
-    model = ScriptedChatModel(turns=[*turns, "7 each"])
+    """No Deep Agents capability asked for: the tools are held while the task is an ordinary
+    one — four model calls made, a fifth: the calls made do not switch — and offered from the
+    call whose conversation is past half the window, for the rest of the run."""
+    turns: list[Any] = [("stock", {"sku": f"a-{n}"}) for n in range(4)]
+    model = ScriptedChatModel(turns=[*turns, ("report", {}), ("stock", {"sku": "a-9"}), "7 each"])
     agent = arm(
-        harness.wrap(ReAct("s", model, backend=JournalBackend(), context_window=ROOM), id="long"),
-        [stock],
+        harness.wrap(ReAct("s", model, context_window=MIN_WINDOW), id="auto"), [stock, report]
     )
     assert (await agent.run("how many a-0 .. a-3?", user="u")).answer == "7 each"
-    # threshold - 1, at, + 1: none before, all from the LONG_AFTER-th call on
-    assert not offered(model, LONG_AFTER - 1) & LONG_TOOLS
-    assert offered(model, LONG_AFTER) >= LONG_TOOLS
-    assert offered(model, LONG_AFTER + 1) >= LONG_TOOLS
-    assert all(not offered(model, n) & LONG_TOOLS for n in range(LONG_AFTER))
+    assert all(not offered(model, n) & LONG_TOOLS for n in range(5))
+    assert offered(model, 5) >= LONG_TOOLS and offered(model, 6) >= LONG_TOOLS
+    # where old results start being cleared: the request is edited anyway
+    assert LONG_AT == react.CLEAR_AT
     # the instructions stay the same from the first call on (a prompt cache's prefix holds):
     # the plan's guidance is the tool's own description
-    assert model.seen[LONG_AFTER][0].content == model.seen[0][0].content
+    assert model.seen[5][0].content == model.seen[0][0].content
 
 
 @pytest.mark.parametrize(
-    ("asked", "long"),
+    "asked",
     [
-        (STEPS + "count a-1.", True),
-        ("Make a plan to count a-1.", True),
-        ("Count:\n1. a-1\n2. a-2\n3. a-3", True),
-        ("Count:\n1. a-1\n2. a-2", False),  # two items: not yet steps
-        ("How many a-1? First check, then answer.", False),
+        STEPS + "count a-1.",
+        "Make a plan to count a-1.",
+        "Count:\n1. a-1\n2. a-2\n3. a-3",
     ],
 )
-async def test_a_request_asking_for_steps_gets_them_from_the_first_call(
-    harness: Harness, asked: str, long: bool
-) -> None:
+async def test_the_wording_of_a_request_does_not_switch(harness: Harness, asked: str) -> None:
+    """A request that says "step by step", "a plan" or lists items is offered what any other
+    is: on the long set no request said so, and the one benchmark request that did ("pick the
+    plan with...") asked for no steps."""
     model = ScriptedChatModel(turns=["7"])
-    await arm(
-        harness.wrap(ReAct("s", model, backend=JournalBackend(), context_window=ROOM), id="steps"),
-        [stock],
-    ).run(asked, user="u")
-    assert (offered(model, 0) >= LONG_TOOLS) is long
-    assert bool(offered(model, 0) & LONG_TOOLS) is long
-
-
-async def test_a_small_window_has_no_room_for_them(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=["7"])
-    target = ReAct("s", model, backend=JournalBackend(), context_window=MIN_WINDOW - 1)
-    await arm(harness.wrap(target, id="small"), [stock]).run(STEPS + "count", user="u")
-    assert not offered(model, 0) & LONG_TOOLS
-    model = ScriptedChatModel(turns=["7"])
-    target = ReAct("s", model, backend=JournalBackend(), context_window=MIN_WINDOW)
-    await arm(harness.wrap(target, id="room"), [stock]).run(STEPS + "count", user="u")
-    assert offered(model, 0) >= LONG_TOOLS
-
-
-async def test_a_window_not_known_has_none_of_them(harness: Harness) -> None:
-    model = ScriptedChatModel(turns=["7"])
-    await arm(harness.wrap(ReAct("s", model, backend=JournalBackend()), id="unknown"), [stock]).run(
-        STEPS + "count", user="u"
+    await arm(harness.wrap(ReAct("s", model, context_window=ROOM), id="words"), [stock]).run(
+        asked, user="u"
     )
     assert not offered(model, 0) & LONG_TOOLS
+
+
+@pytest.mark.parametrize("window", [ROOM, MIN_WINDOW, None], ids=["room", "least", "unknown"])
+async def test_react_asked_for_a_backend_is_deep_agents_from_its_first_step(
+    harness: Harness, window: int | None
+) -> None:
+    """A Deep Agents capability asked for: its tools, planning and ``read_file`` from the first
+    call — the developer's choice — on any window not known to be too small for them."""
+    model = ScriptedChatModel(turns=["7"])
+    target = ReAct("s", model, backend=JournalBackend(), context_window=window)
+    await arm(harness.wrap(target, id=f"asked-{window}"), [stock]).run("count", user="u")
+    assert offered(model, 0) >= LONG_TOOLS | {"read_file"}
+
+
+async def test_a_window_known_to_be_small_has_no_room_for_them(harness: Harness) -> None:
+    """Together they cost about 2,600 tokens a call: under ``MIN_WINDOW`` they are held, asked
+    for or not, even once the conversation is past half of it."""
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a-1"}), "7"])
+    target = ReAct("s", model, backend=JournalBackend(), context_window=MIN_WINDOW - 1)
+    await arm(harness.wrap(target, id="small"), [stock]).run("x " * 40_000, user="u")
+    assert not offered(model, 0) & LONG_TOOLS and not offered(model, 1) & LONG_TOOLS
+
+
+@pytest.mark.parametrize("window", [MIN_WINDOW - 1, None], ids=["small", "unknown"])
+async def test_react_alone_on_a_small_or_unknown_window_is_offered_none(
+    harness: Harness, window: int | None
+) -> None:
+    model = ScriptedChatModel(turns=[("report", {}), "7"])
+    target = ReAct("s", model, context_window=window)
+    await arm(harness.wrap(target, id=f"none-{window}"), [stock, report]).run("count", user="u")
+    assert not offered(model, 0) & LONG_TOOLS and not offered(model, 1) & LONG_TOOLS
 
 
 # --------------------------------------------------------------------------- planning
