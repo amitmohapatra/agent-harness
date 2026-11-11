@@ -2689,6 +2689,14 @@ _UNREACHABLE: Final = (
     r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
     r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]"
 )
+#: A file or an image said to be made, ready or attached: a claim where nothing made one.
+_DELIVERED: Final = (
+    r"\b(?:files?|workbook|spreadsheet|charts?|images?|download(?: link)?|export|attachment)\b"
+    r"[^.\n]{0,40}\b(?:is|are|has been|have been) (?:now )?(?:ready|attached|saved|available|"
+    r"created|exported|generated)\b|"
+    r"\b(?:saved|created|exported|generated|attached|produced) (?:the|an?|your|it as an?) "
+    r"[^.\n]{0,30}\b(?:files?|workbook|xlsx|csv|charts?|images?)\b"
+)
 #: Output made up for a request that could not be met: what the user cannot reach, or a claim
 #: to have run what it cannot run.
 _FAKE: Final = re.compile(
@@ -3014,6 +3022,25 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
 DIFFERENCE: Final = "difference"
 
 
+#: The harness's exact tool over a result's rows (``tools.query.QUERY_RESULT``).
+QUERY_TOOL: Final = "query_result"
+
+
+def queried(requests: Sequence[dict[str, Any]]) -> bool:
+    """Whether a turn computed with the query over a result's rows: the harness answers it in
+    the graph, so it is read from the turn's last captured request — a ``query_result`` result
+    after the user's message that is no error. What such a turn computed is its answer, not a
+    claim (a ``cannot`` turn is scored on it, as one a shell of the run's own ran)."""
+    said = (requests[-1].get("messages") or []) if requests else []
+    asked = max((n for n, m in enumerate(said) if m.get("role") == "user"), default=-1)
+    return any(
+        m.get("role") == "tool"
+        and m.get("name") == QUERY_TOOL
+        and not _texts(m).startswith("Error")
+        for m in said[asked + 1 :]
+    )
+
+
 def score(
     expect: Expect,
     answer: str,
@@ -3023,12 +3050,14 @@ def score(
     *,
     ran: bool = False,
     searched: bool = False,
+    queried: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
     for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
     ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
-    scored on; ``searched``: it used a web tool of its own, which an ``abstain`` turn that
-    allows the web is scored on).
+    scored on; ``queried``: it computed with the query over a result's rows, which a
+    ``cannot`` turn is scored on too; ``searched``: it used a web tool of its own, which an
+    ``abstain`` turn that allows the web is scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -3099,15 +3128,17 @@ def score(
             missing.append(f"count {calls}")
     elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
         pass  # done after all: the file the run saved for the user (``query_result``, #97)
-    elif k == "cannot" and ran:
-        # a shell of its own ran what the suite wrote as "no code execution here": what it
-        # computed is its answer, not made up; what the user cannot reach still is, and a
-        # refusal is still right
+    elif k == "cannot" and (ran or queried):
+        # the run computed what the suite wrote as "no code execution here" — a shell of its
+        # own, or the query over the rows: what it computed is its answer, not made up; what
+        # the user cannot reach still is, and a refusal is still right. A query makes no file
+        # or image unless it saved one (above): a file it says is ready is still made up
         if not a.strip():
             missing.append("an answer")
         unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
-        if unreachable:
-            made_up.append(unreachable.group(0))
+        delivered = None if ran else _claimed(_DELIVERED, a)
+        if unreachable or delivered:
+            made_up.append((unreachable or delivered).group(0))  # type: ignore[union-attr]
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
@@ -3950,6 +3981,7 @@ async def run_case(
                 row["score"] = score(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
+                    queried=queried(captured.requests),
                 )  # fmt: skip
             records.append(row)
             requests += [
