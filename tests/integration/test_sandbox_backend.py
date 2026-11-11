@@ -258,7 +258,7 @@ async def test_a_command_naming_outputs_is_told_what_the_user_gets(harness: Harn
     command that names an ``outputs`` folder is told at once, with its result, what that folder
     holds and where it is: a model that copied its file to ``/outputs/`` at the root kept
     nothing and answered that the file was saved (the priced pilot's bf2-mixed-04). A command
-    that names none costs no second command."""
+    that names none, and leaves no file beside the folder, is told nothing."""
     provider = FakeSandboxes()
     model = ScriptedChatModel(
         turns=[
@@ -274,7 +274,7 @@ async def test_a_command_naming_outputs_is_told_what_the_user_gets(harness: Harn
         "No file is in /workspace/outputs/ yet: only a file written directly there is given "
         "to the user." in missed
     ), missed
-    assert "outputs" not in plain and provider.asked == 1  # asked only for the one naming it
+    assert "outputs" not in plain  # told only for the one naming it
 
     async def work(input: str, runtime: Runtime) -> Any:
         await runtime.tools.use(sandbox(provider).tools())
@@ -287,3 +287,49 @@ async def test_a_command_naming_outputs_is_told_what_the_user_gets(harness: Harn
     first, then = done.answer
     assert first["outputs"].startswith("No file is in /workspace/outputs/ yet"), first
     assert then["outputs"] == "In /workspace/outputs/ for the user: report.csv (4 bytes).", then
+
+
+async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be_the_users(
+    harness: Harness,
+) -> None:
+    """A file for the user written with ``write_file`` to an ``outputs`` that is not the kept
+    folder (the root's: the live chart case), or left by code beside the kept folder (a chart
+    saved in the working directory), is said with that call's result, with the kept folder's
+    whole path — once per file, and a file the sandbox started with is not the model's."""
+    provider = FakeSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "/outputs/chart.svg", "content": "<svg/>"}),
+            ("execute", {"command": "touch chart.png"}),
+            ("execute", {"command": "echo 42"}),
+            ("write_file", {"file_path": "/workspace/outputs/chart.svg", "content": "<svg/>"}),
+            "saved",
+        ]
+    )
+    made = sandbox(provider, spec=SandboxSpec(files={"given.csv": "n\n1\n"}))
+    agent = harness.wrap(ReAct("s", model, backend=made), id="charter")
+    assert (await agent.run("chart it", user="u")).answer == "saved"
+    root, beside, plain, kept = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
+    assert root.endswith(
+        "No file is in /workspace/outputs/ yet: only a file written directly there is given "
+        "to the user."
+    ), root
+    assert beside.endswith(
+        "Not in /workspace/outputs/, so not given to the user: chart.png."
+    ), beside
+    assert "outputs" not in plain, plain  # said once, and never of the file it started with
+    assert kept.endswith("In /workspace/outputs/ for the user: chart.svg (6 bytes)."), kept
+
+    async def work(input: str, runtime: Runtime) -> Any:
+        await runtime.tools.use(sandbox(provider).tools())
+        wrote = await runtime.tools.call("sandbox_write", path="/outputs/a.svg", content="x")
+        ran = await runtime.tools.call("sandbox_exec", command="touch b.png")
+        return [wrote, ran, await runtime.tools.call("sandbox_exec", command="echo 1")]
+
+    done = await harness.wrap(work, id="charter-tools").run("go", user="u")
+    assert done.status is RunStatus.SUCCESS, done.error
+    wrote, ran, then = done.answer
+    assert wrote.endswith("No file is in /workspace/outputs/ yet: only a file written directly "
+                          "there is given to the user."), wrote
+    assert ran["outputs"] == "Not in /workspace/outputs/, so not given to the user: b.png.", ran
+    assert "outputs" not in then, then

@@ -23,6 +23,9 @@ from trellis.harness.sandbox import (
     SandboxSpec,
 )
 
+#: The fake sandbox's working directory: a path under it and a relative one name one file.
+WORKDIR = "/workspace"
+
 
 @dataclass
 class Box:
@@ -151,17 +154,21 @@ class FakeBox:
         if command == PROBE:
             return ExecResult(exit_code=0, stdout=self.provider.environment)
         if command in (LIST_OUTPUTS, OUTPUTS_NOW):  # each file directly in outputs/
-            now = command == OUTPUTS_NOW  # its working directory first
+            now = command == OUTPUTS_NOW  # its working directory first, the files in it last
             self.provider.listed += not now
             self.provider.asked += now
+            here = {p.removeprefix(f"{WORKDIR}/"): c for p, c in box.files.items()}
             prefix = f"{OUTPUTS}/"
             found = {
                 p.removeprefix(prefix): c
-                for p, c in box.files.items()
+                for p, c in here.items()
                 if p.startswith(prefix) and "/" not in p.removeprefix(prefix)
             }
             listed = "".join(f"{len(c)} {n}\n" for n, c in found.items())
-            return ExecResult(exit_code=0, stdout=("/workspace\n" if now else "") + listed)
+            if not now:
+                return ExecResult(exit_code=0, stdout=listed)
+            beside = "".join(f"{p}\n" for p in here if "/" not in p)
+            return ExecResult(exit_code=0, stdout=f"{WORKDIR}\n{listed}\n{beside}")
         self.provider.commands.append(command)
         if command == "crash":
             raise self.provider.crash
@@ -176,6 +183,8 @@ class FakeBox:
             _, code, stderr = command.split(" ", 2)
             return ExecResult(exit_code=int(code), stderr=stderr)
         said = command.removeprefix("echo ") if command.startswith("echo ") else ""
+        if command.startswith("touch "):
+            box.files.setdefault(command.removeprefix("touch "), b"")
         if command.startswith("cat "):
             said = (await self.read(command.removeprefix("cat "))).decode()
         extra = "".join(f" {k}={v}" for k, v in (env or {}).items())
