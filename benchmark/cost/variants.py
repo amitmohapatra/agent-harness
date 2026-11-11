@@ -38,8 +38,10 @@ same instructions and model. A new cost feature lands as one more entry of :data
 
 from __future__ import annotations
 
+import atexit
 import functools
 import os
+import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -191,6 +193,7 @@ def _disk(files: dict[str, str]) -> Any:
     from deepagents.backends import FilesystemBackend
 
     root = Path(tempfile.mkdtemp(prefix="trellis-bench-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)  # removed when the run ends
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
