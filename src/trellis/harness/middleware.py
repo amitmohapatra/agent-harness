@@ -1778,10 +1778,12 @@ class FitWindow(AgentMiddleware):
        summarization after it) leaves the results to it: it offloads a result whole to its
        backend and reads it back with its own ``read_file``, so a result is stored once, where
        its sandbox's code reads it;
-    4. ``turns`` — the older turns left out, the latest kept whole (``turns=False`` leaves the
-       turns to a summarization after it: ``ReAct``'s summarizes them), and only then the tools
-       narrowed past :data:`FIT_KEEP`, as far as the latest turn leaves no room: the tools the
-       question needs are never dropped for older turns;
+    4. ``turns`` — the older turns left out, the latest kept whole: first their tool calls and
+       results, the oldest turn's first, each such turn then its question and answer (what
+       memory's window gives of an older turn), and whole only when those do not fit either
+       (``turns=False`` leaves the turns to a summarization after it: ``ReAct``'s summarizes
+       them); only then the tools narrowed past :data:`FIT_KEEP`, as far as the latest turn
+       leaves no room: the tools the question needs are never dropped for older turns;
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
@@ -1880,10 +1882,16 @@ class FitWindow(AgentMiddleware):
         runtime: Runtime | None,
         before: Collection[str],
     ) -> ModelRequest[Any]:
-        """The older turns left out (none with a summarization after it: ``turns=False``), then
-        the tools narrowed past :data:`FIT_KEEP` only as far as what is left does not fit."""
-        latest = _latest(request) if self.turns else request
-        return _narrowed(latest, budget, runtime, least=0, before=before)
+        """The older turns left out (none with a summarization after it: ``turns=False``) —
+        their calls and results first (:func:`_answers`), whole when their questions and answers
+        do not fit either — then the tools narrowed past :data:`FIT_KEEP` only as far as what is
+        left does not fit."""
+        if self.turns:
+            request = _answers(request, budget)
+            if _size(request) <= budget:
+                return request
+            request = _latest(request)
+        return _narrowed(request, budget, runtime, least=0, before=before)
 
     def _fitted(
         self, request: ModelRequest[Any], budget: int, *, refit: bool = False
@@ -2036,12 +2044,12 @@ def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
     return found
 
 
-def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """The request with its leading system messages and its latest turn only (from the user's
-    latest message in the conversation on — a note appended to this call alone, as the step
-    limit's and the budget's are, is not one: the turn starts at the question before it)."""
-    messages = list(request.messages)
-    lead = list(itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
+def _asked(request: ModelRequest[Any]) -> int | None:
+    """Where the request's latest turn starts: the user's latest message in the conversation —
+    a note appended to this call alone, as the step limit's and the budget's are, is not one:
+    the turn starts at the question before it — or ``None`` when no turn is before it."""
+    messages = request.messages
+    lead = sum(1 for _ in itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
     state = request.state.get("messages") or []
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
@@ -2053,9 +2061,39 @@ def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
         ),
         default=None,
     )
-    if asked is None or asked <= len(lead):
+    return None if asked is None or asked <= lead else asked
+
+
+def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with its leading system messages and its latest turn only (:func:`_asked`)."""
+    asked = _asked(request)
+    if asked is None:
         return request
+    messages = list(request.messages)
+    lead = itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages)
     return request.override(messages=[*lead, *messages[asked:]])
+
+
+def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
+    """The request with its older turns' tool calls and their results left out — the oldest
+    turn's first, a turn's all together, only as far as it must — each such turn then its
+    question and what the assistant answered: what the memory service's window gives of an
+    older turn, and the run store's turns with memory off (``conversation.earlier``)."""
+    asked = _asked(request)
+    messages = list(request.messages)
+    over = _size(request) - budget
+    gone: set[int] = set()
+    for n, message in enumerate(messages[: asked or 0]):
+        if over <= 0 and isinstance(message, HumanMessage):
+            break  # the next turn: its calls and results stay
+        if isinstance(message, ToolMessage) or (
+            isinstance(message, AIMessage) and message.tool_calls
+        ):
+            gone.add(n)
+            over -= count_tokens_approximately([message])
+    if not gone:
+        return request
+    return request.override(messages=[m for n, m in enumerate(messages) if n not in gone])
 
 
 #: The memory context's sections (``## ...``), its items' lines (``- ...``) and their handles
@@ -2142,11 +2180,10 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
         tools.append(READ_FILE_TOOL)
     messages = list(request.messages)
     measured = request.override(tools=tools)
-    # the latest turn's first message: the user's latest one (:func:`_latest`)
     start = 0
     if latest:
         measured = _latest(measured)
-        start = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=0)
+        start = _asked(request) or 0
     over = _size(measured) - budget
     for n in sorted(
         (n for n, m in enumerate(messages) if n >= start and isinstance(m, ToolMessage)),
