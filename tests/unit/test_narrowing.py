@@ -33,6 +33,8 @@ class Run:
         self.events = SimpleNamespace(warning=lambda *said: None)
         self.replay = SimpleNamespace(journal=SimpleNamespace(results={}))
         self.earlier_results: dict[str, str] = {}
+        self.toolbox: dict[str, object] = {}  # the run's own tools: none runs code
+        self.native: dict[str, object] = {}
 
 
 def made(name: str, rng: random.Random) -> Any:
@@ -51,7 +53,7 @@ def situation(count: int, turn: int, seed: int) -> tuple[ModelRequest[Any], Run,
     names = [f"tool_{n}" for n in range(count)]
     chosen = set(rng.sample(names, k=min(3, count)))
     used = set(rng.sample(names, k=min(2, count)))
-    messages: list[Any] = [HumanMessage("What is the on-time rate of the top supplier?")]
+    messages: list[Any] = [HumanMessage("Which order is late, and by how many days?")]
     for step in range(turn // 1_500):  # the model's own steps: nothing in them is cut shorter
         call = {"id": f"c{step}", "name": sorted(used)[0], "args": {}}
         messages += [
