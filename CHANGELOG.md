@@ -5,15 +5,22 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
-### Fixed: `query_result` could not read a result its own cleared mark names
+### Fixed: `query_result` reads a result in whatever state the run holds it
 
-When older results are cleared from a request, each one's mark names the path that reads it
-again (`/large_tool_results/<call id>`). `read_file` read that path; `query_result` answered
-"not found: it is not a result this conversation keeps here", so a model that queried the path
-it had just been given lost a model call and was told to call the tool again. In the acceptance
-runs this happened 13 times across the 6k and 8k cases (`long-multi-02`, `advconv-05`). The
-query now loads a cleared result by that path as `read_file` does, as the table it already is
-when the run keeps it.
+A result the run holds is queried by the path the run names for it, over every row, whatever
+its size and where it is held. Two states were not:
+
+- **cleared from the request.** A cleared result's mark names the path that reads it again
+  (`/large_tool_results/<call id>`). `read_file` read that path; `query_result` answered "not
+  found: it is not a result this conversation keeps here", so a model that queried the path it
+  had just been given lost a model call and was told to call the tool again (13 times across
+  the 6k and 8k cases of the acceptance runs: `long-multi-02`, `advconv-05`).
+- **too large to show, then named by its call.** The run keeps such a result under a path of
+  its own and shows a stub naming it; asked by the call's path instead, neither reader found
+  it. Both now follow the stub to the kept file.
+
+A generated test holds a result of 1 to 9,000 rows, as CSV or JSON, in each state — shown
+whole, kept, cleared, saved by Deep Agents — and queries it by the path named for it.
 
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
