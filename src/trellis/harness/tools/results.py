@@ -175,6 +175,13 @@ def tabled(text: str, tool: str | None = None) -> str:
     return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
 
 
+def noted(text: str) -> tuple[str, str]:
+    """``text`` (a tool's result as the model reads it) and the note :func:`tabled` put after
+    it — where it is kept and the table to query — apart (``""``: none): what a cut keeps."""
+    at = text.rfind("\n\n" + TABLED.split("{", 1)[0])
+    return (text, "") if at < 0 else (text[:at], text[at:])
+
+
 #: The fewest characters a table's row takes (``a,1`` and its line break): a shorter text
 #: cannot hold :data:`TABLE_ROWS` rows, and is not parsed.
 MIN_ROW_CHARS: Final = 4

@@ -27,6 +27,21 @@ causes, all the harness's; Deep Agents' summarization is left as it is:
 - **The model's tokens per counted token are learned where it is called**, of the request it
   was sent (`ModelHooks`), not of the request before a summarization made it smaller.
 
+### Fixed: a kept table queried under its note's name reads its own rows
+
+A kept table's note names the table to query (`FROM sku_catalog_2`). Inside a query, the
+results a Deep Agents graph saved in its state joined the query and were named first (a
+`ChainMap` iterates its last map first), so they took that name: the footwear note's table
+read another turn's denim rows (ReAct on Deep Agents, adversarial `advconv-05`; the
+`deepagents` adapter too). `query.tables` now names the conversation's earlier turns' results
+first, then the run's own, then the graph's, which join only while a query runs. Adapters with
+no graph files (OpenAI Agents, Claude, Kimi, `create_agent`) keep the names they had.
+
+And a kept table `FitWindow` cuts to fit the window keeps its note (where it is kept, the table
+to query) whole after the cut, its rest read from the same kept copy: the note was at the end
+and was cut away, so the model guessed `FROM sku_catalog` and read the earlier turn's knitwear
+rows for outerwear (`deepagents` adapter, 6,000 tokens).
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

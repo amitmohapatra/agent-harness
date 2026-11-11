@@ -225,6 +225,31 @@ def test_two_results_of_one_tool_are_two_tables(journal: Journal) -> None:
     assert list(query.tables(run).values()) == ["rows", "rows_2", "rows_3"]
 
 
+def test_a_result_is_queried_under_the_table_its_note_named(journal: Journal) -> None:
+    """A kept table's note names its table (``results.tabled``) before the query runs; the
+    results a Deep Agents graph saved in its state join the query only while it runs
+    (``query.graph_results``). They never take the name the note gave: they did, and the
+    footwear note's ``sku_catalog_2`` read another turn's denim rows (ReAct on Deep Agents,
+    advconv-05). The conversation's earlier turns keep their names too."""
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    denim = "\n".join(["sku,cat", *(f"D{n},denim" for n in range(30))])
+    run.earlier_results = {results.PREFIX + "/earlier": denim}  # type: ignore[union-attr]
+    run.kept_from[results.PREFIX + "/earlier"] = "catalog"  # type: ignore[union-attr]
+    footwear = "\n".join(["sku,cat", *(f"F{n},footwear" for n in range(30))])
+    noted = results.tabled(footwear, tool="catalog")
+    path = noted.split("also saved at ")[1].split(". ")[0]
+    assert "FROM catalog_2" in noted  # the earlier turn's is catalog
+    shirts = "\n".join(["sku,cat", *(f"S{n},shirts" for n in range(30))])
+    evicted = {results.PREFIX + "/call_1": shirts}  # another call's, evicted by Deep Agents
+    with query.graph_results(evicted, dict.fromkeys(evicted, "catalog")):
+        sql = "SELECT DISTINCT cat FROM catalog_2"
+        said = asyncio.run(query.query({"file_path": path, "sql": sql}))
+        assert said == "cat\nfootwear", said
+        earlier = asyncio.run(query.query({"file_path": path, "sql": "SELECT cat FROM catalog"}))
+        assert earlier.splitlines()[1] == "denim", earlier
+
+
 def amounts(seed: int, n: int = 6000) -> tuple[str, Decimal]:
     """``n`` two-decimal amounts as CSV, and their exact sum."""
     rng = random.Random(seed)
@@ -281,3 +306,30 @@ def test_a_figure_reads_as_its_digits_not_a_floats_tail(journal: Journal) -> Non
     assert ask(text, "SELECT price * qty v FROM result") == "v\n59.97\n0.3"
     assert ask(text, "SELECT 1.0 / 3 v") == "v\n0.333333333333333"
     assert ask(text, "SELECT 1e300 * 10 v, 2.0 * 3 w") == "v,w\n1e+301,6.0"
+
+
+def test_a_kept_table_cut_to_fit_the_window_keeps_its_note(journal: Journal) -> None:
+    """``FitWindow`` cuts the longest results to their head and tail; a kept table's note — its
+    path and the table to query — is at its end, and was cut away: the model, told no table,
+    queried ``FROM sku_catalog`` and read the earlier turn's knitwear rows for outerwear (the
+    ``deepagents`` adapter at 6,000 tokens). The cut keeps the note whole and points at the
+    same kept copy."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rows = "\n".join(["sku,cat,price", *(f"O{n},outerwear,{100 + n}.00" for n in range(300))])
+    noted = results.tabled(rows, tool="catalog")
+    path = noted.split("also saved at ")[1].split(". ")[0]
+    call = AIMessage(content="", tool_calls=[{"id": "c1", "name": "catalog", "args": {}}])
+    messages = [HumanMessage("how many?"), call, ToolMessage(noted, tool_call_id="c1")]
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages, tools=[])
+    cut = middleware._cut(given, 1).messages[2].text  # as far as it goes
+    assert "characters cut to fit the window" in cut
+    assert cut.endswith(noted[len(rows) :])  # the note whole: the path and the table
+    assert f'file_path="{path}"' in cut  # the rest is read from the same kept copy
+    assert len(run.replay.journal.results) == 1  # type: ignore[union-attr]

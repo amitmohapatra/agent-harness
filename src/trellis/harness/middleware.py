@@ -2107,7 +2107,9 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     latest turn, :func:`_latest`, whose results alone are cut) fits — inside a run, each kept
     whole first (``tools.results``) and its cut saying where the rest is: the ``read_file`` call
     that reads on from the line the cut starts on (offered with it), so no row of it is out of
-    the model's reach."""
+    the model's reach. A kept table's note (``results.noted``: its path and the table to query)
+    stays whole after the cut: without it, the model guessed a table name and read another
+    result's rows."""
     tools = list(request.tools)
     inside = current() is not None and any(isinstance(m, ToolMessage) for m in request.messages)
     if inside and all(_named(t) != READ_FILE for t in tools):
@@ -2126,20 +2128,21 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     ):
         if over <= 0:
             break
-        text = messages[n].text
+        text, note = results.noted(messages[n].text)
         # tokens to characters, as the count does, and room for the marker said in its place
         keep = max(200, len(text) - over * 4 - CUT_MARKER)
         if keep >= len(text):
             continue
         half = keep // 2
         said = f"{len(text) - keep} characters cut to fit the window"
+        # a kept table's rows are kept already, at the path its note names: the same copy
         path = results.keep(text, tool=messages[n].name) if inside else None
         if path is not None:
             line = results.line_at(text, half)
             said += f'; the rest: {results.READ_FILE}(file_path="{path}", offset={line})'
-        cut = f"{text[:half]}\n…[{said}]…\n{text[-half:]}"
+        cut = f"{text[:half]}\n…[{said}]…\n{text[-half:]}{note}"
         messages[n] = messages[n].model_copy(update={"content": cut})
-        over -= (len(text) - len(cut)) // 4
+        over -= (len(text) + len(note) - len(cut)) // 4
     if messages == list(request.messages):
         return request
     return request.override(messages=messages, tools=tools)
