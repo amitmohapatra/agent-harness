@@ -14,6 +14,7 @@ from trellis.contracts import ToolError
 from trellis.harness.sandbox import (
     LIST_OUTPUTS,
     OUTPUTS,
+    OUTPUTS_NOW,
     PROBE,
     PROBE_LABEL,
     ExecResult,
@@ -51,6 +52,8 @@ class FakeSandboxes:
         self.environment = "3.12.7\nnumpy==2.1.0 openpyxl==3.1.5"
         #: how often a run's outputs were listed (``LIST_OUTPUTS``), apart from ``commands``
         self.listed = 0
+        #: how often a command naming outputs asked what the folder holds (``OUTPUTS_NOW``)
+        self.asked = 0
 
     async def create(self, ref: SandboxRef, spec: SandboxSpec) -> FakeBox:
         if PROBE_LABEL in ref.labels:
@@ -147,17 +150,18 @@ class FakeBox:
         assert not box.paused, "a command in a paused sandbox"
         if command == PROBE:
             return ExecResult(exit_code=0, stdout=self.provider.environment)
-        if command == LIST_OUTPUTS:  # each file directly in outputs/: its size and name
-            self.provider.listed += 1
+        if command in (LIST_OUTPUTS, OUTPUTS_NOW):  # each file directly in outputs/
+            now = command == OUTPUTS_NOW  # its working directory first
+            self.provider.listed += not now
+            self.provider.asked += now
             prefix = f"{OUTPUTS}/"
             found = {
                 p.removeprefix(prefix): c
                 for p, c in box.files.items()
                 if p.startswith(prefix) and "/" not in p.removeprefix(prefix)
             }
-            return ExecResult(
-                exit_code=0, stdout="".join(f"{len(c)} {n}\n" for n, c in found.items())
-            )
+            listed = "".join(f"{len(c)} {n}\n" for n, c in found.items())
+            return ExecResult(exit_code=0, stdout=("/workspace\n" if now else "") + listed)
         self.provider.commands.append(command)
         if command == "crash":
             raise self.provider.crash

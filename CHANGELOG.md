@@ -488,6 +488,13 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- A file meant for the user that a sandbox command wrote outside the kept folder is said at
+  once. Only `outputs/` of the working directory is kept; a model copied its export to
+  `/outputs/` at the root, nothing was kept, and its answer said the file was saved (`ReAct`
+  with a sandbox, `bf2-mixed-04`). A command that names an `outputs` folder is now told with
+  its result what the kept folder holds, with its whole path, or that it holds no file yet
+  (`SandboxSource.outputs_said`: Deep Agents' `execute` and `sandbox_exec`); a command that
+  names none costs nothing more.
 - `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
   window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
   turns left out — and the tools stayed out, though the room the turns took was free. Every

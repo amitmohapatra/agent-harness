@@ -251,3 +251,39 @@ async def test_executes_output_ends_with_what_the_sandbox_knows_about_why(
         "Killed (exit 137): the command went past the sandbox's memory limit (64 MiB)"
     )
     assert seen["ok"].output == "hi"
+
+
+async def test_a_command_naming_outputs_is_told_what_the_user_gets(harness: Harness) -> None:
+    """Only a file written directly in ``outputs/`` of the working directory is the user's. A
+    command that names an ``outputs`` folder is told at once, with its result, what that folder
+    holds and where it is: a model that copied its file to ``/outputs/`` at the root kept
+    nothing and answered that the file was saved (the priced pilot's bf2-mixed-04). A command
+    that names none costs no second command."""
+    provider = FakeSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("execute", {"command": "cp /large_tool_results/abc /outputs/report.csv"}),
+            ("execute", {"command": "echo 42"}),
+            "saved",
+        ]
+    )
+    agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="saver")
+    assert (await agent.run("save the report", user="u")).answer == "saved"
+    missed, plain = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
+    assert (
+        "No file is in /workspace/outputs/ yet: only a file written directly there is given "
+        "to the user." in missed
+    ), missed
+    assert "outputs" not in plain and provider.asked == 1  # asked only for the one naming it
+
+    async def work(input: str, runtime: Runtime) -> Any:
+        await runtime.tools.use(sandbox(provider).tools())
+        first = await runtime.tools.call("sandbox_exec", command="cp a /outputs/a.csv")
+        await runtime.tools.call("sandbox_write", path="outputs/report.csv", content="n\n1\n")
+        return [first, await runtime.tools.call("sandbox_exec", command="cat outputs/report.csv")]
+
+    done = await harness.wrap(work, id="saver-tools").run("go", user="u")
+    assert done.status is RunStatus.SUCCESS, done.error
+    first, then = done.answer
+    assert first["outputs"].startswith("No file is in /workspace/outputs/ yet"), first
+    assert then["outputs"] == "In /workspace/outputs/ for the user: report.csv (4 bytes).", then
