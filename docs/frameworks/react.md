@@ -122,10 +122,14 @@ The names are Deep Agents' where both have one. In four tiers:
   its attempts and sub-agents, is `Budget(max_tool_calls=)` ([runs.md](../runs.md)); a spent
   budget asks the model for one last answer.
 * `context_window` — the model's window in tokens; given, it wins. Unset, the model's
-  LangChain profile (`model.profile["max_input_tokens"]`). When neither says, the window-scaled
+  LangChain profile (`model.profile["max_input_tokens"]`); for a model name LangChain has no
+  profile of (one released after the installed package, a local one) the route is asked once,
+  when the agent is built: Anthropic's Models API (`max_input_tokens`), an OpenAI-compatible
+  endpoint's `/models` (the field its server names the window with: Bifrost, OpenRouter, Groq,
+  vLLM, Mistral), within 5 seconds, with the route's auth. When none says, the window-scaled
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
-  Deep Agents' summarization uses its own thresholds: give it for a local model (a llama.cpp
-  server's `-c`) or a prefixed vendor name.
+  Deep Agents' summarization uses its own thresholds: give it for a server whose model list
+  names no window (Ollama, llama.cpp's `-c`) and for a chat model object without a profile.
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is
@@ -487,8 +491,9 @@ Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/sub
   a sub-agent with its name and description (`{"name", "description", "runnable"}`).
 * Building a `ReAct` costs what `create_deep_agent` costs (it compiles its general-purpose helper
   as well): about 26 ms against 13 ms for `create_agent` — once per agent, not per run.
-* Without a known window (`context_window=`, or the model's LangChain profile), clearing old
-  tool results and the long-task tools are off, said once.
+* Without a known window (`context_window=`, the model's LangChain profile, or the route's
+  own record of the model), clearing old tool results and the long-task tools are off, said
+  once.
 * Skills and memory files on the default backend must be in the graph's state; give a
   `FilesystemBackend` (or a store) that holds them.
 * The harness runs the graph asynchronously (`ainvoke`): the sandbox backend has no synchronous

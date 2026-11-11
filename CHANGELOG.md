@@ -5,6 +5,25 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a model LangChain has no profile of had no context window
+
+A model name's window came only from the table of profiles bundled in the installed LangChain
+package. A model released after that package, a local model, or any name on a provider other
+than OpenAI and Anthropic had none: `ReAct` ran with clearing old tool results and the
+long-task tools off, `FitWindow` stepped aside, and the memory context's and the replayed
+conversation's budgets were the fixed ones (the priced pilot ran every arm so: the routed
+model was newer than the table).
+
+- **The route is asked when the table names no window** (`ModelGateway.window`,
+  `gateways.routed_chat_model`): Anthropic's Models API through Anthropic's own client
+  (`max_input_tokens`), an OpenAI-compatible endpoint's `/models` (the field its server names:
+  `max_input_tokens`, `context_length`, `context_window`, `max_model_len`,
+  `max_context_length`), with the route's auth, within 5 seconds, once per route and model.
+  No table of windows is kept here.
+- **A route that says none leaves the window unknown**, as before (said once): a model list
+  without the model or without a window, an endpoint that does not answer (asked again by the
+  next build). `context_window=` wins over all of it.
+
 ### Fixed: ReAct on Deep Agents on a small window
 
 On a 6,000-token window (adversarial `advconv-05`, `react --variant deep`, memory off) the

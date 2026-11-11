@@ -532,6 +532,8 @@ def test_a_providers_own_sdk_asks_anthropic_with_its_own_key(
     assert routed_chat_model("granite").profile is None  # no provider told: no route to ask
     assert len(anthropic_models.asked) == 1
     assert routed_chat_model("anthropic:claude-unheard").profile is None  # a 404
+    # a route a package adds, without a record of its own: none (the port's default)
+    assert gateways.ModelGateway.window(ProviderSDK(), "anthropic:claude-newer") is None
 
 
 def test_anthropics_own_api_is_reached_with_its_own_client() -> None:
