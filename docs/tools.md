@@ -278,7 +278,7 @@ has to. In order of preference:
    `t1` is also `result`, and the run is offered `query_result` once its context names one.
    A table of 5 rows or more that is read whole is kept as well (it was 30), and its note says
    to compute with the query: with `sql` alone the query computes with the figures it names
-   (`SELECT 1123571.70 / 11978`), so a ratio or a percentage of two figures is not done by
+   (`SELECT 1250.50 / 37`), so a ratio or a percentage of two figures is not done by
    hand either.
    Every result the run saved is a table named by the tool that returned it
    (`result` is the file asked about) — a result Deep Agents saved in the graph's state too —

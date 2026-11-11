@@ -14,7 +14,7 @@ rows was read as it was, with no `query_result` to compute with.
 - **A table of 5 rows or more that is read whole is kept as a table** (`results.TABLE_ROWS`,
   was 30), so the model is offered `query_result` and told to compute with it.
 - **Its note names dividing, and the query runs on `sql` alone** (`results.QUERY`,
-  `tools.query`): `SELECT 1123571.70 / 11978` computes with the figures it names, no file
+  `tools.query`): `SELECT 1250.50 / 37` computes with the figures it names, no file
   needed (before, a query without `file_path` or `results` was refused).
 - Measured on top of the three changes above, three runs each: `planning-03` right in 9 of 9
   runs (5 of 9 before); complex tier 3 81/81 turns (80/81); the 35 ordinary cases 113/114

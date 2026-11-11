@@ -560,7 +560,7 @@ async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand
 
 
 SUMMARY: Final = "category,revenue,units\n" + "\n".join(
-    f"{name},{1123571.70 + n},{11978 + n}"
+    f"{name},{1250.50 + n},{37 + n}"
     for n, name in enumerate(
         ["footwear", "knitwear", "dresses", "activewear", "denim", "shirts", "outerwear", "bags"]
     )
@@ -580,8 +580,8 @@ async def test_a_handful_of_rows_is_a_table_and_two_figures_are_computed_by_the_
     the query — a ratio of two of its figures as well, by ``sql`` alone: from two such
     summaries a model divided revenue by units by hand and was a penny off in 4 of 9 runs
     (``planning-03``: 93.79 for 93.80)."""
-    compute = {"sql": "SELECT round(1123571.70 / 11978, 2) AS per_unit"}
-    model = ScriptedChat([("category_summary", {}), ("query_result", compute), "93.80"])
+    compute = {"sql": "SELECT round(1250.50 / 37, 2) AS per_unit"}
+    model = ScriptedChat([("category_summary", {}), ("query_result", compute), "33.80"])
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="few8"), [category_summary])
     result = await agent.run("revenue per unit of footwear?", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
@@ -589,7 +589,7 @@ async def test_a_handful_of_rows_is_a_table_and_two_figures_are_computed_by_the_
     assert told.startswith(SUMMARY) and "These 8 rows are also saved at" in told
     assert "Do not add up, divide or rank rows yourself" in told
     assert "query_result" in names(model.requests[1])
-    assert last(model.requests[2]) == "per_unit\n93.8"
+    assert last(model.requests[2]) == "per_unit\n33.8"
 
 
 async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:

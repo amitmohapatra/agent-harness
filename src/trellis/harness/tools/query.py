@@ -1231,8 +1231,8 @@ QUERY_RESULT_DESCRIPTION: Final = (
     f"SELECT * FROM {TABLE} LIMIT 3 shows its columns). "
     "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
     "instead of reading them page by page: the answer is computed over all of them, exactly. "
-    "With sql alone it computes with figures you already have, exactly (SELECT 1123571.70 / "
-    "11978): divide, multiply, take a percentage or round with it, never by hand."
+    "With sql alone it computes with figures you already have, exactly (SELECT 1250.50 / "
+    "37): divide, multiply, take a percentage or round with it, never by hand."
 )
 
 

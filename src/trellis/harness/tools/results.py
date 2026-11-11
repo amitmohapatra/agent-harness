@@ -88,7 +88,7 @@ QUERY: Final = (
     'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
     "this run saved is a table of the same query, named by its tool, so one query can JOIN "
     "them. Do not add up, divide or rank rows yourself: with sql alone, query_result computes "
-    "with figures you already have (SELECT 1123571.70 / 11978). {private}"
+    "with figures you already have (SELECT 1250.50 / 37). {private}"
 )
 #: What a kept result's note says of its path: the run's own working copy, which the user
 #: cannot reach (a model offered one as an export to open in Excel).
