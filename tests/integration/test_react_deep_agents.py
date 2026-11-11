@@ -277,6 +277,27 @@ def test_a_compiled_graph_is_a_sub_agent_with_its_name_and_description() -> None
     assert not (task.metadata or {}).get(MACHINERY)  # an agent of its own: not machinery
 
 
+async def test_on_your_own_graph_a_cleared_result_is_read_back(harness: Harness) -> None:
+    """``create_agent`` with ``middleware(context_window=)``: once an older result was cleared
+    from the request, ``read_file`` is offered (the graph has none of its own) and reads it
+    back by its call's path — a result that is no table, so nothing else offered a reader."""
+
+    @tool(side_effects="read")
+    def page(n: int) -> str:
+        """A page of a book."""
+        return f"page {n} " + "w" * 2000
+
+    turns: list[Any] = [("page", {"n": n}) for n in range(1, 7)]
+    model = ScriptedChatModel(turns=[*turns, "done"])
+    target = create_agent(
+        model, middleware=middleware(context_window=6000), checkpointer=RunCheckpointer()
+    )
+    result = await arm(harness.wrap(target, id="own-cleared"), [page]).run("read", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    offered = ["read_file" in set(r.get("tools", [])) for r in model.requests]
+    assert offered[0] is False and offered[-1] is True
+
+
 # --------------------------------------------------------------------------- backends
 def test_without_a_deep_agents_capability_react_holds_deep_agents_machinery() -> None:
     """No backend, sub-agent of its own, skills, memory files or permissions: Deep Agents'
