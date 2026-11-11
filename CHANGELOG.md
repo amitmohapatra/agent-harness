@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a cleared result the run already keeps as a table, and a stubbed one, are queried by their call's path
+
+A cleared result's mark names its call's path (`/large_tool_results/<call id>`) and the query
+over its rows. Two results asked for by that path were still not read as their rows:
+
+- **a table read whole** (30 rows or more: the run keeps it, and its message carries the
+  note after the rows). The query was given the message as it stood, note and all: a JSON
+  result became one row of thousands of columns, a CSV's figures became text
+  (`sum(VARCHAR)`). It is now the table the run already keeps of it.
+- **a result too large to show.** The run keeps it under a path of its own and shows a stub
+  naming it; asked by the call's path, neither reader found it. Both now follow the stub to
+  the kept file.
+
+A generated test holds a result of 1 to 9,000 rows, as CSV or JSON, in each state — shown
+whole, kept, cleared, saved by Deep Agents — and queries it by the path named for it: 36 of
+its 144 situations failed before.
+
 ### Fixed: a held result is queryable wherever it lives; the query hands its rows to the sandbox; a file not kept is said at once
 
 `ReAct(backend=sandbox())` answered differently from plain `ReAct` on the same question

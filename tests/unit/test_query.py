@@ -342,6 +342,66 @@ def test_a_graphs_copy_of_a_kept_table_is_that_table(journal: Journal) -> None:
     assert middleware._graph_results(other, run)[0] == {copy: "sku,cat\nS1,shirts"}
 
 
+#: The states a run holds a result in: shown whole in the conversation (too small to keep),
+#: kept by the run (a table read whole, or too large to show), cleared from the request with a
+#: mark naming its call's path, and saved by Deep Agents as a file of the graph's state.
+HELD = ("shown", "kept", "cleared", "deep agents")
+
+
+def rows_of(shape: str, count: int, rng: random.Random) -> tuple[str, int]:
+    """``count`` rows as a tool returns them (``shape``), and the sum of their ``units``."""
+    units = [rng.randrange(1, 500) for _ in range(count)]
+    if shape == "csv":
+        return "sku,units\n" + "\n".join(f"S{n},{u}" for n, u in enumerate(units)), sum(units)
+    listed = [{"sku": f"S{n}", "units": u} for n, u in enumerate(units)]
+    return json.dumps(listed if shape == "array" else {"rows": listed}), sum(units)
+
+
+@pytest.mark.parametrize("seed", range(2))
+@pytest.mark.parametrize("count", [1, 4, 29, 30, 400, 9_000])
+@pytest.mark.parametrize("shape", ["csv", "array", "object"])
+@pytest.mark.parametrize("held", HELD)
+def test_a_result_is_queried_exactly_in_whatever_state_the_run_holds_it(
+    journal: Journal, held: str, shape: str, count: int, seed: int
+) -> None:
+    """Any result the run holds is queried by the path the run names for it, over every row,
+    whatever its size, its shape and where it is held: the model is never left to add up rows
+    because a result was small, cleared or saved elsewhere."""
+    from langchain.agents.middleware.types import ToolCallRequest
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    text, total = rows_of(shape, count, random.Random(f"{held}-{shape}-{count}-{seed}"))
+    call = AIMessage("", tool_calls=[{"id": "call_1", "name": "stock", "args": {}}])
+    by_call = f"{results.PREFIX}/call_1"  # what a cleared result's mark, and Deep Agents, name
+    state: dict[str, object] = {"messages": [call]}
+    if held == "kept":
+        said = results.readable(text, "stock")
+        if "saved at " not in said and "saved in " not in said:
+            return  # too small to keep: the run shows it whole (the "shown" state)
+        path = next(p for p in journal.results if p in said)
+    elif held == "deep agents":  # its file in the graph's state, its stub in the conversation
+        path, state["files"] = by_call, {by_call: {"content": text.split("\n")}}
+        stub = results.STUB.split("{preview_note}")[0].format(tool_call_id="call_1", file_path=path)
+        state["messages"] = [call, ToolMessage(stub, tool_call_id="call_1")]
+    else:  # shown whole, or cleared from the request: the graph's state has the message
+        path = by_call
+        shown = results.readable(text, "stock")
+        state["messages"] = [call, ToolMessage(shown, tool_call_id="call_1")]
+    asked = {"file_path": path, "sql": "SELECT count(*) AS n, sum(units) AS units FROM result"}
+    request = ToolCallRequest(
+        tool_call={"name": query.QUERY_RESULT, "args": asked, "id": "q1", "type": "tool_call"},
+        tool=None,
+        state=state,
+        runtime=None,  # type: ignore[arg-type]
+    )
+    answer = asyncio.run(middleware._kept_read(run, request))  # type: ignore[arg-type]
+    assert answer is not None and answer.text.splitlines()[-1] == f"{count},{total}", answer
+
+
 def test_a_very_wide_table_is_typed_in_bounded_statements() -> None:
     """Typing counts six aggregates a column: over thousands of columns in one statement
     DuckDB ran for minutes and no interrupt stopped it, so the load's time limit did not hold.
