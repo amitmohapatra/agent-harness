@@ -508,7 +508,9 @@ async def test_a_steer_the_working_run_never_takes_runs_as_its_own_turn(
     model = PlannedChat([], stall=0.5)  # its one model call: under way as the message comes
     agent = harness.wrap(ReAct(system_prompt="You work.", model=model), id="late")
     first = asyncio.create_task(agent.run("Look it up.", user="ada", thread=THREAD))
-    await asyncio.sleep(0.2)
+    # the call is under way when the message comes, whatever the machine's speed: on a slow
+    # runner a fixed wait ended before the call began, and the first run took the message
+    await asyncio.wait_for(model.script.arrived.wait(), 30)
     b = await agent.run("Also say hello.", user="ada", thread=THREAD, mode="steer")
     a = await first
     assert a.status is RunStatus.SUCCESS and b.status is RunStatus.SUCCESS

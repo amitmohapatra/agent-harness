@@ -28,6 +28,9 @@ class Script:
         self.requests: list[dict[str, Any]] = []
         #: each request's headers
         self.headers: list[dict[str, str]] = []
+        #: set when a request reaches the endpoint, before any stall: a test that needs a call
+        #: under way waits on this and not on a clock
+        self.arrived = asyncio.Event()
 
     def next(self, body: dict[str, Any]) -> Turn:
         return self.turns.pop(0)
@@ -109,6 +112,7 @@ class ScriptedChat(ChatOpenAI):
         script = kwargs.pop("script", None) or Script(turns)
 
         async def slow(request: httpx.Request) -> httpx.Response:
+            script.arrived.set()
             await asyncio.sleep(stall)
             return script.handle(request)
 
