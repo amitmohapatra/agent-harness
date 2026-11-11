@@ -39,7 +39,7 @@ from trellis.harness.conversation import (
     rendered,
     result_id,
 )
-from trellis.harness.history import Called, Said, Speaker, recorded, said_of
+from trellis.harness.history import NOTED_WITH, Called, Said, Speaker, recorded, said_of
 from trellis.harness.identity import conversation_key
 from trellis.harness.middleware import FITTED
 
@@ -152,7 +152,8 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
     # took an on-hand count of the turn before as an input of the next turn's formula
     # (``freshness-03``, wrong in 4 of 5 runs)
     noted, asked = model.requests[-1]["messages"][-1]["content"]
-    assert snapshots.NOTE.format(tools="supplier") in noted["text"]
+    # under the run's own name: memory is off, and holds none of it
+    assert noted["text"] == NOTED_WITH.format(context=snapshots.NOTE.format(tools="supplier"))
     assert asked["text"] == "Why is its lead time so long?"
     # a turn with no out-of-date result is sent what it was: its question, as asked
     assert model.requests[0]["messages"][-1]["content"] == "Who supplies NV-1?"
