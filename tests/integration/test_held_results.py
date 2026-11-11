@@ -91,3 +91,43 @@ async def test_a_held_result_is_offered_the_query_with_its_table_named(
         assert way in said  # the window no longer shows it whole: "cleared", "cut to fit"
     # and the query over it is exact — the same figure on every backend
     assert answered[-1].text == expected(way)
+
+
+async def test_with_a_sandbox_a_querys_rows_are_a_file_there_where_code_starts(
+    harness: Harness,
+) -> None:
+    """The hand-off from the query to the sandbox: the query computes exactly, and what code
+    makes of its result (a chart, a workbook) starts from the result as a file — the answer
+    names it, the sandbox holds it at that path, and both tools' descriptions say which does
+    what. Without a sandbox the same query answers with the same rows, and names no file."""
+    rows = "SELECT sku, units FROM result WHERE units = 6 ORDER BY sku LIMIT 3"
+    turns = [
+        ("sales", {}),
+        ("query_result", {"file_path": SAVED, "sql": rows}),
+        ("execute", {"command": f"cat {SAVED}"}),
+        "done",
+    ]
+
+    @tool(side_effects="read")
+    def sales() -> str:
+        """Sales rows."""
+        return table("large")
+
+    model = KeyedChatModel(turns=[], script=[(QUESTION, turns)])
+    target = ReAct("s", model, backend=sandbox(FakeSandboxes()), context_window=128_000)
+    agent = arm(harness.wrap(target, id="handed"), [sales])
+    assert (await agent.run(QUESTION, user="u")).answer == "done"
+    answered, read = model.seen[-2][-1].text, model.seen[-1][-1].text
+    found = "sku,units\ns1000,6\ns10002,6\ns10009,6"
+    path = re.search(rf"{results.PREFIX}/\w+", answered)
+    assert answered.startswith(found) and path is not None, answered
+    assert results.CODE.format(path=path.group(), tool="execute") in answered
+    assert read.startswith(found), read  # the file the note names, read in the sandbox
+    said = model.described[-1]
+    assert "sandbox" in said[query.QUERY_RESULT] and query.QUERY_RESULT in said["execute"]
+
+    plain = KeyedChatModel(turns=[], script=[(QUESTION, [*turns[:2], "done"])])
+    alone = arm(harness.wrap(ReAct("s", plain, context_window=128_000), id="alone"), [sales])
+    assert (await alone.run(QUESTION, user="u")).answer == "done"
+    assert plain.seen[-1][-1].text == found  # the same rows, and no file named
+    assert "sandbox" not in plain.described[-1][query.QUERY_RESULT]

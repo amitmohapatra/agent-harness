@@ -448,7 +448,22 @@ SAVING: Final[tuple[Reader, ...]] = (
 )
 
 
+#: The readers of a run with a sandbox: ``query_result`` says its result is a file there.
+CODING: Final[tuple[Reader, ...]] = (
+    READERS[0],
+    (
+        query.QUERY_RESULT,
+        query.QUERY_RESULT_CODING_DESCRIPTION,
+        query.QUERY_RESULT_SCHEMA,
+        query.query,
+    ),
+)
+
+
 def readers() -> tuple[Reader, ...]:
     """The readers as the current run is offered them: :data:`SAVING` in a run with no tool
-    that runs code (``query.saving``), else :data:`READERS`."""
-    return SAVING if query.saving(current()) else READERS
+    that runs code (``query.saving``), :data:`CODING` in one with a sandbox
+    (:func:`coding_tool`), else :data:`READERS`."""
+    if query.saving(current()):
+        return SAVING
+    return CODING if coding_tool() is not None else READERS

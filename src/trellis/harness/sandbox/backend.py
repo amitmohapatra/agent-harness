@@ -161,10 +161,10 @@ class SandboxCard(AgentMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        from trellis.harness.sandbox import DELIVERS  # noqa: PLC0415 - the package imports this
+        from trellis.harness.sandbox import DELIVERS, STARTS  # noqa: PLC0415 - imports this
 
         card = await self.source.card()  # "": not read (no daemon), only where outputs go
-        said = f"\n\n{DELIVERS}" + (f" {card}" if card else "")
+        said = f"\n\n{DELIVERS} {STARTS}" + (f" {card}" if card else "")
         tools = [
             t.model_copy(update={"description": t.description + said})
             if isinstance(t, BaseTool) and t.name == EXECUTE

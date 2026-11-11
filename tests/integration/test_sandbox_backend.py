@@ -16,7 +16,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.sandbox import FakeSandboxes, PausingSandboxes
 from trellis import Harness, ReAct, Runtime, sandbox, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolError
-from trellis.harness.sandbox import SandboxSource, SandboxSpec
+from trellis.harness.sandbox import DELIVERS, STARTS, SandboxSource, SandboxSpec
 from trellis.harness.sandbox.backend import ASYNC_ONLY, SandboxBackend, _error_of
 
 
@@ -231,7 +231,7 @@ async def test_execute_keeps_its_own_description_when_the_card_cannot_be_read(
     agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="coder")
     assert (await agent.run("6*7?", user="u")).answer == "42"
     assert "Its environment" not in model.described[0]["execute"]
-    assert model.described[0]["execute"].endswith("are given to the user when you finish.")
+    assert model.described[0]["execute"].endswith(f"{DELIVERS} {STARTS}")  # no card after
 
 
 async def test_executes_output_ends_with_what_the_sandbox_knows_about_why(

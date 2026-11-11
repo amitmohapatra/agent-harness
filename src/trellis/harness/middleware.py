@@ -634,19 +634,25 @@ def _kept_own(
 
 
 def _readers(
-    runtime: Runtime | None, state: Any, present: Collection[str | None], *, held: bool = False
+    runtime: Runtime | None,
+    state: Any,
+    present: Collection[str | None],
+    *,
+    held: bool | None = None,
 ) -> list[BaseTool]:
     """The harness's readers of a held result (``read_file``; ``query_result`` too, saving its
     result as a file where the run runs no code: :data:`SAVING`) the model is offered beside
     ``present``, once a result is held anywhere: the run keeps one, the graph's state holds
-    one Deep Agents saved (:func:`_saved`), or the caller knows one is ``held`` (the request
-    shows one cleared from the window: :class:`ReadTools`, after the clearing; one is being
-    cut to fit: :func:`_cut`). Their calls are answered by the harness (:func:`_kept_read`),
-    from wherever the result is."""
-    if not (held or _saved(state)):
+    one Deep Agents saved (:func:`_saved`), or the caller knows one is held — ``held``: the
+    request shows one cleared from the window (:class:`ReadTools`, after the clearing), or one
+    is being cut to fit (:func:`_cut`); ``True`` when it holds rows, ``False`` when it is
+    text only, which ``read_file`` alone reads (a query has nothing to compute over). Their
+    calls are answered by the harness (:func:`_kept_read`), from wherever the result is."""
+    if held is None and not _saved(state):
         return []
-    readers = SAVING if query.saving(runtime) else READERS
-    return [t for name, t in readers.items() if name not in present]
+    readers = _OFFERED[id(results.readers())]  # the run's: saving, with a sandbox, or plain
+    only = {READ_FILE} if held is False and not _saved(state) else set(readers)
+    return [t for name, t in readers.items() if name in only and name not in present]
 
 
 def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) -> BaseTool:
@@ -666,6 +672,14 @@ def _reader(name: str, description: str, schema: dict[str, Any], answer: Any) ->
 READERS: Final = {r[0]: _reader(*r) for r in results.READERS}
 READ_FILE_TOOL: Final = READERS[READ_FILE]
 SAVING: Final = {**READERS, query.QUERY_RESULT: _reader(*results.SAVING[1])}
+#: And as a run with a sandbox is offered them (``results.CODING``).
+CODING: Final = {**READERS, query.QUERY_RESULT: _reader(*results.CODING[1])}
+#: Each set of ``results.readers()`` as LangChain tools.
+_OFFERED: Final = {
+    id(results.READERS): READERS,
+    id(results.SAVING): SAVING,
+    id(results.CODING): CODING,
+}
 #: The runs a :class:`HarnessTools` offers the harness's tools to (:func:`_paged`).
 _PAGED: Final[weakref.WeakSet[Runtime]] = weakref.WeakSet()
 
@@ -1800,9 +1814,10 @@ class ReadTools(AgentMiddleware):
         tools = list(request.tools)
         has = any(_named(t) == READ_FILE for t in tools)
         if self.cleared and any(_cleared(m) for m in request.messages):
-            # a result was cleared: read_file reads it back, query_result computes over it
-            present = {_named(t) for t in tools}
-            tools += _readers(current(), request.state, present, held=True)
+            # a result was cleared: read_file reads it back; query_result computes over one
+            # that holds rows (its placeholder names the table: ``_rows_said``)
+            rows = any(_cleared(m) and query.QUERY_RESULT in m.text for m in request.messages)
+            tools += _readers(current(), request.state, {_named(t) for t in tools}, held=rows)
         elif has and not (self.files or request.state.get("files") or results.kept()):
             tools = [t for t in tools if _named(t) != READ_FILE]
         return await handler(
@@ -2328,8 +2343,8 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     tools = list(request.tools)
     runtime = current()
     inside = runtime is not None and any(isinstance(m, ToolMessage) for m in request.messages)
-    if inside:  # what is cut is held: its readers are offered with it
-        tools += _readers(runtime, request.state, {_named(t) for t in tools}, held=True)
+    if inside:  # what is cut is held: read_file is offered with it
+        tools += _readers(runtime, request.state, {_named(t) for t in tools}, held=False)
     messages = list(request.messages)
     measured = request.override(tools=tools)
     start = 0
@@ -2357,6 +2372,8 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
             said += f'; the rest: {results.READ_FILE}(file_path="{path}", offset={line})'
             # no note of its own (fewer rows than a table read whole is kept at): its rows'
             note = note or _rows_said(path, text, query.tables(runtime)[path])
+            if note:  # rows: query_result too, which the note names
+                tools += _readers(runtime, request.state, {_named(t) for t in tools}, held=True)
         cut = f"{text[:half]}\n…[{said}]…\n{text[-half:]}{note}"
         messages[n] = messages[n].model_copy(update={"content": cut})
         over -= (len(text) + len(note) - len(cut)) // 4

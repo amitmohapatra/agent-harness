@@ -142,6 +142,14 @@ DELIVERS: Final = (
     f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
     "finish."
 )
+#: What the command tool's description says of the run's data: where code finds it, and what
+#: is the query's — facts the model chooses by.
+STARTS: Final = (
+    "A result this run saved, and a query_result's result of more than one row, is a file "
+    "here at the path its note names: code starts from that file, for what a query cannot "
+    "make (a chart, a formatted workbook, a script, a model of its own). A count, a sum, a "
+    "filter, a ranking or a join over saved rows is query_result's: exact over every row."
+)
 #: What an agent working in a folder of its own on this machine (Claude Code's, Kimi Code's:
 #: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way.
 DELIVERS_HERE: Final = (
@@ -167,7 +175,7 @@ class SandboxSource:
                 _spec(
                     EXEC,
                     "Run a shell command in your sandbox (sh -c, in its working directory): "
-                    f"its exit code, stdout and stderr. {DELIVERS}",
+                    f"its exit code, stdout and stderr. {DELIVERS} {STARTS}",
                     {"command": "the command"},
                     side_effects="write",
                 ),
