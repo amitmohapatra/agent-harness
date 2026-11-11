@@ -536,3 +536,87 @@ def test_a_workers_run_of_a_run_checkpointed_graph_saves_each_step_before_the_ne
     assert _run_arguments(runtime("w1", durability="exit"), graph) == {"durability": "exit"}  # type: ignore[arg-type]
     assert _run_arguments(runtime(None), graph) == {}  # type: ignore[arg-type]
     assert _run_arguments(runtime("w1"), own) == {}  # type: ignore[arg-type]
+
+
+def _unanswered(messages: list[Any]) -> list[str]:
+    """The tool calls of ``messages`` with no result straight after their message, as a
+    provider checks them (Anthropic refuses such a request, OpenAI too)."""
+    missing: list[str] = []
+    for n, message in enumerate(messages):
+        if message.type != "ai" or not message.tool_calls:
+            continue
+        after = {m.tool_call_id for m in messages[n + 1 : n + 1 + len(message.tool_calls)]
+                 if m.type == "tool"}  # fmt: skip
+        missing += [c["id"] for c in message.tool_calls if c["id"] not in after]
+    return missing
+
+
+@pytest.mark.parametrize("built", ["plain", "middleware", "deep"])
+async def test_a_call_a_newer_message_stopped_is_answered_in_the_kept_thread(
+    harness: Harness, built: str
+) -> None:
+    """A graph keeping its own thread (a checkpointer), its run stopped mid-call by a newer
+    message (``mode="interrupt"``): the thread holds the model's call with no result, which a
+    provider refuses — the next turn, and every turn after it, would fail. The next turn's
+    request answers the stopped call, saying it did not finish; a Deep Agent answers it itself
+    (its ``PatchToolCallsMiddleware``), and only it does."""
+    import asyncio
+
+    from deepagents import create_deep_agent
+    from langchain_core.messages import ToolMessage
+
+    from trellis import middleware
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+    from trellis.harness.adapters.langgraph import STOPPED_CALL
+
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def slow_count(sku: str) -> int:
+        """Units of a SKU, counted slowly."""
+        started.set()
+        await asyncio.sleep(5)
+        return 7
+
+    model = ScriptedChatModel(
+        turns=[("slow_count", {"sku": "a"}), "10 stores", "I was counting a."]
+    )
+    if built == "plain":
+        tools = await native_tools(harness, slow_count, framework="langgraph")
+        graph = create_agent(model, tools=tools, checkpointer=InMemorySaver())
+    else:
+        build = create_agent if built == "middleware" else create_deep_agent
+        graph = build(model, tools=[], middleware=middleware(), checkpointer=InMemorySaver())
+        setattr(graph, TOOLS_ATTRIBUTE, [slow_count])
+    agent = harness.wrap(graph, id="stopped")
+    first = asyncio.create_task(agent.run("count a", user="u1", thread="th"))
+    await asyncio.wait_for(started.wait(), 10)
+    later = await agent.run("stop, how many stores?", user="u1", thread="th", mode="interrupt")
+    assert (await first).status is RunStatus.CANCELLED
+    assert later.status is RunStatus.SUCCESS, later.error
+    after = await agent.run("what were you doing?", user="u1", thread="th")
+    assert after.status is RunStatus.SUCCESS, after.error
+    for sent in model.seen[1:]:
+        assert not _unanswered(sent), [(m.type, m.content) for m in sent]
+    [stopped] = [m for m in model.seen[1] if isinstance(m, ToolMessage)]
+    assert stopped.status == "error" and "slow_count" in str(stopped.content), stopped
+    ours = STOPPED_CALL.format(tool="slow_count") in str(stopped.content)
+    assert ours is (built != "deep"), stopped.content
+
+
+async def test_a_call_left_waiting_for_an_approval_is_answered_when_the_user_moves_on(
+    harness: Harness,
+) -> None:
+    """A run paused on a call that asks for an approval, and the user writes again instead of
+    answering: the kept thread's call gets its result in the new turn's request."""
+    from trellis.harness.adapters.langgraph import STOPPED_CALL
+
+    model = ScriptedChatModel(turns=[("order", {"sku": "a", "qty": 5}), "7 units of a"])
+    graph = await agent_graph(harness, model, checkpointer=InMemorySaver())
+    agent = harness.wrap(graph, id="buyer")
+    assert (await agent.run("order 5 a", user="u1", thread="t1")).status is RunStatus.PAUSED
+    later = await agent.run("no, how many a?", user="u1", thread="t1")
+    assert later.status is RunStatus.SUCCESS, later.error
+    assert not _unanswered(model.seen[1]), [(m.type, m.content) for m in model.seen[1]]
+    assert STOPPED_CALL.format(tool="order") in [m.content for m in model.seen[1]]
+    assert executed == []

@@ -114,6 +114,16 @@ RUN_METADATA: Final = "trellis_run_id"
 #: The ``configurable`` key under which LangGraph hands a task, by namespace, the checkpoint
 #: its step started from (``CONFIG_KEY_CHECKPOINT_MAP``; the root graph's under ``""``).
 CHECKPOINT_MAP: Final = "checkpoint_map"
+#: The result a new turn gives a call its thread's last message holds with none: the run that
+#: made it was stopped (a newer message interrupted it, its time ran out) or left waiting for
+#: a person's approval, and a provider refuses a call with no result — the thread could not go
+#: on.
+STOPPED_CALL: Final = (
+    "{tool} has no result: its run stopped, or waited for a person's approval, before the call "
+    "came back."
+)
+#: The node of Deep Agents' ``PatchToolCallsMiddleware``: a graph that answers such calls itself.
+PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
 
 
 class LangGraphAdapter:
@@ -530,16 +540,40 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
             return native_input
         replay.resumed = _latest(replay.journal.graph)
         return native_input if resumed else None
-    if runtime.attempt == 1:
-        return native_input
     state = await target.aget_state({"configurable": {"thread_id": thread}})
     marked: Mapping[str, object] = state.metadata or {}
-    if marked.get(RUN_METADATA) != runtime.run_id:
-        return native_input
+    if runtime.attempt == 1 or marked.get(RUN_METADATA) != runtime.run_id:
+        return native_input if resumed else _answered(target, native_input, state.values)
     configurable: Mapping[str, object] = state.config.get("configurable") or {}
     latest = configurable.get("checkpoint_id")
     replay.resumed = latest if isinstance(latest, str) else None
     return native_input if resumed else None
+
+
+def _answered(target: Any, native_input: Any, values: Any) -> Any:
+    """A new turn's input, the calls of its thread's last message that have no result answered
+    first (:data:`STOPPED_CALL`) — unless the graph answers them itself (Deep Agents'
+    ``PatchToolCallsMiddleware``) or its state holds no messages."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    held = values.get("messages") if isinstance(values, Mapping) else None
+    given = native_input.get("messages") if isinstance(native_input, Mapping) else None
+    if not held or not isinstance(given, list) or PATCHES_CALLS in target.nodes:
+        return native_input
+    last = held[-1]
+    calls = last.tool_calls if isinstance(last, AIMessage) else []
+    if not calls:
+        return native_input
+    stopped = [
+        ToolMessage(
+            STOPPED_CALL.format(tool=c["name"]),
+            name=c["name"],
+            tool_call_id=c["id"],
+            status="error",
+        )
+        for c in calls
+    ]
+    return {**native_input, "messages": [*stopped, *given]}
 
 
 def _latest(graph: Mapping[str, Any]) -> str:
