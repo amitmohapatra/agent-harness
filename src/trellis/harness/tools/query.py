@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import difflib
 import hashlib
 import importlib
 import io
@@ -778,10 +779,10 @@ def _answer(
                 said = "took too long" if time.monotonic() > call.ends else engine.said(exc)
                 if "VARCHAR" in said and _TEXT_MISUSED.search(said):
                     said += TEXT_NUMBERS
-                there = "; ".join(f"{t} ({', '.join(columns_of(x))})" for t, x in texts.items())
                 return (
                     f"Error: the query failed: {said}. Only a SELECT runs, over the table "
-                    f"{TABLE} (this file) and the run's other saved results: {there}."
+                    f"{TABLE} (this file) and the run's other saved results: "
+                    f"{_there(texts, own, engine.asked(db, sql))}."
                 )
             finally:
                 with call.lock:
@@ -800,6 +801,31 @@ def _first(cursor: Any, names: list[str]) -> str:
     elif len(rows) > ROWS:
         shown += f"\n…[only the first {ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     return shown
+
+
+#: How many of the run's tables a failed query is told, with their columns — the closest to
+#: those it reads (:func:`_there`) — and the query that lists them all: its error stays short,
+#: so no window cuts the table it meant out of the middle.
+TOLD_TABLES: Final = 5
+ALL_TABLES: Final = "SELECT table_name FROM information_schema.tables"
+
+
+def _there(texts: Mapping[str, Source], own: str, asked: Sequence[str]) -> str:
+    """The tables a failed query could read, each with its columns: the :data:`TOLD_TABLES`
+    whose names are closest to those it ``asked`` for (``difflib``'s ratio, :data:`TABLE`
+    being ``own``; equally close, as they were loaded), then how many more there are and the
+    query that lists them."""
+    names = [own.lower() if a.lower() == TABLE else a.lower() for a in asked]
+
+    def near(table: str) -> float:
+        ratios = (difflib.SequenceMatcher(None, table.lower(), a).ratio() for a in names)
+        return max(ratios, default=0.0)
+
+    closest = sorted(texts, key=near, reverse=True)[:TOLD_TABLES]
+    said = [f"{t} ({', '.join(columns_of(texts[t]))})" for t in closest]
+    if more := len(texts) - len(closest):
+        said.append(f"and {more} more ({ALL_TABLES} lists them all)")
+    return "; ".join(said)
 
 
 #: How many rows a saved query's cursor gives at a time.
@@ -1040,6 +1066,13 @@ class DuckDB:
             for n, (d, z) in enumerate(zip(described, zoned, strict=True), start=1)
         )
         return db.execute(f"SELECT {shown} FROM ({sql}\n)", list(params))
+
+    def asked(self, db: Any, sql: str) -> list[str]:
+        """The tables ``sql`` reads, as DuckDB parses it; none of a text it does not parse."""
+        try:
+            return sorted(db.get_table_names(sql))
+        except self.duckdb.Error:
+            return []
 
     def said(self, exc: Exception) -> str:
         # its pointer under the SQL, and the functions it lists, left out
