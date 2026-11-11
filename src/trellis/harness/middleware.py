@@ -542,7 +542,8 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
         said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         with query.graph_results(*_graph_results(request.state, runtime)):
-            given = None if kept else _state_file(request.state, path, runtime)
+            # a file Deep Agents saved in the state, else a result still in its messages
+            given = None if kept else _state_file(request.state, path, runtime) or cleared
             said = await query.query(args, given)
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
@@ -632,12 +633,16 @@ def _kept_own(
     return done.model_copy(update={"content": kept})
 
 
-def _readers(runtime: Runtime, state: Any, present: set[str]) -> list[BaseTool]:
-    """The harness's readers of a kept result (``read_file``; ``query_result`` too, saving its
+def _readers(
+    runtime: Runtime | None, state: Any, present: Collection[str | None], *, cleared: bool = False
+) -> list[BaseTool]:
+    """The harness's readers of a held result (``read_file``; ``query_result`` too, saving its
     result as a file where the run runs no code: :data:`SAVING`) the model is offered beside
-    ``present``, once the run keeps a result or the graph's state holds one Deep Agents saved
-    (:func:`_saved`): its calls are answered by the harness (:func:`_kept_read`)."""
-    if not _saved(state):
+    ``present``, once a result is held anywhere: the run keeps one, the graph's state holds
+    one Deep Agents saved (:func:`_saved`), or the request shows one ``cleared`` from the
+    window (what :class:`ReadTools` sees, after the clearing). Their calls are answered by
+    the harness (:func:`_kept_read`), from wherever the result is."""
+    if not (cleared or _saved(state)):
         return []
     readers = SAVING if query.saving(runtime) else READERS
     return [t for name, t in readers.items() if name not in present]
@@ -1794,8 +1799,9 @@ class ReadTools(AgentMiddleware):
         tools = list(request.tools)
         has = any(_named(t) == READ_FILE for t in tools)
         if self.cleared and any(_cleared(m) for m in request.messages):
-            if not has:  # a result was cleared: read_file reads it back
-                tools.append(READ_FILE_TOOL)
+            # a result was cleared: read_file reads it back, query_result computes over it
+            present = {_named(t) for t in tools}
+            tools += _readers(current(), request.state, present, cleared=True)
         elif has and not (self.files or request.state.get("files") or results.kept()):
             tools = [t for t in tools if _named(t) != READ_FILE]
         return await handler(
@@ -1868,6 +1874,7 @@ class ThisTurnsResults(ClearToolUsesEdit):
             0,
         )
         turn = messages[start:]
+        shown = [m.text if isinstance(m, ToolMessage) else "" for m in turn]  # before clearing
         earlier = count_tokens(messages[:start]) if start else 0
         ClearToolUsesEdit.apply(
             replace(self, trigger=self.trigger - earlier), turn, count_tokens=count_tokens
@@ -1875,9 +1882,22 @@ class ThisTurnsResults(ClearToolUsesEdit):
         for n, message in enumerate(turn):
             if _cleared(message) and message.content == self.placeholder:
                 path = f"{results.PREFIX}/{message.tool_call_id}"
-                said = self.placeholder.replace("{path}", path)
+                said = self.placeholder.replace("{path}", path) + _rows_said(path, shown[n])
                 turn[n] = message.model_copy(update={"content": said})
         messages[start:] = turn
+
+
+@functools.lru_cache(maxsize=256)
+def _rows_said(path: str, text: str) -> str:
+    """What a cleared result's placeholder adds when the result holds rows: the table
+    ``query_result`` computes over them at ``path``, as every held result's note says
+    (``results.table_said``) — a result out of the window is counted exactly, not read back
+    and added up. ``""`` for one with no rows (prose, a document). Each result is parsed
+    once: the request is cleared anew before every model call."""
+    columns, rows = query.rows_of(text)
+    if not rows or columns == ["line"]:
+        return ""
+    return " " + results.table_said(path, text, query.TABLE)
 
 
 def _cleared(message: AnyMessage) -> TypeGuard[ToolMessage]:
