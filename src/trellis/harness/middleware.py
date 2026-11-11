@@ -453,7 +453,8 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
     from before the latest user message of a live tool of the run (``max_age`` 0: every
     earlier value is out of date) marked ``snapshots.EARLIER``, and those tools. A result
     already stamped (a memory window's replay), or of a tool whose value stays current a while
-    (its age is not known here) or for good, is left as it is."""
+    (its age is not known here) or for good, is left as it is; and so is the result of a call
+    that failed or was stopped before it came back: it returned no value to be out of date."""
     asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
     called = {
         c["id"]: c["name"]
@@ -464,7 +465,7 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
     out = list(messages)
     stale: set[str] = set()
     for n, m in enumerate(messages[:asked]):
-        if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
+        if not isinstance(m, ToolMessage) or not isinstance(m.content, str) or m.status == "error":
             continue
         tool = called.get(m.tool_call_id) or m.name or ""
         found = runtime.toolbox.get(tool)

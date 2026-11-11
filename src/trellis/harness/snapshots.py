@@ -7,7 +7,8 @@ conversation that replays it in a later turn says so.
   result's own text is never stamped with it.
 * **out of date** — a tool's data is live unless it declares otherwise (``tools.base.max_age``:
   0 by default, ``max_age`` seconds, or none for ``freshness="static"`` reference data), so an
-  earlier result replayed past that age says it is out of date (:data:`STALE`), the run's
+  earlier result replayed past that age — of a call that returned a value: a failed call has
+  none — says it is out of date (:data:`STALE`), the run's
   context says the same in one line naming the tool (:func:`note`), and the tool stays offered
   — the model fetches the value again instead of answering from the old one. Memory is never
   the source of a tool's data; a repeated call is served from an earlier one only within its
@@ -65,14 +66,18 @@ def out_of_date(
 ) -> tuple[list[Said], list[str]]:
     """``history`` with each tool result whose recorded fetch time (``Said.facts``,
     :data:`FETCHED`) is past its tool's ``max_age`` (seconds; ``None``: the tool did not say)
-    starting with :data:`STALE`, and those tools, in the order met."""
+    starting with :data:`STALE`, and those tools, in the order met. The result of a call that
+    failed (its recorded status) is left as it is: it returned no value to be out of date."""
+    from trellis.harness.tools.base import FAILED  # noqa: PLC0415 - the tools import this
+
     at = now()
     tools = {c.id: c.name for m in history for c in m.tool_calls}
     stale: dict[str, None] = {}
 
     def one(m: Said) -> Said:
         tool = tools.get(m.tool_call_id or "") if m.role is Speaker.TOOL else None
-        when = _parsed((m.facts or {}).get(FETCHED))
+        facts = m.facts or {}
+        when = None if facts.get("status") in FAILED else _parsed(facts.get(FETCHED))
         limit = None if tool is None else max_age(tool)
         if tool is None or when is None or limit is None or (at - when).total_seconds() <= limit:
             return m

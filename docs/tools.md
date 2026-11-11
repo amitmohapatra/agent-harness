@@ -368,7 +368,9 @@ where a number came from and when, and the result's own text is never stamped. A
 tool's age (0 unless declared) is marked out of date in the replay, the run's context says the
 same in one line, and the tool stays offered even when the tool hints narrow the rest: the model
 fetches the value again instead of answering from the old one, and the fresh result, with the
-older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). A repeated
+older one dated beside it, is what the answer uses (`trellis.harness.snapshots`). Only a call
+that returned a value is marked: one that failed, or was stopped before it came back, has no
+value to be out of date, in memory's replay and in a thread the framework keeps alike. A repeated
 call is answered from an earlier one only within its own model step and run, never across
 turns; `memory_search` items carry `observed_on`. The
 memory service never turns a tool's result into a long-term fact (it forms memories from what

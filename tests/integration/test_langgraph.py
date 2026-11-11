@@ -566,6 +566,7 @@ async def test_a_call_a_newer_message_stopped_is_answered_in_the_kept_thread(
     from langchain_core.messages import ToolMessage
 
     from trellis import middleware
+    from trellis.harness import snapshots
     from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
     from trellis.harness.adapters.langgraph import STOPPED_CALL
 
@@ -600,8 +601,13 @@ async def test_a_call_a_newer_message_stopped_is_answered_in_the_kept_thread(
         assert not _unanswered(sent), [(m.type, m.content) for m in sent]
     [stopped] = [m for m in model.seen[1] if isinstance(m, ToolMessage)]
     assert stopped.status == "error" and "slow_count" in str(stopped.content), stopped
-    ours = STOPPED_CALL.format(tool="slow_count") in str(stopped.content)
+    ours = str(stopped.content) == STOPPED_CALL.format(tool="slow_count")
     assert ours is (built != "deep"), stopped.content
+    # a call with no result has no value to be out of date: no turn is told to call it again
+    mark = snapshots.EARLIER.format(tool="slow_count")
+    for sent in model.seen[1:]:
+        [told] = [str(m.content) for m in sent if isinstance(m, ToolMessage)]
+        assert mark not in told, told
 
 
 async def test_a_call_left_waiting_for_an_approval_is_answered_when_the_user_moves_on(
