@@ -473,14 +473,19 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
     """Whether a large result of this call is kept in the run and previewed, ``read_file``
     paging it (``tools.results``, the convention every adapter's model reads): in a graph that
     is offered the harness's tools per model call (:class:`HarnessTools`, which offers and
-    serves that ``read_file``) and has no ``read_file`` of its own — Deep Agents' saves a large
-    result on its backend itself (a sandbox's among them, where code reads it)."""
+    serves that ``read_file``) and has no ``read_file`` of its own keeping files in the
+    graph's state — there Deep Agents saves a large result itself, where the harness reads it
+    (:func:`_graph_results`). On a backend outside the state (a sandbox, a disk, a store:
+    :data:`OUTSIDE_STATE`) the run keeps it, as without a backend: the harness cannot read a
+    file there, so no table was named and ``query_result`` was never offered; a sandbox gets
+    the kept result as a file for code all the same (``SandboxSource.with_results``)."""
     if runtime not in _PAGED:
         return False
     tools = getattr(request.runtime, "tools", None) or ()
     return not any(
         getattr(t, "name", None) == READ_FILE
-        and not (getattr(t, "metadata", None) or {}).get(KEPT_BY_RUN)
+        and not (marks := getattr(t, "metadata", None) or {}).get(KEPT_BY_RUN)
+        and not marks.get(OUTSIDE_STATE)
         for t in tools
     )
 
