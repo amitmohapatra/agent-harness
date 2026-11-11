@@ -317,7 +317,7 @@ def ReAct(
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
-        from deepagents.graph import GENERAL_PURPOSE_SUBAGENT
+        from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
         from deepagents.middleware.summarization import create_summarization_middleware
 
         from trellis.harness import automatic
