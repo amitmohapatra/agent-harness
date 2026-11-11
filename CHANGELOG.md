@@ -496,6 +496,15 @@ own model work follows the harness's configuration.
   formatted workbook or a script, read from the file and never typed into a command; a table
   read whole says so too (its file is in the sandbox as well: 1,528 values were typed into one
   command).
+- `query_result` no longer runs a run out of its time on a small window with a backend. A
+  table read whole is kept and sent with its note; Deep Agents then saved that whole message
+  as a file of its own, and the query loaded the copy as one more table: a JSON result
+  followed by the note read as "CSV" whose header was the JSON line, 3,902 columns, and
+  typing them in one statement ran for minutes with no interrupt stopping it (`ReAct` with a
+  backend, a 16,000-token window, `long-data-02`: 420 s, the run's limit). A graph's copy of
+  a result the run keeps is now that result (one table; asked by the copy's path, the kept
+  rows), and typing counts 64 columns a statement with the load's time looked at between two,
+  so `LOAD_SECONDS` holds for any table. The same case now ends in 69 s.
 - `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
   window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
   turns left out — and the tools stayed out, though the room the turns took was free. Every

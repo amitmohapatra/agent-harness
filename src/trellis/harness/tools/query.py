@@ -177,6 +177,12 @@ LOADED: Final = "loaded"
 #: The rows DuckDB first types a table's columns by: a column with a value no number there
 #: is text, not looked at again over every row (:meth:`DuckDB._typed`).
 SAMPLE_ROWS: Final = 2_048
+#: The columns one typing statement counts (six aggregates each): thousands in one statement
+#: ran for minutes and no interrupt stopped it, so the load's time is looked at between two
+#: statements of at most this many (:meth:`DuckDB._typed`).
+TYPED_COLUMNS: Final = 64
+#: What a load past its time says (:data:`LOAD_SECONDS`).
+LOAD_TOO_LONG: Final = "loading the saved results took too long"
 
 
 def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
@@ -766,9 +772,9 @@ def _answer(
                 call.ends = time.monotonic() + LOAD_SECONDS
             try:
                 with call.watched():
-                    engine.load(db, texts, own)
+                    engine.load(db, texts, own, until=call.ends)
                     if time.monotonic() > call.ends:
-                        raise TimeoutError("loading the saved results took too long")
+                        raise TimeoutError(LOAD_TOO_LONG)
                     call.ends = time.monotonic() + seconds  # the query's own, from here
                     cursor = engine.execute(db, sql, params)
                     names = [d[0] for d in cursor.description or ()]
@@ -910,12 +916,18 @@ class DuckDB:
         with contextlib.closing(self.duckdb.connect(":memory:", config=config)) as db:
             yield db
 
-    def load(self, db: Any, texts: Mapping[str, Source], own: str) -> None:
+    def load(
+        self, db: Any, texts: Mapping[str, Source], own: str, *, until: float | None = None
+    ) -> None:
+        """Every text of ``texts`` a table of ``db`` (``own``: the queried one, also
+        :data:`TABLE`), then locked. ``until``: the time (``time.monotonic``) the load may
+        take until — looked at between two typing statements, so it holds whatever DuckDB
+        makes of an interrupt (``TimeoutError`` past it)."""
         used = {TABLE, *texts}
         views: list[tuple[str, str]] = []  # the queried result's parts, as result_<part>
         with tempfile.TemporaryDirectory(prefix="trellis-query-") as folder:
             for n, (name, text) in enumerate(texts.items()):
-                for key in self._tables(db, os.path.join(folder, str(n)), text):
+                for key in self._tables(db, os.path.join(folder, str(n)), text, until):
                     table = base = name if key is None else part(name, key)
                     while key is not None and table in used:  # a name taken: the next one
                         table = f"{base}_{len(used)}"
@@ -933,7 +945,9 @@ class DuckDB:
         db.execute("SET enable_external_access = false")
         db.execute("SET lock_configuration = true")
 
-    def _tables(self, db: Any, path: str, text: Source) -> Iterator[str | None]:
+    def _tables(
+        self, db: Any, path: str, text: Source, until: float | None = None
+    ) -> Iterator[str | None]:
         """Each table ``text`` is (:meth:`_read`: its own, ``None``, then each part by its
         key), typed, as the table :data:`LOADED` — taken before the next: read from
         :data:`TYPED`'s Parquet of the same text when it has it, else read, typed
@@ -950,7 +964,7 @@ class DuckDB:
             return
         made: list[tuple[str | None, bytes]] = []
         for n, (key, columns) in enumerate(self._read(db, path, text)):
-            self._typed(db, LOADED, columns)
+            self._typed(db, LOADED, columns, until)
             if digest is not None:
                 file = f"{path}_{n}.parquet"
                 db.execute(f"COPY {LOADED} TO {_quoted(file)} (FORMAT parquet, COMPRESSION zstd)")
@@ -1018,16 +1032,25 @@ class DuckDB:
         db.execute(f"CREATE TEMP TABLE raw AS SELECT {listed} FROM {source}")
         yield None, names
 
-    def _typed(self, db: Any, name: str, columns: Sequence[str]) -> None:
+    def _typed(
+        self, db: Any, name: str, columns: Sequence[str], until: float | None = None
+    ) -> None:
         """The table ``name`` from ``raw`` (dropped after), each column typed by the module's
         rules (:func:`_counted`), counted in one pass over every row — only the columns still
-        numbers in its first :data:`SAMPLE_ROWS` — then cast."""
+        numbers in its first :data:`SAMPLE_ROWS` — then cast. A pass counts
+        :data:`TYPED_COLUMNS` columns a statement, and stops between two once past ``until``
+        (``TimeoutError``): a table of thousands of columns is bounded as any other."""
         kinds: dict[str, str | None] = dict.fromkeys(columns, "")
         for rows in (f"(SELECT * FROM raw LIMIT {SAMPLE_ROWS})", "raw"):
             asked = [c for c in columns if kinds[c] is not None]
-            if not asked:
-                break
-            counts = db.execute(f"SELECT {', '.join(map(_counted, asked))} FROM {rows}").fetchone()
+            counts: list[Any] = []
+            for start in range(0, len(asked), TYPED_COLUMNS):
+                if until is not None and time.monotonic() > until:
+                    raise TimeoutError(LOAD_TOO_LONG)
+                some = asked[start : start + TYPED_COLUMNS]
+                counts += db.execute(
+                    f"SELECT {', '.join(map(_counted, some))} FROM {rows}"
+                ).fetchone()
             for n, column in enumerate(asked):
                 present, whole, decimal, number, digits, scale = counts[6 * n : 6 * n + 6]
                 if number < present or (rows == "raw" and not present):
