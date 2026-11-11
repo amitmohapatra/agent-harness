@@ -242,25 +242,25 @@ def test_a_failed_query_is_told_the_closest_tables_first_and_stays_short(
         assert path is not None
         return path
 
-    def failed(sql: str) -> str:
+    def sent(sql: str) -> str:
         return asyncio.run(query.query({"file_path": paths[0], "sql": sql}))
 
     paths = [kept(n) for n in range(20)]
-    said = failed("SELECT * FROM order_item_6")  # one letter off
+    said = sent("SELECT * FROM order_item_6")  # one letter off
     there = said.split("saved results: ")[1]
     assert there.startswith("order_items_6 (id, col_6); "), said
     assert there.count("(id, col_") == query.TOLD_TABLES
     assert "customers_" not in there and "refunds_" not in there and "stock_" not in there
     assert there.endswith(f"and {20 - query.TOLD_TABLES} more ({query.ALL_TABLES} lists them all).")
     # a query that names a table there is, and fails on a column: that table's columns first
-    assert failed("SELECT nope FROM stock_19").split("saved results: ")[1].startswith("stock_19 (")
+    assert sent("SELECT nope FROM stock_19").split("saved results: ")[1].startswith("stock_19 (")
     own = asyncio.run(query.query({"file_path": paths[7], "sql": "SELECT nope FROM result"}))
     assert own.split("saved results: ")[1].startswith("customers_7 (id, col_7); ")
     # the rest is one query away
-    listed = failed(f"{query.ALL_TABLES} ORDER BY 1").splitlines()
+    listed = sent(f"{query.ALL_TABLES} ORDER BY 1").splitlines()
     assert {f"{kinds[n % 5]}_{n}" for n in range(20)} <= set(listed)
     paths += [kept(n) for n in range(20, 40)]
-    again = failed("SELECT * FROM order_item_6").split("saved results: ")[1]
+    again = sent("SELECT * FROM order_item_6").split("saved results: ")[1]
     assert again.count("(id, col_") == query.TOLD_TABLES and "; and 35 more (" in again
 
 
