@@ -91,7 +91,11 @@ async def test_every_adapter_works_in_its_runs_sandbox_governed_and_deleted_at_t
     assert finished.outcome is not None and finished.outcome.value == "success", finished
     assert finished.data["result"] == "Done. hello"  # the model read the file
     assert results(events) == [
-        ("sandbox_write", "wrote 5 bytes to notes.txt"),
+        (
+            "sandbox_write",
+            "wrote 5 bytes to notes.txt\n"
+            "Not in /workspace/outputs/, so not given to the user: notes.txt.",
+        ),
         ("sandbox_exec", {"exit_code": 0, "stdout": "hi", "stderr": ""}),
         ("sandbox_read", "hello"),
     ]

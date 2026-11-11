@@ -137,7 +137,8 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    base = [c for c in cases if not c.category.startswith(("adv_", "bf_", "hist_", "long_"))]
+    apart = ("adv_", "bf_", "hist_", "long_", "cando")  # each a module of its own
+    base = [c for c in cases if not c.category.startswith(apart)]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
     assert {c.tier for c in cases} == set(cx.TIERS)
@@ -2090,3 +2091,68 @@ def test_a_figure_said_in_millions_or_thousands_reads_as_its_value() -> None:
     assert cx.score(cx.money(36_255.0), "About £36.3k.", [])["correct"] is False  # 0.1% off: no
     assert cx.score(cx.money(36_255.0), "About £36.255k.", [])["correct"]
     assert not cx.score(expect, "Q4 would be about £8.3 million.", [])["correct"]
+
+
+@pytest.mark.parametrize("window", [None, 16_000])
+async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox(
+    tmp_path: Path, offline: None, window: int | None
+) -> None:
+    """Parity, replayed: every ``cando`` data case run both ways (``main``, and ``sandbox``:
+    ``ReAct(backend=sandbox())``), at the model's own window and at a small one — each scored
+    figure right on both, and the file a query saves the user's with the right rows."""
+    rows: dict[str, dict[str, Any]] = {}
+    for variant in ("main", "sandbox"):
+        out = tmp_path / f"cando-{variant}"
+        await cx.bench(
+            _args(out, cases="cando", adapter="react", variant=variant, window=window),
+            progress=lambda _: None,
+        )
+        found = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+        rows[variant] = {x["case"]: x for x in found}
+    assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 6)}
+    # the clustering runs both ways too: its figures judge it, with or without code
+    assert not any("not_applicable" in rows[v]["cando-04"] for v in rows)
+    for variant, cases in rows.items():
+        turns = [t for c in cases.values() for t in c.get("turns", ())]
+        assert all(t["status"] == "SUCCESS" for t in turns), variant
+        assert all(t["score"]["correct"] for t in turns if "score" in t), variant
+        assert all(k["ok"] for t in turns for k in t["checks"]), variant
+    kept = [k for c in rows["main"].values() for t in c["turns"] for k in t["checks"]]
+    assert [k["found"] for k in kept if k["check"] == "file"] == [
+        "top20_skus_sep2026.xlsx (21 lines)",
+        "S14_sales_2026.csv (1078 lines)",
+    ]
+
+
+def test_a_kept_file_is_checked_by_its_name_its_rows_and_what_it_holds() -> None:
+    probe = cx.Probe("file", r"\.csv$", "the export", holds=("SKU-1,3", "sku-2,5"), limit=3)
+    whole = b"sku,units\nSKU-1,3\nSKU-2,5\n"
+    assert cx.kept_file(probe, {"export.csv": whole}) == (True, "export.csv (3 lines)")
+    assert cx.kept_file(probe, {"notes.txt": whole}) == (False, "kept: ['notes.txt']")
+    assert cx.kept_file(probe, {}) == (False, "kept: no file")
+    short, why = cx.kept_file(probe, {"export.csv": b"sku,units\nSKU-1,3\n"})
+    assert not short and "lacks ['sku-2,5']" in why
+
+
+def test_two_runs_are_compared_turn_by_turn(tmp_path: Path) -> None:
+    from benchmark.cost import parity
+
+    def run(name: str, right: bool, kept: bool) -> Path:
+        turn = {
+            "turn": 0,
+            "score": {"correct": right, "missing": [] if right else ["under_40"]},
+            "checks": [{"check": "file", "ok": kept}],
+        }
+        rows = [{"case": "c-1", "turns": [turn]}, {"case": "c-2", "not_applicable": "x"}]
+        path = tmp_path / name
+        path.write_text("\n".join(json.dumps(r) for r in rows))
+        return path
+
+    same = parity.differences(run("a.jsonl", True, True), run("b.jsonl", True, True))
+    assert same == (1, [])  # the case that did not apply is not compared
+    shared, found = parity.differences(run("a.jsonl", True, True), run("b.jsonl", False, False))
+    assert shared == 1 and found == [
+        "c-1 turn 0: right in one only — b.jsonl lacks ['under_40']",
+        "c-1 turn 0: checks failed — a.jsonl: []; b.jsonl: ['file']",
+    ]
+    assert parity.main([str(tmp_path / "a.jsonl"), str(tmp_path / "b.jsonl")]) == 1

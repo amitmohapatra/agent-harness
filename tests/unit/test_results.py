@@ -135,3 +135,27 @@ def test_a_run_with_a_sandbox_is_told_the_kept_result_is_a_file_there_to_run_cod
     assert (code in stub) is (said is not None)
     if said is not None:  # said before the preview, which a small model reads past
         assert stub.index(code) < stub.index("Here is a preview")
+
+
+def test_with_a_sandbox_the_query_comes_first_and_code_reads_the_kept_file(
+    run: SimpleNamespace,
+) -> None:
+    """One owner of a count, a sum, a filter, a ranking or a group over kept rows:
+    ``query_result`` (exact decimals). The code note gave the same job to the sandbox, so a
+    model with one computed in its own Python (105 SKUs under a 40% margin where every query
+    said 104), and a table read whole said nothing of its file there, so 1,528 values were
+    typed into a command. Code is for what a query cannot do, reading the kept file."""
+    run.toolbox, run.native = {}, {"execute": 1}
+    stub = readable("y\n" * MAX_CHARS)
+    code = results.CODE.format(path=kept_path(stub), tool="execute")
+    said = stub.index(results.QUERY.split("{", 1)[0])
+    assert said < stub.index(code)  # the query first
+    asked = [w for w in ("count", "sum", "filter", "rank", "group") if w in results.QUERY]
+    assert asked and not [w for w in asked if w in results.CODE]  # not the code's job too
+    # a table read whole, kept as well: its file is in the sandbox too, and the note says so
+    table = "sku,units\n" + "\n".join(f"S{n},{n}" for n in range(results.TABLE_ROWS))
+    whole = results.tabled(table, tool="sales")
+    path = whole.split("also saved at ")[1].split(". ")[0]
+    assert whole.endswith(results.CODE.format(path=path, tool="execute")), whole[-400:]
+    run.native = {}
+    assert results.CODE.split("{", 1)[0] not in results.tabled(table + "\nS9,9", tool="sales")

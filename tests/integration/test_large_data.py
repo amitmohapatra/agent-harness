@@ -559,6 +559,39 @@ async def test_a_table_read_whole_is_also_queryable_so_no_row_is_counted_by_hand
     assert last(model.requests[2]).splitlines()[1] == "41"
 
 
+SUMMARY: Final = "category,revenue,units\n" + "\n".join(
+    f"{name},{1250.50 + n},{37 + n}"
+    for n, name in enumerate(
+        ["footwear", "knitwear", "dresses", "activewear", "denim", "shirts", "outerwear", "bags"]
+    )
+)
+
+
+@tool(side_effects="read")
+def category_summary() -> str:
+    """Revenue and units of each of the 8 categories, as CSV."""
+    return SUMMARY
+
+
+async def test_a_handful_of_rows_is_a_table_and_two_figures_are_computed_by_the_query(
+    harness: Harness,
+) -> None:
+    """An 8-row summary is read whole and kept as a table too, its note saying to compute with
+    the query — a ratio of two of its figures as well, by ``sql`` alone: from two such
+    summaries a model divided revenue by units by hand and was a penny off in 4 of 9 runs
+    (``planning-03``: 93.79 for 93.80)."""
+    compute = {"sql": "SELECT round(1250.50 / 37, 2) AS per_unit"}
+    model = ScriptedChat([("category_summary", {}), ("query_result", compute), "33.80"])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="few8"), [category_summary])
+    result = await agent.run("revenue per unit of footwear?", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    told = last(model.requests[1])
+    assert told.startswith(SUMMARY) and "These 8 rows are also saved at" in told
+    assert "Do not add up, divide or rank rows yourself" in told
+    assert "query_result" in names(model.requests[1])
+    assert last(model.requests[2]) == "per_unit\n33.8"
+
+
 async def test_a_few_rows_are_read_as_they_are(harness: Harness) -> None:
     model = ScriptedChat([("few_lines", {}), "done"])
     agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="few"), [few_lines])
