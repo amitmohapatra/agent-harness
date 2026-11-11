@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
@@ -383,3 +384,18 @@ async def test_whichever_tool_wrote_a_file_the_model_knows_whether_the_user_has_
         or "No file is in /workspace/outputs/ yet" in said
     )
     assert (given, not_given) == (PLACES[path], not PLACES[path]), said
+
+
+async def test_a_write_that_failed_is_told_its_error_and_nothing_of_the_users_files(
+    harness: Harness,
+) -> None:
+    """A ``write_file`` that wrote nothing (a path the backend refuses) left no file to speak
+    of: the model is told the error, as it is, and nothing about the kept folder."""
+    model = ScriptedChatModel(
+        turns=[("write_file", {"file_path": "/workspace/../outputs/x.svg", "content": "x"}), "no"]
+    )
+    agent = harness.wrap(ReAct("s", model, backend=sandbox(FakeSandboxes())), id="refused-write")
+    assert (await agent.run("write it", user="u")).answer == "no"
+    told = model.seen[-1][-1]
+    assert isinstance(told, ToolMessage) and told.status == "error", told
+    assert "given to the user" not in told.text
