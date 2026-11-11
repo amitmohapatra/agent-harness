@@ -317,6 +317,7 @@ def ReAct(
     try:
         from deepagents import create_deep_agent
         from deepagents.backends import StateBackend
+        from deepagents.graph import GENERAL_PURPOSE_SUBAGENT
         from deepagents.middleware.summarization import create_summarization_middleware
 
         from trellis.harness import automatic
@@ -349,6 +350,15 @@ def ReAct(
     native, helpers = _subagents(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
+    # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
+    # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's
+    general = _native(
+        dict(GENERAL_PURPOSE_SUBAGENT),
+        call_timeout=call_timeout,
+        max_steps=max_steps,
+        max_repeats=max_repeats,
+    )
+    own_helpers = {s.get("name") for s in native}
     profiled = _profiled(chat, window)
     cached, middleware = ours.prompt_cache(middleware)
     stored_prompt = system_prompt if isinstance(system_prompt, Stored) else None
@@ -403,7 +413,8 @@ def ReAct(
         # Deep Agents' summarization stands after the harness's narrowing, which it counts;
         # the prompt cache in its own caching middleware's place
         middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cached],
-        subagents=cast(Any, native),  # Deep Agents' own dicts, as given
+        # Deep Agents' own dicts, as given, and its general-purpose helper unless one is named
+        subagents=cast(Any, native if general["name"] in own_helpers else [general, *native]),
         skills=skills,
         memory=memory_files,
         permissions=permissions,
@@ -533,7 +544,10 @@ def _native(
     own ``AnthropicPromptCachingMiddleware``) and its ``interrupt_on`` turned into its tools'
     declared risk — a tool it names asks a person (``irreversible``), as the catalog says; a
     name that is none of its tools (a Deep Agents tool of its own) stays Deep Agents'
-    approval, which the harness asks once."""
+    approval, which the harness asks once. One that names no ``tools`` has the run's, as Deep
+    Agents gives it the main agent's: ``ReAct``'s are offered per model call
+    (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
+    its own tools has exactly those."""
     if "runnable" in spec or "graph_id" in spec:
         return spec
     from trellis.harness import middleware as ours
@@ -543,6 +557,7 @@ def _native(
     cache, given = ours.prompt_cache(spec.get("middleware") or [])
     names = {m.name for m in given}
     guards = [
+        *([] if "tools" in spec else [ours.HarnessTools(), ours.GovernTools()]),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),
