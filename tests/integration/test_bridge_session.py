@@ -174,7 +174,8 @@ async def test_an_earlier_live_value_in_the_thread_reads_as_out_of_date(
     )  # fmt: skip
     items = await MemorySession(runtime).get_items()  # type: ignore[arg-type]
     told = next(i["output"] for i in items if i.get("type") == "function_call_output")
-    assert told == f"{snapshots.STALE.format(tool='stock')}\n40"
+    # no note goes with the question on this path: the mark says what to do itself
+    assert told == "[out of date: call stock again for the current value]\n40"
     assert runtime.offered == {"other", "stock"}
 
 

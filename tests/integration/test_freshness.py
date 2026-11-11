@@ -126,7 +126,7 @@ async def test_a_replayed_result_says_which_tool_fetched_it_and_when(
     assert stored[0]["content"] == "40"
     facts = stored[0]["custom_metadata"]["run_record"]
     assert facts["fetched"] == "2026-10-30T09:00:00Z" and facts["max_age"] == 0.0
-    assert told == snapshots.STALE.format(tool="get_stock") + "\n40"
+    assert told == snapshots.STALE + "\n40"
     assert "out of date" in context(model.requests[-1])  # live by default: call it again
 
 

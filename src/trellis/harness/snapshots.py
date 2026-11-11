@@ -8,9 +8,9 @@ conversation that replays it in a later turn says so.
 * **out of date** — a tool's data is live unless it declares otherwise (``tools.base.max_age``:
   0 by default, ``max_age`` seconds, or none for ``freshness="static"`` reference data), so an
   earlier result replayed past that age — of a call that returned a value: a failed call has
-  none — says it is out of date (:data:`STALE`), the run's
-  context says the same in one line naming the tool (:func:`note`), and the tool stays offered
-  — the model fetches the value again instead of answering from the old one. Memory is never
+  none — says it is out of date (:data:`STALE`: its state alone), the run's
+  context says what to do in one line naming the tool (:func:`note`), and the tool stays
+  offered — the model fetches the value again instead of answering from the old one. Memory is never
   the source of a tool's data; a repeated call is served from an earlier one only within its
   own model step (``tools.bridge.same``) and run (the journal), never across turns.
 * **today** — the dates all of these carry mean something only against the day it is, which
@@ -33,8 +33,14 @@ from trellis.harness.history import Said, Speaker
 #: stays current (seconds; absent for a tool whose data is static).
 FETCHED: Final = "fetched"
 MAX_AGE: Final = "max_age"
-#: The line a replayed result past its tool's max age starts with.
-STALE: Final = "[out of date: call {tool} again for the current value]"
+#: The line a replayed result past its tool's max age starts with: its state alone. What to do
+#: about it is :data:`NOTE`'s, said once with the question and only for a value the question
+#: needs — told on the result itself to call the tool again, a model asked for August's figure
+#: volunteered July's too (``conversation-02``).
+STALE: Final = "[out of date]"
+#: The same where no note goes with the question (a session its framework reads the thread
+#: through, ``bridges.session``): the mark says what to do itself.
+STALE_CALL: Final = "[out of date: call {tool} again for the current value]"
 #: The mark of a live tool's result from an earlier turn of a thread its framework keeps (a
 #: graph's checkpointer: no fetch time is kept with it, and it is from before this turn).
 EARLIER: Final = (
@@ -88,12 +94,13 @@ def today(runtime: Any) -> str:
 
 
 def out_of_date(
-    history: Sequence[Said], max_age: Callable[[str], float | None]
+    history: Sequence[Said], max_age: Callable[[str], float | None], *, mark: str = STALE
 ) -> tuple[list[Said], list[str]]:
     """``history`` with each tool result whose recorded fetch time (``Said.facts``,
     :data:`FETCHED`) is past its tool's ``max_age`` (seconds; ``None``: the tool did not say)
-    starting with :data:`STALE`, and those tools, in the order met. The result of a call that
-    failed (its recorded status) is left as it is: it returned no value to be out of date."""
+    starting with ``mark`` (:data:`STALE`; :data:`STALE_CALL` where no note goes with the
+    question), and those tools, in the order met. The result of a call that failed (its
+    recorded status) is left as it is: it returned no value to be out of date."""
     from trellis.harness.tools.base import FAILED  # noqa: PLC0415 - the tools import this
 
     at = now()
@@ -108,7 +115,7 @@ def out_of_date(
         if tool is None or when is None or limit is None or (at - when).total_seconds() <= limit:
             return m
         stale[tool] = None
-        return dataclasses.replace(m, content=f"{STALE.format(tool=tool)}\n{m.content}")
+        return dataclasses.replace(m, content=f"{mark.format(tool=tool)}\n{m.content}")
 
     marked = [one(m) for m in history]
     return marked, list(stale)
@@ -136,6 +143,7 @@ __all__ = [
     "MAX_AGE",
     "NOTE",
     "STALE",
+    "STALE_CALL",
     "TIME",
     "declared_max_age",
     "note",

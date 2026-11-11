@@ -41,8 +41,14 @@ def test_a_replayed_result_past_its_tools_max_age_is_out_of_date(clock: list[dat
     clock[0] = T0 + timedelta(hours=1)
     marked, stale = snapshots.out_of_date(history, ages.get)
     assert stale == ["get_stock"]
-    assert marked[2].content == snapshots.STALE.format(tool="get_stock") + "\n40"
+    # the mark is the result's state alone: what to do about it is the note's, said once with
+    # the question and only for a value the question needs (on ``conversation-02`` a model told
+    # on the July result to "call sales_summary again" volunteered July when asked for August)
+    assert marked[2].content == "[out of date]\n40"
     assert "2026-10-30" not in marked[2].content  # the fetch time is the run record's to say
+    # where no note goes with the question, the mark says it itself
+    alone, _ = snapshots.out_of_date(history, ages.get, mark=snapshots.STALE_CALL)
+    assert alone[2].content == "[out of date: call get_stock again for the current value]\n40"
     assert snapshots.out_of_date(history, {}.get) == (history, [])  # no age declared
     assert snapshots.note(stale) is not None and "get_stock" in str(snapshots.note(stale))
     assert snapshots.note([]) is None
@@ -61,10 +67,9 @@ def test_a_result_with_no_recorded_or_an_unreadable_fetch_time_is_left_as_it_is(
 
 @pytest.mark.parametrize("status", ["error", "timeout"])
 def test_a_failed_call_has_no_value_to_be_out_of_date(clock: list[datetime], status: str) -> None:
-    """A call that failed returned no value: its replayed result ("Error: ...") was told
-    "[out of date: call get_stock again for the current value]" all the same, and its tool
-    counted as one whose earlier values are out of date. Only a call that returned a value is
-    marked."""
+    """A call that failed returned no value: its replayed result ("Error: ...") was marked
+    out of date all the same, and its tool counted as one whose earlier values are out of
+    date. Only a call that returned a value is marked."""
     failed = turn(result="Error: the warehouse is down")
     failed[2] = Said(
         Speaker.TOOL,
@@ -77,7 +82,7 @@ def test_a_failed_call_has_no_value_to_be_out_of_date(clock: list[datetime], sta
     marked, stale = snapshots.out_of_date(failed + turn(call="c2"), {"get_stock": 0.0}.get)
     assert stale == ["get_stock"]  # the call that returned 40 still is
     assert marked[2].content == "Error: the warehouse is down"
-    assert marked[6].content == snapshots.STALE.format(tool="get_stock") + "\n40"
+    assert marked[6].content == snapshots.STALE + "\n40"
 
 
 def test_a_tools_declared_age_is_read_from_the_run() -> None:

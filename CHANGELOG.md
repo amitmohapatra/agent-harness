@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: an out-of-date result's mark is its state; what to do is said once, with the question
+
+A replayed result past its tool's age started with "[out of date: call <tool> again for the
+current value]", and the note sent with the question said the same, limited to "a value the
+question needs". The mark sat on every such result whether the question needed it or not: on
+`conversation-02` ("Sorry, I meant August") a model answered August and then volunteered July's
+figure again as "re-run", which it had not done. The mark is now `[out of date]`
+(`snapshots.STALE`); the instruction is the note's alone. Where no note goes with the question
+(the OpenAI Agents session reading memory's thread, `bridges/session.py`), the mark keeps its
+instruction (`snapshots.STALE_CALL`). A graph's own thread is unchanged (`snapshots.EARLIER`).
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each

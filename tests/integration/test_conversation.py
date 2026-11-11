@@ -145,7 +145,7 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
         assert "21 days" not in sent
         return
     assert "21 days" in sent  # the tool result behind the answer
-    assert json.dumps(snapshots.STALE.format(tool="supplier"))[1:-1] in sent  # live data
+    assert json.dumps(snapshots.STALE)[1:-1] in sent  # live data
     roles = [m["role"] for m in model.requests[-1]["messages"]]
     assert roles[1:] == ["user", "assistant", "tool", "assistant", "user"], roles
     # and the question says so, as memory's replay says it in its context: without it a model

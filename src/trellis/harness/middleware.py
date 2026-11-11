@@ -507,7 +507,7 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
         tool = called.get(m.tool_call_id) or m.name or ""
         found = runtime.toolbox.get(tool)
         spec = found.spec if found is not None else runtime.native.get(tool)
-        marked = m.content.startswith(snapshots.STALE.format(tool=tool))  # memory's replay
+        marked = m.content.startswith(snapshots.STALE)  # memory's replay
         if spec is None or marked or max_age(spec) != 0:
             continue
         stale.add(tool)

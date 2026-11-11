@@ -104,7 +104,7 @@ async def test_a_tool_call_comes_back_with_its_result(
     # out of date already (a tool's data is live unless it says otherwise); when it was
     # fetched is the run record's to say, not the result's
     said = messages[2]["content"]
-    assert said == snapshots.STALE.format(tool="stock") + "\n7"
+    assert said == snapshots.STALE + "\n7"
     assert messages[3]["content"] == "7 units."
 
 
@@ -218,7 +218,8 @@ async def test_an_openai_agent_reads_the_thread_through_its_session_as_input_ite
     assert call["name"] == "lookup" and output["call_id"] == call["call_id"]
     # lookup is live (it declares no max age): its earlier value reads as out of date, as the
     # memory window's replay says it, from its run record's fetch time (the text is unstamped)
-    assert output["output"] == snapshots.STALE.format(tool="lookup") + "\nresult a"
+    # (no note goes with the question on a session's path: the mark says what to do itself)
+    assert output["output"] == snapshots.STALE_CALL.format(tool="lookup") + "\nresult a"
     # memory's thread is the session: the context carries no window besides it
     assert all("window_format" not in c.body for c in memory_service.named("context"))
 

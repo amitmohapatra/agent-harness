@@ -76,7 +76,9 @@ class MemorySession:
         # an earlier value of a live tool is out of date, as the memory window's replay says,
         # and its tool stays offered: the model fetches it again
         said, stale = snapshots.out_of_date(
-            said, lambda name: snapshots.declared_max_age(self.runtime, name)
+            said,
+            lambda name: snapshots.declared_max_age(self.runtime, name),
+            mark=snapshots.STALE_CALL,  # no note goes with the question here
         )
         if stale and self.runtime.offered is not None:
             self.runtime.offered |= set(stale)
