@@ -299,6 +299,10 @@ def declare_files(graph: Any) -> None:
 #: (``ReAct``'s: Deep Agents' ``execute`` on a backend that runs nothing, its general-purpose
 #: ``task`` helper, offered on a long task only): it is left out of the run's tool set.
 MACHINERY: Final = "trellis_machinery"
+#: Deep Agents' ``read_file`` in a graph no Deep Agents capability was asked for (``ReAct``
+#: alone): a large result is kept by the run, as on any graph without file tools of its own
+#: (:func:`_paged`), not saved by Deep Agents in the graph's state.
+KEPT_BY_RUN: Final = "trellis_kept_by_run"
 
 
 class GovernTools(AgentMiddleware):
@@ -474,7 +478,11 @@ def _paged(runtime: Runtime, request: ToolCallRequest) -> bool:
     if runtime not in _PAGED:
         return False
     tools = getattr(request.runtime, "tools", None) or ()
-    return not any(getattr(t, "name", None) == READ_FILE for t in tools)
+    return not any(
+        getattr(t, "name", None) == READ_FILE
+        and not (getattr(t, "metadata", None) or {}).get(KEPT_BY_RUN)
+        for t in tools
+    )
 
 
 def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[AnyMessage], set[str]]:

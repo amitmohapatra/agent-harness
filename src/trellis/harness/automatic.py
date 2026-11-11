@@ -3,10 +3,9 @@ middleware used as it is, the harness's code only the trigger and the glue that 
 governed, journaled and resumable. A task that does not need one never sees it: a short task's
 model calls are what they were before any of these existed (the tools, the instructions).
 
-* **A long task** — :func:`long_task`: once the model has made :data:`LONG_AFTER` calls in this
-  invocation, or the request asks for steps (a list of :data:`STEP_ITEMS` items or more, "step
-  by step", "a plan") — on a model whose window is known and has room for them
-  (:data:`MIN_WINDOW`; an unknown window: off) gets:
+* **A long task** — :func:`long_task`: a conversation that has outgrown :data:`LONG_AT` of
+  the model's window, where ``ReAct`` starts clearing old tool results — on a model whose
+  window is known and has room for them (:data:`MIN_WINDOW`; an unknown window: off) gets:
 
   * ``planning`` — LangChain's ``TodoListMiddleware`` (:class:`Planning`): the ``write_todos``
     tool and its instructions;
@@ -25,8 +24,7 @@ model calls are what they were before any of these existed (the tools, the instr
 
 from __future__ import annotations
 
-import re
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection
 from typing import Any, Final
 
 from deepagents.backends import StateBackend
@@ -38,7 +36,8 @@ from langchain.agents.middleware import (
     ModelResponse,
 )
 from langchain.agents.middleware.todo import TodoListMiddleware
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from trellis.harness import budget
 from trellis.harness.middleware import _named, no_tool
@@ -48,12 +47,12 @@ from trellis.harness.runtime import current
 #: cost about 2,600 tokens of instructions and definitions on every call, which a smaller
 #: window cannot spare.
 MIN_WINDOW: Final = 32_000
-#: Model calls in one invocation after which a task is long (the next call gets the tools).
-LONG_AFTER: Final = 3
-#: List items in the request from which it asks for steps.
-STEP_ITEMS: Final = 3
-_ITEM: Final = re.compile(r"(?m)^\s*(?:\d{1,2}[.)]|[-*•])\s+\S")
-_CUE: Final = re.compile(r"\bstep[- ]by[- ]step\b|\bmulti-?step\b|\b(?:a|the|your) plan\b", re.I)
+#: The share of the window a conversation fills from which its task is long — where ``ReAct``
+#: starts clearing old tool results (``ThisTurnsResults``' trigger): the tools join a request
+#: that is edited anyway, so a provider's prompt cache is rewritten once, not once more. The
+#: priced pilot's switch after three model calls rewrote it on half of 12 long cases (cached
+#: input 456,000 tokens down to 337,000, the cost up a third) for tools no model call used.
+LONG_AT: Final = 0.5
 #: ``write_todos``: the planning tool.
 TODOS: Final = "write_todos"
 #: Deep Agents' scratch file tools a long task is offered (``read_file`` reads saved results
@@ -69,31 +68,12 @@ MAX_RUN_CHARS: Final = 1_000_000
 RESERVED: Final = ("/large_tool_results/", "/conversation_history/")
 
 
-def calls_made(request: ModelRequest[Any]) -> int:
-    """The model calls of this invocation so far (the steps since the user's message)."""
-    made = 0
-    for message in reversed(_history(request)):
-        if isinstance(message, HumanMessage):
-            break
-        made += isinstance(message, AIMessage)
-    return made
-
-
-def asks_for_steps(request: ModelRequest[Any]) -> bool:
-    """Whether the user's latest message asks for steps: a list of :data:`STEP_ITEMS` items or
-    more, or says so ("step by step", "multi-step", "a plan"). The graph's state is read, not
-    the request: a middleware's own message to the model (a check) is not the user's."""
-    asked = next((m.text for m in reversed(_history(request)) if isinstance(m, HumanMessage)), "")
-    return len(_ITEM.findall(asked)) >= STEP_ITEMS or bool(_CUE.search(asked))
-
-
-def _history(request: ModelRequest[Any]) -> Sequence[Any]:
-    return (request.state or {}).get("messages", [])
-
-
-def long_task(request: ModelRequest[Any]) -> bool:
-    """Whether the task is long: :data:`LONG_AFTER` model calls made, or steps asked for."""
-    return calls_made(request) >= LONG_AFTER or asks_for_steps(request)
+def long_task(request: ModelRequest[Any], window: int) -> bool:
+    """Whether the conversation has outgrown :data:`LONG_AT` of ``window``, counted as
+    LangChain's context editing counts it (the request's messages, approximately). It is the
+    run's own behaviour, never the request's wording, and it holds for the rest of the thread:
+    a conversation only grows."""
+    return count_tokens_approximately(request.messages) > int(LONG_AT * window)
 
 
 class _LongTasks:
@@ -103,8 +83,8 @@ class _LongTasks:
     window: int | None = None
 
     def wanted(self, request: ModelRequest[Any]) -> bool:
-        roomy = self.window is not None and self.window >= MIN_WINDOW
-        return roomy and long_task(request)
+        window = self.window
+        return window is not None and window >= MIN_WINDOW and long_task(request, window)
 
 
 def without_tools(request: ModelRequest[Any], names: Collection[str]) -> ModelRequest[Any]:
@@ -141,13 +121,16 @@ class Budgeted(AgentMiddleware):
 # --------------------------------------------------------------------------- planning
 class Planning(_LongTasks, TodoListMiddleware):
     """LangChain's ``TodoListMiddleware``, offered on a long task (``planning``): until then
-    the model is not sent ``write_todos``. Its guidance travels in the tool's own description
-    (LangChain's), never in the instructions: the system prompt stays the same from the first
-    call to the last, so a provider's prompt cache keeps its prefix. Named as LangChain's."""
+    the model is not sent ``write_todos`` — or from the first call (``always``: a ``ReAct``
+    asked for a Deep Agents capability is Deep Agents' from its first step). Its guidance
+    travels in the tool's own description (LangChain's), never in the instructions: the system
+    prompt stays the same from the first call to the last, so a provider's prompt cache keeps
+    its prefix. Named as LangChain's."""
 
-    def __init__(self, *, window: int | None = None) -> None:
+    def __init__(self, *, window: int | None = None, always: bool = False) -> None:
         super().__init__()
         self.window = window
+        self.always = always
 
     @property
     def name(self) -> str:
@@ -158,7 +141,7 @@ class Planning(_LongTasks, TodoListMiddleware):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> Any:
-        if self.wanted(request):
+        if self.always or self.wanted(request):
             return await handler(request)  # the tool, its description its guidance
         return await handler(without_tools(request, {TODOS}))
 

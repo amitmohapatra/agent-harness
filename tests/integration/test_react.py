@@ -453,8 +453,11 @@ async def test_a_huge_result_is_saved_as_a_file_the_model_reads_in_pages(
     assert len(told) < 10_000  # a preview, not the result
     assert "0123456789" in model.requests[2]["messages"][-1]["content"]
     offered = [[t["function"]["name"] for t in r.get("tools", [])] for r in model.requests]
-    once_saved = ["dump", "query_result", "read_file"]  # query_result: SQL over its rows
-    assert offered == [["dump"], once_saved, once_saved]
+    # a backend asked for: Deep Agents' own tools from the first step
+    deep = ["delete", "edit_file", "glob", "grep", "ls", "read_file", "task", "write_file"]
+    first = sorted(["dump", "write_todos", *deep])
+    once_saved = [*first, "query_result"]  # SQL over its rows; after the tools offered first
+    assert offered == [first, once_saved, once_saved]
 
 
 async def test_the_same_call_over_and_over_is_a_stall(harness: Harness) -> None:
