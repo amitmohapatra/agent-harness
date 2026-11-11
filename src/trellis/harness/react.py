@@ -366,11 +366,15 @@ def ReAct(
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
     # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
-    # outside the graph's state — a disk, a store, a sandbox — governed), unless the window is
-    # known to have no room for them. None asked for: the same graph, its scratch tools, its
-    # general-purpose helper and planning held until the run shows a long task
-    # (``automatic.long_task``), large results kept by the run and the window fitted by
-    # ``FitWindow``, as on ``create_agent`` with ``middleware()``
+    # outside the graph's state — a disk, a store, a sandbox — governed) and its summarization
+    # of the older turns, unless the window is known to have no room for them
+    # (``automatic.MIN_WINDOW``): one owner of the window either way. None asked for, or no
+    # room: the same graph, its scratch tools, its general-purpose helper and planning held
+    # until the run shows a long task (``automatic.long_task``), large results kept by the run
+    # and the window fitted by ``FitWindow``, as on ``create_agent`` with ``middleware()`` —
+    # under that window Deep Agents' summarization measured worse than ``FitWindow`` (it saved
+    # again the results the run keeps and spent model calls on summaries: 6 of 8 small-window
+    # cases right against 8 of 8, one out of time)
     outside = not isinstance(files_backend, StateBackend)
     first = asked and (window is None or window >= automatic.MIN_WINDOW)
     held = (
@@ -390,7 +394,7 @@ def ReAct(
         files=first or outside or bool(skills) or bool(memory_files),
         summarization=(
             _placed(create_summarization_middleware(profiled, graph_backend), PLACED)
-            if asked
+            if first
             else None
         ),
         card=_card(files_backend),

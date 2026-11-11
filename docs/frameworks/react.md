@@ -185,8 +185,11 @@ agent = h.wrap(target, id="reports")
 Its tools, planning and `read_file` are offered from the first call (about 2,600 tokens a
 call), a large result is saved as a file by Deep Agents (kept by the run instead when the
 backend's files are outside the graph's state — a sandbox, a disk, a store — so `query_result`
-reads its rows there as anywhere), and the older turns are summarized near the window's end. On a window known to be under 32,000 tokens the long-task tools are
-held: there is no room for them.
+reads its rows there as anywhere), and the older turns are summarized near the window's end.
+On a window known to be under 32,000 tokens the long-task tools are held: there is no room
+for them. The summarization is not placed there either: `FitWindow` fits the request, as on
+`ReAct` alone (one owner of the window; measured on windows of 6,000 to 16,000 tokens, where
+the summarization saved again the results the run keeps and spent model calls on summaries).
 
 ## The base
 
@@ -254,7 +257,7 @@ asked for a chart, a model had saved an SVG there and told the user to open it.
 |---|---|
 | `FilesystemMiddleware` | the file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`, and `execute` on a sandbox backend) on `backend`; a tool result over 20,000 tokens saved as a file (`/large_tool_results/<call id>`), a head-and-tail preview in its place, `read_file` reading it by lines |
 | `SubAgentMiddleware` | the `task` tool: your `SubAgent`/`CompiledSubAgent` sub-agents, and its general-purpose helper |
-| summarization (`create_summarization_middleware`) | past 85% of the window (its own thresholds when the window is not known), the older turns summarized by one model call, the turns it replaced saved where `read_file` reads them (`/conversation_history/...`), oversized tool arguments in older turns truncated first, a context overflow summarized and retried. `ReAct` places it after the harness's middleware that narrow the tools, so it counts what the model is sent |
+| summarization (`create_summarization_middleware`) | past 85% of the window (its own thresholds when the window is not known), the older turns summarized by one model call, the turns it replaced saved where `read_file` reads them (`/conversation_history/...`), oversized tool arguments in older turns truncated first, a context overflow summarized and retried. `ReAct` places it after the harness's middleware that narrow the tools, so it counts what the model is sent; with a capability and a window known to be under 32,000 tokens it is left out and `FitWindow` leaves the older turns out instead |
 | `PatchToolCallsMiddleware` | a tool call left with no answer (a crash, a cancel) gets one, so the conversation stays valid |
 | `SkillsMiddleware`, `MemoryMiddleware` | `skills=`, `memory_files=` |
 | prompt caching | Anthropic's (and Bedrock's, Fireworks') cache breakpoints, when the model is theirs; `ReAct` puts `PromptCache` in the Anthropic one's place ([below](#the-middleware)) |

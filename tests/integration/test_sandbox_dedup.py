@@ -119,10 +119,11 @@ def test_code_modes_meta_tools_are_apart_from_the_sandboxs_execute() -> None:
 async def test_a_result_over_the_window_is_offloaded_once_where_code_reads_it(
     harness: Harness, kept_by_harness: list[str]
 ) -> None:
-    """Below Deep Agents' eviction but over the window, a result is Deep Agents' to make fit
-    (its summarization's overflow path offloads it whole to the backend): ``FitWindow`` does
-    not also cut it and keep it in the run's journal, which the sandbox would then hold a
-    second time. One copy, the whole result, in the sandbox where code reads it."""
+    """Below Deep Agents' eviction but over the window, a result has one owner. Under the
+    window Deep Agents needs (``automatic.MIN_WINDOW``) that is the run: ``FitWindow`` cuts it
+    and keeps it whole, the sandbox holds that copy (``SandboxSource.with_results``), and
+    Deep Agents' summarization, which is not placed there, saves no second one. One copy, the
+    whole result, in the sandbox where code reads it."""
     # a log, not a table: a table is also kept for query_result (``results.tabled``)
     rows = "\n".join(f"event {n}: stock moved by {n % 5}" for n in range(1_500))
 
@@ -137,8 +138,8 @@ async def test_a_result_over_the_window_is_offloaded_once_where_code_reads_it(
     agent = arm(harness.wrap(target, id="fit"), [stock])
     result = await agent.run("how many units?", user="u")
     assert result.answer == "2", result.error
-    assert kept_by_harness == []  # no harness copy
+    [path] = set(kept_by_harness)  # the run's copy, kept once
     [box] = run_boxes(provider)
     saved = {p: v for p, v in box.files.items() if p.startswith(results.PREFIX)}
-    assert list(saved) == [f"{results.PREFIX}/call_1_0"]  # once, by its call's id
-    assert saved[f"{results.PREFIX}/call_1_0"].decode() == rows  # whole
+    assert list(saved) == [path]  # once: no copy of Deep Agents' beside it
+    assert saved[path].decode() == rows  # whole
