@@ -68,6 +68,18 @@ file's), each with its columns, then how many more there are and the query that 
 (`SELECT table_name FROM information_schema.tables`): about 500 characters however many
 results the run keeps.
 
+### Fixed: only a call that returned a value is marked out of date
+
+A live tool's result from an earlier turn is marked out of date, so the model fetches the value
+again. The mark went on every earlier tool message of the tool, also one of a call with no
+result: in a thread a graph keeps, a call a newer message stopped read "[slow_count's result
+from an earlier turn: out of date ... call slow_count again for the current value]" before
+"slow_count has no result: its run stopped ...", and a failed call's error the same; in
+memory's replay a failed call's error was marked too, and its tool counted among those whose
+values are out of date. A call that failed or was stopped returned no value: its result is
+sent as it was (`middleware._earlier`: the tool message's `status`; `snapshots.out_of_date`:
+the run record's status).
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

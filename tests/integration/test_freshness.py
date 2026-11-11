@@ -309,6 +309,47 @@ async def test_a_framework_kept_thread_marks_an_earlier_live_result_out_of_date(
     assert get_stock.calls == ["SKU-00123", "SKU-00123"]
 
 
+async def test_a_framework_kept_threads_failed_call_is_not_marked_out_of_date(
+    harness: Harness,
+) -> None:
+    """A call that failed in an earlier turn of a thread the framework keeps returned no value:
+    the next turn's request said "[get_price's result from an earlier turn: out of date ...
+    call get_price again for the current value]" before its error all the same. Only a call
+    that returned a value is marked; the failed one is sent as it was."""
+    from langchain.agents import create_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis import middleware
+    from trellis.harness.adapters.base import TOOLS_ATTRIBUTE
+
+    get_stock = stock_tool()
+
+    @tool(side_effects="read")
+    def get_price(sku: str) -> float:
+        """The price of a SKU now."""
+        raise RuntimeError("the price list is down")
+
+    model = ScriptedChatModel(
+        turns=[
+            [("get_stock", {"sku": "SKU-00123"}), ("get_price", {"sku": "SKU-00123"})],
+            "40 in stock; no price",
+            "still no price",
+        ]
+    )
+    graph = create_agent(model, tools=[], middleware=middleware(), checkpointer=InMemorySaver())
+    setattr(graph, TOOLS_ATTRIBUTE, [get_stock, get_price])
+    agent = harness.wrap(graph, id="kept-failed")
+    await agent.run("stock and price of SKU-00123?", user="u1", thread=THREAD)
+    result = await agent.run("and now?", user="u1", thread=THREAD)
+    assert result.status is RunStatus.SUCCESS, result.error
+    first = {m.name: str(m.content) for m in model.seen[1] if m.type == "tool"}
+    later = {m.name: str(m.content) for m in model.seen[2] if m.type == "tool"}
+    assert "the price list is down" in first["get_price"]
+    assert later["get_price"] == first["get_price"]  # no value: nothing to be out of date
+    assert later["get_stock"] == snapshots.EARLIER.format(tool="get_stock") + "\n40"
+
+
 async def test_a_framework_kept_threads_live_tool_stays_offered_when_hints_narrow(
     memory_harness: Harness, memory_service: FakeMemoryService, narrowing: None
 ) -> None:
