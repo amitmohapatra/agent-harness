@@ -406,6 +406,13 @@ own model work follows the harness's configuration.
   are left out. A note the step limit or the budget appends to the call is no longer taken for
   the question: a request over the window kept the note alone, and the model answered that it
   had looked nothing up.
+- `FitWindow` leaves the older turns out in layers: first their tool calls and results, the
+  oldest turn's first and only as far as it must, each such turn then its question and answer
+  (what memory's window gives of an older turn); whole only when those do not fit either. They
+  went all at once: with the tools kept for the question (above), a 14-turn chat on a
+  6,000-token window lost the first turn's answer with every other, where all 14 questions and
+  answers were a few hundred tokens (the scripted `deepagents` run of `advconv-05`, its last
+  turn: 54 messages cut to 2; now 52, the oldest turn's call and result left out).
 - A LangGraph graph that keeps its own thread (a checkpointer: `create_agent`, with or
   without `middleware()`, a hand-built graph) can be continued after a run stopped mid-call
   (`mode="interrupt"`, a time limit) or left paused on a call while the user wrote again. The
