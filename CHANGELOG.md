@@ -16,10 +16,12 @@ rows was read as it was, with no `query_result` to compute with.
 - **Its note names dividing, and the query runs on `sql` alone** (`results.QUERY`,
   `tools.query`): `SELECT 1250.50 / 37` computes with the figures it names, no file
   needed (before, a query without `file_path` or `results` was refused).
-- Measured on top of the three changes above, three runs each: `planning-03` right in 9 of 9
-  runs (5 of 9 before); complex tier 3 81/81 turns (80/81); the 35 ordinary cases 113/114
-  (110/114); no case lost. It costs a model call where the model now computes: input tokens
-  up 19% on both sets, model calls up 5 to 7%, cost up 5% and 17%.
+- Measured with example figures that are no case's (`SELECT 1250.50 / 37`): `planning-03`
+  right in 8 of 9 runs (5 of 9 before) and `long-flow-02` in 5 of 6 (4 of 6). Every wrong run
+  is one where the model answered without calling the query; every run that called it is
+  right. An earlier 9 of 9 was measured with the case's own division as the example and does
+  not count. It costs a model call where the model now computes.
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
