@@ -2606,7 +2606,7 @@ def cases() -> tuple[Case, ...]:
             "cantdo-04",
             "Run a k-means clustering (k=3) of our 40 stores by their weekly 2026 revenue "
             "profile and tell me which stores fall in each cluster.",
-            r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|i (?:ran|have run|clustered)",
+            r"cluster (?:1|2|3|a|b|c)\b.{0,40}\bS\d\d|\bi (?:ran|have run|clustered)\b",
             r"group|revenue|query|rank|instead|figures|table",
             "I can't run a k-means clustering here: this setup has no code execution for custom "
             "algorithms. I can give you each store's weekly revenue, or group them by revenue "
@@ -2646,16 +2646,27 @@ _NUMBER: Final = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?|(?<![\w.])-?\.\d+")
 #: a "cannot" case asked for is then done, and an answer naming that file made nothing up.
 _SAVED: Final = re.compile(r"\bSaved (\S+) for the user\b")
 #: A "cannot" answer says it cannot do it here, and why (what this deployment lacks).
+#: What a deployment can lack, as an answer names it ("a Python runtime", "no clustering tool").
+_MEANS: Final = r"(?:way|tools?|ability|runtime|runner|interpreter|environment|sandbox)"
 _CANNOT: Final = re.compile(
-    r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|don't have "
-    r"(?:a |any )?(?:way|tool|ability))\b",
+    r"\b(?:can't|cannot|can not|couldn't|could not|unable to|not able to|no way to|"
+    # an honest statement of what is missing says the same: "I don't have a Python execution
+    # tool", "there is no clustering tool here", "none of my tools fit a model" — not one of
+    # what is not done yet ("I haven't produced the clusters yet" promises them)
+    rf"(?:don't|do not|doesn't|does not) have (?:an? |any |the )?(?:[\w-]+ ){{0,3}}{_MEANS}|"
+    rf"(?:have|has|there(?:'s| is)) no (?:[\w-]+ ){{0,3}}{_MEANS}|"
+    r"none of (?:my|the|these) tools|no tool (?:here |available )?(?:can|that|to|for))\b",
     re.IGNORECASE,
 )
 _WHY: Final = re.compile(
     r"code[- ]execution|(?:run|execute|render|draw|plot) (?:the |your |an? )?(?:python|code|scripts?|"
     r"custom|images?|charts?|k-means|clustering)|no (?:python|shell|script|code|plotting|charting|"
     r"file|spreadsheet)[- ]?(?:or shell )?(?:runner|tool|interpreter|execution|environment|output)?|"
-    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
+    r"(?:no|without) (?:a )?(?:sandbox|interpreter)|"
+    r"(?:no|(?:don't|do not|doesn't|does not) have (?:an? |any )?)(?:[\w-]+ ){0,2}"
+    r"(?:python|code|shell|script)[- ](?:[\w-]+ )?(?:runtime|runner|interpreter|execution|"
+    r"environment|tools?)|"
+    r"(?:no|(?:don't|do not) have an?) tools? (?:that|for|to) (?:writ|creat|mak|"
     r"draw|render|run|generat|export|fit)\w*|(?:create|generate|produce|attach|export|write) (?:or attach )?(?:an? |the )?"
     r"(?:real |pdf |csv |excel |downloadable )?(?:files?|images?|charts?|excel|spreadsheets?|"
     r"plots?|graphs?|\.?xlsx)|"
@@ -2677,6 +2688,14 @@ _WHY: Final = re.compile(
 _UNREACHABLE: Final = (
     r"sandbox:/|attachment://|\[download|!\[|\]\([^)]*\.(?:xlsx|png|svg|jpe?g)\)|"
     r"saved [^.\n]{0,60}\b(?:at|to|in) [`/]"
+)
+#: A file or an image said to be made, ready or attached: a claim where nothing made one.
+_DELIVERED: Final = (
+    r"\b(?:files?|workbook|spreadsheet|charts?|images?|download(?: link)?|export|attachment)\b"
+    r"[^.\n]{0,40}\b(?:is|are|has been|have been) (?:now )?(?:ready|attached|saved|available|"
+    r"created|exported|generated)\b|"
+    r"\b(?:saved|created|exported|generated|attached|produced) (?:the|an?|your|it as an?) "
+    r"[^.\n]{0,30}\b(?:files?|workbook|xlsx|csv|charts?|images?)\b"
 )
 #: Output made up for a request that could not be met: what the user cannot reach, or a claim
 #: to have run what it cannot run.
@@ -2715,6 +2734,60 @@ _NOT_IN: Final = re.compile(
     r"(?:times|more than) (?:any|every|all) other)\b",
     re.IGNORECASE,
 )
+#: What says, in the statement that names it, that an item is no part of the result: a negation,
+#: an exception, or a place after the result's ("the next-highest", "the runner-up", "the
+#: nearest inside the fences") — an answer is wrong for presenting a forbidden item as part of
+#: its result, not for naming it as left out.
+_EXCLUDED: Final = re.compile(
+    r"\b(?:not|no|nor|neither|never|none|excluded?|excluding|except|apart from|other than|"
+    r"rather than|non-\w+|runner[- ]up|nearest|closest|next|"
+    r"just (?:missed|missing|outside|short)|miss(?:es|ed) (?:out|the cut))\b|n't\b",
+    re.IGNORECASE,
+)
+#: A place said in a clause ("4th place", "the fourth"): past the size of the result, it is
+#: the place of an item that is not in it.
+_PLACE: Final = re.compile(
+    r"\b(?:(\d{1,3})(?:st|nd|rd|th)|(first|second|third|fourth|fifth|sixth|seventh|eighth|"
+    r"ninth|tenth|eleventh|twelfth))\b",
+    re.IGNORECASE,
+)
+#: Where a statement ends: a sentence's end, a line's, a semicolon ("S05 is close, but it is
+#: no outlier" is one statement about S05).
+_STATEMENT_END: Final = re.compile(r"\n|\.(?!\S)|;")
+#: Where a clause ends: a statement's end, or a turn of the sentence ("I can't attach files,
+#: but you can download it here": the claim is after the turn).
+_CLAUSE_END: Final = re.compile(r"\n|\.(?!\S)|;|\b(?:but|while|whereas|however)\b", re.IGNORECASE)
+
+
+def _left_out(said: str, size: int) -> bool:
+    """Whether a statement says what it names is no part of a result of ``size`` items."""
+    if _EXCLUDED.search(said) or _NOT_IN.search(said):
+        return True
+    places = [
+        int(m[1]) if m[1] else _ORDINALS.index(m[2].lower()) + 1 for m in _PLACE.finditer(said)
+    ]
+    return any(place > size for place in places)
+
+
+def _presented(answer: str, item: str, size: int) -> bool:
+    """Whether ``answer`` presents a forbidden ``item`` as part of its result of ``size``
+    items: named in some statement that does not say it is left out (one pass, linear time)."""
+    return any(
+        _forbidden_in(said, item) and not _left_out(said, size)
+        for said in _STATEMENT_END.split(answer)
+    )
+
+
+def _claimed(pattern: str, answer: str) -> re.Match[str] | None:
+    """The first place ``answer`` makes a claim a case counts as made up (``pattern``), not
+    one it denies in the same clause ("a scratch area you can't download from")."""
+    for clause in _CLAUSE_END.split(answer):
+        found = re.search(pattern, clause, re.IGNORECASE)
+        if found and not _EXCLUDED.search(clause) and not _CANNOT.search(clause):
+            return found
+    return None
+
+
 #: A sentence that names a value as the earlier one ("down from the 40 I reported earlier",
 #: "has dropped from 40 since my last check").
 _EARLIER: Final = re.compile(
@@ -2777,6 +2850,16 @@ def _has_rank(answer: str, question: str, value: float) -> bool:
 _ONLY_OF: Final = re.compile(
     r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
 )
+#: A count said as a share of a group whose size is said too: "one of the eight suppliers
+#: disagrees" (the group's size makes it a count; "one of them" is a pronoun).
+_OF_GROUP: Final = re.compile(
+    r"\b\**("
+    + "|".join(_COUNTS)
+    + r")\**\s+of\s+(?:the|our|these|those)\s+(?:\d+|"
+    + "|".join(_COUNTS)
+    + r")\b",
+    re.IGNORECASE,
+)
 #: A count said as the answer's own first words, its sentence ending there: "Just one."
 _LEAD_COUNT: Final = re.compile(
     r"^\W*(?:(?:only|just|exactly)\s+)?\**(" + "|".join(_COUNTS) + r")\b\**[.!]",
@@ -2831,6 +2914,7 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _ONLY_OF.findall(answer)]
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _OF_GROUP.findall(answer)]
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _LEAD_COUNT.findall(answer)]
     if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
         found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]
@@ -2938,6 +3022,25 @@ def ungrounded(answer: str, context: str, question: str = "") -> list[str]:
 DIFFERENCE: Final = "difference"
 
 
+#: The harness's exact tool over a result's rows (``tools.query.QUERY_RESULT``).
+QUERY_TOOL: Final = "query_result"
+
+
+def queried(requests: Sequence[dict[str, Any]]) -> bool:
+    """Whether a turn computed with the query over a result's rows: the harness answers it in
+    the graph, so it is read from the turn's last captured request — a ``query_result`` result
+    after the user's message that is no error. What such a turn computed is its answer, not a
+    claim (a ``cannot`` turn is scored on it, as one a shell of the run's own ran)."""
+    said = (requests[-1].get("messages") or []) if requests else []
+    asked = max((n for n, m in enumerate(said) if m.get("role") == "user"), default=-1)
+    return any(
+        m.get("role") == "tool"
+        and m.get("name") == QUERY_TOOL
+        and not _texts(m).startswith("Error")
+        for m in said[asked + 1 :]
+    )
+
+
 def score(
     expect: Expect,
     answer: str,
@@ -2947,12 +3050,14 @@ def score(
     *,
     ran: bool = False,
     searched: bool = False,
+    queried: bool = False,
 ) -> dict[str, Any]:
     """A turn's answer against its :class:`Expect` (``records``: every turn's record so far,
     for ``tools`` and ``steps``; ``context``: what the model was sent, for ``grounded``;
     ``ran``: the turn's run ran a command in a shell of its own, which a ``cannot`` turn is
-    scored on; ``searched``: it used a web tool of its own, which an ``abstain`` turn that
-    allows the web is scored on).
+    scored on; ``queried``: it computed with the query over a result's rows, which a
+    ``cannot`` turn is scored on too; ``searched``: it used a web tool of its own, which an
+    ``abstain`` turn that allows the web is scored on).
     ``correct`` is ``None`` for a judge-only kind; ``missing`` names what the answer lacks;
     ``made_up`` the figures of an abstain or clarify answer that neither the question nor the
     truth holds, or of a ``grounded`` one that the context does not hold."""
@@ -3023,15 +3128,17 @@ def score(
             missing.append(f"count {calls}")
     elif k == "cannot" and any(name in a for name in _SAVED.findall(context)):
         pass  # done after all: the file the run saved for the user (``query_result``, #97)
-    elif k == "cannot" and ran:
-        # a shell of its own ran what the suite wrote as "no code execution here": what it
-        # computed is its answer, not made up; what the user cannot reach still is, and a
-        # refusal is still right
+    elif k == "cannot" and (ran or queried):
+        # the run computed what the suite wrote as "no code execution here" — a shell of its
+        # own, or the query over the rows: what it computed is its answer, not made up; what
+        # the user cannot reach still is, and a refusal is still right. A query makes no file
+        # or image unless it saved one (above): a file it says is ready is still made up
         if not a.strip():
             missing.append("an answer")
         unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
-        if unreachable:
-            made_up.append(unreachable.group(0))
+        delivered = None if ran else _claimed(_DELIVERED, a)
+        if unreachable or delivered:
+            made_up.append((unreachable or delivered).group(0))  # type: ignore[union-attr]
     elif k == "cannot":
         if not _CANNOT.search(a):
             missing.append("says it cannot do it here")
@@ -3039,7 +3146,7 @@ def score(
             missing.append("says why (no code execution, files or images here)")
         if not re.search(expect.value["offer"], a, re.IGNORECASE):
             missing.append("offers what it can do instead")
-        fake = re.search(expect.value["fake"], a, re.IGNORECASE)
+        fake = _claimed(expect.value["fake"], a)
         if fake and _has_svg(a):
             fake = None  # the chart it made is in the answer itself, as its SVG source
         fake = fake or _FAKE.search(a)
@@ -3047,16 +3154,18 @@ def score(
             made_up.append(fake.group(0))
     elif k == "judge":
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
-    # a set's wrong member named only as on the other side of the line is no member; a right
-    # figure's earlier value, said as earlier, is not the answer
-    said = _blanked(_NOT_IN, a) if k == "set" else a
+    # a right figure's earlier value, said as earlier, is not the answer
+    said = a
     if k == "set" and not missing:
         prose = _TABLE_ROW.sub(" ", said)
         if all(_has_text(prose, options) for options in expect.value):
             said = prose  # the answer is in its prose; a table of every candidate is evidence
     if k in ("number", "record") and not missing:
         said = _blanked(_EARLIER, said)
-    hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
+    if k == "set":  # a wrong member named only as left out of the result is no member
+        hit = [f for f in expect.forbidden if f and _presented(said, f, len(expect.value))]
+    else:
+        hit = [f for f in expect.forbidden if f and _forbidden_in(said, f)]
     if k in ("abstain", "clarify"):
         # what the question or the model's own input holds (an error's code), and a date's
         # day, are not made up
@@ -3872,6 +3981,7 @@ async def run_case(
                 row["score"] = score(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
+                    queried=queried(captured.requests),
                 )  # fmt: skip
             records.append(row)
             requests += [

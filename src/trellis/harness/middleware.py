@@ -132,6 +132,7 @@ from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
+from trellis.harness.clients.memory import TOOL_SEARCH
 from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
@@ -1805,6 +1806,15 @@ class ReadTools(AgentMiddleware):
 FIT_KEEP: Final = 8
 #: A compacted tool description's most characters (its first sentence, at most this).
 FIT_DESCRIPTION: Final = 120
+#: What a tool offered by its signature alone says where its description was (:func:`_signature`).
+FIT_SIGNATURE: Final = "(description left out to fit the window)"
+#: What the instructions say of the tools a request no longer offers at all, and what finds
+#: one (``tool_search``, where the run has it) or that nothing does at this size.
+FIT_HELD: Final = "Tools held back to fit the window ({how}): {names}"
+FIT_FOUND: Final = f"{TOOL_SEARCH} finds one and offers it again"
+FIT_NOT_FOUND: Final = "not offered at this window size"
+_HELD: Final = FIT_HELD.split("(", maxsplit=1)[0]
+_HELD_SIZE: Final = len(FIT_HELD.format(how=FIT_FOUND, names="")) / 4 + 1
 #: The characters a cut result's marker takes at most (its size, and where the rest is read).
 CUT_MARKER: Final = 192
 #: The steps :class:`FitWindow` takes, in order, each only while the request does not fit;
@@ -1892,7 +1902,9 @@ class FitWindow(AgentMiddleware):
 
     1. ``tools`` — the offered tools narrowed to the most relevant: those the run already used
        (and the graph's own state tools) always kept, then those the tool hints chose, then by
-       the words they share with the request, :data:`FIT_KEEP` of them at least besides;
+       the words they share with the request, :data:`FIT_KEEP` of them at least besides; a
+       tool not kept is still offered by its signature while that fits (always, when the
+       hints chose it), and one held back altogether is named after the instructions;
     2. ``descriptions`` — the kept tools' descriptions compacted (the first sentence, no
        parameter descriptions);
     3. ``results`` — the longest results cut to their head and tail, each kept whole and its
@@ -1906,7 +1918,8 @@ class FitWindow(AgentMiddleware):
        memory's window gives of an older turn), and whole only when those do not fit either
        (``turns=False`` leaves the turns to a summarization after it: ``ReAct``'s summarizes
        them); only then the tools narrowed past :data:`FIT_KEEP`, as far as the latest turn
-       leaves no room: the tools the question needs are never dropped for older turns;
+       leaves no room, those :data:`FIT_KEEP` staying by their signature: the tools the
+       question needs are never dropped for older turns, nor for the latest turn's own bulk;
     5. ``memory`` — last, only when the latest turn would still not fit: the memory context's
        lowest-ranked items left out (those its ``## Most relevant`` does not name first, the
        last first), never a line that states a rule, nor one of the standing instructions (the
@@ -2004,29 +2017,43 @@ class FitWindow(AgentMiddleware):
         budget: int,
         runtime: Runtime | None,
         before: Collection[str],
+        given: Sequence[BaseTool | dict[str, Any]],
+        *,
+        refit: bool,
     ) -> ModelRequest[Any]:
         """The older turns left out (none with a summarization after it: ``turns=False``) —
         their calls and results first (:func:`_answers`), whole when their questions and answers
-        do not fit either — then the tools narrowed past :data:`FIT_KEEP` only as far as what is
-        left does not fit."""
+        do not fit either — then the tools past :data:`FIT_KEEP` narrowed only as far as what is
+        left does not fit, and those :data:`FIT_KEEP` kept by their signature: a latest turn
+        that fills the window by itself is not made to fit by taking away the tools it goes on
+        with. Only a request the model's server itself refused (``refit``) gives them up too."""
         if self.turns:
             request = _answers(request, budget)
             if _size(request) <= budget:
                 return request
             request = _latest(request)
-        return _narrowed(request, budget, runtime, least=0, before=before)
+        return _narrowed(
+            request,
+            budget,
+            runtime,
+            least=0,
+            signed=0 if refit else FIT_KEEP,
+            before=before,
+            given=given,
+        )
 
     def _fitted(
         self, request: ModelRequest[Any], budget: int, *, refit: bool = False
     ) -> ModelRequest[Any]:
         runtime = current()
         before = self._kept.get(runtime, frozenset()) if runtime is not None else frozenset()
+        given = request.tools
         taken: list[str] = []
         steps: tuple[Callable[[ModelRequest[Any], int], ModelRequest[Any]], ...] = (
-            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before),
+            lambda r, b: _narrowed(r, b, runtime, least=FIT_KEEP, before=before, given=given),
             lambda r, b: r.override(tools=[_compact(t) for t in r.tools]),
             lambda r, b: self._results(r, b, refit=refit),
-            lambda r, b: self._turns(r, b, runtime, before),
+            lambda r, b: self._turns(r, b, runtime, before, given, refit=refit),
             lambda r, b: _remembered_less(r, b, after=None if self.turns else _latest),
         )
         for name, step in zip(FIT_STEPS, steps, strict=True):
@@ -2049,7 +2076,7 @@ class FitWindow(AgentMiddleware):
                 details={"budget": budget, "size": size},
             )
         if runtime is not None and ("tools" in taken or "turns" in taken):
-            self._kept[runtime] = frozenset(_named(t) for t in request.tools)
+            self._kept[runtime] = frozenset(_named(t) for t in request.tools if _whole(t))
         said = (
             f"the request was made to fit the model's window ({budget} tokens): {', '.join(taken)}"
         )
@@ -2108,19 +2135,30 @@ def _narrowed(
     runtime: Runtime | None,
     *,
     least: int,
+    signed: int = FIT_KEEP,
     before: Collection[str] = (),
+    given: Sequence[BaseTool | dict[str, Any]] | None = None,
 ) -> ModelRequest[Any]:
-    """The request's tools ranked — those the run used (and the graph's own state tools, and
-    the readers of a result the run keeps, :data:`SAVING`, which its preview says to call),
-    those an earlier call of the run kept (``before``: the same set call after call, so a
-    prompt cache keeps its prefix), those the tool hints chose, then by the words they share
-    with the user's latest message — and kept in that order while they fit what the messages
-    leave, ``least`` of them at least besides those it must keep (the used ones, always)."""
-    tools = list(request.tools)
+    """The request's tools ranked — those it must keep (the run's used ones, the graph's own
+    state tools, the readers of a result the run keeps, :data:`SAVING`, which its preview says
+    to call, and what finds a held tool, ``tool_search``), those an earlier call of the run
+    kept (``before``: the same set call after call, so a prompt cache keeps its prefix), those
+    the tool hints chose, then by the words they share with the user's latest message — and
+    kept in that order while they fit what the messages leave, ``least`` of them at least
+    besides those it must keep.
+
+    A tool it does not keep is still offered while its signature fits (:func:`_signature`:
+    its name and arguments, what a call takes), and whatever the room when the tool hints chose
+    it or it is among the first ``signed`` besides those it must keep: the model reaches for a
+    tool it has not called yet, and it is there at every window size. Only past those is a
+    tool held back, and the instructions name it (:func:`_held_said`: of ``given``, the tools
+    before any narrowing of the call) — a line whose room is set aside first."""
+    tools, incoming = list(request.tools), request
     if not tools:
         return request
-    used = set(runtime.used) if runtime is not None else set()
-    used |= {*STATE_TOOLS, *(SAVING if _saved(request.state) else ())}
+    request = _unheld(request)  # an earlier narrowing's line: said anew, of what is held now
+    must = set(runtime.used) if runtime is not None else set()
+    must |= {*STATE_TOOLS, TOOL_SEARCH, *(SAVING if _saved(request.state) else ())}
     hinted = (runtime.offered or set()) if runtime is not None else set()
     asked = next((m.text for m in reversed(request.messages) if isinstance(m, HumanMessage)), "")
     words = set(_WORD.findall(asked.lower()))
@@ -2128,25 +2166,79 @@ def _narrowed(
     def rank(item: tuple[int, BaseTool | dict[str, Any]]) -> tuple[int, int, int]:
         n, tool = item
         name = _named(tool)
-        must = name in used
         shared = len(words & set(_WORD.findall(f"{name} {_described(tool)}".lower())))
-        tier = 0 if must else 1 if name in before else 2 if name in hinted else 3
+        tier = 0 if name in must else 1 if name in before else 2 if name in hinted else 3
         return (tier, -shared, n)
 
-    room = budget - _size(request.override(tools=[]))
-    kept: list[BaseTool | dict[str, Any]] = []
-    more = 0  # kept beside those it must keep
-    for _, tool in sorted(enumerate(tools), key=rank):
-        must = _named(tool) in used
-        cost = count_tokens_approximately([], tools=[tool])
-        if must or more < least or cost <= room:
-            kept.append(tool)
-            more += not must
-            room -= cost
-    if len(kept) == len(tools):
+    offered = [_named(t) for t in (tools if given is None else given)]
+    # what naming a held tool takes is set aside for each that could be, and given back by
+    # each that stays: the line is part of what must fit
+    aside = {name: (len(name) + 2) / 4 for name in offered if name not in must}
+    room = budget - _size(request.override(tools=[])) - (_HELD_SIZE + sum(aside.values()))
+    kept: dict[int, BaseTool | dict[str, Any]] = {}
+    more = 0  # kept, or offered by signature, beside those it must keep
+    for n, tool in sorted(enumerate(tools), key=rank):
+        name = _named(tool)
+        cost = count_tokens_approximately([], tools=[tool]) - aside.get(name, 0)
+        if name in must or more < least or cost <= room:
+            kept[n] = tool
+        else:
+            bare = _signature(tool)
+            cost = count_tokens_approximately([], tools=[bare]) - aside.get(name, 0)
+            if not (name in hinted or more < signed or cost <= room):
+                continue  # held back: named in the instructions
+            kept[n] = bare
+        more += name not in must
+        room -= cost
+    if all(kept.get(n) is tool for n, tool in enumerate(tools)):
+        return incoming
+    out = request.override(tools=[kept[n] for n in sorted(kept)])  # the offered order kept
+    return _held_said(out, offered)
+
+
+def _signature(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+    """A tool as its name and the arguments a call takes (their names, types and which are
+    required), no description: what a call needs, in a few tokens."""
+    found = _compact(tool)
+    found.get("function", found)["description"] = FIT_SIGNATURE
+    return found
+
+
+def _whole(tool: BaseTool | dict[str, Any]) -> bool:
+    """Whether a tool is offered with its description (not by its signature alone)."""
+    return _described(tool) != FIT_SIGNATURE
+
+
+def _held_said(request: ModelRequest[Any], offered: Sequence[str]) -> ModelRequest[Any]:
+    """The request saying, after its instructions, which of the tools ``offered`` before any
+    narrowing it no longer offers, and what finds one: a tool is never held back in silence (a
+    model that was not told answered that no tool held the data)."""
+    now = {_named(t) for t in request.tools}
+    held = [name for name in offered if name not in now]
+    if not held:
         return request
-    order = {id(t): n for n, t in enumerate(tools)}  # the offered order kept (a cache's prefix)
-    return request.override(tools=sorted(kept, key=lambda t: order[id(t)]))
+    how = FIT_FOUND if TOOL_SEARCH in now else FIT_NOT_FOUND
+    line = FIT_HELD.format(how=how, names=", ".join(held))
+    system = request.system_message
+    content = system.content if system is not None else ""
+    said: str | list[str | dict[Any, Any]] = (
+        [*content, {"type": "text", "text": line}]
+        if isinstance(content, list)
+        else "\n\n".join(part for part in (content, line) if part)
+    )
+    return request.override(system_message=SystemMessage(content=said))
+
+
+def _unheld(request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request without the line an earlier narrowing of the call said (:func:`_held_said`)."""
+    system = request.system_message
+    if system is None or _HELD not in system.text:
+        return request
+    content = system.content  # the line is the last thing said: a block of its own, or a part
+    left: str | list[str | dict[Any, Any]] = (
+        content[:-1] if isinstance(content, list) else content[: content.rindex(_HELD)].rstrip()
+    )
+    return request.override(system_message=SystemMessage(content=left) if left else None)
 
 
 def _described(tool: BaseTool | dict[str, Any]) -> str:
