@@ -5,6 +5,18 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a `ReAct` sub-agent that names no tools has the run's tools
+
+Deep Agents gives a sub-agent that names no `tools` the main agent's. `ReAct`'s tools are not
+built into its graph: they are offered per model call (`HarnessTools`), so such a sub-agent,
+and Deep Agents' general-purpose helper, was offered the seven file tools only. A helper asked
+for a stock level searched files for it and handed the question back, and the parent made every
+call itself. A declarative sub-agent that names no `tools`, and the general-purpose helper, are
+now given the run's tools, governed as the parent's are (`react._native`); one that names its
+own `tools` has exactly those. Over three live runs each, the two sub-agent cases stayed right
+3 of 3: `advflow-02` went from 67, 39 and 68 model calls to 42 each time (24 s to about 16 s),
+`advflow-03` from 13, 7 and 10 to 9 each time (about 13 s to about 10 s).
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
