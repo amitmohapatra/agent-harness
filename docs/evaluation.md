@@ -550,6 +550,25 @@ is right when the run used its web tool (`WebSearch`, `WebFetch`, Kimi's `FetchU
 `native`, the tools the framework ran itself) and the answer cites a source; with no search it
 must still say the data is not there.
 
+
+**What a deployment can do, with exact answers (`cando`, `benchmark/cost/cando.py`).** Five
+conversations whose figure every variant must give — a workbook with the right rows, a chart
+with the right labels, a script with an exact figure, a k-means clustering from fixed starting
+centres, a file saved in one chat and read back in the next. Each figure comes from a query over
+the kept result, so the case runs without a sandbox too; what only code makes (the chart, the
+script) is checked only where code runs, and the clustering applies only there. A `file` check
+(`Probe("file", ...)`) reads what the run kept for its user: the file's name, its lines, and the
+rows or labels it must hold (a workbook's cells read as CSV lines). No case sets its window.
+
+`--variant` builds `ReAct` given one Deep Agents capability (`benchmark.cost.variants.CAPABILITIES`):
+`sandbox` (the run's sandbox as its backend: Docker, the image `TRELLIS_BENCH_SANDBOX_IMAGE`
+names; a fake one under `--scripted`), `subagents`, `memory-files`, `permissions`. Every case
+runs on each, at any `--window`. `python -m benchmark.cost.parity one.jsonl other.jsonl` compares
+two runs turn by turn (with and without a sandbox, two windows): a turn right one way only, or a
+check failed one way only, is a difference. `--scripted` replays the gold calls on any variant;
+it cannot write the code a sandbox runs, so with a sandbox the files are checked on a real
+model only.
+
 ## Scheduling benchmark
 
 `python -m benchmark.cost.schedules --model <name> --repeats 2 --max-usd 0.4` asks 61 chats

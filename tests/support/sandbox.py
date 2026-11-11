@@ -184,17 +184,17 @@ class FakeBox:
             return ExecResult(exit_code=int(code), stderr=stderr)
         said = command.removeprefix("echo ") if command.startswith("echo ") else ""
         if command.startswith("touch "):
-            box.files.setdefault(command.removeprefix("touch "), b"")
+            box.files.setdefault(command.removeprefix("touch ").removeprefix(f"{WORKDIR}/"), b"")
         if command.startswith("cat "):
             said = (await self.read(command.removeprefix("cat "))).decode()
         extra = "".join(f" {k}={v}" for k, v in (env or {}).items())
         return ExecResult(exit_code=1 if command == "false" else 0, stdout=said + extra)
 
     async def read(self, path: str) -> bytes:
-        found = self.provider.live(self.ref).files.get(path)
+        found = self.provider.live(self.ref).files.get(path.removeprefix(f"{WORKDIR}/"))
         if found is None:
             raise ToolError(f"there is no file {path} in the sandbox", source="tools")
         return found
 
     async def write(self, path: str, data: bytes) -> None:
-        self.provider.live(self.ref).files[path] = data
+        self.provider.live(self.ref).files[path.removeprefix(f"{WORKDIR}/")] = data

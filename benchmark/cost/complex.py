@@ -49,13 +49,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import csv
+import io
 import json
 import math
 import re
 import sys
 import time
 import uuid
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -64,7 +66,7 @@ from typing import Any, Final
 
 from langchain_core.messages import convert_to_openai_messages
 
-from benchmark.cost import approvals, prices, stats
+from benchmark.cost import approvals, prices, stats, variants
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
@@ -115,6 +117,9 @@ CATEGORIES: Final = (
     "long_data",
     "long_multi",
     "long_flow",
+    # what a deployment can do, with exact answers (``benchmark.cost.cando``): the same figure
+    # with or without a sandbox, the user's file with the right content
+    "cando",
 )
 ADVERSARIAL: Final = "adversarial"
 TIERS: Final = (1, 2, 3)
@@ -173,6 +178,10 @@ class Probe:
       ``called``: a write done exactly once);
     * ``distinct`` — no call of a tool matching ``pattern`` (a regular expression; empty:
       every tool) that ended ``ok`` was made twice with the same arguments;
+    * ``file`` — the run kept a file for its user whose name matches ``pattern`` (a regular
+      expression) and whose text (a workbook's cells as CSV lines) holds every one of ``holds``
+      and at least ``limit`` lines; ``coding``: checked only where the variant runs code (a
+      sandbox), which the file needs — a chart, a script;
     * ``asks`` — the turn's run paused for a person's approval (``Turn.approve``);
     * ``restarts`` — its worker died mid-run and another finished the run (``Turn.restart``).
 
@@ -184,6 +193,9 @@ class Probe:
     why: str = ""
     role: str | None = None
     limit: int | None = None
+    #: ``file``: texts the kept file holds, every one; and whether it needs a variant with code
+    holds: tuple[str, ...] = ()
+    coding: bool = False
     when: str | None = None
 
 
@@ -244,6 +256,9 @@ class Case:
     #: the adapters it applies to (empty: every one), and why not the others
     adapters: tuple[str, ...] = ()
     only_because: str = ""
+    #: whether it needs code to run (a ``react`` variant of ``variants.CODING``): elsewhere it
+    #: does not apply
+    coding: bool = False
     #: the model's context window for this case (over ``--window``)
     window: int | None = None
     #: the scripted model answers each call by the message it answers (``KeyedChatModel``),
@@ -2635,6 +2650,9 @@ def cases() -> tuple[Case, ...]:
     from benchmark.cost import longtasks
 
     out.extend(longtasks.cases())
+    from benchmark.cost import cando
+
+    out.extend(cando.cases())
     return tuple(out)
 
 
@@ -3104,6 +3122,40 @@ def _unanswered(messages: Sequence[dict[str, Any]]) -> list[str]:
 SENT_PROBES: Final = ("has", "lacks", "nonblank", "fits", "repeats", "answered")
 
 
+def file_text(name: str, data: bytes) -> str:
+    """A kept file as text: a workbook's cells, each row a CSV line (every sheet); any other
+    file decoded."""
+    if not name.lower().endswith(".xlsx"):
+        return data.decode("utf-8", errors="replace")
+    import openpyxl  # only a workbook needs it
+
+    book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    for sheet in book.worksheets:
+        writer.writerows(
+            ["" if v is None else v for v in row] for row in sheet.iter_rows(values_only=True)
+        )
+    return out.getvalue()
+
+
+def kept_file(probe: Probe, files: Mapping[str, bytes]) -> tuple[bool, str]:
+    """Whether one of the run's kept ``files`` is the one ``probe`` asks for (its name, what
+    its text holds, its lines at least), and what was found: the file, or what it lacks."""
+    named = {n: d for n, d in files.items() if re.search(probe.pattern, n, re.IGNORECASE)}
+    if not named:
+        return False, f"kept: {sorted(files) or 'no file'}"
+    lacks = ""
+    for name, data in named.items():
+        text = file_text(name, data)
+        missing = [h for h in probe.holds if h.lower() not in text.lower()]
+        lines = len(text.splitlines())
+        if not missing and lines >= (probe.limit or 0):
+            return True, f"{name} ({lines} lines)"
+        lacks = f"{name} ({lines} lines) lacks {missing[:3] or f'{probe.limit} lines'}"
+    return False, lacks
+
+
 def checked(
     turn: Turn,
     status: str,
@@ -3113,6 +3165,8 @@ def checked(
     calls: Sequence[dict[str, Any]] = (),
     history: str = "thread",
     happened: Collection[str] = (),
+    files: Mapping[str, bytes] | None = None,
+    coding: bool = False,
 ) -> list[dict[str, Any]]:
     """A turn's harness checks: how its run ended (``Turn.ends``) and each :class:`Probe` on
     what was sent — each ``{"check", "ok", "why", "found"}``. ``happened``: what the turn's
@@ -3133,7 +3187,13 @@ def checked(
             continue
         if requests is None and p.kind in SENT_PROBES:
             continue
+        if p.kind == "file" and (files is None or (p.coding and not coding)):
+            continue  # not checked: the scripted model where only code makes the file
         found: Any = None
+        if p.kind == "file":
+            ok, found = kept_file(p, files or {})
+            out.append({"check": p.kind, "ok": ok, "why": p.why, "found": found})
+            continue
         if p.kind in ("has", "lacks"):
             pattern = re.compile(p.pattern, re.IGNORECASE)
             hits = [
@@ -3262,6 +3322,11 @@ class Captured(runner.Meter):
             self.requests[-1] |= {"input_tokens": spent[0], "output_tokens": spent[1]}
 
 
+#: The tools a command runs with: a CLI's own shell, the run's sandbox (Deep Agents'
+#: ``execute`` on it, ``sandbox().tools()``'s).
+RAN_CODE: Final = frozenset({*approvals.SHELLS, "execute", "sandbox_exec"})
+
+
 class Trace(Hooks):
     """Every tool call of the current turn: its name, arguments, status and run; ``started``
     is set once a call of the turn starts; ``told``: what the case's runs were given, by
@@ -3276,12 +3341,26 @@ class Trace(Hooks):
         #: every tool each run (by id) used, its framework's own too (Claude's WebSearch,
         #: Kimi's Bash): those run outside the tool hooks (``bridge.observed``)
         self.used: dict[str, set[str]] = {}
+        #: where each run (by id) keeps its files for its user, in the harness's file store
+        self.folders: dict[str, tuple[Any, str]] = {}
 
     async def on_run_start(self, run: Any) -> None:
         if run.task:  # the user's message: a later turn may cite its figures
             self.told.setdefault(run.thread, []).append(str(run.task))
 
+    async def kept(self, run_id: str | None) -> dict[str, bytes]:
+        """The files the run kept for its user (``query_result``'s ``save_as``, a sandbox's
+        ``outputs/``), by name: read once the run ended, when the outputs are kept."""
+        store, folder = self.folders.get(run_id or "", (None, ""))
+        if store is None:
+            return {}
+        named = [n for _, n, size in await store.files(folder) if size is not None]
+        return {n: data for n in named if (data := await store.read(folder, n)) is not None}
+
     async def on_run_end(self, run: Any, result: Any) -> None:
+        harness = getattr(getattr(run, "agent", None), "harness", None)
+        if harness is not None:  # a run of a harness: where its files for the user are kept
+            self.folders[run.run_id] = (harness.files, run.files_folder())
         self.used.setdefault(run.run_id, set()).update(run.used)
         if run.pushed_context:
             self.told.setdefault(run.thread, []).append(run.pushed_context)
@@ -3672,6 +3751,10 @@ async def run_case(
     }
     if case.adapters and kind not in case.adapters:
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
+    coding = kind == "react" and variant in variants.CODING
+    scripted = not isinstance(model, str)
+    if case.coding and not coding:
+        return found | {"not_applicable": "needs code to run: a sandbox variant"}, []
     wire: list[dict[str, Any]] = []
     if kind == "kimi" and not isinstance(model, str):  # the scripted model: Kimi calls it
         model = await scripted_endpoint(model, wire)
@@ -3831,6 +3914,7 @@ async def run_case(
                 for c in trace.calls
                 if len(together) == 1 or c.get("run") == run_id
             ]
+            kept = await trace.kept(run_id)
             row: dict[str, Any] = {
                 "turn": i + n,
                 "thread": turn.thread,
@@ -3845,6 +3929,8 @@ async def run_case(
                 "approved": approved.get(id(turn), []),
                 # the framework's own tools the run used (its WebSearch, its Bash)
                 "native": sorted(trace.used.get(run_id or "", set()) - {c["tool"] for c in calls}),
+                # the files the run kept for its user, each with its size
+                "files": {name: len(data) for name, data in kept.items()},
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "cached_tokens": captured.cached_tokens if n == 0 else 0,
@@ -3858,6 +3944,10 @@ async def run_case(
                     calls=calls,
                     history=history,
                     happened=happened.get(id(turn), ()),
+                    # the scripted model writes no code: where only code makes the file (a
+                    # variant with a sandbox, which has no ``save_as``), it is not checked
+                    files=None if coding and scripted else kept,
+                    coding=coding,
                 ),
             }
             if turn.expect is not None:
@@ -3868,7 +3958,10 @@ async def run_case(
                 told = [] if captured.requests else trace.told.get(conversation(turn), [])
                 said = said_in(captured.requests, told)
                 used = set(row["native"])
-                ran = any(c["tool"] in approvals.SHELLS and c["status"] == "ok" for c in calls)
+                # a command that ran (a CLI's own shell, the run's sandbox), or a file the run
+                # kept for its user where code runs: what the suite wrote as "cannot" was done
+                ran = any(c["tool"] in RAN_CODE and c["status"] == "ok" for c in calls)
+                ran = ran or (coding and bool(kept))
                 row["score"] = score(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
@@ -4136,9 +4229,10 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--variant",
-        choices=("main", "deep"),
+        choices=("main", "deep", *variants.CAPABILITIES),
         default="main",
-        help="with --adapter react: ReAct as built (main) or on Deep Agents (deep: a backend)",
+        help="with --adapter react: ReAct as built (main), on Deep Agents (deep: a backend), "
+        "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES)",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(
