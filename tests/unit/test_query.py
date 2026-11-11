@@ -289,6 +289,79 @@ def test_a_result_is_queried_under_the_table_its_note_named(journal: Journal) ->
         assert earlier.splitlines()[1] == "denim", earlier
 
 
+def test_a_graphs_copy_of_a_kept_table_is_that_table(journal: Journal) -> None:
+    """A table read whole is kept and sent with its note (``results.tabled``); on a small
+    window Deep Agents then saves that whole message — the rows and the note after them — as a
+    file of its own. The copy is the kept result, not another table: read as it stood it was
+    no JSON any more but "CSV" whose header was the whole JSON line, 3,902 columns, and
+    ``query_result`` typed them until the run's time ran out (ReAct with a backend, a
+    16,000-token window, long-data-02: 420 s)."""
+    from langchain_core.messages import AIMessage
+
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rows = [{"key": f"SKU-{n:05d}", "value": round(n * 1.37, 2)} for n in range(1500)]
+    noted = results.tabled(json.dumps({"group_by": "sku", "rows": rows}), tool="sales_summary")
+    kept = noted.split("also saved at ")[1].split(". ")[0]
+    copy = results.PREFIX + "/call_1"  # Deep Agents' file of the message: its call's id
+    state = {
+        "files": {copy: {"content": noted.split("\n")}},
+        "messages": [
+            AIMessage("", tool_calls=[{"id": "call_1", "name": "sales_summary", "args": {}}])
+        ],
+    }
+    files, tools = middleware._graph_results(state, run)
+    assert files == {} and tools == {}  # the run keeps it already: one table, not two
+    # asked by the copy's path, the query is over the kept rows
+    text = middleware._state_file(state, copy, run)
+    assert text is not None and query._shape(text)[0] == "json"
+    with query.graph_results(files, tools):
+        said = asyncio.run(
+            query.query({"file_path": copy, "sql": "SELECT count(*) FROM result"}, text)
+        )
+        assert said.splitlines()[-1] == "1500", said
+        own = asyncio.run(query.query({"file_path": kept, "sql": "SELECT count(*) FROM result"}))
+        assert own.splitlines()[-1] == "1500", own
+    # Deep Agents' stub of that message names the kept table, with its columns
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import ToolMessage
+
+    stub = ToolMessage(f"{results.EVICTED}: saved at {copy}", tool_call_id="call_1")
+    asked = ModelRequest(
+        model=None, messages=[stub], system_message=None, tools=[], tool_choice=None,  # type: ignore[arg-type]
+        response_format=None, state=state, runtime=None, model_settings={},  # type: ignore[arg-type]
+    )  # fmt: skip
+    run.run_id = "run_copy"  # type: ignore[union-attr]
+    told = middleware._stubs_tabled(run, asked).messages[0].text  # type: ignore[arg-type]
+    assert "the table sales_summary (columns: key, value)" in told, told
+    # a file of the graph's that is no copy stays a result of its own
+    other = {"files": {copy: {"content": ["sku,cat", "S1,shirts"]}}, "messages": []}
+    assert middleware._graph_results(other, run)[0] == {copy: "sku,cat\nS1,shirts"}
+
+
+def test_a_very_wide_table_is_typed_in_bounded_statements() -> None:
+    """Typing counts six aggregates a column: over thousands of columns in one statement
+    DuckDB ran for minutes and no interrupt stopped it, so the load's time limit did not hold.
+    The columns are counted a few at a time, the load's time looked at between two statements:
+    a wide table is typed, and one too wide for the time stops there."""
+    import time
+
+    def wide(columns: int) -> str:
+        names, values = (f"c{n}" for n in range(columns)), map(str, range(columns))
+        return ",".join(names) + "\n" + ",".join(values)
+
+    engine = query.ENGINE
+    columns = query.TYPED_COLUMNS + 3  # two statements a pass
+    with engine.opened() as db:
+        engine.load(db, {"wide": wide(columns)}, "wide", until=time.monotonic() + 60)
+        last = db.execute(f"SELECT typeof(c{columns - 1}), c{columns - 1} FROM result")
+        assert last.fetchone() == ("BIGINT", columns - 1)
+    with engine.opened() as db, pytest.raises(TimeoutError, match="took too long"):
+        engine.load(db, {"wide": wide(columns + 1)}, "wide", until=time.monotonic() - 1)
+
+
 def amounts(seed: int, n: int = 6000) -> tuple[str, Decimal]:
     """``n`` two-decimal amounts as CSV, and their exact sum."""
     rng = random.Random(seed)
