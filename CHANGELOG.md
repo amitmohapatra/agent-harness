@@ -5,26 +5,35 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
-### Fixed: with a sandbox, a large result is queried as without one, and a file outside the kept folder is said at once
+### Fixed: a held result is queryable wherever it lives; the query hands its rows to the sandbox; a file not kept is said at once
 
-`ReAct(backend=sandbox())` answered differently from plain `ReAct` on the same question. With a
-backend whose files are outside the graph's state (a sandbox, a disk, a store) the run did not
-keep a large tool result: Deep Agents saved its own copy on the backend, where the harness
-cannot read it, so no table was named and `query_result` was never offered. The model counted
-in code instead (`long-data-03`: 105 SKUs under 40% margin in 2 of 3 runs, where the exact
-query gives 104). The run now keeps the result there as it does without a backend
-(`middleware._paged`): the preview names the table, `query_result` is offered, and the sandbox
-still gets the same file at the same path for code. Over three live runs of the eight files and
-code cases on the sandbox arm, `long-data-03` went from 1 of 3 right to 3 of 3 (104 each time,
-by `query_result`, no command), `advfile-01` from 2 of 3 to 3 of 3, the other six stayed right.
+`ReAct(backend=sandbox())` answered differently from plain `ReAct` on the same question
+(`long-data-03`: 105 SKUs under a 40% margin in 2 of 3 runs, where the exact query gives 104).
+The cause was one cell of a wider gap, closed as four rules that hold for any task
+([sandbox.md](docs/sandbox.md), [react.md](docs/frameworks/react.md)):
 
-A file meant for the user but written outside the kept folder is known at once, with the call
-that wrote it ([sandbox.md](docs/sandbox.md)): a `write_file` or `sandbox_write` whose path
-names an `outputs` that is not the kept one is told so by its path, and a command that left a
-new file directly in the working directory is told that file is not the user's. The model's
-command is told in Deep Agents' own entry for it (`SandboxBackend.aexecute_with_offload`), so a
-file tool's parsed output never carries the note. This costs one listing in the sandbox after
-each command of the model's.
+- **A result the run holds is queryable exactly, wherever it lives.** With a backend whose
+  files are outside the graph's state (a sandbox, a disk, a store) the run now keeps a large
+  result, as without a backend: Deep Agents kept the only copy where the harness cannot read
+  it, so no table was named and `query_result` was not offered. A result cleared from the
+  window, and one cut to fit a small window, now name their table too when they hold rows, and
+  the query reads them (`middleware._paged`, `_readers`, `_kept_read`, `_rows_said`). A
+  generated test crosses five backends with four ways a result is held: 13 of its 20 cells
+  failed before.
+- **The query hands its rows to the sandbox.** With a sandbox, a query's result of more than
+  one row is kept by the run and is a CSV file there; the answer names it, and both tools'
+  descriptions say which does what (the query: exact counts, sums, filters, rankings, joins;
+  code: a chart, a formatted workbook, a script, starting from that file).
+- **Same output with or without a sandbox.** Live, three runs: `long-data-03` went from 1 of
+  3 right to 3 of 3 (104 each time, by `query_result`, no command); the other seven files and
+  code cases stayed or became right every time.
+- **A file for the user is kept, or the model knows at once that it was not, whichever tool
+  wrote it.** A file written by its path (`write_file`, `sandbox_write`) outside the kept
+  folder is told so by its path; a command that left a new file directly in the working
+  directory is told that file is not the user's. The chart case kept its file in 3 of 3 runs
+  (1 of 3 before). The model's command is told in Deep Agents' own entry for it
+  (`SandboxBackend.aexecute_with_offload`), so a file tool's parsed output never carries the
+  note. This costs one listing in the sandbox after each command of the model's.
 
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 

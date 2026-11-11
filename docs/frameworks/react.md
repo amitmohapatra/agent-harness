@@ -238,6 +238,7 @@ result as a file and the model went looking. Deep Agents' capabilities stay a pa
 |---|---|
 | planning (`write_todos`), the scratch file tools, the general-purpose `task` helper | `ReAct` alone: a long task — the conversation past half the window, on a known window of 32,000 tokens or more. Asked for a Deep Agents capability: from the first call |
 | `read_file` | once an older result was cleared past half the window (by its call's id: `/large_tool_results/<call id>`), a large result was kept, or the graph's state holds a file |
+| `query_result` | once a result is held anywhere: kept by the run (a large one, a table read whole, one cut to fit the window), saved in the graph's state, or cleared from the window with rows in it; the result's message names its path and table |
 | file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
 | `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
