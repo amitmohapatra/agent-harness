@@ -81,6 +81,37 @@ async def test_older_results_are_cleared_past_half_the_window_and_read_back(
     assert len(model.requests) == asked + 1  # only the step after the approval
 
 
+async def test_a_cleared_result_is_queried_by_the_path_its_mark_names(
+    memory_harness: Harness,
+) -> None:
+    @tool(side_effects="read")
+    def stock(n: int) -> str:
+        """A store's stock lines."""
+        return "sku,units\n" + "\n".join(f"SKU-{n}-{k:03d},{k}" for k in range(1, 201))
+
+    script: list[Any] = [("stock", {"n": n}) for n in range(1, 7)]
+    script += [
+        (
+            "query_result",
+            {
+                "file_path": "/large_tool_results/call_1",
+                "sql": "SELECT count(*) AS lines, sum(units) AS units FROM result",
+            },
+        ),
+        "done",
+    ]
+    model = ScriptedChat(script=Summarizing(script))
+    target = ReAct(system_prompt="s", model=model, context_window=6000)
+    agent = arm(memory_harness.wrap(target, id="stock"), [stock])
+    done = await agent.run("count the stock", user="u")
+    assert done.answer == "done", done.error
+    # the first result is cleared by then, its mark naming the path the query is asked about
+    gone = CLEARED.replace("{path}", "/large_tool_results/call_1")
+    assert gone in contents(model, len(model.requests) - 1)
+    # the query computes over that result's every row: the path is not "not found"
+    assert contents(model, len(model.requests) - 1)[-1] == "lines,units\n200,20100"
+
+
 async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     memory_harness: Harness,
 ) -> None:

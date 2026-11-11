@@ -561,11 +561,15 @@ def _cleared_result(state: Any, path: str) -> str | None:
 
 
 def _state_file(state: Any, path: str, runtime: Runtime | None = None) -> str | None:
-    """The text of a file Deep Agents keeps in the graph's state (a large result it saved), or
+    """The text of a file Deep Agents keeps in the graph's state (a large result it saved),
+    else of a result the request no longer shows, whose mark names this path
+    (:func:`_cleared_result`: a model queries the path it is told ``read_file`` reads), or
     ``None`` — a copy of a result the run keeps (:func:`_kept_copy`) as that result."""
     found = (state.get("files") if isinstance(state, Mapping) else None) or {}
     content = (found.get(path) or {}).get("content")
     text = "\n".join(content) if isinstance(content, list) else content
+    if text is None:
+        text = _cleared_result(state, path)
     if text is None or runtime is None:
         return text
     copied = _kept_copy(runtime, text)

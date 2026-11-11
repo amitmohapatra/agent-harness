@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: `query_result` could not read a result its own cleared mark names
+
+When older results are cleared from a request, each one's mark names the path that reads it
+again (`/large_tool_results/<call id>`). `read_file` read that path; `query_result` answered
+"not found: it is not a result this conversation keeps here", so a model that queried the path
+it had just been given lost a model call and was told to call the tool again. In the acceptance
+runs this happened 13 times across the 6k and 8k cases (`long-multi-02`, `advconv-05`). The
+query now loads a cleared result by that path as `read_file` does, as the table it already is
+when the run keeps it.
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
