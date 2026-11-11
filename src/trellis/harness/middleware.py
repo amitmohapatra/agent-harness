@@ -134,7 +134,7 @@ from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
-from trellis.harness.history import asked_with
+from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
 from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
@@ -1314,7 +1314,7 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
     part of the user's message, never a system message after the first: some providers refuse
     one there. Only the request changes; the conversation the graph keeps does not. The
     question is the latest user message the graph's state holds (a spent budget's last word
-    is not). The context is marked off (``history.asked_with``): after a long one, a model read
+    is not). The context is marked off (``history.ASKED_WITH``): after a long one, a model read
     the question as one more saved note. A cache that keeps only what a request marks keeps
     the history too (:func:`history_marked`)."""
     messages = list(request.messages)
@@ -1345,7 +1345,7 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
         if isinstance(question.content, list)
         else [{"type": "text", "text": question.content}]
     )
-    told = [{"type": "text", "text": asked_with(messages[at].text, current())}, *said]
+    told = [{"type": "text", "text": ASKED_WITH.format(context=messages[at].text)}, *said]
     messages[asked] = question.model_copy(update={"content": told})
     del messages[at]
     return request.override(messages=messages)

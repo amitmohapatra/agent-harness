@@ -99,10 +99,10 @@ from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import Shell
-from trellis.harness.history import Called, Said, Speaker, asked_with
+from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
 from trellis.harness.journal import Pending
 from trellis.harness.prompts import GatewayHeaders
-from trellis.harness.runtime import Paused, Runtime, current, reason_of
+from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
 
@@ -962,7 +962,7 @@ class Attempt:
 
         blocks = [text_block(native_input.prompt)]
         if native_input.context:  # marked off: the question is the block after it
-            blocks.insert(0, text_block(asked_with(native_input.context, current())))
+            blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         if self.target.sandbox is None:  # its own folder's outputs/ are the user's (workdir)
             blocks.insert(0, text_block(DELIVERS_HERE))
         return blocks

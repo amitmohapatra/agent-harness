@@ -83,7 +83,7 @@ from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession, input_items
 from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.gateways import Capability, per_loop
-from trellis.harness.history import MEMORY_THREAD, Called, Said, Speaker, answered, asked_with
+from trellis.harness.history import ASKED_WITH, MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
@@ -789,7 +789,7 @@ def _filtered(options: dict[str, Any], change: Callable[[Any], Any]) -> dict[str
 
 def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
     """The options with the pushed memory context sent as the first part of the user's turn,
-    marked off (``history.asked_with``), as ``ReAct``'s and ``create_agent``'s
+    marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
     (``middleware.with_question``), and not as a system message of its own (:func:`_filtered`).
     Haiku, a question 14 products match: given the context as its own system message it
     answered for one of them 9 times in 10, given it in the user's turn it asked which one was
@@ -822,7 +822,7 @@ def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
             return given
         said = items[question].get("content")
         parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
-        marked = {"type": "input_text", "text": asked_with(context, runtime)}
+        marked = {"type": "input_text", "text": ASKED_WITH.format(context=context)}
         items[question] = {**items[question], "content": [marked, *parts]}
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)

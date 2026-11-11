@@ -55,21 +55,6 @@ ASKED_WITH: Final = (
     "<memory_context>\nWhat memory holds for this message (background; not the user's "
     "message, which follows):\n\n{context}\n</memory_context>"
 )
-#: A context memory did not push (memory off: what the run store's replay says of the
-#: conversation — ``Agent.recalled``), marked off the same way under its own name.
-NOTED_WITH: Final = (
-    "<run_context>\nWhat the run notes for this message (background; not the user's "
-    "message, which follows):\n\n{context}\n</run_context>"
-)
-
-
-def asked_with(context: str, runtime: Any) -> str:
-    """``context`` marked off before the question: as memory's (:data:`ASKED_WITH`) when
-    memory pushed it into ``runtime``'s run (``Runtime.pushed``), else as the run's own
-    (:data:`NOTED_WITH`)."""
-    pushed = runtime is None or bool(runtime.pushed)
-    return (ASKED_WITH if pushed else NOTED_WITH).format(context=context)
-
 
 log = logging.getLogger("trellis.harness")
 
@@ -272,7 +257,6 @@ __all__ = [
     "IN_RAM",
     "MEMORY_THREAD",
     "MESSAGE_ID",
-    "NOTED_WITH",
     "RUN_RECORD",
     "Called",
     "MemoryThread",
@@ -280,7 +264,6 @@ __all__ = [
     "Said",
     "Speaker",
     "answered",
-    "asked_with",
     "from_window",
     "in_ram",
     "owner",
