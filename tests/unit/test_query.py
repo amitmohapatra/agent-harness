@@ -9,6 +9,7 @@ import random
 from collections.abc import Iterator
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -445,3 +446,31 @@ def test_a_kept_table_cut_to_fit_the_window_keeps_its_note(journal: Journal) -> 
     assert cut.endswith(noted[len(rows) :])  # the note whole: the path and the table
     assert f'file_path="{path}"' in cut  # the rest is read from the same kept copy
     assert len(run.replay.journal.results) == 1  # type: ignore[union-attr]
+
+
+def test_a_querys_rows_past_what_a_query_loads_are_shown_and_not_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a sandbox a query's rows are kept as a file for code (``_whole``): one row is a
+    figure, not a file; more are kept whole, read in batches; and a result larger than a query
+    could load back (``LOAD_CHARS``) is shown as any other and not kept."""
+
+    class Cursor:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self.rows = rows
+
+        def fetchmany(self, size: int) -> list[tuple[Any, ...]]:
+            taken, self.rows = self.rows[:size], self.rows[size:]
+            return taken
+
+    names = ["sku", "units"]
+    assert query._whole(Cursor([("s1", 3)]), names) == ("sku,units\ns1,3", None)
+    many = [(f"s{n}", n) for n in range(query.ROWS + 5)]
+    shown, kept = query._whole(Cursor(list(many)), names)
+    assert shown.endswith(
+        f"only the first {query.ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
+    )
+    assert kept is not None and kept.splitlines()[-1] == f"s{query.ROWS + 4},{query.ROWS + 4}"
+    monkeypatch.setattr(query, "LOAD_CHARS", 100)
+    again, dropped = query._whole(Cursor(list(many)), names)
+    assert again == shown and dropped is None
