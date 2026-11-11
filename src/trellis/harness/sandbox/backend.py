@@ -71,7 +71,8 @@ class SandboxBackend(BaseSandbox):
         bounds = [s for s in (timeout, self.call_timeout, runtime.remaining()) if s is not None]
         result = await box.exec(command, timeout=min(bounds))
         why = hint(result.exit_code, result.stderr, self.source.spec)
-        output = "\n".join(part for part in (result.stdout, result.stderr, why) if part)
+        kept = await self.source.outputs_said(box, command)
+        output = "\n".join(part for part in (result.stdout, result.stderr, why, kept) if part)
         return ExecuteResponse(output=output, exit_code=result.exit_code)
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
