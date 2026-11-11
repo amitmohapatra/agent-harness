@@ -1913,8 +1913,7 @@ async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox
 ) -> None:
     """Parity, replayed: every ``cando`` data case run both ways (``main``, and ``sandbox``:
     ``ReAct(backend=sandbox())``), at the model's own window and at a small one — each scored
-    figure right on both, the file a query saves the user's with the right rows, and the case
-    that is nothing without code run only where code runs."""
+    figure right on both, and the file a query saves the user's with the right rows."""
     rows: dict[str, dict[str, Any]] = {}
     for variant in ("main", "sandbox"):
         out = tmp_path / f"cando-{variant}"
@@ -1925,8 +1924,8 @@ async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox
         found = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
         rows[variant] = {x["case"]: x for x in found}
     assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 6)}
-    assert rows["main"]["cando-04"]["not_applicable"]  # a clustering: only code gives it
-    assert "not_applicable" not in rows["sandbox"]["cando-04"]
+    # the clustering runs both ways too: its figures judge it, with or without code
+    assert not any("not_applicable" in rows[v]["cando-04"] for v in rows)
     for variant, cases in rows.items():
         turns = [t for c in cases.values() for t in c.get("turns", ())]
         assert all(t["status"] == "SUCCESS" for t in turns), variant
