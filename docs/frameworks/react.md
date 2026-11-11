@@ -183,12 +183,13 @@ agent = h.wrap(target, id="reports")
 ```
 
 Its tools, planning and `read_file` are offered from the first call (about 2,600 tokens a
-call), a large result is saved as a file by Deep Agents, and the older turns are summarized
-near the window's end. On a window known to be under 32,000 tokens the long-task tools are
-held: there is no room for them. The summarization is not placed there either: `FitWindow`
-fits the request, as on `ReAct` alone (one owner of the window; measured on windows of 6,000
-to 16,000 tokens, where the summarization saved again the results the run keeps and spent
-model calls on summaries).
+call), a large result is saved as a file by Deep Agents (kept by the run instead when the
+backend's files are outside the graph's state — a sandbox, a disk, a store — so `query_result`
+reads its rows there as anywhere), and the older turns are summarized near the window's end.
+On a window known to be under 32,000 tokens the long-task tools are held: there is no room
+for them. The summarization is not placed there either: `FitWindow` fits the request, as on
+`ReAct` alone (one owner of the window; measured on windows of 6,000 to 16,000 tokens, where
+the summarization saved again the results the run keeps and spent model calls on summaries).
 
 ## The base
 
@@ -237,6 +238,7 @@ result as a file and the model went looking. Deep Agents' capabilities stay a pa
 |---|---|
 | planning (`write_todos`), the scratch file tools, the general-purpose `task` helper | `ReAct` alone: a long task — the conversation past half the window, on a known window of 32,000 tokens or more. Asked for a Deep Agents capability: from the first call |
 | `read_file` | once an older result was cleared past half the window (by its call's id: `/large_tool_results/<call id>`), a large result was kept, or the graph's state holds a file |
+| `query_result` | once a result is held anywhere: kept by the run (a large one, a table read whole, one cut to fit the window), saved in the graph's state, or cleared from the window with rows in it; the result's message names its path and table |
 | file tools (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`), a large result saved as a file, summarization | `backend=` — `JournalBackend()` for the graph's state kept by the run's journal, a disk, a store, or `sandbox()` (with `execute`) |
 | `task` with your sub-agents | `subagents=` with a `SubAgent` or `CompiledSubAgent` dict |
 | skills, memory files, permissions | `skills=`, `memory_files=`, `permissions=` |
@@ -298,7 +300,11 @@ OpenAI-compatible endpoint's chat completions carry no breakpoints.
 
 A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `ModelHooks` and
 `PromptCache` too (its own of those names kept), and a model name of its own is routed as
-`ReAct`'s.
+`ReAct`'s. One that names no `tools` has the run's tools, as Deep Agents gives such a sub-agent
+the main agent's (`HarnessTools` and `GovernTools` are given to it: `ReAct`'s tools are offered
+per model call, not built into the graph); one that names its own `tools` has exactly those.
+Deep Agents' general-purpose helper is given the same way, unless you name a sub-agent
+`general-purpose` yourself.
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
 harness's is refused, `middleware()` itself among them). Each works the same in any

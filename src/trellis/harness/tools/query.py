@@ -500,6 +500,9 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
     groups across them — only the run's own: nothing else is ever loaded. With ``save_as`` (a
     run that is :func:`saving`), the query's every row is also kept as a file for the user
     (``Runtime.save_file``), and the answer says so, with its first :data:`SAVED_ROWS` rows.
+    In a run with a sandbox (``results.coding_tool``) a result of more than one row is kept by
+    the run as CSV, every row of it (:func:`_whole`), and the answer names the file it is in
+    the sandbox (``results.CODE``): what code makes of a query's result starts from that file.
 
     The query runs in a worker thread (the event loop never waits on it), at most
     :data:`CONCURRENT` at once in the process, on a database made for it and closed after it
@@ -525,9 +528,15 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
         given, record = found
     if args.get("save_as") is not None:
         return await _save(runtime, args, sql, given, record, past=past[0])
-    answer = await run(path, sql, (), given, past=past[0])
+    from trellis.harness.tools import results  # noqa: PLC0415 - it imports this module
+
+    code = results.coding_tool()  # a sandbox: the query's rows are a file there too
+    found = await run(path, sql, (), given, past=past[0], whole=code is not None)
+    answer, rows = found if isinstance(found, tuple) else (found, None)
     if answer.startswith("Error"):
         return answer
+    if rows is not None and code is not None and (kept := results.keep(rows, tool=QUERY_RESULT)):
+        answer += f"\n\n{results.CODE.format(path=kept, tool=code)}"
     if path is not None and _markup(runtime, path, given):
         answer = f"{MARKED.format(path=path)}\n{answer}"
     told = [_told(runtime, path, record, sql, given)] if record is not None and path else []
@@ -681,17 +690,22 @@ async def run(
     *,
     save: str | None = None,
     past: Mapping[str, str] | None = None,
+    whole: bool = False,
 ) -> Any:
     """``sql`` (with ``params``) over the run's saved results (:func:`loadable`), in a worker
     thread (see :func:`query`): its rows shown, or — ``save``, a format of ``tools.export`` —
-    every row as a file of that format, how many, and the first :data:`SAVED_ROWS` shown; or
-    what is wrong, as text."""
+    every row as a file of that format, how many, and the first :data:`SAVED_ROWS` shown, or —
+    ``whole`` — its rows shown and every row as CSV (:func:`_whole`); or what is wrong, as
+    text."""
     found = loadable(file_path, text, past)
     if isinstance(found, str):
         return found
     texts, own = found
     call = _Call()
+    take: Callable[[Any, list[str]], Any]
     take, seconds = (_first, SECONDS) if save is None else (_saved(save), SAVE_SECONDS)
+    if whole and save is None:
+        take, seconds = _whole, SAVE_SECONDS
     work = asyncio.to_thread(
         _answer, texts, own, sql, params, call=call, take=take, seconds=seconds
     )
@@ -799,7 +813,31 @@ def _answer(
 def _first(cursor: Any, names: list[str]) -> str:
     """A query's first :data:`ROWS` rows as CSV, at most :data:`OUTPUT_CHARS`, saying when
     there were more."""
+    return _shown_rows(names, cursor.fetchmany(ROWS + 1))
+
+
+def _whole(cursor: Any, names: list[str]) -> tuple[str, str | None]:
+    """A query's rows as :func:`_first` shows them, and every row as CSV — the file code in
+    the run's sandbox starts from. ``None`` for a result of one row or none (a figure: nothing
+    to make a file of) and for one past :data:`LOAD_CHARS` (more than a query loads)."""
     rows = cursor.fetchmany(ROWS + 1)
+    shown = _shown_rows(names, rows)
+    if len(rows) < 2:
+        return shown, None
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(names)
+    while rows:
+        writer.writerows([_shown(v) for v in row] for row in rows)
+        if out.tell() > LOAD_CHARS:
+            return shown, None
+        rows = cursor.fetchmany(BATCH_ROWS)
+    return shown, out.getvalue().rstrip("\n")
+
+
+def _shown_rows(names: list[str], rows: Sequence[Sequence[Any]]) -> str:
+    """The first :data:`ROWS` of ``rows`` (one more was fetched, to know of more) as CSV, at
+    most :data:`OUTPUT_CHARS`, saying when there were more."""
     shown = _csv(names, rows[:ROWS])
     if len(shown) > OUTPUT_CHARS:
         shown = shown[:OUTPUT_CHARS] + f"\n…[cut at {OUTPUT_CHARS} characters: aggregate more]"
@@ -1233,6 +1271,13 @@ QUERY_RESULT_DESCRIPTION: Final = (
     "instead of reading them page by page: the answer is computed over all of them, exactly. "
     "With sql alone it computes with figures you already have, exactly (SELECT 1250.50 / "
     "37): divide, multiply, take a percentage or round with it, never by hand."
+)
+#: The description in a run with a sandbox: what the query does and what code there does, as
+#: facts — the model chooses.
+QUERY_RESULT_CODING_DESCRIPTION: Final = (
+    f"{QUERY_RESULT_DESCRIPTION} A result of more than one row is also saved as a CSV file in "
+    "your sandbox (the answer names its path): code there starts from that file, for what a "
+    "query cannot make — a chart, a formatted workbook, a script, a model of its own."
 )
 
 

@@ -65,9 +65,15 @@ def kept_by_harness(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return seen
 
 
-async def test_a_sandbox_backend_offers_each_tool_once_and_stores_a_large_result_once(
+async def test_a_sandbox_backend_offers_each_tool_once_and_the_run_keeps_a_large_result(
     harness: Harness, kept_by_harness: list[str]
 ) -> None:
+    """With a sandbox a large result has one owner, the run, as without one: kept in its
+    journal, its stub naming the table ``query_result`` computes over (offered from then on),
+    and written into the sandbox as a file for code (``SandboxSource.with_results``) — once
+    there, Deep Agents evicting nothing beside it. Left to Deep Agents, the file was the
+    sandbox's alone, where the harness could not read it: no ``query_result``, no table named,
+    and a count done in code came out 105 where every query said 104."""
     provider = Kept()
     model = ScriptedChatModel(turns=[("sales", {}), ("execute", {"command": "echo 3"}), "3"])
     target = ReAct("s", model, backend=sandbox(provider), context_window=128_000)
@@ -78,16 +84,15 @@ async def test_a_sandbox_backend_offers_each_tool_once_and_stores_a_large_result
         assert len(names) == len(set(names)), names  # no two tools of one name
         assert "read_result" not in names and "sandbox_read" not in names
         assert "execute" in names and names.count("read_file") == 1
-        # the evicted file is the sandbox's: code reads it there, no SQL tool beside execute
-        assert "query_result" not in names
-    # Deep Agents evicted the result to the sandbox: there once, by its call's id ...
-    [box] = run_boxes(provider)
-    saved = [p for p in box.files if p.startswith(results.PREFIX)]
-    assert len(saved) == 1, saved
+    assert "query_result" in offered(model)[1]  # once the run keeps the result
+    [path] = set(kept_by_harness)
     told = [m for m in model.seen[1] if getattr(m, "type", "") == "tool"][-1].text
-    assert saved[0] in told and told.startswith(results.EVICTED)
-    # ... and the harness kept no second copy in the run's journal
-    assert kept_by_harness == []
+    assert told.startswith(results.EVICTED) and path in told
+    assert "Its rows are the table sales (columns: " in told  # the table the query reads
+    assert results.CODE.format(path=path, tool="execute") in told  # and the file, for code
+    # in the sandbox once, at that path: no copy of Deep Agents' beside it
+    [box] = run_boxes(provider)
+    assert [p for p in box.files if p.startswith(results.PREFIX)] == [path]
 
 
 async def test_without_a_backend_the_journal_keeps_it_once_and_no_sandbox_is_made(

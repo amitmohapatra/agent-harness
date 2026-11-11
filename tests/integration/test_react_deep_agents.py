@@ -359,3 +359,57 @@ async def test_memory_tools_reach_a_deep_agent_given_the_middleware(
     result = await memory_harness.wrap(graph, id="remembering").run("hi", user="u")
     assert result.answer == "hi", result.error
     assert any(name.startswith("memory_") for name in names(model, 0))
+
+
+async def test_a_sub_agent_that_names_no_tools_has_the_runs(harness: Harness) -> None:
+    """Deep Agents gives a sub-agent that names no tools the main agent's. ``ReAct``'s tools are
+    the run's, offered per model call (``HarnessTools``), so its sub-agents had none of them:
+    told to look a figure up, a helper answered that it had no such tool (after searching the
+    files for one) and the parent made every call itself — 20 helpers, 69 model calls, the
+    tools called by the parent. A sub-agent that names its own tools keeps exactly those."""
+    executed: list[str] = []
+
+    @tool(side_effects="read")
+    def stock(sku: str) -> int:
+        """Units of a SKU in stock."""
+        executed.append(f"stock:{sku}")
+        return 7
+
+    helper = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7 units of a"])
+    counter = {"name": "counter", "description": "Counts stock.", "model": helper}
+    model = ScriptedChatModel(
+        turns=[("task", {"description": "count a", "subagent_type": "counter"}), "done"]
+    )
+    agent = harness.wrap(ReAct("s", model, tools=[stock], subagents=[counter]), id="counts")
+    result = await agent.run("how many a?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "done", result.error
+    assert "stock" in helper.requests[0]["tools"]  # offered the run's tool
+    assert executed == ["stock:a"]  # and it ran, governed as the run's
+    assert "7 units of a" in str(model.seen[-1][-1].content)
+    # the general-purpose helper, the same model: its request is offered the run's tools too
+    executed.clear()
+    one = ScriptedChatModel(
+        turns=[
+            ("task", {"description": "count b", "subagent_type": "general-purpose"}),
+            ("stock", {"sku": "b"}),
+            "7 units of b",
+            "done",
+        ]
+    )
+    graph = ReAct("s", one, tools=[stock], backend=JournalBackend())
+    general = harness.wrap(graph, id="counts-general")
+    again = await general.run("how many b?", user="u")
+    if again.interrupt is not None:  # the general-purpose helper's task asks, once
+        again = await general.resume(again.interrupt.interrupt_id, "approve", reviewer="r")
+    assert again.status is RunStatus.SUCCESS and again.answer == "done", again.error
+    assert executed == ["stock:b"] and "stock" in one.requests[1]["tools"]
+    # its own tools named: those, and no other
+    own = ScriptedChatModel(turns=["nothing to do"])
+    payer = {"name": "payer", "description": "Pays.", "model": own, "tools": [wire]}
+    parent = ScriptedChatModel(
+        turns=[("task", {"description": "pay", "subagent_type": "payer"}), "done"]
+    )
+    await harness.wrap(ReAct("s", parent, tools=[stock], subagents=[payer]), id="pays-own").run(
+        "pay", user="u"
+    )
+    assert "wire" in own.requests[0]["tools"] and "stock" not in own.requests[0]["tools"]

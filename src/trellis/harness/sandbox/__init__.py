@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import posixpath
 import re
 import time
 import uuid
@@ -115,21 +116,39 @@ LIST_OUTPUTS: Final = (
     f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
     'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
 )
-#: The working directory, then each output file's size and name: what a command that names
-#: :data:`OUTPUTS` is told with its result (:meth:`SandboxSource.outputs_said`).
-OUTPUTS_NOW: Final = f'printf "%s\\n" "$PWD"; {LIST_OUTPUTS}'
-#: What such a command is told: the files the user gets so far, or that there is none yet —
-#: with the folder's whole path, the one place a file for the user is written.
+#: The working directory, each output file's size and name, an empty line, then the name of
+#: each file directly in the working directory: what the model's command or file is told with
+#: its result is read from this (:meth:`SandboxSource.outputs_said`).
+OUTPUTS_NOW: Final = (
+    f'printf "%s\\n" "$PWD"; {LIST_OUTPUTS}; printf "\\n"; '
+    'for f in * .[!.]*; do [ -f "$f" ] && printf "%s\\n" "$f"; done; true'
+)
+#: What a command or a file that names :data:`OUTPUTS` is told: the files the user gets so
+#: far, or that there is none yet — with the folder's whole path, the one place a file for
+#: the user is written.
 OUTPUTS_HOLD: Final = "In {folder}/ for the user: {files}."
 OUTPUTS_EMPTY: Final = (
     "No file is in {folder}/ yet: only a file written directly there is given to the user."
 )
+#: What a command that left a new file beside that folder is told, once per file; and a file
+#: written by a path that is not directly in that folder.
+OUTPUTS_BESIDE: Final = "Not in {folder}/, so not given to the user: {files}."
+#: The most new files beside the folder named at once; the rest are counted.
+BESIDE_NAMED: Final = 20
 #: The largest output file kept; a larger one is left, said in a warning.
 OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
 #: What the command tool's description says about outputs.
 DELIVERS: Final = (
     f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
     "finish."
+)
+#: What the command tool's description says of the run's data: where code finds it, and what
+#: is the query's — facts the model chooses by.
+STARTS: Final = (
+    "A result this run saved, and a query_result's result of more than one row, is a file "
+    "here at the path its note names: code starts from that file, for what a query cannot "
+    "make (a chart, a formatted workbook, a script, a model of its own). A count, a sum, a "
+    "filter, a ranking or a join over saved rows is query_result's: exact over every row."
 )
 #: What an agent working in a folder of its own on this machine (Claude Code's, Kimi Code's:
 #: ``Adapter.workdir``) is told with its context: the same ``outputs/``, kept the same way.
@@ -156,7 +175,7 @@ class SandboxSource:
                 _spec(
                     EXEC,
                     "Run a shell command in your sandbox (sh -c, in its working directory): "
-                    f"its exit code, stdout and stderr. {DELIVERS}",
+                    f"its exit code, stdout and stderr. {DELIVERS} {STARTS}",
                     {"command": "the command"},
                     side_effects="write",
                 ),
@@ -187,6 +206,10 @@ class SandboxSource:
         self._reaped: LRU[str, float] = LRU()
         #: the kept results each attempt has written into its sandbox (:meth:`with_results`)
         self._written: weakref.WeakKeyDictionary[Runtime, set[str]] = weakref.WeakKeyDictionary()
+        #: each attempt's working directory and the files seen directly in it (:meth:`seen`)
+        self._beside: weakref.WeakKeyDictionary[Runtime, tuple[str, set[str]]] = (
+            weakref.WeakKeyDictionary()
+        )
         #: the environment card, once read (:meth:`card`); ``""`` when none could be
         self._card: str | None = None
         self._probing = asyncio.Lock()
@@ -314,28 +337,66 @@ class SandboxSource:
         box = await self.opened(runtime, changes=True)
         await self.with_results(runtime, box)
         command = str(args["command"])
+        await self.seen(runtime, box)
         result = await box.exec(command, timeout=runtime.remaining())
         why = hint(result.exit_code, result.stderr, self.spec)
-        kept = await self.outputs_said(box, command)
+        kept = await self.outputs_said(runtime, box, command)
         told = {"hint": why, OUTPUTS: kept}
         return result.model_dump() | {k: v for k, v in told.items() if v is not None}
 
-    async def outputs_said(self, box: Sandbox, command: str) -> str | None:
-        """What a command that names an :data:`OUTPUTS` folder is told once it ran: the files
-        the kept folder holds (each with its size), or that it holds none, with the folder's
-        whole path — so a file written to another ``outputs`` (the root's, another folder's)
-        is known at once not to be the user's. ``None`` for a command that names none: no
-        second command."""
-        if OUTPUTS not in command:
-            return None
-        listed = await box.exec(OUTPUTS_NOW, timeout=self.call_timeout)
-        where, *lines = listed.stdout.splitlines() or [""]
+    async def seen(self, runtime: Runtime, box: Sandbox) -> None:
+        """Before the model's first command or file of an attempt: the files its working
+        directory holds already (the spec's, an earlier attempt's) are not ones it just left
+        beside the kept folder."""
+        if runtime not in self._beside:
+            await self._now(runtime, box)
+
+    async def outputs_said(self, runtime: Runtime, box: Sandbox, named: str) -> str | None:
+        """What the model's command, or the file it wrote (``named``: the command, the path),
+        is told with its result, so a file that is not the user's is known at once. One that
+        names an :data:`OUTPUTS` folder: the files the kept folder holds (each with its size),
+        or that it holds none, with the folder's whole path — another ``outputs`` (the root's,
+        another folder's) is not it. One that left a new file directly in the working
+        directory, beside the kept folder: that file, named once. ``None`` for neither."""
+        folder, kept, new = await self._now(runtime, box)
+        said = []
+        if OUTPUTS in named:
+            said.append((OUTPUTS_HOLD if kept else OUTPUTS_EMPTY).format(folder=folder, files=kept))
+        if new:
+            more = f" and {len(new) - BESIDE_NAMED} more" if len(new) > BESIDE_NAMED else ""
+            files = ", ".join(new[:BESIDE_NAMED]) + more
+            said.append(OUTPUTS_BESIDE.format(folder=folder, files=files))
+        return " ".join(said) or None
+
+    async def written_said(self, runtime: Runtime, box: Sandbox, path: str) -> str | None:
+        """What a file the model wrote by its path is told, whichever path: what the kept
+        folder holds when the file is directly in it, else that the file is not the user's —
+        by its path, so nothing is left to infer. (Told here, a file beside the kept folder
+        is not one its next command left.)"""
+        where, known = self._beside[runtime]
+        written = posixpath.normpath(posixpath.join(where, path))
         folder = f"{where.rstrip('/')}/{OUTPUTS}"
-        found = [line.strip().partition(" ") for line in lines]
+        if posixpath.dirname(written) != folder:
+            known.add(posixpath.relpath(written, where))
+            return OUTPUTS_BESIDE.format(folder=folder, files=path)
+        _, kept, _ = await self._now(runtime, box)
+        return OUTPUTS_HOLD.format(folder=folder, files=kept)
+
+    async def _now(self, runtime: Runtime, box: Sandbox) -> tuple[str, str, list[str]]:
+        """The kept folder's whole path, the files it holds (each with its size), and the files
+        directly in the working directory this attempt had not seen (none at its first look:
+        :meth:`seen`) — one command (:data:`OUTPUTS_NOW`)."""
+        listed = await box.exec(OUTPUTS_NOW, timeout=self.call_timeout)
+        where, _, rest = listed.stdout.partition("\n")
+        kept, _, beside = f"\n{rest}".partition("\n\n")
+        found = [line.strip().partition(" ") for line in kept.splitlines()]
         files = ", ".join(f"{name} ({size} bytes)" for size, _, name in found if name)
-        if not files:
-            return OUTPUTS_EMPTY.format(folder=folder)
-        return OUTPUTS_HOLD.format(folder=folder, files=files)
+        names = [name for name in beside.splitlines() if name]
+        first = runtime not in self._beside
+        known = self._beside.setdefault(runtime, (where, set()))[1]
+        new = [] if first else [name for name in names if name not in known]
+        known.update(names)
+        return f"{where.rstrip('/')}/{OUTPUTS}", files, new
 
     async def _read(self, args: dict[str, Any]) -> str:
         runtime = _running()
@@ -354,8 +415,12 @@ class SandboxSource:
     async def _write(self, args: dict[str, Any]) -> str:
         runtime = _running()
         path, data = str(args["path"]), str(args["content"]).encode()
-        await (await self.opened(runtime, changes=True)).write(path, data)
-        return f"wrote {len(data)} bytes to {path}"
+        box = await self.opened(runtime, changes=True)
+        await self.seen(runtime, box)
+        await box.write(path, data)
+        wrote = f"wrote {len(data)} bytes to {path}"
+        said = await self.written_said(runtime, box, path)
+        return f"{wrote}\n{said}" if said else wrote
 
 
 class SandboxTools:
