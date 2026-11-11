@@ -531,6 +531,9 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     call = request.tool_call
     args = dict(call["args"])
     path = "/" + str(args.get("file_path", "")).lstrip("/")
+    named = _stub_names(request.state, path)
+    if named is not None:  # the call's result is a stub: the file it names is the result
+        path = args["file_path"] = named
     # a result the run can read (its own, its conversation's earlier turns'), or a file kept
     # for its user (``tools.stored``): the harness's
     kept = path in query.saved(runtime) or stored.is_stored(path)
@@ -542,12 +545,43 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
         said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
         with query.graph_results(*_graph_results(request.state, runtime)):
-            # a file Deep Agents saved in the state, else a result still in its messages
-            given = None if kept else _state_file(request.state, path, runtime) or cleared
+            # a file Deep Agents saved in the state, else a result still in its messages —
+            # either as the table the run already keeps of it (:func:`_kept_copy`)
+            given = None if kept else _state_file(request.state, path, runtime)
             said = await query.query(args, given)
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
+
+
+#: Where a stub says its result was saved (``results.STUB``'s wording, Deep Agents' own).
+_STUB_AT: Final = re.compile(
+    re.escape(results.STUB.split("{file_path}")[0].rsplit("{tool_call_id}", 1)[1]) + r"(\S+)"
+)
+
+
+def _result_of(state: Any, path: str) -> str | None:
+    """The text of the tool result a call's path names (``/large_tool_results/<call id>``: what
+    a cleared result's mark gives, and Deep Agents' stubs), as the graph's state keeps it — the
+    latest of that call's id; ``None`` for any other path."""
+    prefix = results.PREFIX + "/"
+    if not path.startswith(prefix) or not isinstance(state, Mapping):
+        return None
+    ident = path[len(prefix) :]
+    for message in reversed(state.get("messages") or ()):
+        if isinstance(message, ToolMessage) and message.tool_call_id == ident:
+            return message.text
+    return None
+
+
+def _stub_names(state: Any, path: str) -> str | None:
+    """The file a call's result was saved at, when its result in the graph's state is a stub
+    naming another path than the call's own (the run keeps a large result under a path of its
+    own): a model given the call's path — by a cleared result's mark — reads or queries the
+    result itself. ``None`` otherwise."""
+    text = _result_of(state, path)
+    found = _STUB_AT.search(text) if text is not None and text.startswith(results.EVICTED) else None
+    return found.group(1) if found is not None and found.group(1) != path else None
 
 
 def _cleared_result(state: Any, path: str) -> str | None:
@@ -555,23 +589,21 @@ def _cleared_result(state: Any, path: str) -> str | None:
     ``ClearToolUsesEdit`` cleared it: the graph's state keeps it), named by Deep Agents' path
     for its call (``/large_tool_results/<call id>``) — ``None`` for any other path, and for a
     result Deep Agents evicted to its backend (its own ``read_file`` reads that file)."""
-    prefix = results.PREFIX + "/"
-    if not path.startswith(prefix) or not isinstance(state, Mapping):
-        return None
-    ident = path[len(prefix) :]
-    for message in reversed(state.get("messages") or ()):
-        if isinstance(message, ToolMessage) and message.tool_call_id == ident:
-            text = message.text
-            return None if text.startswith(results.EVICTED) else text
-    return None
+    text = _result_of(state, path)
+    return None if text is None or text.startswith(results.EVICTED) else text
 
 
 def _state_file(state: Any, path: str, runtime: Runtime | None = None) -> str | None:
-    """The text of a file Deep Agents keeps in the graph's state (a large result it saved), or
-    ``None`` — a copy of a result the run keeps (:func:`_kept_copy`) as that result."""
+    """The text of a file Deep Agents keeps in the graph's state (a large result it saved),
+    else of a result still in the graph's messages, by its call's path (:func:`_cleared_result`:
+    what a cleared result's mark names), or ``None`` — a copy of a result the run keeps
+    (:func:`_kept_copy`: the message of a table read whole carries its note after the rows) as
+    that result."""
     found = (state.get("files") if isinstance(state, Mapping) else None) or {}
     content = (found.get(path) or {}).get("content")
     text = "\n".join(content) if isinstance(content, list) else content
+    if text is None:
+        text = _cleared_result(state, path)
     if text is None or runtime is None:
         return text
     copied = _kept_copy(runtime, text)
