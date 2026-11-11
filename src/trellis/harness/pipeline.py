@@ -321,7 +321,7 @@ async def _attempt(
         task=query_of(input),
         document_ids=record.metadata.get(DOCUMENTS),
         budget=Spending.of(record.metadata.get(KEPT_BUDGET)) or agent.budget,
-        started_at=datetime.now(UTC),
+        started_at=snapshots.now(),
         ends_at=None if budget is None else time.monotonic() + budget.seconds,
         deadline=None if budget is None else budget.deadline,
         parent=parent,
@@ -1128,7 +1128,7 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
     began = runtime.started_at
     run: dict[str, Any] = {"status": status.value}
     if began is not None:
-        run["seconds"] = round((datetime.now(UTC) - began).total_seconds(), 3)
+        run["seconds"] = round((snapshots.now() - began).total_seconds(), 3)
     approvals = [
         DECIDED[a["decision"]]
         for answers in journal.answers.values()

@@ -51,7 +51,7 @@ import json
 import logging
 import types
 import weakref
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
@@ -65,7 +65,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
-from trellis.harness import budget
+from trellis.harness import budget, snapshots
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -708,7 +708,7 @@ def _options(runtime: Runtime, target: Any, native_input: Any) -> dict[str, Any]
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
     told = _told_unknown_tools(options)
-    asked = _asked_with(runtime, told)
+    asked = _dated(runtime, _asked_with(runtime, told))
     again = native_input.told if isinstance(native_input, _Again) else None
     return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked, again)))
 
@@ -766,29 +766,41 @@ def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:
     return {**options, "run_config": told}
 
 
-def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
-    """The options with the pushed memory context sent as the first part of the user's turn,
-    marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
-    (``middleware.with_question``), and not as a system message of its own
-    (``RunConfig.call_model_input_filter``, after the run's own filter). Only the model's input
-    changes; the input a session keeps does not. Haiku, a question 14 products match: given
-    the context as its own system message it answered for one of them 9 times in 10, given it
-    in the user's turn it asked which one was meant."""
+def _filtered(options: dict[str, Any], change: Callable[[Any], Any]) -> dict[str, Any]:
+    """The options with ``change`` made to the input of each model call (its
+    ``ModelInputData``: the items and the instructions), after the run's own filter
+    (``RunConfig.call_model_input_filter``). Only the model's input changes; the input a
+    session keeps does not."""
     from agents import RunConfig
-    from agents.run_config import ModelInputData
 
-    context = runtime.pushed_context
-    if not context:
-        return options
     config = options.get("run_config") or RunConfig()
     theirs = config.call_model_input_filter
 
-    async def asked(data: Any) -> Any:
+    async def changed(data: Any) -> Any:
         given = data.model_data
         if theirs is not None:
             given = theirs(data)
             if inspect.isawaitable(given):
                 given = await given
+        return change(given)
+
+    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=changed)}
+
+
+def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the pushed memory context sent as the first part of the user's turn,
+    marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
+    (``middleware.with_question``), and not as a system message of its own (:func:`_filtered`).
+    Haiku, a question 14 products match: given the context as its own system message it
+    answered for one of them 9 times in 10, given it in the user's turn it asked which one was
+    meant."""
+    from agents.run_config import ModelInputData
+
+    context = runtime.pushed_context
+    if not context:
+        return options
+
+    def asked(given: Any) -> Any:
         items: list[Any] = list(given.input)
         at = next(
             (
@@ -815,29 +827,36 @@ def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)
 
-    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=asked)}
+    return _filtered(options, asked)
+
+
+def _dated(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+    """The options with the day it is said after each agent's instructions
+    (``snapshots.today``: the run's start, the same line for every model call of the run, the
+    instructions before it the same from day to day, as a prompt cache keeps them)."""
+    from agents.run_config import ModelInputData
+
+    day = snapshots.today(runtime)
+
+    def dated(given: Any) -> Any:
+        told = "\n\n".join(part for part in (given.instructions, day) if part)
+        return ModelInputData(input=given.input, instructions=told)
+
+    return _filtered(options, dated)
 
 
 def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> dict[str, Any]:
     """The options with the messages steered into the run (``Runtime.steered``) joining the
-    input of each model call where they were taken, as the user's
-    (``RunConfig.call_model_input_filter``, after the run's own filter): the SDK keeps a
-    filter's input for that call only, so each call is given them again, in place. ``again``:
-    what a run resumed from its input is told first, the same way (no session keeps it)."""
-    from agents import RunConfig
+    input of each model call where they were taken, as the user's (:func:`_filtered`): the SDK
+    keeps a filter's input for that call only, so each call is given them again, in place.
+    ``again``: what a run resumed from its input is told first, the same way (no session keeps
+    it)."""
     from agents.run_config import ModelInputData
 
-    config = options.get("run_config") or RunConfig()
-    theirs = config.call_model_input_filter
     kept: list[tuple[int, dict[str, Any]]] = []
     said = [again] if again else []
 
-    async def steered(data: Any) -> Any:
-        given = data.model_data
-        if theirs is not None:
-            given = theirs(data)
-            if inspect.isawaitable(given):
-                given = await given
+    def steered(given: Any) -> Any:
         items: list[Any] = list(given.input)
         said.extend(s.text for s in runtime.steered())
         kept.extend((len(items), {"role": "user", "content": text}) for text in said)
@@ -846,7 +865,7 @@ def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> d
             items.insert(at + offset, item)
         return ModelInputData(input=items, instructions=given.instructions)
 
-    return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=steered)}
+    return _filtered(options, steered)
 
 
 def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:

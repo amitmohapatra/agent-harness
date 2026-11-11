@@ -962,7 +962,8 @@ async def _narrow(
     without them a ``create_agent`` graph built without ``middleware()`` summed rows by hand
     (the break-and-fix gate, 5 analytics turns) —, the memory context sent with the question
     (:func:`with_question`), the end of the history marked when a caching middleware marks the
-    request (:func:`history_marked`)."""
+    request (:func:`history_marked`), and the day it is after the instructions
+    (:func:`_dated`)."""
     runtime = current()
     if runtime is not None:
         _PAGED.add(runtime)
@@ -972,7 +973,8 @@ async def _narrow(
         readers = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
         if readers:
             request = request.override(tools=[*request.tools, *readers])
-    return await handler(history_marked(with_question(_offered(request, runtime))))
+    asked = history_marked(with_question(_offered(request, runtime)))
+    return await handler(_dated(asked, runtime))
 
 
 def narrowing(graph: Any, node: Callable[..., Any]) -> Any | None:
@@ -1077,6 +1079,7 @@ class ModelHooks(AgentMiddleware):
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
+        request = _dated(request, runtime)
         name = _model_name(request.model)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
@@ -1153,6 +1156,26 @@ class ModelHooks(AgentMiddleware):
             system_message=SystemMessage(content=text),
             messages=[*cast(list[AnyMessage], convert_to_messages(rest)), *request.messages],
         )
+
+
+def _dated(request: ModelRequest[Any], runtime: Runtime | None) -> ModelRequest[Any]:
+    """The request with the day it is said after its instructions (``snapshots.today``: the
+    run's start, the same line for every call of the run), so the instructions before it are
+    the same from day to day, as a prompt cache keeps them — instructions given as content
+    blocks keep their blocks, the day one more after them. Said once (a graph given
+    ``ModelHooks`` alone is run through :func:`_narrow` too). Outside a run, as it is."""
+    if runtime is None:
+        return request
+    system, day = request.system_message, snapshots.today(runtime)
+    if system is not None and system.text.endswith(day):
+        return request
+    given = system.content if system is not None else ""
+    content: str | list[str | dict[Any, Any]] = (
+        [*given, {"type": "text", "text": day}]
+        if isinstance(given, list)
+        else "\n\n".join(part for part in (given, day) if part)
+    )
+    return request.override(system_message=SystemMessage(content=content))
 
 
 def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:

@@ -42,6 +42,22 @@ to query) whole after the cut, its rest read from the same kept copy: the note w
 and was cut away, so the model guessed `FROM sku_catalog` and read the earlier turn's knitwear
 rows for outerwear (`deepagents` adapter, 6,000 tokens).
 
+### Added: the model is told what day it is
+
+Memories, fetch times and earlier conversations carry dates, and nothing told the model the
+day to measure them against (only `schedule_task`'s description did). The harness now says it
+in the instructions, one line after them: `It is now Wed 2026-11-11 (UTC; the user's zone is
+not known).`, in the user's zone when their app sends one. To the day and from the run's start,
+so every model call of a run reads the same line and a prompt cache loses its prefix once a
+day at most; the date only, no instruction with it.
+
+- Where: `ReAct`, a `create_agent` or `create_deep_agent` graph (with the harness's middleware
+  or without), and OpenAI Agents (after each agent's instructions). Claude Code and Kimi Code
+  say the date themselves, so the harness adds none there. A hand-built `StateGraph` and a
+  function call their model in their own code and get none.
+- One wording of when it is (`snapshots.said`): `schedule_task` keeps its day and hour, from
+  the same function. A run's start and its seconds read the one clock (`snapshots.now`).
+
 ### Added: "Always allow", kept in the memory service
 
 With a memory service, a write's approval offers a fourth choice, **always allow** (`always`,

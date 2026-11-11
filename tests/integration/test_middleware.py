@@ -19,6 +19,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.today import dated
 from trellis import Harness, Hooks, Settings, current, tool
 from trellis.contracts import ConfigurationError, ModelError, RunStatus
 from trellis.harness import middleware as ours
@@ -455,7 +456,7 @@ async def test_any_other_prompt_is_rendered_into_the_instructions(harness: Harne
     agent = harness.wrap(graph(model, hooks, system_prompt="You sell."), id="persona")
     assert (await agent.run("x", user="u")).answer == "done"
     sent = model.seen[0]
-    assert sent[0].content == "Answer as a pirate.\n\nYou sell."
+    assert sent[0].content == dated("Answer as a pirate.\n\nYou sell.")
     assert [m.content for m in sent[1:]] == ["An example.", "x"]
     unfilled = ModelHooks(prompt=stored("persona"))
     agent = harness.wrap(graph(ScriptedChatModel(turns=["x"]), unfilled), id="vars")

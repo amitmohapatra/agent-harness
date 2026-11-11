@@ -16,6 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic import SecretStr
 
 from tests.support.gateway import URL, FakeGateway, completion
+from tests.support.today import dated
 from trellis import Harness, ReAct, Runtime, Settings, stored, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import fresh
@@ -107,7 +108,7 @@ async def test_a_prompt_with_variables_is_rendered_into_the_instructions(
         assert "x-bf-prompt-id" not in sent.headers
         assert completion(sent)["messages"][0] == {
             "role": "system",
-            "content": "You help the EU team.",
+            "content": dated("You help the EU team."),
         }
     assert events_of(events, "prompt") == [
         {"name": "prompt", "prompt": "greet", "version": "1", "source": "Bifrost"}
@@ -179,7 +180,7 @@ async def test_a_graphs_model_gets_the_prompt_through_the_harness_middleware(
     assert (await agent.run("triage this", user="ada")).answer == "triaged"
     [sent] = fake.completions
     # a model of yours is not the harness's to route: the prompt is its instructions
-    assert completion(sent)["messages"][0] == {"role": "system", "content": "You triage."}
+    assert completion(sent)["messages"][0] == {"role": "system", "content": dated("You triage.")}
     chats = [dict(s.attributes or {}) for s in spans.get_finished_spans() if "chat" in s.name]
     assert [c["trellis.prompt.version"] for c in chats] == [3]
 
