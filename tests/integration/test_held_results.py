@@ -70,7 +70,11 @@ async def test_a_held_result_is_offered_the_query_with_its_table_named(
         return table(way, page)
 
     fetch = [("sales", {"page": n}) for n in range(CALLS[way])]
-    ask = ("query_result", {"file_path": SAVED, "sql": SQL})
+    # the result asked about: the last one the model was told is held — and where older
+    # results are cleared, the first call's, by the path its mark names (a table of 5 rows or
+    # more is held from the start, so the last one shown names a path too: not the cleared one)
+    held = f"{results.PREFIX}/call_1_0" if way == "cleared" else SAVED
+    ask = ("query_result", {"file_path": held, "sql": SQL})
     model = KeyedChatModel(turns=[], script=[(QUESTION, [*fetch, ask, "done"])])
     backend = backends(tmp_path)[kind]
     given = {} if backend is None else {"backend": backend}

@@ -5,8 +5,9 @@ with the right content.
 
 Each case asks for a figure every variant can compute (the query over the kept result), so it
 runs without a sandbox too; what needs code (a chart, a script) is checked only where code runs
-(``Probe.coding``), and a case that is nothing without code (:attr:`Case.coding`: a clustering
-from fixed starting points) applies only there. No case sets its window: ``--window`` runs each
+(``Probe.coding``); a case that is nothing without code (:attr:`Case.coding`) would apply only
+there, and none is: the clustering from fixed starting points has one right answer, which the
+query's own statements reach without a sandbox. No case sets its window: ``--window`` runs each
 at any size, on any variant (``--variant sandbox``, ``main``, ...), which is how the two are
 compared (:mod:`benchmark.cost.parity`).
 
@@ -127,7 +128,9 @@ def cases() -> list[Any]:
         )
     )  # fmt: skip
 
-    # 4. a clustering from fixed starting points: one right answer, and only code gives it
+    # 4. a clustering from fixed starting points: one right answer — code gives it in a
+    # sandbox, and without one the query's own statements do, iterated (it runs on every arm,
+    # so a clustering is judged on its figures here, not on whether the run said it could not)
     sizes, centres = kmeans([s.price for s in w.skus.values()], CENTRES)
     fields = {f"cluster_{n + 1}_skus": size for n, size in enumerate(sizes)}
     fields |= {f"centre_{n + 1}": round(c, 2) for n, c in enumerate(centres)}
@@ -147,7 +150,6 @@ def cases() -> list[Any]:
                 ),
             ),
             ("clustering with fixed starting points",),
-            coding=True,
         )
     )  # fmt: skip
 
