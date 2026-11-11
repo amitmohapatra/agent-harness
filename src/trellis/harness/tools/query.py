@@ -532,8 +532,6 @@ async def query(args: dict[str, Any], text: str | None = None) -> str:
 def _problem(runtime: Any, args: dict[str, Any]) -> str | None:
     """What is wrong with a call's arguments, as the model reads it; ``None`` when nothing."""
     problem = arguments_problem(schema(runtime), args)
-    if problem is None and args.get("file_path") is None and not args.get("results"):
-        problem = "name file_path, results, or both"
     if problem is None and len(args.get("results") or ()) > PAST_RESULTS:
         problem = f"results names at most {PAST_RESULTS} past results"
     if problem is not None:
@@ -640,13 +638,14 @@ def loadable(
     """What a query of ``file_path`` loads — the run's saved results by table name (the file
     asked about among them, given as ``text`` when it is no result the run keeps: a file Deep
     Agents saved, a file kept for the user, read from the store), and the ``past`` results
-    (``t1``…) — and the table :data:`TABLE` is (the file's; with no file, ``t1``); or why
-    there is nothing to load."""
+    (``t1``…) — and the table :data:`TABLE` is (the file's; with no file, ``t1``; with neither,
+    none: the query computes with the figures it names, and over the run's tables if it names
+    them); or why there is nothing to load."""
     runtime = current()
     kept = saved(runtime) if runtime is not None else {}
     named = tables(runtime) if runtime is not None else {}
     texts: dict[str, Source] = {named[p]: kept[p] for p in named} | dict(past or {})
-    if file_path is None:  # past results only (``query`` asks for one at least)
+    if file_path is None:  # past results, or none at all: figures only
         own = next(iter(past or {}), "t1")
     else:
         path = "/" + file_path.lstrip("/")
@@ -925,7 +924,8 @@ class DuckDB:
                         views.append((part(TABLE, key), table))
         for macro in MACROS:
             db.execute(macro)
-        db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
+        if own in texts:  # else sql alone: figures only, no table is :data:`TABLE`
+            db.execute(f'CREATE VIEW {TABLE} AS SELECT * FROM "{own}"')
         for view, table in views:
             if view not in used:
                 db.execute(f"CREATE VIEW {_name(view)} AS SELECT * FROM {_name(table)}")
@@ -1207,7 +1207,9 @@ QUERY_RESULT_DESCRIPTION: Final = (
     f"was saved to a file: the rows are the table {TABLE} (the tool message names its path; "
     f"SELECT * FROM {TABLE} LIMIT 3 shows its columns). "
     "Use it to count, sum, average, filter, rank (ORDER BY ... LIMIT n) or group the rows "
-    "instead of reading them page by page: the answer is computed over all of them, exactly."
+    "instead of reading them page by page: the answer is computed over all of them, exactly. "
+    "With sql alone it computes with figures you already have, exactly (SELECT 1123571.70 / "
+    "11978): divide, multiply, take a percentage or round with it, never by hand."
 )
 
 

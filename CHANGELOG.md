@@ -5,6 +5,24 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: a handful of rows is a table too, and two figures are computed by the query
+
+From two 8-row summaries a model divided £1,123,571.70 by 11,978 units by hand and gave £93.79
+for £93.80 (`planning-03`: wrong in 4 of 9 runs, and in some run of every arm): a table under 30
+rows was read as it was, with no `query_result` to compute with.
+
+- **A table of 5 rows or more that is read whole is kept as a table** (`results.TABLE_ROWS`,
+  was 30), so the model is offered `query_result` and told to compute with it.
+- **Its note names dividing, and the query runs on `sql` alone** (`results.QUERY`,
+  `tools.query`): `SELECT 1123571.70 / 11978` computes with the figures it names, no file
+  needed (before, a query without `file_path` or `results` was refused).
+- Measured on top of the three changes above, three runs each: `planning-03` right in 9 of 9
+  runs (5 of 9 before); complex tier 3 81/81 turns (80/81); the 35 ordinary cases 113/114
+  (110/114); no case lost. It costs a model call where the model now computes: input tokens
+  up 19% on both sets, model calls up 5 to 7%, cost up 5% and 17%.
+- With memory off, the context sent with the question is marked off under the run's own name
+  (`<run_context>`, `history.NOTED_WITH`), not as what memory holds.
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each

@@ -39,8 +39,10 @@ MAX_CHARS: Final = 20_000 * 4
 #: The rows from which a table read whole is also kept, ``query_result`` computing over it
 #: (:func:`tabled`): a small model counts, adds up and ranks a few dozen rows by hand wrongly
 #: (the holistic run: 748 distinct SKUs counted where there were 740, a 237-row join summed
-#: £18,533 off), and the query is exact.
-TABLE_ROWS: Final = 30
+#: £18,533 off), and the query is exact. A handful is enough to go wrong: from two 8-row
+#: summaries a model divided £1,123,571.70 by 11,978 units by hand and was a penny off in 4 of
+#: 9 runs (``planning-03``); told here to compute with the query, 0 of 9. (It was 30 rows.)
+TABLE_ROWS: Final = 5
 #: What a table read whole says after its rows (then :data:`QUERY`).
 TABLED: Final = "These {rows} rows are also saved at {path}. "
 #: Where a kept result is read (Deep Agents' ``/large_tool_results/<call id>``).
@@ -85,7 +87,8 @@ QUERY: Final = (
     'filter, a ranking or a group over them, call query_result(file_path="{path}", '
     'sql="SELECT ... FROM {table} ..."): it computes over every row, exactly. Every result '
     "this run saved is a table of the same query, named by its tool, so one query can JOIN "
-    "them. Do not add up or rank rows yourself. {private}"
+    "them. Do not add up, divide or rank rows yourself: with sql alone, query_result computes "
+    "with figures you already have (SELECT 1123571.70 / 11978). {private}"
 )
 #: What a kept result's note says of its path: the run's own working copy, which the user
 #: cannot reach (a model offered one as an export to open in Excel).

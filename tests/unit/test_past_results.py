@@ -123,9 +123,9 @@ def test_the_limits_hold_for_past_results(
     ref = _said(service, "ann", MONDAY)
     many = [ref] * (query.PAST_RESULTS + 1)
     assert "results names at most" in ask(sql="SELECT 1", results=many)
-    assert ask(sql="SELECT 1") == query.not_run(
-        query.QUERY_RESULT, "name file_path, results, or both"
-    )
+    # sql alone: the figures it names, computed; no table is ``result`` then
+    assert ask(sql="SELECT round(1123571.70 / 11978, 2) AS per_unit") == "per_unit\n93.8"
+    assert "Table with name result does not exist" in ask(sql="SELECT * FROM result")
     monkeypatch.setattr(query, "LOAD_CHARS", len(MONDAY) - 1)
     assert "more than a query here loads" in ask(sql="SELECT 1", results=[ref])
 
