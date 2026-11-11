@@ -147,6 +147,16 @@ async def test_react_on_a_small_window_with_many_tools_runs_and_says_what_it_dro
     assert "look_3" in model.requests[1]["tools"]  # a tool the run used stays offered
     # the same tools call after call (a prompt cache keeps its prefix)
     assert model.requests[1]["tools"] == model.requests[0]["tools"]
+    # a tool is never held back in silence: the instructions name each one not offered, once,
+    # after the day (said once too)
+    told = model.seen[0][0].text
+    held = {f"look_{n}" for n in range(60)} - set(model.requests[0]["tools"])
+    line = next(part for part in told.split("\n\n") if part.startswith(ours._HELD))
+    assert held and held == set(line.split(": ")[1].split(", "))
+    assert told.count(ours._HELD) == 1 and ours.FIT_NOT_FOUND in told
+    assert told.count("It is now") == 1 and model.seen[1][0].text.count("It is now") == 1
+    # and some are offered by their signature alone: callable, their description left out
+    assert ours.FIT_SIGNATURE in model.described[0].values()
 
 
 async def test_middleware_on_create_agent_fits_with_its_window(harness: Harness) -> None:
@@ -322,7 +332,8 @@ async def test_the_ratio_is_learned_from_what_replies_say_their_requests_were() 
 
     fit = FitWindow(window)
     await fit.awrap_model_call(given, handler)
-    assert len(seen[0].tools) < len(tools)  # nothing learned yet: fitted by the estimate
+    # nothing learned yet: fitted by the estimate (some tools by their signature alone)
+    assert not all(ours._whole(t) for t in seen[0].tools)
     name = ours._model_name(given.model) or ""
     first = ours._RATIOS.get(name)
     assert first is not None and first >= ours.FIT_RATIOS[0]  # within the bounds
@@ -483,10 +494,15 @@ def test_the_readers_of_a_kept_result_stay_offered_when_the_tools_are_narrowed()
     given = request([HumanMessage("how many over 100?")], tools)
     kept: Any = {"messages": given.messages, "files": {f"{READ_PREFIX}/r1": {}}}  # Deep Agents'
     given = given.override(state=kept)
-    out = ours._narrowed(given, 1, None, least=0)
+    out = ours._narrowed(given, 1, None, least=0, signed=0)
     assert {ours._named(t) for t in out.tools} == {QUERY_RESULT, READ_FILE}
-    bare = ours._narrowed(given.override(state={"messages": given.messages}), 1, None, least=0)
+    state: Any = {"messages": given.messages}
+    bare = ours._narrowed(given.override(state=state), 1, None, least=0, signed=0)
     assert QUERY_RESULT not in {ours._named(t) for t in bare.tools}  # nothing kept to read
+    # short of a refusal by the model's server, the tools ranked first stay by their signature
+    floor = ours._narrowed(given, 1, None, least=0)
+    whole = {ours._named(t) for t in floor.tools if ours._whole(t)}
+    assert whole == {QUERY_RESULT, READ_FILE} and len(floor.tools) == 2 + ours.FIT_KEEP
 
 
 def _calls(message: Any) -> list[Any]:

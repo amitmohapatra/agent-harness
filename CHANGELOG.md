@@ -5,6 +5,23 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: at a small window a tool the question needed was dropped in silence
+
+When a request does not fit, `FitWindow` narrows the tools. Its last step kept only the tools
+the run had already used whenever the latest turn alone filled the window, so a tool the model
+had not called yet was gone when it reached for it, and nothing said so: on `long-multi-02` at
+8,000 tokens the model answered "none of my tools hold supplier delivery data" in 4 of 6 runs,
+of a tool that had been dropped a step before to save 89 tokens of a request still 2,000 over.
+The rule now, at every window size:
+
+- a tool the narrowing does not keep is still offered by its **signature** (its name and
+  arguments, the description left out) while that fits — always when the tool hints chose it,
+  and for the first 8 besides the kept ones whatever the room. Only a request the model's
+  server itself refused gives those up;
+- a tool held back altogether is **named** after the instructions, with what finds one
+  (`tool_search`, where the run has it, which is never held itself). The line's room is set
+  aside, so a fitted request still fits.
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
