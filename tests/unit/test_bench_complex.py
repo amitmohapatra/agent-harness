@@ -137,7 +137,8 @@ def test_daily_series_fill_days_without_sales() -> None:
 # --------------------------------------------------------------------------- the cases
 def test_the_cases_cover_every_category_and_tier() -> None:
     cases = cx.cases()
-    base = [c for c in cases if not c.category.startswith(("adv_", "bf_", "hist_", "long_"))]
+    apart = ("adv_", "bf_", "hist_", "long_", "cando")  # each a module of its own
+    base = [c for c in cases if not c.category.startswith(apart)]
     assert 60 <= len(base) <= 85 and len({c.id for c in cases}) == len(cases)
     assert {c.category for c in cases} == set(cx.CATEGORIES)
     assert {c.tier for c in cases} == set(cx.TIERS)

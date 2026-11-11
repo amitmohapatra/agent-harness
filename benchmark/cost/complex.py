@@ -3358,7 +3358,9 @@ class Trace(Hooks):
         return {n: data for n in named if (data := await store.read(folder, n)) is not None}
 
     async def on_run_end(self, run: Any, result: Any) -> None:
-        self.folders[run.run_id] = (run.agent.harness.files, run.files_folder())
+        harness = getattr(getattr(run, "agent", None), "harness", None)
+        if harness is not None:  # a run of a harness: where its files for the user are kept
+            self.folders[run.run_id] = (harness.files, run.files_folder())
         self.used.setdefault(run.run_id, set()).update(run.used)
         if run.pushed_context:
             self.told.setdefault(run.thread, []).append(run.pushed_context)
@@ -3912,6 +3914,7 @@ async def run_case(
                 for c in trace.calls
                 if len(together) == 1 or c.get("run") == run_id
             ]
+            kept = await trace.kept(run_id)
             row: dict[str, Any] = {
                 "turn": i + n,
                 "thread": turn.thread,
@@ -3926,6 +3929,8 @@ async def run_case(
                 "approved": approved.get(id(turn), []),
                 # the framework's own tools the run used (its WebSearch, its Bash)
                 "native": sorted(trace.used.get(run_id or "", set()) - {c["tool"] for c in calls}),
+                # the files the run kept for its user, each with its size
+                "files": {name: len(data) for name, data in kept.items()},
                 "input_tokens": captured.input_tokens if n == 0 else 0,
                 "output_tokens": captured.output_tokens if n == 0 else 0,
                 "cached_tokens": captured.cached_tokens if n == 0 else 0,
@@ -3941,7 +3946,7 @@ async def run_case(
                     happened=happened.get(id(turn), ()),
                     # the scripted model writes no code: where only code makes the file (a
                     # variant with a sandbox, which has no ``save_as``), it is not checked
-                    files=None if coding and scripted else await trace.kept(run_id),
+                    files=None if coding and scripted else kept,
                     coding=coding,
                 ),
             }
@@ -3953,8 +3958,10 @@ async def run_case(
                 told = [] if captured.requests else trace.told.get(conversation(turn), [])
                 said = said_in(captured.requests, told)
                 used = set(row["native"])
-                # a command that ran: a CLI's own shell, or the run's sandbox
+                # a command that ran (a CLI's own shell, the run's sandbox), or a file the run
+                # kept for its user where code runs: what the suite wrote as "cannot" was done
                 ran = any(c["tool"] in RAN_CODE and c["status"] == "ok" for c in calls)
+                ran = ran or (coding and bool(kept))
                 row["score"] = score(
                     turn.expect, answer, records, turn.text, said,
                     ran=ran or bool(used & approvals.SHELLS), searched=bool(used & WEB_SEARCH),
