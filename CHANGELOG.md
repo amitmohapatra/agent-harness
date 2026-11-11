@@ -5,6 +5,45 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: `ReAct` alone switches to Deep Agents' machinery by itself; asked for, it is Deep Agents from the first step
+
+One `ReAct()`, two ways to run it, said by what it already takes
+([react.md](docs/frameworks/react.md#two-ways-to-run-it)):
+
+- **`ReAct` alone** is Deep Agents' graph underneath with its machinery held: an ordinary task
+  is sent what `create_agent` with `middleware()` is sent (the same tools and instructions, a
+  large result kept by the run, the window fitted by `FitWindow`). Once the conversation is
+  past half the model's window — the run's own behaviour, where old tool results start being
+  cleared — the model is offered planning (`write_todos`), Deep Agents' scratch file tools and
+  its general-purpose `task` helper, for the rest of the thread.
+- **`ReAct` asked for a Deep Agents capability** (`backend=`, `subagents=`, `skills=`,
+  `memory_files=`, `permissions=`) offers Deep Agents' tools, planning and `read_file` from the
+  first call (before: its scratch tools and helper came with the third model call), unless the
+  window is known to be under 32,000 tokens.
+- **The switch no longer reads the request's wording or counts model calls.** "Step by step",
+  "a plan" and a list of three items matched no request of the long set (0 of 45 turns) and one
+  of the benchmark's 256 cases, which asked for no steps. The switch after three model calls
+  changed the tools in the middle of a run, so a provider's prompt cache was rewritten: on the
+  12 pilot cases cached input fell from 456,000 to 337,000 tokens and the cost rose a third,
+  and on 57 long and complex cases it fired in 26 runs and no model call used a tool it
+  offered. `automatic.LONG_AFTER`, `STEP_ITEMS`, `calls_made` and `asks_for_steps` are removed;
+  `automatic.long_task(request, window)` is the conversation's size against `LONG_AT`.
+
+### Fixed: kept tables of one tool's calls made side by side
+
+- **Each table says what its call asked** (`middleware._table`): two results of one tool
+  called in one reply were numbered by which answered first, so the model took
+  `sales_summary_2` for its second call and computed a profit from swapped columns (the priced
+  pilot's `aggregate-04`, on three of four frameworks: a wrong result, one step more over
+  80,000 tokens). They are now `sales_summary_revenue` and `sales_summary_units`: the tool, and
+  the arguments that tell the reply's calls of it apart. Calls one after another are numbered
+  as before.
+- **Deep Agents' stub of a result it saved names its table** (`middleware._stubs_tabled`):
+  `query_result` reads the saved file as a table, but Deep Agents' own stub does not say which,
+  and a model took `result` for it in another file's query (`long-data-02` on `ReAct` with a
+  backend: a failed query, a step more). The request's copy of the stub now says the table and
+  its columns before the preview, as the harness's own stubs do.
+
 ### Fixed: a model LangChain has no profile of had no context window
 
 A model name's window came only from the table of profiles bundled in the installed LangChain
