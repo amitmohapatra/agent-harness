@@ -2842,6 +2842,16 @@ def _has_rank(answer: str, question: str, value: float) -> bool:
 _ONLY_OF: Final = re.compile(
     r"\b(?:only|just|exactly)\s+\**(" + "|".join(_COUNTS) + r")\**\s+of\b", re.IGNORECASE
 )
+#: A count said as a share of a group whose size is said too: "one of the eight suppliers
+#: disagrees" (the group's size makes it a count; "one of them" is a pronoun).
+_OF_GROUP: Final = re.compile(
+    r"\b\**("
+    + "|".join(_COUNTS)
+    + r")\**\s+of\s+(?:the|our|these|those)\s+(?:\d+|"
+    + "|".join(_COUNTS)
+    + r")\b",
+    re.IGNORECASE,
+)
 #: A count said as the answer's own first words, its sentence ending there: "Just one."
 _LEAD_COUNT: Final = re.compile(
     r"^\W*(?:(?:only|just|exactly)\s+)?\**(" + "|".join(_COUNTS) + r")\b\**[.!]",
@@ -2896,6 +2906,7 @@ def _has_number(answer: str, value: float, tol: float) -> bool:
     if value == int(value) and 1 <= value <= len(_COUNTS):
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _COUNT_WORD.findall(answer)]
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _ONLY_OF.findall(answer)]
+        found += [_COUNTS.index(w.lower()) + 1.0 for w in _OF_GROUP.findall(answer)]
         found += [_COUNTS.index(w.lower()) + 1.0 for w in _LEAD_COUNT.findall(answer)]
     if value < 0:  # a fall said in words ("down 0.92%", "a 0.92% drop") is the negative change
         found += [-float(m.replace(",", "")) for pair in _FALL.findall(answer) for m in pair if m]

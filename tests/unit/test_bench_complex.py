@@ -1878,6 +1878,24 @@ def test_a_made_up_result_or_no_word_of_what_is_missing_is_no_refusal(answer: st
     assert not cx.score(expect, answer, [], "run this Python")["correct"], answer
 
 
+@pytest.mark.parametrize(
+    ("answer", "right"),
+    [
+        ("**One of the eight suppliers disagrees: SUP-13. Its gap is 7 days.**", True),
+        ("Two of the 8 suppliers disagree, SUP-13 by 7 days.", False),
+        ("SUP-13 has a 7-day gap; one of them told us so.", False),  # a pronoun, no count
+        ("Of the eight suppliers, 1 disagrees: SUP-13, by 7 days.", True),
+    ],
+)
+def test_a_count_said_as_a_share_of_a_sized_group_is_read(answer: str, right: bool) -> None:
+    """ "One of the eight suppliers disagrees" states a count of one (a right answer of
+    ``long-chain-04`` was scored as naming none); "one of them" does not."""
+    expect = cx.record(
+        {"disagree": 1, "supplier": "SUP-13", "gap_days": 7}, tol={"disagree": 0, "gap_days": 0}
+    )
+    assert cx.score(expect, answer, [], "how many disagree?")["correct"] is right, answer
+
+
 def test_a_claim_denied_in_its_own_clause_is_not_made_up() -> None:
     """ "A scratch area that you can't download from" denies the download it names (a right
     refusal of ``cantdo-03`` scored made up for "download from"); a link to a file the user
