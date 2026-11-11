@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: with memory off, an out-of-date value of the turn before was reused
+
+With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
+result of a live tool marked out of date. Memory's replay also says so in the run's context,
+with the question ("for a value the question needs, call its tool again; never answer with an
+earlier one": `snapshots.note`); the run store's replay did not (`Agent.recalled` dropped the
+list of out-of-date tools). The mark sits on the old result, and a model asked for a new figure
+that only uses the old one as an input took it as it stood: on `freshness-03` the on-hand count
+of the turn before went into the next turn's reorder formula in 3 of 3 runs, and on
+`freshness-04` in 3 of 3. The note is now said with the question on that path too, and only
+when a replayed result is out of date: the four freshness cases went from 20 of 27 turns right
+to 26 of 27 over three runs.
+
 ### Changed: `ReAct` alone switches to Deep Agents' machinery by itself; asked for, it is Deep Agents from the first step
 
 One `ReAct()`, two ways to run it, said by what it already takes
