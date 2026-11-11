@@ -171,11 +171,14 @@ says it was saved:
 It costs one listing in the sandbox after each command of the model's (and one before its
 first), and one after a file written into the kept folder.
 
-**A large result with a sandbox.** A tool result too large to show whole is kept by the run, as
-without a sandbox: the model is shown a preview with the result's file path and, for rows, the
-table `query_result` reads them from, so a count or a sum is one exact query. The sandbox gets
-the same file at that path before the next command, for what a query cannot make (a chart, a
-workbook, a script of the model's own).
+**The run's data, the query and the sandbox.** A tool result too large to show whole is kept
+by the run, as without a sandbox: the model is shown a preview with the result's file path and,
+for rows, the table `query_result` reads them from, so a count, a sum, a filter, a ranking or a
+join is one exact query. The sandbox gets the same file at that path before the next command.
+A query's own result of more than one row is kept the same way and is a CSV file in the
+sandbox, named in the query's answer: what code makes of it (a chart, a formatted workbook, a
+script) starts from that file. Both tools' descriptions say which does what; the model chooses.
+The same question gives the same figure with or without a sandbox.
 
 Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
