@@ -1599,6 +1599,25 @@ def test_a_current_figure_may_name_the_earlier_one_as_earlier() -> None:
     assert cx.score(expect, right, [], turn.text)["correct"], right
     assert not cx.score(expect, f"We have {old} units on hand.", [], turn.text)["correct"]
     assert not cx.score(expect, f"{old} units now; {now} were reserved.", [], turn.text)["correct"]
+    # the same said with another verb (ReAct, 5 of the saved runs): the earlier figure, as earlier
+    for moved in ("dropped", "fallen", "fell", "risen", "rose"):
+        said = f"The current total is **{now} units**. The total has {moved} from {old} since."
+        assert cx.score(expect, said, [], turn.text)["correct"], said
+    assert not cx.score(expect, f"The total is {old}, dropped from 55.", [], turn.text)["correct"]
+
+
+def test_a_scan_that_is_timing_out_says_what_went_wrong() -> None:
+    """edge-04: "The live warehouse scan of the north failed twice in a row, timing out after
+    0.9 seconds each time" names the timeout as "timed out" does (4 of the saved runs were
+    scored as not saying what went wrong). An answer that names no timeout still fails."""
+    case = next(c for c in cx.cases() if c.id == "edge-04")
+    turn = case.turns[0]
+    expect = turn.expect
+    assert expect is not None
+    for said in ("timing out after 0.9 seconds", "it timed out", "a timeout", "it took too long"):
+        answer = f"The live warehouse scan of the north failed twice, {said}."
+        assert cx.score(expect, answer, [], turn.text)["correct"], answer
+    assert not cx.score(expect, "The scan found nothing unusual.", [], turn.text)["correct"]
 
 
 def test_the_scripted_model_reports_the_size_of_the_request_it_was_sent() -> None:

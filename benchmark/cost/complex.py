@@ -2295,7 +2295,7 @@ def cases() -> tuple[Case, ...]:
                     "Run a live warehouse scan of the north and tell me what it finds.",
                     ((("warehouse_scan", {"region": "north"}),),),
                     flags(
-                        r"timed? ?out|time-?out|took too long",
+                        r"tim(?:ed?|ing) ?out|time-?out|took too long",
                         "The warehouse scan timed out after 30 seconds.",
                     ),
                 ),
@@ -2715,8 +2715,12 @@ _NOT_IN: Final = re.compile(
     r"(?:times|more than) (?:any|every|all) other)\b",
     re.IGNORECASE,
 )
-#: A sentence that names a value as the earlier one ("down from the 40 I reported earlier").
-_EARLIER: Final = re.compile(r"\b(?:earlier|previously|before|down from|up from)\b", re.IGNORECASE)
+#: A sentence that names a value as the earlier one ("down from the 40 I reported earlier",
+#: "has dropped from 40 since my last check").
+_EARLIER: Final = re.compile(
+    r"\b(?:earlier|previously|before|(?:down|up|dropped|fell|fallen|rose|risen) from)\b",
+    re.IGNORECASE,
+)
 #: Where a sentence ends: a line break, or a full stop not followed by more of a figure ("3.5").
 _SENTENCE_END: Final = re.compile(r"(\n|\.(?!\S))")
 
