@@ -1947,3 +1947,27 @@ def test_a_kept_file_is_checked_by_its_name_its_rows_and_what_it_holds() -> None
     assert cx.kept_file(probe, {}) == (False, "kept: no file")
     short, why = cx.kept_file(probe, {"export.csv": b"sku,units\nSKU-1,3\n"})
     assert not short and "lacks ['sku-2,5']" in why
+
+
+def test_two_runs_are_compared_turn_by_turn(tmp_path: Path) -> None:
+    from benchmark.cost import parity
+
+    def run(name: str, right: bool, kept: bool) -> Path:
+        turn = {
+            "turn": 0,
+            "score": {"correct": right, "missing": [] if right else ["under_40"]},
+            "checks": [{"check": "file", "ok": kept}],
+        }
+        rows = [{"case": "c-1", "turns": [turn]}, {"case": "c-2", "not_applicable": "x"}]
+        path = tmp_path / name
+        path.write_text("\n".join(json.dumps(r) for r in rows))
+        return path
+
+    same = parity.differences(run("a.jsonl", True, True), run("b.jsonl", True, True))
+    assert same == (1, [])  # the case that did not apply is not compared
+    shared, found = parity.differences(run("a.jsonl", True, True), run("b.jsonl", False, False))
+    assert shared == 1 and found == [
+        "c-1 turn 0: right in one only — b.jsonl lacks ['under_40']",
+        "c-1 turn 0: checks failed — a.jsonl: []; b.jsonl: ['file']",
+    ]
+    assert parity.main([str(tmp_path / "a.jsonl"), str(tmp_path / "b.jsonl")]) == 1
