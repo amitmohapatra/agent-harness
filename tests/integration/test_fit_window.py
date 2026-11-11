@@ -389,7 +389,8 @@ async def test_older_turns_are_left_out_before_the_tools_the_question_needs() ->
     """The tools a question needs, and the question, go after the older turns: a request over
     the window keeps the most relevant tools — :data:`FIT_KEEP` of them beside those it must
     keep (the run's used ones, the graph's own state tools) — and leaves the older turns out
-    first. Before, the tools were narrowed to the must-keep ones alone to make room for older
+    first (their calls and results; their questions and answers fit here). Before, the tools
+    were narrowed to the must-keep ones alone to make room for older
     turns that were then left out too: on the ``deepagents`` adapter at 6,000 tokens the
     catalog questions had only Deep Agents' file tools, no catalog (0 of 12 answered)."""
     state = [lc(name, "Works on the agent's files.") for name in sorted(ours.STATE_TOOLS)]
@@ -406,7 +407,7 @@ async def test_older_turns_are_left_out_before_the_tools_the_question_needs() ->
     given = request([*older, question], tools)
     room = request([question], [*state, catalog, *others[: ours.FIT_KEEP]])
     out = await sent(FitWindow(int((_size(room) + 100) / 0.95)), given)
-    assert out.messages == [question]  # the older turn left out
+    assert out.messages == [older[0], older[3], question]  # the older turn: its call left out
     names = {ours._named(t) for t in out.tools}
     assert "sku_catalog" in names and names >= ours.STATE_TOOLS
     assert len(names - ours.STATE_TOOLS) >= ours.FIT_KEEP  # beside the ones it must keep
@@ -486,3 +487,45 @@ def test_the_readers_of_a_kept_result_stay_offered_when_the_tools_are_narrowed()
     assert {ours._named(t) for t in out.tools} == {QUERY_RESULT, READ_FILE}
     bare = ours._narrowed(given.override(state={"messages": given.messages}), 1, None, least=0)
     assert QUERY_RESULT not in {ours._named(t) for t in bare.tools}  # nothing kept to read
+
+
+def _calls(message: Any) -> list[Any]:
+    return message.tool_calls if isinstance(message, AIMessage) else []
+
+
+async def test_older_turns_lose_their_calls_and_results_before_their_questions_and_answers() -> (
+    None
+):
+    """Older turns are left out in layers, as memory's window gives them: first their tool
+    calls and results, the oldest turn's first and only as far as it must, each such turn then
+    its question and answer; whole only when those do not fit either. They went all at once:
+    a long chat on a 6,000-token window lost the first turn's answer ("£985,471.57") with every
+    other, where the questions and answers of all 13 turns were a few hundred tokens (the
+    scripted ``deepagents`` run of ``advconv-05``, turn 13)."""
+    older: list[Any] = []
+    for n in range(6):
+        call = {"id": f"c{n}", "name": "a", "args": {}}
+        older += [
+            HumanMessage(f"question {n}"),
+            AIMessage(content="", tool_calls=[call]),
+            ToolMessage(f"row {n}\n" * 600, tool_call_id=f"c{n}"),
+            AIMessage(content=f"answer {n}"),
+        ]
+    question = HumanMessage("and the first answer again?")
+    given = request([*older, question], [lc("a")])
+    spoken = [m for m in older if not isinstance(m, ToolMessage) and not _calls(m)]
+    # room for every question and answer, and for three of the six results cut as far as they go
+    window = int((_size(request([*spoken, question], [lc("a")])) + 250) / 0.95)
+    out = await sent(FitWindow(window), given)
+    assert _size(out) <= int(window * 0.95)
+    said = [m.text for m in out.messages if not isinstance(m, ToolMessage) and not _calls(m)]
+    assert said == [m.text for m in spoken] + [question.text]  # every question and answer
+    results = [m.tool_call_id for m in out.messages if isinstance(m, ToolMessage)]
+    calls = [c["id"] for m in out.messages for c in _calls(m)]
+    assert results == calls == ["c3", "c4", "c5"]  # the oldest turns' first, as far as it must
+    # the questions and answers do not fit either: the older turns whole, as before
+    tiny = int((_size(request([question], [])) + 20) / 0.95)
+    assert (await sent(FitWindow(tiny), request([*older, question], []))).messages == [question]
+    # a summarization after it has the older turns: none of their messages is taken out
+    kept = await sent(FitWindow(window, turns=False), given)
+    assert len(kept.messages) == len(given.messages)
