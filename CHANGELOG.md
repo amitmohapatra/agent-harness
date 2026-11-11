@@ -5,6 +5,27 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: with a sandbox, a large result is queried as without one, and a file outside the kept folder is said at once
+
+`ReAct(backend=sandbox())` answered differently from plain `ReAct` on the same question. With a
+backend whose files are outside the graph's state (a sandbox, a disk, a store) the run did not
+keep a large tool result: Deep Agents saved its own copy on the backend, where the harness
+cannot read it, so no table was named and `query_result` was never offered. The model counted
+in code instead (`long-data-03`: 105 SKUs under 40% margin in 2 of 3 runs, where the exact
+query gives 104). The run now keeps the result there as it does without a backend
+(`middleware._paged`): the preview names the table, `query_result` is offered, and the sandbox
+still gets the same file at the same path for code. Over three live runs of the eight files and
+code cases on the sandbox arm, `long-data-03` went from 1 of 3 right to 3 of 3 (104 each time,
+by `query_result`, no command), `advfile-01` from 2 of 3 to 3 of 3, the other six stayed right.
+
+A file meant for the user but written outside the kept folder is known at once, with the call
+that wrote it ([sandbox.md](docs/sandbox.md)): a `write_file` or `sandbox_write` whose path
+names an `outputs` that is not the kept one is told so by its path, and a command that left a
+new file directly in the working directory is told that file is not the user's. The model's
+command is told in Deep Agents' own entry for it (`SandboxBackend.aexecute_with_offload`), so a
+file tool's parsed output never carries the note. This costs one listing in the sandbox after
+each command of the model's.
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
