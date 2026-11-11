@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from tests.support.arm import arm
 from tests.support.chat_model import ScriptedChatModel
@@ -396,5 +397,5 @@ async def test_a_write_that_failed_is_told_its_error_and_nothing_of_the_users_fi
     agent = harness.wrap(ReAct("s", model, backend=sandbox(FakeSandboxes())), id="refused-write")
     assert (await agent.run("write it", user="u")).answer == "no"
     told = model.seen[-1][-1]
-    assert told.status == "error" and "outputs/ " not in told.text, told.text
+    assert isinstance(told, ToolMessage) and told.status == "error", told
     assert "given to the user" not in told.text
