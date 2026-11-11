@@ -314,8 +314,7 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     root, own, beside, plain, kept = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
     assert own == "Updated file /workspace/plot.py"  # a place of its own choice: no surprise
     assert root.endswith(
-        "No file is in /workspace/outputs/ yet: only a file written directly there is given "
-        "to the user."
+        "Not in /workspace/outputs/, so not given to the user: /outputs/chart.svg."
     ), root
     assert "Not in /workspace/outputs/, so not given to the user: chart.png." in beside, beside
     assert "outputs" not in plain, plain  # said once, and never of the file it started with
@@ -331,8 +330,7 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     assert done.status is RunStatus.SUCCESS, done.error
     wrote, ran, then = done.answer
     assert wrote.endswith(
-        "No file is in /workspace/outputs/ yet: only a file written directly "
-        "there is given to the user."
+        "Not in /workspace/outputs/, so not given to the user: /outputs/a.svg."
     ), wrote
     assert ran["outputs"] == "Not in /workspace/outputs/, so not given to the user: b.png.", ran
     assert "outputs" not in then, then

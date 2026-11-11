@@ -130,7 +130,8 @@ OUTPUTS_HOLD: Final = "In {folder}/ for the user: {files}."
 OUTPUTS_EMPTY: Final = (
     "No file is in {folder}/ yet: only a file written directly there is given to the user."
 )
-#: What a command or a file that left a new file beside that folder is told, once per file.
+#: What a command that left a new file beside that folder is told, once per file; and a file
+#: written by a path that names an ``outputs`` which is not that folder.
 OUTPUTS_BESIDE: Final = "Not in {folder}/, so not given to the user: {files}."
 #: The most new files beside the folder named at once; the rest are counted.
 BESIDE_NAMED: Final = 20
@@ -360,14 +361,20 @@ class SandboxSource:
         return " ".join(said) or None
 
     async def written_said(self, runtime: Runtime, box: Sandbox, path: str) -> str | None:
-        """What a file the model wrote by its path is told: as a command, when the path names
-        an :data:`OUTPUTS` folder (:meth:`outputs_said`); nothing otherwise — the place was
-        the model's own choice, and its next command did not leave that file."""
-        if OUTPUTS in path:
-            return await self.outputs_said(runtime, box, path)
+        """What a file the model wrote by its path is told when the path names an
+        :data:`OUTPUTS` folder: what the kept folder holds when the file is directly in it,
+        else that the file is not the user's — by its path, so nothing is left to infer.
+        Nothing otherwise: the place was the model's own choice, and its next command did not
+        leave that file."""
         where, known = self._beside[runtime]
-        known.add(posixpath.relpath(posixpath.join(where, path), where))
-        return None
+        written = posixpath.normpath(posixpath.join(where, path))
+        if OUTPUTS not in path:
+            known.add(posixpath.relpath(written, where))
+            return None
+        folder, kept, _ = await self._now(runtime, box)
+        if posixpath.dirname(written) == folder:
+            return OUTPUTS_HOLD.format(folder=folder, files=kept)
+        return OUTPUTS_BESIDE.format(folder=folder, files=path)
 
     async def _now(self, runtime: Runtime, box: Sandbox) -> tuple[str, str, list[str]]:
         """The kept folder's whole path, the files it holds (each with its size), and the files

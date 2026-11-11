@@ -183,8 +183,9 @@ agent = h.wrap(target, id="reports")
 ```
 
 Its tools, planning and `read_file` are offered from the first call (about 2,600 tokens a
-call), a large result is saved as a file by Deep Agents, and the older turns are summarized
-near the window's end. On a window known to be under 32,000 tokens the long-task tools are
+call), a large result is saved as a file by Deep Agents (kept by the run instead when the
+backend's files are outside the graph's state — a sandbox, a disk, a store — so `query_result`
+reads its rows there as anywhere), and the older turns are summarized near the window's end. On a window known to be under 32,000 tokens the long-task tools are
 held: there is no room for them.
 
 ## The base

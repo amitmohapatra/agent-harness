@@ -153,11 +153,30 @@ is deleted. The file is named in the run's journal and announced with the `file`
 take is left behind and reported in a warning: a name that is not one safe path part, or a file
 over 50 MiB. A run that fails keeps none.
 
-A command that names an `outputs` folder is told with its result what the kept folder holds and
-where it is ("In /workspace/outputs/ for the user: report.csv (85731 bytes)." or "No file is in
-/workspace/outputs/ yet: only a file written directly there is given to the user."). A file
-copied to another `outputs` (the root's `/outputs/`) is then known at once not to be the user's,
-before the answer says it was saved. It costs one listing in the sandbox, only for such a command.
+A file that is not the user's is known at once, with the call that wrote it, before the answer
+says it was saved:
+
+- A command that names an `outputs` folder is told what the kept folder holds and where it is
+  ("In /workspace/outputs/ for the user: report.csv (85731 bytes)." or "No file is in
+  /workspace/outputs/ yet: only a file written directly there is given to the user."). Another
+  `outputs` (the root's `/outputs/`) is not the kept one.
+- A file written by a path that names an `outputs` folder (`write_file`, `sandbox_write`) is
+  told the same when it is directly in the kept folder, and otherwise that it is not the
+  user's, by its path ("Not in /workspace/outputs/, so not given to the user:
+  /outputs/chart.svg.").
+- A command that left a new file directly in the working directory, beside the kept folder, is
+  told so, once per file ("Not in /workspace/outputs/, so not given to the user: chart.png.").
+  A file the sandbox started with, or one the model wrote by a path of its own choice, is not
+  named.
+
+It costs one listing in the sandbox after each command of the model's (and one before its
+first), none after a file tool's.
+
+**A large result with a sandbox.** A tool result too large to show whole is kept by the run, as
+without a sandbox: the model is shown a preview with the result's file path and, for rows, the
+table `query_result` reads them from, so a count or a sum is one exact query. The sandbox gets
+the same file at that path before the next command, for what a query cannot make (a chart, a
+workbook, a script of the model's own).
 
 Claude Code and Kimi Code work in a folder of their own on this machine (their `cwd`). Its
 `outputs/` is the user's the same way (`sandbox.delivered`, one implementation): Claude is told
