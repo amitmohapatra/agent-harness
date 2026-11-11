@@ -382,11 +382,16 @@ smaller, step by step, only as far as it must, in this order:
 
 | Step | What goes | Kept |
 |---|---|---|
-| `tools` | the offered tools narrowed to the most relevant | those the run used and the graph's own state tools; then the hinted ones; then by the words they share with the request; 8 of them at least besides |
+| `tools` | the offered tools narrowed to the most relevant; one not kept is still offered by its signature (its name and arguments, the description left out) while that fits, and always when the tool hints chose it | those the run used, the graph's own state tools and `tool_search`; then the hinted ones; then by the words they share with the request; 8 of them at least besides |
 | `descriptions` | the kept tools' descriptions cut to their first sentence, no parameter descriptions | the names and parameters |
 | `results` | the longest tool results cut to head and tail (clearing is `ContextEditingMiddleware`'s alone; on Deep Agents, none: its summarization offloads them whole to its backend), each kept whole in the run and its cut naming the `read_file` call that reads on from where it starts | the latest |
-| `turns` | the older turns, in layers: their tool calls and results, the oldest turn's first, then the turns whole (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); then the tools past the first step's 8, only as far as the latest turn leaves no room | the older turns' questions and answers while they fit; the latest turn whole, from the user's question (not a note the step limit or the budget appends); the tools it must keep |
+| `turns` | the older turns, in layers: their tool calls and results, the oldest turn's first, then the turns whole (`ReAct`: Deep Agents' summarization summarizes them, the turns saved for `read_file`); then the tools past the first step's 8, only as far as the latest turn leaves no room | the older turns' questions and answers while they fit; the latest turn whole, from the user's question (not a note the step limit or the budget appends); the tools it must keep, and the first 8 besides by their signature whatever the room (only a request the model's server itself refused gives those up) |
 | `memory` | last, only when the latest turn alone still does not fit: the memory context's lowest-ranked items, those its `Most relevant` does not name first | the rules, the standing instructions (profile), the summary, the recent conversation, the learned plan (its skills and tools) |
+
+No tool is held back in silence: a tool the request no longer offers at all is named after the
+instructions ("Tools held back to fit the window (...)"), with what finds one (`tool_search`,
+where the run has it, which is never held itself). So at any window size a tool the model has
+not called yet is there when it reaches for it, or it knows the tool exists.
 
 Each step taken is said on the run (a `warning` event, code `context_fit`, naming the steps) and
 in the log. The count is an estimate (Deep Agents'): when the model's server still refuses the
