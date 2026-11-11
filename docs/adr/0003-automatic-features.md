@@ -18,8 +18,11 @@ long tasks; a short task must keep sending exactly that.
    harness adds only the trigger and the glue that keeps it governed, journaled and resumable
    (`trellis.harness.automatic`). Delegation stays the team's explicit code
    (an agent in `tools=[...]`): no automatic helper.
-2. **On from signals.** A feature is offered when the run shows it needs it: a long task (the
-   model's third call of an invocation, or a request that asks for steps) on a known window with
+2. **On from signals.** A feature is offered when the run shows it needs it: a long task (a
+   conversation past half the model's window, where old tool results start being cleared — the
+   request is edited there anyway, so a prompt cache is rewritten once; first it was the
+   model's third call or a request asking for steps, which rewrote the cache mid-run for tools
+   no model call used on 57 long and complex cases) on a known window with
    room for it (32,000 tokens or more); an unknown window: off. Until then the model is sent neither its tools nor its
    instructions — the request is unchanged, so a prompt cache holds and a short task costs what
    it did (a golden snapshot of the requests proves it, `tests/integration/test_react_golden.py`).

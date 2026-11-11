@@ -5,6 +5,77 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: with memory off, an out-of-date value of the turn before was reused
+
+With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
+result of a live tool marked out of date. Memory's replay also says so in the run's context,
+with the question ("for a value the question needs, call its tool again; never answer with an
+earlier one": `snapshots.note`); the run store's replay did not (`Agent.recalled` dropped the
+list of out-of-date tools). The mark sits on the old result, and a model asked for a new figure
+that only uses the old one as an input took it as it stood: on `freshness-03` the on-hand count
+of the turn before went into the next turn's reorder formula in 3 of 3 runs, and on
+`freshness-04` in 3 of 3. The note is now said with the question on that path too, and only
+when a replayed result is out of date: the four freshness cases went from 20 of 27 turns right
+to 26 of 27 over three runs.
+
+### Changed: `ReAct` alone switches to Deep Agents' machinery by itself; asked for, it is Deep Agents from the first step
+
+One `ReAct()`, two ways to run it, said by what it already takes
+([react.md](docs/frameworks/react.md#two-ways-to-run-it)):
+
+- **`ReAct` alone** is Deep Agents' graph underneath with its machinery held: an ordinary task
+  is sent what `create_agent` with `middleware()` is sent (the same tools and instructions, a
+  large result kept by the run, the window fitted by `FitWindow`). Once the conversation is
+  past half the model's window — the run's own behaviour, where old tool results start being
+  cleared — the model is offered planning (`write_todos`), Deep Agents' scratch file tools and
+  its general-purpose `task` helper, for the rest of the thread.
+- **`ReAct` asked for a Deep Agents capability** (`backend=`, `subagents=`, `skills=`,
+  `memory_files=`, `permissions=`) offers Deep Agents' tools, planning and `read_file` from the
+  first call (before: its scratch tools and helper came with the third model call), unless the
+  window is known to be under 32,000 tokens.
+- **The switch no longer reads the request's wording or counts model calls.** "Step by step",
+  "a plan" and a list of three items matched no request of the long set (0 of 45 turns) and one
+  of the benchmark's 256 cases, which asked for no steps. The switch after three model calls
+  changed the tools in the middle of a run, so a provider's prompt cache was rewritten: on the
+  12 pilot cases cached input fell from 456,000 to 337,000 tokens and the cost rose a third,
+  and on 57 long and complex cases it fired in 26 runs and no model call used a tool it
+  offered. `automatic.LONG_AFTER`, `STEP_ITEMS`, `calls_made` and `asks_for_steps` are removed;
+  `automatic.long_task(request, window)` is the conversation's size against `LONG_AT`.
+
+### Fixed: kept tables of one tool's calls made side by side
+
+- **Each table says what its call asked** (`middleware._table`): two results of one tool
+  called in one reply were numbered by which answered first, so the model took
+  `sales_summary_2` for its second call and computed a profit from swapped columns (the priced
+  pilot's `aggregate-04`, on three of four frameworks: a wrong result, one step more over
+  80,000 tokens). They are now `sales_summary_revenue` and `sales_summary_units`: the tool, and
+  the arguments that tell the reply's calls of it apart. Calls one after another are numbered
+  as before.
+- **Deep Agents' stub of a result it saved names its table** (`middleware._stubs_tabled`):
+  `query_result` reads the saved file as a table, but Deep Agents' own stub does not say which,
+  and a model took `result` for it in another file's query (`long-data-02` on `ReAct` with a
+  backend: a failed query, a step more). The request's copy of the stub now says the table and
+  its columns before the preview, as the harness's own stubs do.
+
+### Fixed: a model LangChain has no profile of had no context window
+
+A model name's window came only from the table of profiles bundled in the installed LangChain
+package. A model released after that package, a local model, or any name on a provider other
+than OpenAI and Anthropic had none: `ReAct` ran with clearing old tool results and the
+long-task tools off, `FitWindow` stepped aside, and the memory context's and the replayed
+conversation's budgets were the fixed ones (the priced pilot ran every arm so: the routed
+model was newer than the table).
+
+- **The route is asked when the table names no window** (`ModelGateway.window`,
+  `gateways.routed_chat_model`): Anthropic's Models API through Anthropic's own client
+  (`max_input_tokens`), an OpenAI-compatible endpoint's `/models` (the field its server names:
+  `max_input_tokens`, `context_length`, `context_window`, `max_model_len`,
+  `max_context_length`), with the route's auth, within 5 seconds, once per route and model.
+  No table of windows is kept here.
+- **A route that says none leaves the window unknown**, as before (said once): a model list
+  without the model or without a window, an endpoint that does not answer (asked again by the
+  next build). `context_window=` wins over all of it.
+
 ### Fixed: ReAct on Deep Agents on a small window
 
 On a 6,000-token window (adversarial `advconv-05`, `react --variant deep`, memory off) the

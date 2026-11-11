@@ -28,7 +28,7 @@ from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness.adapters.langgraph import bound_tools, graph_tools
 from trellis.harness.automatic import JournalBackend
 from trellis.harness.gateways import routed
-from trellis.harness.middleware import MACHINERY, OUTSIDE_STATE, RunCheckpointer
+from trellis.harness.middleware import KEPT_BY_RUN, MACHINERY, OUTSIDE_STATE, RunCheckpointer
 from trellis.harness.react import PLACED, _native, defaults_off
 
 
@@ -278,11 +278,17 @@ def test_a_compiled_graph_is_a_sub_agent_with_its_name_and_description() -> None
 
 
 # --------------------------------------------------------------------------- backends
-def test_without_a_deep_agents_capability_react_is_langchains_loop() -> None:
-    """No backend, sub-agent of its own, skills, memory files or permissions: ``create_agent``
-    with the harness's part — no file tools, no ``task`` (measured the better base)."""
+def test_without_a_deep_agents_capability_react_holds_deep_agents_machinery() -> None:
+    """No backend, sub-agent of its own, skills, memory files or permissions: Deep Agents'
+    graph all the same, its file tools and general-purpose helper there for a long task
+    (``automatic.long_task``) — with a large result kept by the run, as on ``create_agent``
+    with ``middleware()`` (Deep Agents' ``read_file`` is marked so), where a graph asked for a
+    backend leaves it to Deep Agents."""
     graph = ReAct("s", ScriptedChatModel(turns=[]))
-    assert {t.name for t in graph_tools(graph)} == {"write_todos"}  # planning, on a long task
+    assert {t.name for t in graph_tools(graph)} >= {"write_todos", "task", "write_file"}
+    assert marked(graph, KEPT_BY_RUN)["read_file"]
+    asked = ReAct("s", ScriptedChatModel(turns=[]), backend=JournalBackend())
+    assert not marked(asked, KEPT_BY_RUN)["read_file"]
 
 
 def test_on_the_graphs_state_the_file_tools_are_its_own_and_execute_is_machinery() -> None:

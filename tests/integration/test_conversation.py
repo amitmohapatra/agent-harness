@@ -148,6 +148,14 @@ async def test_with_memory_off_react_replays_an_earlier_turns_tool_results(
     assert json.dumps(snapshots.STALE.format(tool="supplier"))[1:-1] in sent  # live data
     roles = [m["role"] for m in model.requests[-1]["messages"]]
     assert roles[1:] == ["user", "assistant", "tool", "assistant", "user"], roles
+    # and the question says so, as memory's replay says it in its context: without it a model
+    # took an on-hand count of the turn before as an input of the next turn's formula
+    # (``freshness-03``, wrong in 4 of 5 runs)
+    noted, asked = model.requests[-1]["messages"][-1]["content"]
+    assert snapshots.NOTE.format(tools="supplier") in noted["text"]
+    assert asked["text"] == "Why is its lead time so long?"
+    # a turn with no out-of-date result is sent what it was: its question, as asked
+    assert model.requests[0]["messages"][-1]["content"] == "Who supplies NV-1?"
     other = await agent.run("Why so long?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS
     assert "21 days" not in json.dumps(model.requests[-1]["messages"])  # another user's chat

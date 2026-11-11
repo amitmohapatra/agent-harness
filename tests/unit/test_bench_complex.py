@@ -25,6 +25,7 @@ from benchmark.cost import complex as cx
 from benchmark.cost import retail as r
 from tests.support.kimi import needs_kimi
 from trellis import Settings
+from trellis.harness.middleware import KEPT_BY_RUN
 from trellis.harness.schedules import SCHEDULE_TOOLS
 from trellis.harness.writes import Writes
 
@@ -370,8 +371,11 @@ async def test_react_runs_as_any_benchmark_variant_and_its_rows_say_which(
     assert [x["variant"] for x in rows] == ["deep", "main"] and again["variant"] == "main"
     deep, _ = cx.target_of("m", "memory", 32_000, 6, adapter="react", variant="deep")
     main, _ = cx.target_of("m", "memory", 32_000, 6, adapter="react")
-    assert "write_file" in deep.nodes["tools"].bound.tools_by_name
-    assert "write_file" not in main.nodes["tools"].bound.tools_by_name
+    asked, alone = (g.nodes["tools"].bound.tools_by_name for g in (deep, main))
+    assert "write_file" in asked and "write_file" in alone  # Deep Agents' graph, both
+    # alone, its tools are held and a large result is the run's to keep
+    assert (alone["read_file"].metadata or {}).get(KEPT_BY_RUN)
+    assert not (asked["read_file"].metadata or {}).get(KEPT_BY_RUN)
 
 
 async def test_a_langgraph_graph_without_the_harness_middleware_is_an_adapter_of_its_own(

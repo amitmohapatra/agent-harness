@@ -246,7 +246,7 @@ them). `without={"memory"}` is per agent or per run: the rest of the deployment 
 and the tenant, `h.add_document` and `h.feedback` keep working. `Harness(memory=False)` is the
 whole deployment with no memory service: no client even with `MEMORY_URL` set, the local
 tenant, no `h.add_document`, and `RUNS_URL` refused ([api.md](api.md#harness)). A `ReAct`'s long-task tools (`write_todos`, scratch files) are its own, offered on a
-long task with room in the window ([react.md](frameworks/react.md#the-middleware)). Not switchable, because they are correctness or have an owner elsewhere:
+long task (a conversation past half the window) with room in the window ([react.md](frameworks/react.md#the-middleware)). Not switchable, because they are correctness or have an owner elsewhere:
 governance and approvals, the journal and replay, tool retries and time limits, tracing and
 redaction, the run record, a budget (opt-in: give one), structured output, model retries,
 fallbacks and caching (the gateway's). Inside a run, `trellis.current().uses(feature)` says

@@ -112,6 +112,8 @@ You can do this by specifying an offset and limit in the read_file tool call. Fo
 
 {content_sample}
 """  # noqa: E501 - Deep Agents' text, as it is
+#: How a stub's preview starts (Deep Agents' text).
+PREVIEW: Final = "Here is a preview showing the head and tail of the result"
 MARKER: Final = "... [{omitted_lines} lines truncated] ..."
 OMITTED: Final = (
     f"lines of the form `{MARKER.format(omitted_lines='N')}` indicate omitted lines in the "
@@ -134,21 +136,35 @@ def readable(output: Any, tool: str | None = None) -> str:
     runtime = current()
     if path is None or runtime is None:
         return text
+    rows = query.document(text) in (None, query.MARKUP)  # else: no code over rows either
+    table = table_said(path, text, query.tables(runtime)[path])
+    code = coding_tool() if rows else None
+    return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=code, table=table)
+
+
+def table_said(path: str, text: str, name: str) -> str:
+    """What a kept result's stub says of its rows: the table they are in a query (``name``) and
+    its columns (:data:`QUERY`); or, when ``text`` holds none (a PDF, an image, binary data),
+    where to compute instead."""
     what = query.document(text)
     if what is not None and what != query.MARKUP:  # no rows: where to compute instead
-        table = f"{query.not_rows(path, what)} {PRIVATE}"
-        return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=None, table=table)
+        return f"{query.not_rows(path, what)} {PRIVATE}"
     parts = query.parts_of(text)
-    name = query.tables(runtime)[path]
     table = QUERY.format(
         table=name,
         columns=", ".join(parts[0][1]),
         path=path,
         private=PRIVATE,
     ) + query.also(parts, name)
-    if what is not None:  # markup: its lines, said first
-        table = f"{query.MARKED.format(path=path)} {table}"
-    return _stub(path.rsplit("/", 1)[1], path, _lines(text), code=coding_tool(), table=table)
+    # markup: its lines, said first
+    return table if what is None else f"{query.MARKED.format(path=path)} {table}"
+
+
+def stub_tabled(stub: str, table: str) -> str:
+    """Deep Agents' own ``stub`` of a result it saved, saying ``table`` (:func:`table_said`)
+    before its preview, as the harness's stubs do (:func:`_stub`)."""
+    head, found, preview = stub.partition(f"\n\n{PREVIEW}")
+    return f"{head}\n\n{table}{found}{preview}" if found else f"{stub.rstrip()}\n\n{table}"
 
 
 def tabled(text: str, tool: str | None = None) -> str:
@@ -190,8 +206,9 @@ MIN_ROW_CHARS: Final = 4
 def keep(text: str, *, tool: str | None = None) -> str | None:
     """``text`` kept whole in the current run's journal, where ``read_file`` pages it (and the
     run's sandbox finds it: ``sandbox.SandboxSource``), and the path it is kept at — named by
-    its content, so the same text is kept once; ``None`` outside a run. ``tool``: the tool that
-    returned it, whose name its table has in a query (``tools.query.tables``)."""
+    its content, so the same text is kept once; ``None`` outside a run. ``tool``: what its
+    table is named in a query (``tools.query.tables``) — the tool that returned it, and, of a
+    reply's several calls of that tool, what this one asked (``middleware._table``)."""
     runtime = current()
     if runtime is None:
         return None
@@ -382,7 +399,7 @@ def _stub(ident: str, path: str, lines: list[str], *, code: str | None, table: s
     sample = f"{_numbered(head, 1)}\n{marker}\n{_numbered(tail, len(lines) - TAIL + 1)}"
     clipped = any(len(line) > PREVIEW_LINE for line in (*head, *tail))
     caveats = "; ".join([OMITTED, CLIPPED] if clipped else [OMITTED])
-    note = f"Here is a preview showing the head and tail of the result ({caveats}):"
+    note = f"{PREVIEW} ({caveats}):"
     if code is not None:
         note = f"{CODE.format(path=path, tool=code)}\n\n{note}"
     note = f"{table}\n\n{note}"
