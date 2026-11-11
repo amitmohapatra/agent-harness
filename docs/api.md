@@ -344,7 +344,7 @@ can and cannot do beyond its tools ("you cannot accept an image upload") goes in
 | `middleware` | `()` | your LangChain or Deep Agents middleware, added before `ModelHooks`; one named as the harness's is refused, naming the parameter that sets it (`middleware()` itself: ReAct already has it), one named as Deep Agents' replaces it |
 | `state_schema`, `context_schema` | none | Deep Agents' graph state (a `DeepAgentState` subclass) and run context schemas |
 | `cache` | none | LangGraph's node cache |
-| `context_window` | the model's LangChain profile (`model.profile`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
+| `context_window` | the model's LangChain profile (`model.profile`); else what the route says of the model (Anthropic's Models API, an endpoint's `/models`); else unknown | the model's window in tokens; every threshold is scaled by it. Unknown: clearing old tool results and the long-task tools are off (said once) |
 | `max_repeats` | 3 | identical calls in a row that stop the run (2 or more) |
 
 Not exposed: Deep Agents' `interrupt_on` (approvals are the [catalog](governance.md)'s), `name`

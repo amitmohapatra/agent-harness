@@ -698,7 +698,8 @@ def _named_class(base: type, name: str) -> type:
 
 def window_of(model: Any, given: int | None = None) -> tuple[int | None, str]:
     """The context window ``ReAct`` builds with, and what said so: ``given``, else the chat
-    model's LangChain profile (``profile``); ``(None, "unknown")`` when neither says."""
+    model's profile (``profile``: LangChain's, or for a model name it has none of, what the
+    route says — ``gateways.routed_chat_model``); ``(None, "unknown")`` when neither says."""
     if given is not None:
         return given, "given"
     found = context_window(model)

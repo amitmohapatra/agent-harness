@@ -456,7 +456,12 @@ def test_a_model_langchain_does_not_know_is_asked_of_anthropics_api(
         ({"LLM_BASE_URL": "http://vllm.test/v1"}, "qwen", "qwen", "max_model_len"),
         ({"LLM_BASE_URL": "http://router.test/v1"}, "meta/llama", "meta/llama", "context_length"),
         ({"LLM_BASE_URL": "http://groq.test/v1"}, "llama-next", "llama-next", "context_window"),
-        ({"LLM_BASE_URL": "http://mistral.test/v1"}, "ministral", "ministral", "max_context_length"),
+        (
+            {"LLM_BASE_URL": "http://mistral.test/v1"},
+            "ministral",
+            "ministral",
+            "max_context_length",
+        ),
         (
             {"LLM_BASE_URL": "http://bf.test/v1", "LLM_GATEWAY": "bifrost", "LLM_API_KEY": "vk"},
             "anthropic/claude-newer",
@@ -476,7 +481,10 @@ def test_an_endpoints_model_list_says_the_window(
         monkeypatch.setenv(key, value)
     root = settings["LLM_BASE_URL"]
     models = respx.get(f"{root}/models").respond(
-        json={"object": "list", "data": [{"id": "another", field: 8_192}, {"id": listed, field: 65_536}]}
+        json={
+            "object": "list",
+            "data": [{"id": "another", field: 8_192}, {"id": listed, field: 65_536}],
+        }
     )
     assert routed_chat_model(name).profile == {"max_input_tokens": 65_536}
     assert routed_chat_model("another").profile == {"max_input_tokens": 8_192}
@@ -515,13 +523,17 @@ def test_a_providers_own_sdk_asks_anthropic_with_its_own_key(
     does not know has none."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-own")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    anthropic_models.records["claude-newer"] = _model_record("claude-newer", max_input_tokens=500_000)
+    anthropic_models.records["claude-newer"] = _model_record(
+        "claude-newer", max_input_tokens=500_000
+    )
     assert routed_chat_model("anthropic:claude-newer").profile == {"max_input_tokens": 500_000}
     assert anthropic_models.asked[0].headers["x-api-key"] == "sk-own"
     assert routed_chat_model("openai:gpt-unreleased").profile is None
     assert routed_chat_model("granite").profile is None  # no provider told: no route to ask
     assert len(anthropic_models.asked) == 1
     assert routed_chat_model("anthropic:claude-unheard").profile is None  # a 404
+    # a route a package adds, without a record of its own: none (the port's default)
+    assert gateways.ModelGateway.window(ProviderSDK(), "anthropic:claude-newer") is None
 
 
 def test_anthropics_own_api_is_reached_with_its_own_client() -> None:
