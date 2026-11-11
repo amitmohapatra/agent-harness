@@ -536,8 +536,9 @@ async def _kept_read(runtime: Runtime, request: ToolCallRequest) -> ToolMessage 
     elif call["name"] == READ_FILE and (request.tool is None or kept):
         said = await results.aread(args)
     elif call["name"] == query.QUERY_RESULT and (request.tool is None or kept):
-        with query.graph_results(*_graph_results(request.state)):
-            said = await query.query(args, None if kept else _state_file(request.state, path))
+        with query.graph_results(*_graph_results(request.state, runtime)):
+            given = None if kept else _state_file(request.state, path, runtime)
+            said = await query.query(args, given)
     if said is None:
         return None  # another tool, or the graph's own read_file of its own files
     return ToolMessage(content=said, tool_call_id=str(call["id"]), name=call["name"])
@@ -559,23 +560,42 @@ def _cleared_result(state: Any, path: str) -> str | None:
     return None
 
 
-def _state_file(state: Any, path: str) -> str | None:
+def _state_file(state: Any, path: str, runtime: Runtime | None = None) -> str | None:
     """The text of a file Deep Agents keeps in the graph's state (a large result it saved), or
-    ``None``."""
+    ``None`` — a copy of a result the run keeps (:func:`_kept_copy`) as that result."""
     found = (state.get("files") if isinstance(state, Mapping) else None) or {}
     content = (found.get(path) or {}).get("content")
-    return "\n".join(content) if isinstance(content, list) else content
+    text = "\n".join(content) if isinstance(content, list) else content
+    if text is None or runtime is None:
+        return text
+    copied = _kept_copy(runtime, text)
+    return text if copied is None else runtime.replay.journal.results[copied]
 
 
-def _graph_results(state: Any) -> tuple[dict[str, str], dict[str, str]]:
+def _kept_copy(runtime: Runtime, text: str) -> str | None:
+    """The path of the result the run keeps that ``text`` — a file Deep Agents saved — is a
+    copy of: a table read whole is kept and sent with its note after it (``results.tabled``),
+    and Deep Agents saves that whole message when it is too large for the window. The file
+    then starts with the kept result, and what follows is the note: no table of its own (read
+    as one, a JSON result was "CSV" of thousands of columns)."""
+    kept: Mapping[str, str] = runtime.replay.journal.results
+    return next((p for p, k in kept.items() if len(k) < len(text) and text.startswith(k)), None)
+
+
+def _graph_results(
+    state: Any, runtime: Runtime | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
     """The results Deep Agents saved in the graph's state (``/large_tool_results/<call id>``),
-    by path, and the tool whose call returned each (named in the state's messages)."""
+    by path, and the tool whose call returned each (named in the state's messages) — less the
+    copies of results ``runtime``'s run keeps itself (:func:`_kept_copy`): tables already."""
     held: Mapping[str, Any] = state if isinstance(state, Mapping) else {}
     prefix = results.PREFIX + "/"
     files = {
         str(p): text
         for p in held.get("files") or {}
-        if str(p).startswith(prefix) and (text := _state_file(held, str(p))) is not None
+        if str(p).startswith(prefix)
+        and (text := _state_file(held, str(p))) is not None
+        and (runtime is None or _kept_copy(runtime, text) is None)
     }
     calls = {
         str(c["id"]): _table(m, c)
@@ -1030,22 +1050,27 @@ def _stubs_tabled(runtime: Runtime, request: ModelRequest[Any]) -> ModelRequest[
     model not told its name took ``result`` for it in another file's query (the priced pilot's
     ``long-data-02`` on ``ReAct`` with a backend: a failed query, one step more over 80,000
     tokens of results). The request's copy says it, once, never the graph's state."""
-    files, tools = _graph_results(request.state)
-    if not files:
+    files, tools = _graph_results(request.state, runtime)
+    # a copy of a result the run keeps (:func:`_kept_copy`) is that result's table
+    whole = _graph_results(request.state)[0]
+    copies = {p: k for p in whole.keys() - files.keys() if (k := _kept_copy(runtime, whole[p]))}
+    if not files and not copies:
         return request
     with query.graph_results(files, tools):
         named = query.tables(runtime)
+    kept: Mapping[str, str] = runtime.replay.journal.results
     messages = list(request.messages)
     for n, m in enumerate(messages):
         if not isinstance(m, ToolMessage) or not isinstance(m.content, str):
             continue
         path = f"{results.PREFIX}/{m.tool_call_id}"
-        text = files.get(path)
+        text = files.get(path) or kept.get(copies.get(path, ""))
         if text is None or not m.content.startswith(results.EVICTED):
             continue
+        table = named[copies.get(path, path)]
         said = _STUB_TABLES.setdefault(
-            (runtime.run_id, path, named[path]),
-            lambda path=path, text=text: results.table_said(path, text, named[path]),
+            (runtime.run_id, path, table),
+            lambda path=path, text=text, table=table: results.table_said(path, text, table),
         )
         if said not in m.content:
             messages[n] = m.model_copy(update={"content": results.stub_tabled(m.content, said)})
