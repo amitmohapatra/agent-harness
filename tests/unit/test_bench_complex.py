@@ -1904,3 +1904,45 @@ def test_a_figure_said_in_millions_or_thousands_reads_as_its_value() -> None:
     assert cx.score(cx.money(36_255.0), "About £36.3k.", [])["correct"] is False  # 0.1% off: no
     assert cx.score(cx.money(36_255.0), "About £36.255k.", [])["correct"]
     assert not cx.score(expect, "Q4 would be about £8.3 million.", [])["correct"]
+
+
+@pytest.mark.parametrize("window", [None, 16_000])
+async def test_the_can_do_cases_give_the_same_figures_with_and_without_a_sandbox(
+    tmp_path: Path, offline: None, window: int | None
+) -> None:
+    """Parity, replayed: every ``cando`` data case run both ways (``main``, and ``sandbox``:
+    ``ReAct(backend=sandbox())``), at the model's own window and at a small one — each scored
+    figure right on both, the file a query saves the user's with the right rows, and the case
+    that is nothing without code run only where code runs."""
+    rows: dict[str, dict[str, Any]] = {}
+    for variant in ("main", "sandbox"):
+        out = tmp_path / f"cando-{variant}"
+        await cx.bench(
+            _args(out, cases="cando", adapter="react", variant=variant, window=window),
+            progress=lambda _: None,
+        )
+        found = [json.loads(x) for x in out.with_suffix(".jsonl").read_text().splitlines()]
+        rows[variant] = {x["case"]: x for x in found}
+    assert set(rows["main"]) == set(rows["sandbox"]) == {f"cando-0{n}" for n in range(1, 6)}
+    assert rows["main"]["cando-04"]["not_applicable"]  # a clustering: only code gives it
+    assert "not_applicable" not in rows["sandbox"]["cando-04"]
+    for variant, cases in rows.items():
+        turns = [t for c in cases.values() for t in c.get("turns", ())]
+        assert all(t["status"] == "SUCCESS" for t in turns), variant
+        assert all(t["score"]["correct"] for t in turns if "score" in t), variant
+        assert all(k["ok"] for t in turns for k in t["checks"]), variant
+    kept = [k for c in rows["main"].values() for t in c["turns"] for k in t["checks"]]
+    assert [k["found"] for k in kept if k["check"] == "file"] == [
+        "top20_skus_sep2026.xlsx (21 lines)",
+        "S14_sales_2026.csv (1078 lines)",
+    ]
+
+
+def test_a_kept_file_is_checked_by_its_name_its_rows_and_what_it_holds() -> None:
+    probe = cx.Probe("file", r"\.csv$", "the export", holds=("SKU-1,3", "sku-2,5"), limit=3)
+    whole = b"sku,units\nSKU-1,3\nSKU-2,5\n"
+    assert cx.kept_file(probe, {"export.csv": whole}) == (True, "export.csv (3 lines)")
+    assert cx.kept_file(probe, {"notes.txt": whole}) == (False, "kept: ['notes.txt']")
+    assert cx.kept_file(probe, {}) == (False, "kept: no file")
+    short, why = cx.kept_file(probe, {"export.csv": b"sku,units\nSKU-1,3\n"})
+    assert not short and "lacks ['sku-2,5']" in why

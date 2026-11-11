@@ -3187,8 +3187,8 @@ def checked(
             continue
         if requests is None and p.kind in SENT_PROBES:
             continue
-        if p.kind == "file" and p.coding and not coding:
-            continue
+        if p.kind == "file" and (files is None or (p.coding and not coding)):
+            continue  # not checked: the scripted model where only code makes the file
         found: Any = None
         if p.kind == "file":
             ok, found = kept_file(p, files or {})
@@ -3750,6 +3750,7 @@ async def run_case(
     if case.adapters and kind not in case.adapters:
         return found | {"not_applicable": case.only_because or f"only {case.adapters}"}, []
     coding = kind == "react" and variant in variants.CODING
+    scripted = not isinstance(model, str)
     if case.coding and not coding:
         return found | {"not_applicable": "needs code to run: a sandbox variant"}, []
     wire: list[dict[str, Any]] = []
@@ -3938,7 +3939,9 @@ async def run_case(
                     calls=calls,
                     history=history,
                     happened=happened.get(id(turn), ()),
-                    files=await trace.kept(run_id),
+                    # the scripted model writes no code: where only code makes the file (a
+                    # variant with a sandbox, which has no ``save_as``), it is not checked
+                    files=None if coding and scripted else await trace.kept(run_id),
                     coding=coding,
                 ),
             }
