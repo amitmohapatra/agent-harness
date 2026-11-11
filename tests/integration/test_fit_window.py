@@ -367,6 +367,72 @@ def test_the_longest_results_are_cut_first_and_only_as_far_as_needed() -> None:
     assert ours._cut(small, 1) is small  # too short to cut
 
 
+async def test_tools_dropped_to_fit_come_back_once_the_older_turns_are_left_out() -> None:
+    """A long chat on a small window: the tools are narrowed (to none, past ``FIT_KEEP``) before
+    the older turns are left out, and leaving them out frees the room; the tools that fit then
+    are offered again — a request with no tool left the model nothing to fetch with (a 6,000-token
+    window, Haiku: every turn after the fourth offered no tool, the model saying it had none)."""
+    older = []
+    for n in range(20):
+        older += [HumanMessage(f"question {n}: {LONG}"), AIMessage(content=f"answer {n}: {LONG}")]
+    messages = [*older, HumanMessage("How many footwear SKUs are priced above £100?")]
+    tools = [lc(name) for name in ("sku_catalog", "sales_summary", "stock_level", "store_list")]
+    out = await sent(FitWindow(3000), request(messages, tools))
+    assert [m.text for m in out.messages] == [messages[-1].text]  # the older turns left out
+    assert [t["function"]["name"] if isinstance(t, dict) else t.name for t in out.tools] == [
+        "sku_catalog", "sales_summary", "stock_level", "store_list",
+    ]  # fmt: skip
+    assert _size(out) <= int(3000 * 0.95)
+
+
+async def test_older_turns_are_left_out_before_the_tools_the_question_needs() -> None:
+    """The tools a question needs, and the question, go after the older turns: a request over
+    the window keeps the most relevant tools — :data:`FIT_KEEP` of them beside those it must
+    keep (the run's used ones, the graph's own state tools) — and leaves the older turns out
+    first. Before, the tools were narrowed to the must-keep ones alone to make room for older
+    turns that were then left out too: on the ``deepagents`` adapter at 6,000 tokens the
+    catalog questions had only Deep Agents' file tools, no catalog (0 of 12 answered)."""
+    state = [lc(name, "Works on the agent's files.") for name in sorted(ours.STATE_TOOLS)]
+    catalog = lc("sku_catalog", "The SKUs of a category with their prices.")
+    others = [lc(f"tool_{n}", "Looks something up.") for n in range(12)]
+    older = [
+        HumanMessage("How many knitwear SKUs are priced above 100?"),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "sku_catalog", "args": {}}]),
+        ToolMessage("SKU-1,knitwear,120.00\n" * 400, tool_call_id="c1"),
+        AIMessage(content="132 of them."),
+    ]
+    question = HumanMessage("How many outerwear SKUs are priced above 100?")
+    tools = [*state, catalog, *others]
+    given = request([*older, question], tools)
+    room = request([question], [*state, catalog, *others[: ours.FIT_KEEP]])
+    out = await sent(FitWindow(int((_size(room) + 100) / 0.95)), given)
+    assert out.messages == [question]  # the older turn left out
+    names = {ours._named(t) for t in out.tools}
+    assert "sku_catalog" in names and names >= ours.STATE_TOOLS
+    assert len(names - ours.STATE_TOOLS) >= ours.FIT_KEEP  # beside the ones it must keep
+
+
+async def test_a_note_appended_for_the_call_is_not_the_question_the_latest_turn_starts_at() -> None:
+    """At the step limit (or the budget) the call is told to answer now in a user message the
+    harness appends to the request, not to the conversation: the latest turn still starts at
+    the user's question. It started at the note, so a request over the window kept the note
+    alone and the model answered "I made no tool calls" (the ``deepagents`` adapter at 6,000
+    tokens, turn 11)."""
+    from trellis.harness import budget
+
+    older = [HumanMessage("first " * 2_000, id="h0"), AIMessage(content="ok", id="a0")]
+    turn = [
+        HumanMessage("How many outerwear SKUs?", id="h1"),
+        AIMessage(content="", id="a1", tool_calls=[{"id": "c1", "name": "a", "args": {}}]),
+        ToolMessage("120 of them", tool_call_id="c1", id="t1"),
+    ]
+    state = [*older, *turn]
+    note = HumanMessage(budget.LIMIT.format(limit=12))
+    given = request(state, [lc("a")]).override(messages=[*state, note])
+    out = await sent(FitWindow(int((_size(given) - 1_000) / 0.95)), given)
+    assert out.messages == [*turn, note]  # the older turn left out, the question kept
+
+
 async def test_a_refusal_after_a_summarization_cuts_the_latest_turns_results() -> None:
     """With a summarization after it (Deep Agents'), the results are its to offload — but it
     keeps a ``read_file`` page whole, and on a small window that page and its summary did not

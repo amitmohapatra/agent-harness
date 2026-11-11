@@ -379,6 +379,23 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
+  window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
+  turns left out — and the tools stayed out, though the room the turns took was free. Every
+  turn after that offered the model no tool (`create_agent` with `middleware()`, a 6,000-token
+  window, Haiku, `advconv-05`: from the fourth turn on, 567 tokens a request, "I only have a
+  file-reading tool"). The tools the narrowing dropped are now offered again as far as they
+  fit: the same case on Haiku fetched the figure again on its last turn and passed every check
+  (0 of 16 failed; 1 of 16 and the answer before).
+- `FitWindow` leaves the older turns out before the tools a question needs, and starts the
+  latest turn at the user's question. Narrowing kept 8 tools counting the ones it must keep,
+  so on Deep Agents (8 state tools) it kept none of the question's; and once the results were
+  cut the request fitted with the older turns kept and the catalog tool gone (the `deepagents`
+  adapter, 6,000 tokens, `advconv-05`: 0 of 12 catalog questions answered). Now 8 are kept
+  besides those it must keep, and the tools are narrowed past them only after the older turns
+  are left out. A note the step limit or the budget appends to the call is no longer taken for
+  the question: a request over the window kept the note alone, and the model answered that it
+  had looked nothing up.
 - A LangGraph graph that keeps its own thread (a checkpointer: `create_agent`, with or
   without `middleware()`, a hand-built graph) can be continued after a run stopped mid-call
   (`mode="interrupt"`, a time limit) or left paused on a call while the user wrote again. The
