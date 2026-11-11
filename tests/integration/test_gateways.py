@@ -58,6 +58,7 @@ def _no_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     gateways._endpoint_wins.cache_clear()
+    gateways._WINDOWS._data.clear()
 
 
 def test_one_route_is_chosen_never_a_chain() -> None:
@@ -416,6 +417,111 @@ def test_a_model_langchain_cannot_make_offline_has_no_profile(
 
 #: Anthropic's own API, as an OpenAI-compatible endpoint (its OpenAI SDK compatibility layer).
 ANTHROPIC_V1 = "https://api.anthropic.com/v1/"
+
+
+def _model_record(name: str, **said: Any) -> dict[str, Any]:
+    """A model as Anthropic's Models API describes it."""
+    return {"type": "model", "id": name, "display_name": name, "created_at": "2026-01-01", **said}
+
+
+def test_a_model_langchain_does_not_know_is_asked_of_anthropics_api(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, anthropic_models: Any
+) -> None:
+    """LangChain's table of profiles is as old as the installed package: a model released after
+    it has none. Anthropic's Models API says its context window (``max_input_tokens``); it is
+    asked once, with the route's key, and ``ReAct`` builds with the window known."""
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    anthropic_models.records["claude-newer"] = _model_record(
+        "claude-newer", max_input_tokens=1_000_000, max_tokens=128_000
+    )
+    assert routed_chat_model("claude-newer").profile == {"max_input_tokens": 1_000_000}
+    (asked,) = anthropic_models.asked
+    assert str(asked.url) == "https://api.anthropic.com/v1/models/claude-newer"
+    assert asked.headers["x-api-key"] == "sk-ant"
+    with caplog.at_level(logging.INFO, logger="trellis.models"):
+        graph = ReAct("Answer.", "claude-newer")
+    assert len(anthropic_models.asked) == 1  # kept: one question per route and model
+    assert graph.config["metadata"]["trellis_context_window"] == 1_000_000
+    assert "the context window of claude-newer: 1000000 tokens" in caplog.text
+    assert "is not known" not in caplog.text
+    # a model LangChain knows is not asked: its profile is LangChain's, whole
+    assert routed_chat_model("claude-sonnet-4-5").profile["tool_calling"] is True
+    assert len(anthropic_models.asked) == 1
+
+
+@pytest.mark.parametrize(
+    ("settings", "name", "listed", "field"),
+    [
+        ({"LLM_BASE_URL": "http://vllm.test/v1"}, "qwen", "qwen", "max_model_len"),
+        ({"LLM_BASE_URL": "http://router.test/v1"}, "meta/llama", "meta/llama", "context_length"),
+        ({"LLM_BASE_URL": "http://groq.test/v1"}, "llama-next", "llama-next", "context_window"),
+        ({"LLM_BASE_URL": "http://mistral.test/v1"}, "ministral", "ministral", "max_context_length"),
+        (
+            {"LLM_BASE_URL": "http://bf.test/v1", "LLM_GATEWAY": "bifrost", "LLM_API_KEY": "vk"},
+            "anthropic/claude-newer",
+            "anthropic/claude-newer",
+            "max_input_tokens",
+        ),
+    ],
+    ids=["vllm", "openrouter", "groq", "mistral", "bifrost"],
+)
+@respx.mock
+def test_an_endpoints_model_list_says_the_window(
+    monkeypatch: pytest.MonkeyPatch, settings: dict[str, str], name: str, listed: str, field: str
+) -> None:
+    """An OpenAI-compatible endpoint's ``/models`` names each model's context window under the
+    server's own field: the route's list is read for the model, as the route names it."""
+    for key, value in settings.items():
+        monkeypatch.setenv(key, value)
+    root = settings["LLM_BASE_URL"]
+    models = respx.get(f"{root}/models").respond(
+        json={"object": "list", "data": [{"id": "another", field: 8_192}, {"id": listed, field: 65_536}]}
+    )
+    assert routed_chat_model(name).profile == {"max_input_tokens": 65_536}
+    assert routed_chat_model("another").profile == {"max_input_tokens": 8_192}
+    if "LLM_API_KEY" in settings:
+        assert models.calls.last.request.headers["authorization"] == "Bearer vk"
+
+
+@respx.mock
+def test_a_route_that_does_not_say_leaves_the_window_unknown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A list without the model, a record without a window, an endpoint that does not answer:
+    the window is not known, as before (said once by ``ReAct``), never guessed. A route that
+    could not be asked is asked again by the next build; one that answered is not."""
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama.test/v1")
+    models = respx.get("http://ollama.test/v1/models").respond(
+        json={"object": "list", "data": [{"id": "granite", "owned_by": "library"}]}
+    )
+    assert routed_chat_model("granite").profile is None  # listed, no window said
+    assert routed_chat_model("absent").profile is None  # not listed
+    assert routed_chat_model("granite").profile is None and models.call_count == 2  # kept
+    models.mock(side_effect=httpx.ConnectError("refused"))
+    assert routed_chat_model("later").profile is None
+    models.mock(return_value=httpx.Response(200, json={"data": [{"id": "later", "n_ctx": 1}]}))
+    assert routed_chat_model("later").profile is None and models.call_count == 4  # asked again
+    with caplog.at_level(logging.WARNING, logger="trellis.models"):
+        ReAct("Answer.", "granite-unsaid")
+    assert "the context window of granite-unsaid is not known" in caplog.text
+
+
+def test_a_providers_own_sdk_asks_anthropic_with_its_own_key(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
+) -> None:
+    """No endpoint: Anthropic's SDK reads its own key, and is asked the same; a provider whose
+    API says no window (OpenAI's model records hold none) is not asked, and a model the API
+    does not know has none."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-own")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    anthropic_models.records["claude-newer"] = _model_record("claude-newer", max_input_tokens=500_000)
+    assert routed_chat_model("anthropic:claude-newer").profile == {"max_input_tokens": 500_000}
+    assert anthropic_models.asked[0].headers["x-api-key"] == "sk-own"
+    assert routed_chat_model("openai:gpt-unreleased").profile is None
+    assert routed_chat_model("granite").profile is None  # no provider told: no route to ask
+    assert len(anthropic_models.asked) == 1
+    assert routed_chat_model("anthropic:claude-unheard").profile is None  # a 404
 
 
 def test_anthropics_own_api_is_reached_with_its_own_client() -> None:
