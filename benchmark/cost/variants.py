@@ -26,14 +26,24 @@ same instructions and model. A new cost feature lands as one more entry of :data
   ``context_editing``, ``summarization``), each measured on its own (``react.defaults_off``);
   with Deep Agents' paging off a large result is paged by the harness's own convention.
 
+* ``sandbox``, ``subagents``, ``memory-files``, ``permissions`` — ``ReAct`` given one Deep
+  Agents capability (:data:`CAPABILITIES`): the run's sandbox as its backend (Docker, the image
+  ``TRELLIS_BENCH_SANDBOX_IMAGE`` names, else the provider's; a fake one under the scripted
+  model, which needs no daemon), a sub-agent of its own, a memory file on a disk backend, and
+  permissions on one. Every case of the suite runs on each, at any ``--window``: what a
+  capability must not change is the answer.
+
 :data:`DEFAULT` are the variants a run compares unless ``--variants`` says.
 """
 
 from __future__ import annotations
 
 import functools
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final, cast
 
 from trellis import ReAct
@@ -150,6 +160,86 @@ def pieces(setup: Setup) -> tuple[Any, dict[str, Any]]:
     return graph, {}
 
 
+def capable(setup: Setup, **given: Any) -> tuple[Any, dict[str, Any]]:
+    """``ReAct`` as ``main`` builds it, given a Deep Agents capability (``given``)."""
+    target = ReAct(
+        setup.system,
+        setup.model,
+        max_steps=setup.max_steps,
+        context_window=setup.window,
+        tools=setup.tools,
+        skills=setup.skills,
+        **given,
+    )
+    return target, {}
+
+
+def with_sandbox(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``ReAct(backend=sandbox())``: a real one for a model on an endpoint, a fake one (no
+    daemon, no interpreter: files and the listing only) for the scripted model."""
+    from trellis import sandbox
+
+    if isinstance(setup.model, str):
+        return capable(setup, backend=sandbox(image=os.environ.get(SANDBOX_IMAGE) or None))
+    from tests.support.sandbox import FakeSandboxes
+
+    return capable(setup, backend=sandbox(FakeSandboxes()))
+
+
+def _disk(files: dict[str, str]) -> Any:
+    """A disk backend of the variant's own (a folder made for it), holding ``files``."""
+    from deepagents.backends import FilesystemBackend
+
+    root = Path(tempfile.mkdtemp(prefix="trellis-bench-"))
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    return FilesystemBackend(root_dir=root, virtual_mode=True)
+
+
+def with_memory_files(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``ReAct(memory_files=[...])``: a memory file of the deployment's on a disk backend."""
+    return capable(setup, backend=_disk({"AGENTS.md": MEMORY_FILE}), memory_files=["/AGENTS.md"])
+
+
+def with_permissions(setup: Setup) -> tuple[Any, dict[str, Any]]:
+    """``ReAct(permissions=[...])``: a disk backend whose ``/reference`` is read-only."""
+    from deepagents.middleware.permissions import FilesystemPermission
+
+    rule = FilesystemPermission(operations=["write"], paths=["/reference/**"], mode="deny")
+    return capable(setup, backend=_disk({"reference/README.md": MEMORY_FILE}), permissions=[rule])
+
+
+#: The environment variable naming the ``sandbox`` variant's image (else the provider's own).
+SANDBOX_IMAGE: Final = "TRELLIS_BENCH_SANDBOX_IMAGE"
+#: What the ``memory-files`` variant's memory file says: house style, no fact of the data.
+MEMORY_FILE: Final = "# Notes\n\nAnswer in British English. Amounts are in GBP.\n"
+#: The ``subagents`` variant's helper: no ``tools`` named, so it has the run's.
+HELPER: Final = {
+    "name": "stock-helper",
+    "description": "Looks up figures for one SKU, supplier or store with the retail tools and "
+    "reports them back.",
+    "system_prompt": "You look up the figures asked for with the tools and report them exactly.",
+}
+#: ``ReAct`` given one Deep Agents capability each: the variants an answer must not change on.
+CAPABILITIES: Final[dict[str, Variant]] = {
+    "sandbox": Variant("sandbox", "ReAct(backend=sandbox()): the run's sandbox", with_sandbox),
+    "subagents": Variant(
+        "subagents",
+        "ReAct(subagents=[a helper]): a sub-agent of its own",
+        functools.partial(capable, subagents=[HELPER]),
+    ),
+    "memory-files": Variant(
+        "memory-files", "ReAct(memory_files=[...]) on a disk backend", with_memory_files
+    ),
+    "permissions": Variant(
+        "permissions", "ReAct(permissions=[...]) on a disk backend", with_permissions
+    ),
+}
+#: The capability variants in which code runs (a sandbox): what a ``cando`` case's file needs.
+CODING: Final = frozenset({"sandbox"})
+
+
 #: ``deep``'s pieces a ``deep-<piece>`` variant turns off, by the name of their middleware.
 PIECES: Final = {
     "paging": "FilesystemMiddleware",
@@ -208,6 +298,7 @@ VARIANTS: Final[dict[str, Variant]] = {
         "main on an 8,192-token window, whatever the model's",
         functools.partial(main, window=SMALL_WINDOW),
     ),
+    **CAPABILITIES,
 }
 #: The variants a run compares by default.
 DEFAULT: Final = ("baseline", "main")

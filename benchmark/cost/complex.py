@@ -64,7 +64,7 @@ from typing import Any, Final
 
 from langchain_core.messages import convert_to_openai_messages
 
-from benchmark.cost import approvals, prices, stats
+from benchmark.cost import approvals, prices, stats, variants
 from benchmark.cost import retail as r
 from benchmark.cost import run as runner
 from trellis import Harness, Hooks, current
@@ -4136,9 +4136,10 @@ def arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--variant",
-        choices=("main", "deep"),
+        choices=("main", "deep", *variants.CAPABILITIES),
         default="main",
-        help="with --adapter react: ReAct as built (main) or on Deep Agents (deep: a backend)",
+        help="with --adapter react: ReAct as built (main), on Deep Agents (deep: a backend), "
+        "or given one Deep Agents capability (benchmark.cost.variants.CAPABILITIES)",
     )
     p.add_argument("--cases", default="", help="case ids, categories or tier:N, comma-separated")
     p.add_argument(
