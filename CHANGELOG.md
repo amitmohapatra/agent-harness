@@ -488,6 +488,14 @@ own model work follows the harness's configuration.
 
 ### Fixed
 
+- With a sandbox, a kept result's rows are `query_result`'s to count, sum, filter, rank and
+  group, and code is for what a query cannot make. The stub's code note gave the same job to
+  the sandbox ("to count, sum, filter, rank or group its rows, run code over that file"), so a
+  model computed in its own Python: 105 SKUs under a 40% margin where every query said 104
+  (`ReAct` with a sandbox, `long-data-03`). The note now says the file is there for a chart, a
+  formatted workbook or a script, read from the file and never typed into a command; a table
+  read whole says so too (its file is in the sandbox as well: 1,528 values were typed into one
+  command).
 - `FitWindow` gives the tools back once it leaves the older turns out. A long chat on a small
   window was fitted in order: the tools narrowed, to none past `FIT_KEEP`, then the older
   turns left out — and the tools stayed out, though the room the turns took was free. Every

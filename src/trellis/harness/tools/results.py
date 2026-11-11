@@ -95,11 +95,13 @@ PRIVATE: Final = (
 )
 #: Deep Agents' tool that runs a command on its backend (a sandbox's: ``ReAct(backend=sandbox())``).
 EXECUTE: Final = "execute"
-#: What a stub adds for a run with a sandbox: the kept result is a file there, which code reads
-#: whole — a count, a sum, a filter, a top-N or a group over every row, without paging it.
+#: What a kept result's note adds for a run with a sandbox, after the query's: the result is a
+#: file there, for what a query does not do. The rows' arithmetic is ``query_result``'s alone
+#: (:data:`QUERY`: exact decimals) — both notes said it once, and code in floats was a row off.
 CODE: Final = (
-    "The whole result is also the file {path} in your sandbox: to count, sum, filter, rank or "
-    "group its rows, run code over that file with {tool} instead of reading it page by page."
+    "The whole result is also the file {path} in your sandbox, for what a query cannot make: "
+    "a chart, a formatted workbook, a script of your own. Read that file in code with {tool}; "
+    "never type its values into a command."
 )
 #: Deep Agents' stub for a large result (``_message_eviction._TOO_LARGE_TOOL_MSG``).
 STUB: Final = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
@@ -188,7 +190,9 @@ def tabled(text: str, tool: str | None = None) -> str:
         path=path,
         private=PRIVATE,
     ) + query.also(query.parts_of(text), name)
-    return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}"
+    code = coding_tool()  # a sandbox holds the kept file too (``SandboxSource.with_results``)
+    there = "" if code is None else f" {CODE.format(path=path, tool=code)}"
+    return f"{text}\n\n{TABLED.format(rows=len(rows), path=path)}{table}{there}"
 
 
 def noted(text: str) -> tuple[str, str]:
