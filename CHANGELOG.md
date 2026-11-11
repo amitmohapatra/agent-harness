@@ -20,9 +20,6 @@ rows was read as it was, with no `query_result` to compute with.
   runs (5 of 9 before); complex tier 3 81/81 turns (80/81); the 35 ordinary cases 113/114
   (110/114); no case lost. It costs a model call where the model now computes: input tokens
   up 19% on both sets, model calls up 5 to 7%, cost up 5% and 17%.
-- With memory off, the context sent with the question is marked off under the run's own name
-  (`<run_context>`, `history.NOTED_WITH`), not as what memory holds.
-
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each

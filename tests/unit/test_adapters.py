@@ -319,7 +319,7 @@ async def test_the_context_moves_into_the_users_turn_after_the_runs_own_filter()
         seen.append(data)
         return data.model_data
 
-    runtime = SimpleNamespace(pushed_context="ctx", pushed={"bundle_id": "b"})  # memory's
+    runtime = SimpleNamespace(pushed_context="ctx")
     options = {"run_config": RunConfig(call_model_input_filter=theirs)}
     moved = _asked_with(runtime, options)["run_config"].call_model_input_filter  # type: ignore[arg-type]
 
