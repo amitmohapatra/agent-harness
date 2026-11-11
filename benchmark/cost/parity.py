@@ -59,13 +59,12 @@ def differences(one: Path, other: Path) -> tuple[int, list[str]]:
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 2:
-        print(__doc__)
+        sys.stdout.write(f"{__doc__}\n")
         return 2
     one, other = (Path(a) for a in args)
     shared, found = differences(one, other)
-    print(f"{shared} turns in both; {len(found)} differences")
-    for line in found:
-        print(f"- {line}")
+    lines = [f"{shared} turns in both; {len(found)} differences", *(f"- {x}" for x in found)]
+    sys.stdout.write("\n".join(lines) + "\n")
     return 1 if found else 0
 
 
