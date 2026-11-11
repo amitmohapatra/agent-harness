@@ -160,17 +160,16 @@ says it was saved:
   ("In /workspace/outputs/ for the user: report.csv (85731 bytes)." or "No file is in
   /workspace/outputs/ yet: only a file written directly there is given to the user."). Another
   `outputs` (the root's `/outputs/`) is not the kept one.
-- A file written by a path that names an `outputs` folder (`write_file`, `sandbox_write`) is
-  told the same when it is directly in the kept folder, and otherwise that it is not the
-  user's, by its path ("Not in /workspace/outputs/, so not given to the user:
-  /outputs/chart.svg.").
+- A file written by its path (`write_file`, `sandbox_write`) is told the same when it is
+  directly in the kept folder, and otherwise that it is not the user's, by its path ("Not in
+  /workspace/outputs/, so not given to the user: /outputs/chart.svg.").
 - A command that left a new file directly in the working directory, beside the kept folder, is
   told so, once per file ("Not in /workspace/outputs/, so not given to the user: chart.png.").
-  A file the sandbox started with, or one the model wrote by a path of its own choice, is not
-  named.
+  A file the sandbox started with is not named, nor one already told of when it was written
+  by its path.
 
 It costs one listing in the sandbox after each command of the model's (and one before its
-first), none after a file tool's.
+first), and one after a file written into the kept folder.
 
 **A large result with a sandbox.** A tool result too large to show whole is kept by the run, as
 without a sandbox: the model is shown a preview with the result's file path and, for rows, the

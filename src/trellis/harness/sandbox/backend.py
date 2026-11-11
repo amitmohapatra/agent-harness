@@ -179,8 +179,8 @@ class SandboxCard(AgentMiddleware):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
         """A file the model wrote with ``write_file`` is told, as its command is
-        (``SandboxBackend.aexecute_with_offload``), what the user gets of it when its path
-        names an ``outputs`` folder: nothing, when that is not the kept one."""
+        (``SandboxBackend.aexecute_with_offload``), what the user gets of it: nothing, unless
+        it is directly in the kept folder."""
         runtime = current()
         if runtime is None or request.tool_call["name"] != WRITE_FILE:
             return await handler(request)

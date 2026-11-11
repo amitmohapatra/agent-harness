@@ -296,7 +296,7 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     folder (the root's: the live chart case), or left by a command beside the kept folder (a
     chart saved in the working directory), is said with that call's result, with the kept
     folder's whole path — once per file; a file the sandbox started with, or one the model
-    wrote by a path of its own choice, is not one a command left."""
+    was told of when it wrote it by its path, is not one a command left."""
     provider = FakeSandboxes()
     model = ScriptedChatModel(
         turns=[
@@ -312,7 +312,9 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     agent = harness.wrap(ReAct("s", model, backend=made), id="charter")
     assert (await agent.run("chart it", user="u")).answer == "saved"
     root, own, beside, plain, kept = [str(m.content) for m in model.seen[-1] if m.type == "tool"]
-    assert own == "Updated file /workspace/plot.py"  # a place of its own choice: no surprise
+    assert own.endswith(  # whichever path: outside the kept folder is not the user's
+        "Not in /workspace/outputs/, so not given to the user: /workspace/plot.py."
+    ), own
     assert root.endswith(
         "Not in /workspace/outputs/, so not given to the user: /outputs/chart.svg."
     ), root
@@ -334,3 +336,50 @@ async def test_a_file_written_outside_the_kept_folder_is_known_at_once_not_to_be
     ), wrote
     assert ran["outputs"] == "Not in /workspace/outputs/, so not given to the user: b.png.", ran
     assert "outputs" not in then, then
+
+
+#: Every tool that can write a file in the run's sandbox, and the call that writes ``path``.
+WRITERS = {
+    "write_file": lambda path: ("write_file", {"file_path": path, "content": "x"}),
+    "execute": lambda path: ("execute", {"command": f"touch {path}"}),
+    "sandbox_write": lambda path: ("sandbox_write", {"path": path, "content": "x"}),
+    "sandbox_exec": lambda path: ("sandbox_exec", {"command": f"touch {path}"}),
+}
+#: Where a file is written, and whether the user is given it: only directly in the kept folder.
+PLACES = {
+    "/workspace/outputs/chart.svg": True,
+    "/outputs/chart.svg": False,  # another outputs: the root's
+    "/workspace/chart.svg": False,  # beside the kept folder
+}
+
+
+@pytest.mark.parametrize("path", list(PLACES))
+@pytest.mark.parametrize("writer", list(WRITERS))
+async def test_whichever_tool_wrote_a_file_the_model_knows_whether_the_user_has_it(
+    harness: Harness, writer: str, path: str
+) -> None:
+    """Every tool that writes a file in the sandbox (Deep Agents' ``write_file`` and
+    ``execute`` on ``ReAct(backend=sandbox())``; ``sandbox_write`` and ``sandbox_exec`` of
+    ``sandbox().tools()``), to a path inside the kept folder and to two outside it: its result
+    says at once whether the user is given the file, with the kept folder's whole path."""
+    provider, call = FakeSandboxes(), WRITERS[writer](path)
+    if writer in ("write_file", "execute"):
+        model = ScriptedChatModel(turns=[call, "done"])
+        agent = harness.wrap(ReAct("s", model, backend=sandbox(provider)), id="writer")
+        assert (await agent.run("write it", user="u")).answer == "done"
+        said = str(model.seen[-1][-1].content)
+    else:
+
+        async def work(input: str, runtime: Runtime) -> Any:
+            await runtime.tools.use(sandbox(provider).tools())
+            return await runtime.tools.call(call[0], **call[1])
+
+        done = await harness.wrap(work, id="writer-tools").run("go", user="u")
+        assert done.status is RunStatus.SUCCESS, done.error
+        said = str(done.answer)
+    given = "In /workspace/outputs/ for the user: chart.svg" in said
+    not_given = (
+        "Not in /workspace/outputs/, so not given to the user" in said
+        or "No file is in /workspace/outputs/ yet" in said
+    )
+    assert (given, not_given) == (PLACES[path], not PLACES[path]), said
