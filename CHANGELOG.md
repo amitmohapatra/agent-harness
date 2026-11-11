@@ -16,6 +16,10 @@ figure again as "re-run", which it had not done. The mark is now `[out of date]`
 (the OpenAI Agents session reading memory's thread, `bridges/session.py`), the mark keeps its
 instruction (`snapshots.STALE_CALL`). A graph's own thread is unchanged (`snapshots.EARLIER`).
 
+With memory off, that note is the run's own, and it was marked off as "What memory holds for
+this message" (`<memory_context>`). A context memory did not push is now marked off under the
+run's name (`<run_context>`, `history.NOTED_WITH`).
+
 ### Fixed: with memory off, an out-of-date value of the turn before was reused
 
 With memory off, `ReAct` replays the conversation's earlier turns from the run store, each
