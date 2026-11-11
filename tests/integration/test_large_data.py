@@ -627,6 +627,43 @@ async def test_tables_of_one_tools_calls_made_side_by_side_say_what_each_asked(
     assert last(model.requests[2]).splitlines()[-2:] == ["revenue,units", f"{n * 10},{n}"]
 
 
+def test_a_stub_of_deep_agents_says_its_table_once() -> None:
+    """A graph whose model call passes the harness's tools and the adapter's narrowing both
+    (a Deep Agents graph of your own with ``middleware()``): the stub names its table once."""
+    from dataclasses import dataclass, replace
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness import middleware
+
+    @dataclass
+    class Request:
+        state: dict[str, Any]
+        messages: list[Any]
+
+        def override(self, **changed: Any) -> Any:
+            return replace(self, **changed)
+
+    path = "/large_tool_results/c1"
+    stub = results.STUB.format(
+        tool_call_id="c1", file_path=path, preview_note=f"{results.PREVIEW}:", content_sample="1  k"
+    )
+    call = {"name": "big_summary", "args": {}, "id": "c1"}
+    said = [AIMessage(content="", tool_calls=[call]), ToolMessage(content=stub, tool_call_id="c1")]
+    files = {path: {"content": totals("revenue").splitlines()}}
+    journal = SimpleNamespace(results={})
+    runtime: Any = SimpleNamespace(run_id="once", replay=SimpleNamespace(journal=journal))
+    request: Any = Request({"files": files, "messages": said}, said)
+    once = middleware._stubs_tabled(runtime, request)
+    twice = middleware._stubs_tabled(runtime, once)
+    told = once.messages[1].content
+    assert table_said(told) == "big_summary" and told.index("Its rows") < told.index(
+        results.PREVIEW
+    )
+    assert twice.messages[1].content == told
+
+
 async def test_a_tools_calls_one_after_another_are_numbered_as_before(harness: Harness) -> None:
     """One call of a tool in a reply is named by its tool alone; the next reply's call of it is
     numbered after it: the model made them in that order. Arguments that are not plain values,

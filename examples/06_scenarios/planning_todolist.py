@@ -1,7 +1,8 @@
-"""Scenario: planning on a long task. ``ReAct`` offers LangChain's ``write_todos`` plan (its
-``TodoListMiddleware``) once a task is long — it asks for steps, or it took a few calls
-already — on a model whose window has room: the agent keeps the plan, updates it as it works,
-and answers when every step is done.
+"""Scenario: planning. ``ReAct`` asked for a Deep Agents capability (here its files on the
+run's journal: ``backend=JournalBackend()``) offers LangChain's ``write_todos`` plan (its
+``TodoListMiddleware``) from the first step: the agent keeps the plan, updates it as it works,
+and answers when every step is done. ``ReAct`` alone offers it by itself once the conversation
+is past half the model's window.
 
 The plan is part of the graph's state, which the run's checkpoint keeps — a resume after a
 pause or a crash continues the same plan. ``write_todos`` is the middleware's own tool: it
@@ -20,6 +21,7 @@ from langchain.agents.middleware import AgentMiddleware
 
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunEventType
+from trellis.harness.automatic import JournalBackend
 
 
 class ShowPlan(AgentMiddleware):
@@ -71,7 +73,7 @@ async def main() -> None:
             system_prompt="You plan replenishment. Keep a todo list; work through it.",
             model=model,
             tools=[inventory, draft_order],
-            context_window=128_000,  # room for the long-task tools
+            backend=JournalBackend(),  # Deep Agents on purpose: its plan from the first step
             middleware=[ShowPlan()],
         )
         agent = h.wrap(target, id="planner")

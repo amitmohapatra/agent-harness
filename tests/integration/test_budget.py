@@ -227,17 +227,6 @@ def test_a_reply_with_no_model_message_spends_nothing() -> None:
     budget.account_reply(runtime, SimpleNamespace(result=["not a message"]))
 
 
-def test_the_calls_of_an_invocation_with_no_user_message_count_from_its_start() -> None:
-    from types import SimpleNamespace
-
-    from langchain_core.messages import AIMessage
-
-    from trellis.harness import automatic
-
-    request: Any = SimpleNamespace(state={"messages": [AIMessage("a"), AIMessage("b")]})
-    assert automatic.calls_made(request) == 2
-
-
 # --------------------------------------------------------------------------- what a run spent
 async def test_a_finished_run_says_what_it_spent_on_its_end(harness: Harness) -> None:
     """Its tokens, model calls, dollars and tool calls — counted in its journal while it works
