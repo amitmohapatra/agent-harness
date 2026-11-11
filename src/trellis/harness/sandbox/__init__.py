@@ -115,6 +115,15 @@ LIST_OUTPUTS: Final = (
     f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
     'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
 )
+#: The working directory, then each output file's size and name: what a command that names
+#: :data:`OUTPUTS` is told with its result (:meth:`SandboxSource.outputs_said`).
+OUTPUTS_NOW: Final = f'printf "%s\\n" "$PWD"; {LIST_OUTPUTS}'
+#: What such a command is told: the files the user gets so far, or that there is none yet —
+#: with the folder's whole path, the one place a file for the user is written.
+OUTPUTS_HOLD: Final = "In {folder}/ for the user: {files}."
+OUTPUTS_EMPTY: Final = (
+    "No file is in {folder}/ yet: only a file written directly there is given to the user."
+)
 #: The largest output file kept; a larger one is left, said in a warning.
 OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
 #: What the command tool's description says about outputs.
@@ -304,9 +313,29 @@ class SandboxSource:
         runtime = _running()
         box = await self.opened(runtime, changes=True)
         await self.with_results(runtime, box)
-        result = await box.exec(str(args["command"]), timeout=runtime.remaining())
+        command = str(args["command"])
+        result = await box.exec(command, timeout=runtime.remaining())
         why = hint(result.exit_code, result.stderr, self.spec)
-        return result.model_dump() if why is None else {**result.model_dump(), "hint": why}
+        kept = await self.outputs_said(box, command)
+        told = {"hint": why, OUTPUTS: kept}
+        return result.model_dump() | {k: v for k, v in told.items() if v is not None}
+
+    async def outputs_said(self, box: Sandbox, command: str) -> str | None:
+        """What a command that names an :data:`OUTPUTS` folder is told once it ran: the files
+        the kept folder holds (each with its size), or that it holds none, with the folder's
+        whole path — so a file written to another ``outputs`` (the root's, another folder's)
+        is known at once not to be the user's. ``None`` for a command that names none: no
+        second command."""
+        if OUTPUTS not in command:
+            return None
+        listed = await box.exec(OUTPUTS_NOW, timeout=self.call_timeout)
+        where, *lines = listed.stdout.splitlines() or [""]
+        folder = f"{where.rstrip('/')}/{OUTPUTS}"
+        found = [line.strip().partition(" ") for line in lines]
+        files = ", ".join(f"{name} ({size} bytes)" for size, _, name in found if name)
+        if not files:
+            return OUTPUTS_EMPTY.format(folder=folder)
+        return OUTPUTS_HOLD.format(folder=folder, files=files)
 
     async def _read(self, args: dict[str, Any]) -> str:
         runtime = _running()
