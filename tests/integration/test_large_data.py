@@ -657,7 +657,7 @@ def test_a_stub_of_deep_agents_says_its_table_once() -> None:
     request: Any = Request({"files": files, "messages": said}, said)
     once = middleware._stubs_tabled(runtime, request)
     twice = middleware._stubs_tabled(runtime, once)
-    told = once.messages[1].content
+    told = str(once.messages[1].content)
     assert table_said(told) == "big_summary" and told.index("Its rows") < told.index(
         results.PREVIEW
     )
