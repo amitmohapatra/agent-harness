@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: values of an earlier request are asked about when they come as memory entries
+
+What the user asked for in an earlier chat reaches a new one as a memory entry
+(`## Memories`), not only as a profile line. The note on using them (`agent.REMEMBERED`) came
+only with a profile, so with entries alone the model wrote with the earlier values and said so
+after the write: the approval was shown without a word of what had been filled in, and a
+person who denied it never learned of it. The part of the note on the values of an earlier
+request (`agent.EARLIER_VALUES`) now comes with memory entries too; the note sent with a
+profile is the same text as before. In the asking benchmark ("Create a low-stock alert for
+SKU-00031 too", the earlier alert an entry): asked first in 0 of 3 runs before, 3 of 3 after;
+the 76 cases that were there, whose notes did not change, 218 and 221 of 228 over three runs
+each. Three more cases of the same kind already passed and are kept (a costly reorder, and
+the item itself left out, as a profile line and as an entry).
+
 ### Fixed: what a ReAct run is told and sent in the cases a closing run still got wrong
 
 One change set, each part with its cause, a rule that knows no case, and generated tests

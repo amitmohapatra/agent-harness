@@ -227,6 +227,14 @@ def memory(rules: Sequence[str] = (), prefs: Sequence[str] = (), about: Sequence
                                       for n, ls in blocks)  # fmt: skip
 
 
+def said(*entries: tuple[str, str]) -> str:
+    """The memory context as the service renders what the user said in earlier chats: its
+    memory entries (``## Memories``: citation, day, weekday, speaker, text), and no profile."""
+    lines = (f"- [m{i}] {on} {datetime.fromisoformat(on):%A} alex: {text}"
+             for i, (on, text) in enumerate(entries, 1))  # fmt: skip
+    return "## Memories\n" + "\n".join(lines)
+
+
 @dataclass
 class Chat:
     answers: list[str] = field(default_factory=list)
@@ -510,6 +518,10 @@ ASK_SUPPLIER: Final = ("Reorder 50 units of SKU-00012 for store S12. Ask me whic
 CANCEL: Final = "Cancel every open purchase order of store S12."
 #: An answer that gives every value a reorder needs, whichever was asked for.
 EVERYTHING: Final = "SKU-00012, 40 units, from SUP-04, delivered on 2026-11-20."
+ALERT_NO_ITEM: Final = "Set a low-stock alert at 10 units in the north region, by email."
+SAID_ALERT: Final = ("2026-11-02", "Set a low-stock alert for SKU-00012 at 20 units in the north "
+                                   "region, by email.")  # fmt: skip
+SAID_ORDER: Final = ("2026-11-02", "Reorder 200 units of SKU-00012 from SUP-04 for store S12.")
 USUAL_ORDER: Final = memory(about=["My usual reorder of SKU-00012 is 200 units from SUP-04. "
                                    "(said 2026-11-02)"])  # fmt: skip
 
@@ -674,6 +686,20 @@ def cases() -> list[Case]:
              memory=LAST_ALERT, replies=(KEEP,)),
         Case("fill-old", "fill", ("Reorder SKU-00012 again.",), asks(),
              memory=memory(about=[f"{LAST_ORDER} (said 2025-12-01)"])),
+        # the request leaves out what it is for (the product), and an earlier one of theirs had
+        # one: asked, never written for the earlier one in silence (a min/max put on the style
+        # of an older chat, the approval shown without a word of it)
+        Case("fill-missing-item", "fill", (ALERT_NO_ITEM,), asks(), memory=LAST_ALERT),
+        # the same values as the user said them in an earlier chat: memory entries, no profile
+        Case("fill-said-stated", "fill", ("Create a low-stock alert for SKU-00031 too.",),
+             both(asks(recommended=True, says=[r"\b20\b", "north", "email"]),
+                  then("create_alert", args={"threshold": "20", "region": "north",
+                                             "channel": "email"})),
+             memory=said(SAID_ALERT), replies=(KEEP,)),
+        Case("fill-said-costly", "fill", ("Reorder SKU-00031 too.",), asks(),
+             memory=said(SAID_ORDER)),
+        Case("fill-said-missing-item", "fill", (ALERT_NO_ITEM,), asks(),
+             memory=said(SAID_ALERT)),
         Case("fill-as-before-new-to", "fill", ("Send the report again like before, to "
                                                "finance@acme.com.",),
              both(asks(recommended=True, says=["north sales summary", "pdf"]),
