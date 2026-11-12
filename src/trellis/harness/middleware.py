@@ -1289,7 +1289,7 @@ class ModelHooks(AgentMiddleware):
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
-        request = _dated(request, runtime)
+        request = _held_named(runtime, _dated(request, runtime))
         name = _model_name(request.model)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
@@ -2051,6 +2051,47 @@ def _rows_said(path: str, text: str, table: str) -> str:
     if not rows or columns == ["line"]:
         return ""
     return " " + results.table_said(path, text, table)
+
+
+#: What a summarized request says, after its summary, of the results the run keeps that no
+#: message left in it names; and the most it names (the rest are counted).
+HELD_NAMED: Final = (
+    "Results of this run that are still kept, each a table query_result computes over and "
+    "read_file pages: {named}{more}."
+)
+HELD_MOST: Final = 100
+
+
+def _held_named(runtime: Runtime | None, request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with its summary — a summarization's, LangChain's or Deep Agents' — saying
+    which results the run still keeps that nothing left in the request names: each by its
+    table and its path (:data:`HELD_NAMED`). A summarization replaces the messages that named
+    them with a summary in the summarizer's own words, which may name none (0 of 56, and the
+    model said it had lost track of the results); the run keeps them all the same. The
+    request's copy says it, never the graph's state. As it is with no summary, outside a run,
+    or when every kept result is still named."""
+    at = next(
+        (
+            n
+            for n in range(len(request.messages) - 1, -1, -1)
+            if request.messages[n].additional_kwargs.get("lc_source") == "summarization"
+        ),
+        None,
+    )
+    if runtime is None or at is None:
+        return request
+    read = " ".join(m.text for m in request.messages)
+    names = query.tables(runtime)
+    lost = [p for p in runtime.replay.journal.results if p not in read]
+    if not lost:
+        return request
+    named = "; ".join(f"{names[p]} at {p}" for p in lost[:HELD_MOST])
+    more = f"; and {len(lost) - HELD_MOST} more" if len(lost) > HELD_MOST else ""
+    summary = request.messages[at]
+    said = f"{summary.text}\n\n{HELD_NAMED.format(named=named, more=more)}"
+    messages = list(request.messages)
+    messages[at] = summary.model_copy(update={"content": said})
+    return request.override(messages=messages)
 
 
 def _page_cut(messages: Sequence[AnyMessage], at: int, room: int) -> str | None:

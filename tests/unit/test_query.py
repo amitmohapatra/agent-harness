@@ -568,6 +568,55 @@ def test_a_page_read_of_a_result_is_cut_as_a_page_and_never_kept_as_a_table(
     assert lines[on] in results.read({"file_path": path, "offset": on, "limit": 1})
 
 
+@pytest.mark.parametrize("seed", range(20))
+def test_after_a_summarization_every_result_the_run_keeps_is_still_named(
+    journal: Journal, seed: int
+) -> None:
+    """A summarization replaces the older messages — the ones that named the kept results —
+    with a summary in the summarizer's own words: whatever it wrote, the request the model
+    gets next still names each result the run keeps that no remaining message names, by its
+    path and its table, so each is one query away. A summary that named 0 of 56 audit paths
+    left a model saying it had "lost track of part of the audit results". Named once: a
+    result a remaining message names is not listed again, and a request with no summary is
+    as it was."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rng = random.Random(seed)
+    kept = {}
+    for _ in range(rng.randrange(1, 60)):
+        text, _ = rows_of(rng.choice(["csv", "array", "object"]), rng.randrange(5, 40), rng)
+        path = results.keep(text, tool=rng.choice(["stock", "sales", "audit"]))
+        assert path is not None
+        kept[path] = query.tables(run)[path]
+    paths = list(kept)
+    shown = rng.sample(paths, rng.randrange(0, len(paths) + 1))  # still named after it
+    said = rng.sample(shown, rng.randrange(0, len(shown) + 1))  # those the summary names
+    summary = HumanMessage(
+        "A condensed summary follows: " + " ".join(said),
+        additional_kwargs={"lc_source": "summarization"},
+    )
+    tail = [ToolMessage(f"rows at {p}", tool_call_id=f"c{i}") for i, p in enumerate(shown)]
+    calls = [{"id": f"c{i}", "name": "stock", "args": {}} for i in range(len(shown))]
+    messages = [HumanMessage("how many?"), summary, AIMessage("", tool_calls=calls), *tail]
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages, tools=[])  # type: ignore[arg-type]
+    told = middleware._held_named(run, given)  # type: ignore[arg-type]
+    read = " ".join(str(m.text) for m in told.messages)
+    for path, table in kept.items():
+        assert read.count(path) >= 1, path  # every kept result is named
+        if path not in shown:
+            assert f"{table} at {path}" in told.messages[1].text  # with its table, once
+    listed = told.messages[1].text.removeprefix(summary.text)
+    assert not [p for p in shown if p in listed]  # one a message still names: not again
+    plain = given.override(messages=[messages[0], *messages[2:]])
+    assert middleware._held_named(run, plain) is plain  # no summary: as it was
+
+
 def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
     """A graph cleared outside a harness run keeps no result: a cleared result's mark names
     the rows its message showed, and of a stub nothing is said that is not known."""

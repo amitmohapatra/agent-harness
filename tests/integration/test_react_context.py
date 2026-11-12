@@ -114,6 +114,42 @@ async def test_a_cleared_result_is_queried_by_the_path_its_mark_names(
     assert contents(model, len(model.requests) - 1)[-1] == "lines,units\n200,20100"
 
 
+async def test_a_summarized_request_still_names_the_results_the_run_keeps(
+    memory_harness: Harness,
+) -> None:
+    """End to end, on Deep Agents' own summarization: the tables read before it are kept by
+    the run, the summary (in the summarizer's words) names none of them, and the request the
+    model gets after it names each one no remaining message names, by its table and path."""
+
+    @tool(side_effects="read")
+    def stock(n: int) -> str:
+        """A store's stock lines."""
+        cell = "w" * 700
+        return "sku,units,note\n" + "\n".join(f"S{n}-{k},{k},{cell}" for k in range(30))
+
+    script: list[Any] = [("stock", {"n": n}) for n in range(8)]
+    summarizing = Summarizing([*script, "done"])
+    model = ScriptedChat(script=summarizing)
+    target = ReAct(system_prompt="s", model=model, context_window=32_000, backend=JournalBackend())
+    agent = arm(memory_harness.wrap(target, id="kept-named"), [stock])
+    done = await agent.run("count the stock", user="u")
+    assert done.answer == "done", done.error
+    assert summarizing.summaries >= 1
+    after = next(
+        r["messages"] for r in model.requests[::-1] if "has been summarized" in str(r["messages"])
+    )
+    read = str(after)
+    summary = next(
+        str(m.get("content")) for m in after if "has been summarized" in str(m.get("content"))
+    )
+    kept = set(
+        re.findall(r"/large_tool_results/\w+", " ".join(str(r["messages"]) for r in model.requests))
+    )
+    kept = {p for p in kept if "call_" not in p}  # the run's own kept results
+    assert kept and all(p in read for p in kept), kept - {p for p in kept if p in read}
+    assert "still kept" in summary and " at /large_tool_results/" in summary
+
+
 async def test_older_turns_are_summarized_and_their_history_kept_to_read(
     memory_harness: Harness,
 ) -> None:
