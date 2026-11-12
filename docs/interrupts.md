@@ -96,8 +96,10 @@ question's shape; when to ask at all is the note sent with every memory context
 (`agent.ASKING`): when several things fit the user's words, ask which one; else ask only when it
 cannot find out itself, the choice is the user's and a wrong guess costs; otherwise act and say
 the assumption. A context with a profile also gets `agent.REMEMBERED`: a remembered rule,
-preference or value used is said with its date, a costly or old fill asked about first. It is
-`ask` with what every surface needs:
+preference or value used is said with its date, a costly or old fill asked about first. A context
+with memory entries and no profile gets the part on the values of an earlier request
+(`agent.EARLIER_VALUES`): what the user asked for in an earlier chat is asked about once, shown
+filled in, before it is used again. It is `ask` with what every surface needs:
 
 | | `options` | `date` | `date_range` | `number` |
 |---|---|---|---|---|

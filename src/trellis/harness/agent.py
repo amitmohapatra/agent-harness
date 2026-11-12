@@ -220,6 +220,19 @@ ASKING: Final = (
     "instruction, the safer choice for money, a delete or a send, the best by the data) and "
     "say why."
 )
+#: The values of an earlier request: the part of the note below that comes with the memory
+#: entries too (:data:`MEMORIES`). What the user asked for in an earlier chat reaches a new one
+#: as an entry with no profile, and told nothing of it the model wrote with those values and
+#: said so after the write, the approval shown without a word of what was filled in ("Create
+#: a low-stock alert for SKU-00031 too", 0 of 4 asked first).
+USING: Final = "## Using what you remember\n"
+EARLIER_VALUES: Final = (
+    "Values the request leaves out that an earlier one of theirs had (their last alert, "
+    "order or report, 'as before'): ask once before you act, all of them in one question, "
+    "each filled in with the remembered value and where it is from; the values they gave "
+    "now stand and are not asked again. Confirm the same way a rule, preference or value "
+    "said more than six months ago, or one a tool shows was changed since."
+)
 #: How to use the remembered rules, preferences and values (memory dates each one,
 #: ``standing_rules``), sent only with a context that has them (the service's profile, the
 #: ``## Profile`` heading it renders): a standing rule or preference used and said with its
@@ -227,14 +240,10 @@ ASKING: Final = (
 #: in (``ask_user``'s ``fields``), as is anything old or changed since; a superseded rule
 #: asked about.
 REMEMBERED: Final = (
-    "## Using what you remember\n"
+    f"{USING}"
     "When you use a remembered rule, preference or value from the profile, say which one and "
     'the date it was said ("as CSV, as you said on 2026-10-15").\n'
-    "Values the request leaves out that an earlier one of theirs had (their last alert, "
-    "order or report, 'as before'): ask once before you act, all of them in one question, "
-    "each filled in with the remembered value and where it is from; the values they gave "
-    "now stand and are not asked again. Confirm the same way a rule, preference or value "
-    "said more than six months ago, or one a tool shows was changed since.\n"
+    f"{EARLIER_VALUES}\n"
     "A rule shown with 'earlier:' replaced that rule by its words, not by the user's say: ask "
     "which holds (the newer recommended), unless they said to change it."
 )
@@ -270,8 +279,11 @@ def answering_note(context: str) -> str | None:
 
 def asking_notes(context: str) -> str:
     """The notes on asking a memory context gets: when to ask, always; how to use remembered
-    values, only when the context has a profile."""
-    return f"{ASKING}\n\n{REMEMBERED}" if PROFILE in context and ASKING else ASKING
+    rules, preferences and values, with the profile that holds them; the values of an earlier
+    request alone, with memory entries and no profile."""
+    earlier = f"{USING}{EARLIER_VALUES}" if MEMORIES in context else ""
+    remembered = REMEMBERED if PROFILE in context else earlier
+    return f"{ASKING}\n\n{remembered}" if remembered and ASKING else ASKING
 
 
 def conversation_budget(window: int | None, *, holds: int, context: int) -> int | None:

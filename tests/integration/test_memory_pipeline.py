@@ -31,7 +31,13 @@ from tests.unit.test_toolbox import Gateway as StubGateway
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import snapshots, telemetry
-from trellis.harness.agent import ANSWERING, ASKING, NARROW_FROM, REMEMBERED
+from trellis.harness.agent import (
+    ANSWERING,
+    ASKING,
+    EARLIER_VALUES,
+    NARROW_FROM,
+    REMEMBERED,
+)
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
 from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
 from trellis.harness.conversation import answer_id, question_id
@@ -166,6 +172,30 @@ async def test_the_note_on_remembered_values_comes_only_with_a_profile(
     sent = pushed(model.requests[0])
     assert ASKING in sent
     assert (REMEMBERED in sent) is profile
+    assert with_note(memory_service.context_text) in sent  # the helper the tests share
+
+
+async def test_values_of_an_earlier_request_are_asked_about_when_memory_entries_hold_them(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """What the user asked for in an earlier chat reaches a new one as a memory entry too, with
+    no profile. Told nothing of it, the model wrote with the earlier values and said so only
+    after the write ("Create a low-stock alert for SKU-00031 too": 0 of 4 asked, the approval
+    shown without a word of what was filled in). The part of the note on values an earlier
+    request had comes with memory entries; the rest of it (rules and preferences said with
+    their date, a superseded rule) stays with the profile that holds them."""
+    memory_service.context_text = (
+        "## Memories\n- [m1] 2026-11-02 Monday alex: Set a low-stock alert for SKU-00012 at "
+        "20 units in the north region, by email."
+    )
+    model = ScriptedChat(["done"])
+    agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="earlier")
+    result = await agent.run("Create a low-stock alert for SKU-00031 too.", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    sent = pushed(model.requests[0])
+    assert EARLIER_VALUES in sent and EARLIER_VALUES in REMEMBERED
+    assert REMEMBERED not in sent
+    assert sent.index(ASKING) < sent.index(EARLIER_VALUES)
     assert with_note(memory_service.context_text) in sent  # the helper the tests share
 
 
