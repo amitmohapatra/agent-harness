@@ -243,6 +243,78 @@ async def test_memory_stays_whole_when_a_summarization_after_it_makes_it_fit() -
     assert len(out.messages) == len(given.messages)
 
 
+class Named(ScriptedChatModel):
+    """A scripted model with a name, as a provider's chat model has one."""
+
+    model_name: str = ""
+
+
+#: How model servers word the refusal of a request over their window, naming the window:
+#: OpenAI's and vLLM's, Anthropic's, llama.cpp's, and a gateway's relay of one.
+LIMIT_SAID = [
+    "This model's maximum context length is {limit} tokens. However, you requested {size} tokens",
+    "prompt is too long: {size} tokens > {limit} maximum",
+    "the request exceeds the available context size ({limit} tokens), try increasing it",
+    "context_length_exceeded: maximum context length is {limit} tokens, request ({size} tokens)",
+]
+
+
+@pytest.mark.parametrize("seed", range(24))
+async def test_a_window_no_one_says_is_learned_from_the_servers_own_refusal(seed: int) -> None:
+    """A provider whose model list names no window (a local server), a model the library has
+    no profile of, and no ``context_window`` given: nothing was fitted, and the first request
+    over the model's window ended the run with the server's refusal. The refusal names the
+    window: it is the model's from then on — that request is fitted to it and sent again,
+    and the model's later requests are fitted at once. A refusal that names no window is the
+    call's, as before."""
+    import random
+
+    from trellis.contracts import ModelError
+
+    rng = random.Random(seed)
+    wording = LIMIT_SAID[seed % len(LIMIT_SAID)]
+    tools = [lc(f"tool_{n}") for n in range(30)]
+    turns = [
+        m
+        for n in range(rng.randrange(6, 40))
+        for m in (HumanMessage(f"q{n} " * 60), AIMessage("a " * 60))
+    ]
+    given = request([*turns, HumanMessage("please refund order o-7")], tools)
+    given = given.override(model=Named(turns=[], model_name=f"local-{seed}"))
+    size = _size(given)
+    limit = rng.randrange(size // 4, size - 10)  # the request is over the model's window
+    seen: list[int] = []
+
+    async def server(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        seen.append(_size(r))
+        if seen[-1] > limit:
+            raise ModelError(wording.format(limit=limit, size=seen[-1]), source="langgraph")
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    fit = FitWindow(None)  # no one said the window
+    assert fit._budget(given) is None
+    await fit.awrap_model_call(given, server)
+    assert seen[0] == size and seen[-1] <= int(limit * 0.95) and len(seen) == 2
+    seen.clear()
+    await fit.awrap_model_call(given, server)  # learned: fitted at once, no refusal
+    assert len(seen) == 1 and seen[0] <= int(limit * 0.95)
+
+    async def unsaid(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        raise ModelError("the request exceeds the available context size", source="langgraph")
+
+    other = request([HumanMessage("hi")], []).override(
+        model=Named(turns=[], model_name=f"unsaid-{seed}")
+    )
+    with pytest.raises(ModelError):
+        await FitWindow(None).awrap_model_call(other, unsaid)
+    # a model with no name: its call is fitted all the same, and nothing is kept of it
+    nameless, seen[:] = request([*turns, HumanMessage("please refund order o-7")], tools), []
+    await FitWindow(None).awrap_model_call(nameless, server)
+    assert len(seen) == 2 and seen[-1] <= int(limit * 0.95)
+    assert list(ours._LEARNED._data) == [f"local-{seed}"]
+    ours._LEARNED._data.clear()
+
+
 def test_the_tools_keep_the_order_they_were_first_offered_in() -> None:
     class Run:  # a run, as the order is kept per run
         pass

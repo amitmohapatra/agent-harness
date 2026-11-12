@@ -1978,6 +1978,14 @@ _OVERFLOW: Final = re.compile(
     re.IGNORECASE,
 )
 _OVERFLOW_SIZE: Final = re.compile(r"(?:request \(|resulted in |too long: )(\d+) tokens")
+#: And the window it says it has, in the same refusal (OpenAI's and vLLM's "maximum context
+#: length is N", Anthropic's "> N maximum", llama.cpp's "context size (N").
+_OVERFLOW_LIMIT: Final = re.compile(
+    r"maximum context length is (\d+)|> (\d+) maximum|context size \((\d+)", re.IGNORECASE
+)
+#: The window a model's server named when it refused a request, by model name: what is known
+#: of a model whose window no one else said (:meth:`FitWindow._learning`).
+_LEARNED: Final[LRU[str, int]] = LRU(64)
 _WORD: Final = re.compile(r"[a-z0-9]+")
 
 
@@ -2122,7 +2130,7 @@ class FitWindow(AgentMiddleware):
     ) -> ModelResponse[Any]:
         budget = self._budget(request)
         if budget is None:
-            return await handler(request)
+            return await self._learning(request, handler)
         name = _model_name(request.model) or ""
         ratio = _RATIOS.get(name) or 1.0
         sent, counted = self._within(request, int(budget / ratio))
@@ -2143,6 +2151,32 @@ class FitWindow(AgentMiddleware):
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
             return await handler(self._within(request, int(budget / learned), refit=True)[0])
 
+    async def _learning(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        """The call of a model whose window no one said — not the caller, not the library's
+        profile, not the route: sent as it is, and when the server refuses it as over its
+        window and names that window (:func:`_refused_limit`), fitted to it and sent again.
+        The window is the model's from then on (:data:`_LEARNED`, by its name). Nothing was
+        fitted for such a model, so its first long request ended the run with the refusal;
+        a refusal that names no window still does."""
+        try:
+            return await handler(request)
+        except Exception as exc:
+            limit = _refused_limit(exc)
+            if limit is None:
+                raise
+        name = _model_name(request.model)
+        if name:
+            _LEARNED[name] = limit
+        budget = self._budget(request, limit)
+        assert budget is not None  # a window is known now
+        FITTED["refit"] += 1
+        log.info("the model's server said its window is %s tokens: fitted to it", limit)
+        return await handler(self._within(request, budget, refit=True)[0])
+
     def _within(
         self, request: ModelRequest[Any], budget: int, *, refit: bool = False
     ) -> tuple[ModelRequest[Any], int]:
@@ -2153,17 +2187,21 @@ class FitWindow(AgentMiddleware):
         fitted = self._fitted(request, budget, refit=refit)
         return fitted, _size(fitted)
 
-    def _budget(self, request: ModelRequest[Any]) -> int | None:
+    def _budget(self, request: ModelRequest[Any], said_now: int | None = None) -> int | None:
         """What the request may hold: the window's share (:data:`FIT_SHARE`), and no more than
         the model's own window leaves beside the reply the call will send — a provider takes
         input and reply together. The reply is the call's own setting, else the chat model's
         that makes the call (a model name's: the one its route resolves to; read from the
         name there was none, and 950,000 tokens were sent where the provider took 872,000).
         A window the caller gives below the model's own is not what the reply is taken out
-        of: given 32,000 for a model replying up to 64,000, nothing was left for the input."""
+        of: given 32,000 for a model replying up to 64,000, nothing was left for the input.
+        The window is the one given, else the model's profile's, else the one its server
+        named when it refused a request (``said_now``, :data:`_LEARNED`); ``None``: no one
+        has said it."""
         profile = getattr(request.model, "profile", None)
         said = profile if isinstance(profile, dict) else {}
-        window = self.window or said.get("max_input_tokens")
+        learned = said_now or _LEARNED.get(_model_name(request.model) or "")
+        window = self.window or said.get("max_input_tokens") or learned
         if not isinstance(window, int) or isinstance(window, bool):
             return None
         sends = _sending(request.model)
@@ -2289,6 +2327,18 @@ def _refused_size(exc: BaseException) -> int | None:
         if isinstance(seen, ContextOverflowError) or _OVERFLOW.search(text):
             said = _OVERFLOW_SIZE.search(text)
             return int(said.group(1)) if said else 0
+        seen = seen.__cause__
+    return None
+
+
+def _refused_limit(exc: BaseException) -> int | None:
+    """The window a model server named in refusing a request as over it, or ``None``: ``exc``
+    is no such refusal (:func:`_refused_size`), or names none."""
+    seen: BaseException | None = exc if _refused_size(exc) is not None else None
+    while seen is not None:
+        said = _OVERFLOW_LIMIT.search(str(seen))
+        if said is not None:
+            return int(next(n for n in said.groups() if n))
         seen = seen.__cause__
     return None
 
