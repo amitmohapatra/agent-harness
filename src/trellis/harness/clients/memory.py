@@ -43,12 +43,15 @@ from trellis.memory.models import (
     ToolPermission,
 )
 
-#: Prompt budget for the pushed context, in tokens, when the model's context window is not
-#: known; with it known, :data:`CONTEXT_SHARE` of the window, between that and
-#: :data:`CONTEXT_TOKEN_MAX`.
-CONTEXT_TOKEN_BUDGET: Final = 2000
-CONTEXT_SHARE: Final = 0.05
+#: Prompt budget for the pushed context, in tokens: the budget the memory service's accuracy
+#: is measured at (its own default). The service packs what bears on the question, so most
+#: contexts are far smaller; a smaller budget cuts what does bear on it, and at 2,000 a
+#: profile of ordinary size no longer fits beside the memories (the service drops the whole
+#: ``user`` block then). Only a model whose window is known and too small to hold it gets
+#: less: :data:`CONTEXT_SHARE` of its window, never under :data:`CONTEXT_TOKEN_MIN`.
 CONTEXT_TOKEN_MAX: Final = 8000
+CONTEXT_SHARE: Final = 0.25
+CONTEXT_TOKEN_MIN: Final = 2000
 #: The pull tools that change nothing: listed with side_effects "read", the rest "write".
 READ_ONLY_TOOLS: Final = frozenset({"memory_search", "tool_search"})
 #: The pull tool that chooses among the run's own tools: the harness answers it with
@@ -242,7 +245,7 @@ class RunMemory:
         tools: Sequence[str] | None,
         window: Window,
         hints: bool,
-        budget: int = CONTEXT_TOKEN_BUDGET,
+        budget: int = CONTEXT_TOKEN_MAX,
         conversation_budget: int | None = None,
         document_ids: Sequence[str] | None = None,
     ) -> PromptContext:
@@ -450,10 +453,10 @@ def documents(document_ids: Sequence[str]) -> list[str]:
 
 def context_budget(window: int | None) -> int:
     """The pushed context's token budget for a model reading ``window`` tokens (``None``: not
-    known)."""
+    known): :data:`CONTEXT_TOKEN_MAX`, less only where the window is too small to hold it."""
     if not window:
-        return CONTEXT_TOKEN_BUDGET
-    return max(CONTEXT_TOKEN_BUDGET, min(CONTEXT_TOKEN_MAX, int(window * CONTEXT_SHARE)))
+        return CONTEXT_TOKEN_MAX
+    return max(CONTEXT_TOKEN_MIN, min(CONTEXT_TOKEN_MAX, int(window * CONTEXT_SHARE)))
 
 
 def _agent_tool(tool: AgentTool) -> ToolSpec:

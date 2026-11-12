@@ -14,10 +14,11 @@ itself with the memory SDK: [blocks/memory.md](blocks/memory.md) (Way 2).
 
 ## Push
 
-Before the agent runs, `/v1/context` for the run's question — its token budget 5 % of the
-model's context window when the target says it (a `context_window` or `max_input_tokens`
-attribute on the target or its `model`, or a LangChain model's `profile`), between 2000 and
-8000, else 2000 — answered in
+Before the agent runs, `/v1/context` for the run's question — its token budget 8000, what
+the service's accuracy is measured at (it packs what bears on the question, so most contexts
+are far smaller), less only for a model whose window is known to be too small to hold it (a
+`context_window` or `max_input_tokens` attribute on the target or its `model`, or a LangChain
+model's `profile`: under 32,000 tokens, a quarter of the window, never under 2000) — answered in
 the prompt format — `{bundle_id, rendered, token_estimate, evidence_status, memory_ids?, tools?}`, items cited
 by short per-bundle handles (`[m1]`, `[d2]`). The rendered text reaches the framework as a system
 message (see the README's matrix, and each [framework page](README.md#which-target)) and is `trellis.current().context`; the `bundle_id` is what

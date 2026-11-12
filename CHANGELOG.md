@@ -5,6 +5,21 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: memory is asked for its whole budget unless the model's window is small
+
+The context pushed for a question was budgeted at 5% of the model's window, between 2,000
+and 8,000 tokens, and at 2,000 when the window was not known: a 128,000-token model got
+6,400 and a 64,000-token one 3,200, where the memory service's accuracy is measured at
+8,000. At 2,000 the service gives the profile 1,000 tokens, and a profile of ordinary size
+no longer fits beside the rules that apply: it drops the whole `user` block. The budget is
+8,000 now (`clients.memory.CONTEXT_TOKEN_MAX`), whether or not the window is known; only a
+window known to be under 32,000 tokens gets less, a quarter of itself and never under 2,000
+(`CONTEXT_TOKEN_MIN`, which replaces `CONTEXT_TOKEN_BUDGET`). The service packs what bears
+on the question, so a request nothing answers stays a few hundred tokens. The front end's
+context and state, which take a share of the same budget, have that share of the larger
+one. A model whose window is not known and is in fact small can now be sent more than it
+holds: say its window (`ReAct(context_window=)`, or a `context_window` on the target).
+
 ### Fixed: values of an earlier request are asked about when they come as memory entries
 
 What the user asked for in an earlier chat reaches a new one as a memory entry

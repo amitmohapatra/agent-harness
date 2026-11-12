@@ -290,7 +290,7 @@ async def test_a_run_memory_is_bound_to_the_run_scope() -> None:
         "custom_metadata": {},
     }
     assert call.body["tools"] == {"available": ["erp-get_stock"], "k": 8}
-    assert call.body["token_budget"] == 2000 and call.body["window"] is False
+    assert call.body["token_budget"] == 8000 and call.body["window"] is False
     assert "window_format" not in call.body  # the service's default
 
 

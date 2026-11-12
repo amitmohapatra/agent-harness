@@ -488,9 +488,11 @@ def test_the_context_window_is_read_where_a_target_says_it() -> None:
     stamped = SimpleNamespace(config={"metadata": {"trellis_context_window": 64_000}})
     assert context_window(stamped) == 64_000  # what ReAct(...) says of its graph
     assert context_window(SimpleNamespace(config={"metadata": None})) is None
-    assert context_budget(None) == 2000
-    assert context_budget(8_000) == 2000  # never less than the default
-    assert context_budget(1_000_000) == 8000  # never more than the cap
+    # what memory's accuracy is measured at, unless the window is known to be too small for it
+    assert context_budget(None) == 8000
+    assert context_budget(1_000_000) == context_budget(32_000) == 8000
+    assert context_budget(16_000) == 4000  # a quarter of a smaller window
+    assert context_budget(8_000) == context_budget(4_000) == 2000  # never less than this
 
 
 def test_mcp_servers_given_as_text_or_a_file_are_read() -> None:
