@@ -107,6 +107,50 @@ async def test_every_adapter_works_in_its_runs_sandbox_governed_and_deleted_at_t
     assert provider.commands == ["echo hi"] and provider.boxes == {}
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "q3.csv",
+        "reports/q3.csv",
+        "a/b/c/q3.csv",
+        "outputs/q3.csv",
+        "outputs/reports/q3.csv",
+        "outputs/a/b/q3.csv",
+    ],
+)
+async def test_a_file_a_command_leaves_at_any_depth_is_known_to_be_the_users_or_not(
+    harness: Harness, path: str
+) -> None:
+    """A command leaves a new file somewhere under the working directory: directly in the
+    kept folder it is the user's, and anywhere else — beside the folder, in a folder of its
+    own, in a folder inside the kept one — the model is told, with the command's result,
+    that it is not given to the user. Only files directly in the working directory were
+    looked at, so one written a folder down was neither: the answer said it was delivered."""
+    from langchain_core.messages import ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness.sandbox import OUTPUTS_BESIDE, OUTPUTS_HOLD
+
+    provider = FakeSandboxes()
+    steps = [
+        ("execute", {"command": "echo first"}),  # the first look: nothing is new yet
+        ("execute", {"command": f"touch {path}"}),
+        "done",
+    ]
+    model = ScriptedChatModel(turns=steps)
+    target = ReAct("s", model, backend=sandbox(provider))
+    agent = arm(harness.wrap(target, id=f"depth-{path.count('/')}-{path[:3]}"), [])
+    assert (await agent.run("make the file", user="u")).answer == "done"
+    told = [m.text for m in model.seen[-1] if isinstance(m, ToolMessage)][-1]
+    folder = "/workspace/outputs"
+    beside = OUTPUTS_BESIDE.format(folder=folder, files=path)
+    if path == "outputs/q3.csv":  # directly in the kept folder: the user's
+        assert OUTPUTS_HOLD.format(folder=folder, files="q3.csv (0 bytes)") in told, told
+        assert "not given to the user" not in told
+    else:
+        assert beside in told, told
+
+
 async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end(
     harness: Harness,
 ) -> None:

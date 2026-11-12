@@ -399,8 +399,7 @@ async def test_a_sub_agent_that_names_no_tools_has_the_runs(harness: Harness) ->
     graph = ReAct("s", one, tools=[stock], backend=JournalBackend())
     general = harness.wrap(graph, id="counts-general")
     again = await general.run("how many b?", user="u")
-    if again.interrupt is not None:  # the general-purpose helper's task asks, once
-        again = await general.resume(again.interrupt.interrupt_id, "approve", reviewer="r")
+    assert again.interrupt is None  # handing the task on asks no one (test_react_helpers.py)
     assert again.status is RunStatus.SUCCESS and again.answer == "done", again.error
     assert executed == ["stock:b"] and "stock" in one.requests[1]["tools"]
     # its own tools named: those, and no other

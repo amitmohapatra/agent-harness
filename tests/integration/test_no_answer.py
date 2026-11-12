@@ -152,6 +152,58 @@ async def test_a_reply_at_the_limit_that_calls_a_tool_is_no_cut_answer(harness: 
     assert events[-1].data["result"] == "2,061 rows" and _warned(events) == []
 
 
+#: What each provider's reply says when it reached the output limit, and one that did not.
+AT_LIMIT = [
+    {"finish_reason": "length"},
+    {"stop_reason": "max_tokens"},
+    {"stopReason": "max_tokens"},
+    {"done_reason": "length"},
+    {"finish_reason": "MAX_TOKENS"},
+]
+WHOLE = [{"finish_reason": "tool_calls"}, {"stop_reason": "tool_use"}, {}]
+
+
+@pytest.mark.parametrize("cut", ["missing", "unparsed", "reader"])
+@pytest.mark.parametrize("said", [*AT_LIMIT, *WHOLE], ids=str)
+async def test_a_call_cut_at_the_output_limit_is_said_to_be_cut_not_wrongly_argued(
+    harness: Harness, said: dict[str, str], cut: str
+) -> None:
+    """A reply that reached the output limit while it wrote a tool call leaves the call's
+    arguments short: one missing (the provider parsed what there was), or not parseable at
+    all — the harness's own tool, or its reader of a kept result. The model is told what
+    happened, which it cannot see for itself (its reply was cut), not that it left an
+    argument out (41 of 22,385 saved model calls: "missing required argument(s)", and the
+    model made the same long reply again). The same arguments in a reply that ended by
+    itself are the model's to correct, as before. Either way the call was a step."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness.tools.base import FIX_ARGUMENTS
+
+    name = "query_result" if cut == "reader" else "rows"
+    if cut == "unparsed":
+        broken = {"name": name, "args": '{"month": "ju', "id": "c1", "error": None}
+        step = AIMessage(content="", invalid_tool_calls=[broken], response_metadata=said)
+    else:
+        call = {"name": name, "args": {}, "id": "c1"}
+        step = AIMessage(content="", tool_calls=[call], response_metadata=said)
+    first = AIMessage(
+        content="", tool_calls=[{"name": "rows", "args": {"month": "may"}, "id": "c0"}]
+    )
+    model = ScriptedChatModel(turns=[first, step, "2,061 rows"])
+    agent = arm(harness.wrap(ReAct("s", model), id=f"cut-call-{cut}"), [rows])
+    result = await agent.run("how many rows?", user="u")
+    assert result.answer == "2,061 rows", result.error
+    told = next(
+        m.text for m in model.seen[-1] if isinstance(m, ToolMessage) and m.tool_call_id == "c1"
+    )
+    assert told.startswith(f"{name} was not run: "), told
+    if said in AT_LIMIT:
+        assert "reached the output limit" in told and FIX_ARGUMENTS not in told, told
+    else:
+        assert "output limit" not in told and told.endswith(FIX_ARGUMENTS), told
+    assert len(model.seen) == 3  # the cut call was a step: the model was called once more
+
+
 async def test_a_reply_cut_again_ends_the_run_saying_so(harness: Harness) -> None:
     from langchain.agents import create_agent
 

@@ -153,7 +153,7 @@ class FakeBox:
         assert not box.paused, "a command in a paused sandbox"
         if command == PROBE:
             return ExecResult(exit_code=0, stdout=self.provider.environment)
-        if command in (LIST_OUTPUTS, OUTPUTS_NOW):  # each file directly in outputs/
+        if command in (LIST_OUTPUTS, OUTPUTS_NOW):  # outputs/'s own files, then all the others
             now = command == OUTPUTS_NOW  # its working directory first, the files in it last
             self.provider.listed += not now
             self.provider.asked += now
@@ -167,7 +167,13 @@ class FakeBox:
             listed = "".join(f"{len(c)} {n}\n" for n, c in found.items())
             if not now:
                 return ExecResult(exit_code=0, stdout=listed)
-            beside = "".join(f"{p}\n" for p in here if "/" not in p)
+            beside = "".join(  # every file but those directly in outputs/, hidden folders out
+                f"{p}\n"
+                for p in here
+                if not p.startswith("/")  # under the working directory only
+                and not (p.startswith(prefix) and "/" not in p.removeprefix(prefix))
+                and not any(part.startswith(".") for part in p.split("/")[:-1])
+            )
             return ExecResult(exit_code=0, stdout=f"{WORKDIR}\n{listed}\n{beside}")
         self.provider.commands.append(command)
         if command == "crash":

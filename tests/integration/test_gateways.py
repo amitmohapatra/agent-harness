@@ -583,6 +583,68 @@ def test_the_reply_never_takes_more_of_the_window_than_the_librarys_own_conventi
     assert 0 < reply <= window * share < window  # and input is left the rest
 
 
+@pytest.mark.parametrize("seed", range(60))
+def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any, seed: int
+) -> None:
+    """Any model — by name or as a chat model object, with or without a profile — at its own
+    window or one the caller gives: the input ``FitWindow`` fits a request to never exceeds
+    the window's share, leaves room in the model's own window for the reply the call will
+    send (a name's reply is its resolved chat model's: read from the name itself there was
+    none, so 950,000 tokens were sent where the provider accepts 872,000), and a window the
+    caller gives is not eaten by a reply that fits the model's own (a 32,000 window given for
+    a model replying up to 64,000 was left no input at all)."""
+    import random
+    from types import SimpleNamespace
+
+    from langchain_anthropic import ChatAnthropic
+
+    from trellis.harness.adapters.base import FIT_SHARE
+    from trellis.harness.middleware import FitWindow
+    from trellis.harness.react import _profiled
+
+    rng = random.Random(seed)
+    own, reply = rng.choice([(1_000_000, 128_000), (200_000, 64_000), (64_000, 8_000)])
+    given = rng.choice([None, None, 8_000, 32_000, own // 2, own])
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    name = f"claude-sized-{seed}"
+    anthropic_models.records[name] = _model_record(name, max_input_tokens=own, max_tokens=reply)
+    if rng.random() < 0.5:  # by name: the route's limits
+        model = routed_chat_model(name)
+        sends = model.resolved().max_tokens
+    else:  # a chat model object of the caller's, saying its own
+        model = ChatAnthropic(model_name=name, max_tokens=reply, api_key="sk-ant")  # type: ignore[call-arg,arg-type]
+        model = model.model_copy(update={"profile": {"max_input_tokens": own}})
+        sends = reply
+    request = SimpleNamespace(model=_profiled(model, given), model_settings={})
+    budget = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+    window = given or own
+    assert budget is not None and 0 < budget <= int(window * FIT_SHARE)
+    assert budget + sends <= int(own * FIT_SHARE)  # the provider takes input and reply
+    if int(window * FIT_SHARE) + sends <= int(own * FIT_SHARE):
+        assert budget == int(window * FIT_SHARE)  # room for the reply: the window's whole share
+    # a reply asked for on this call alone is the one reserved
+    request.model_settings = {"max_tokens": 1_000}
+    less = FitWindow(given, turns=True)._budget(request)  # type: ignore[arg-type]
+    assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
+
+
+def test_a_name_no_route_can_make_reserves_nothing_and_the_call_says_why() -> None:
+    """A model name with no route to make it (no endpoint, no provider told): the budget is
+    the given window's share, nothing reserved — the call itself says what is missing."""
+    from types import SimpleNamespace
+
+    from trellis.harness.adapters.base import FIT_SHARE
+    from trellis.harness.middleware import FitWindow
+
+    model = routed_chat_model("granite")
+    with pytest.raises(Exception):  # noqa: B017 - whatever the route says is missing
+        model.resolved()
+    request = SimpleNamespace(model=model, model_settings={})
+    assert FitWindow(8_000, turns=True)._budget(request) == int(8_000 * FIT_SHARE)  # type: ignore[arg-type]
+
+
 def test_a_route_that_names_no_window_or_a_library_with_no_profiles_leaves_the_fallback(
     monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
 ) -> None:

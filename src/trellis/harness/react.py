@@ -603,9 +603,14 @@ def _declared(
     as any tool, reading or writing (``middleware.OUTSIDE_STATE``); ``execute`` on a backend
     that runs nothing, and the ``task`` tool when its only helper is the general-purpose one
     (``helper_only``: offered on a long task), are the graph's machinery, not tools of the
-    agent's set (``middleware.MACHINERY``)."""
+    agent's set (``middleware.MACHINERY``). ``task`` says what it does whichever helper it
+    hands to: the hand-over is a read (``adapters.base.helper`` — each call the helper then
+    makes is governed on its own). Left out of the run's set as machinery, it had said
+    nothing, and a call of a tool that says nothing asks a person: every task handed to the
+    general-purpose helper paused for an approval of nothing."""
     from deepagents.middleware.filesystem import supports_execution
 
+    from trellis.harness.adapters.base import helper
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
     from trellis.harness.middleware import (
         FILE_TOOLS,
@@ -614,6 +619,7 @@ def _declared(
         READ_FILE,
         framework_made,
         outside_state,
+        spec_of,
     )
 
     runs = supports_execution(backend)
@@ -623,7 +629,10 @@ def _declared(
             continue  # the agent's own tool of that name: it says what it does itself
         if outside and tool.name in FILE_TOOLS:
             marks = outside_state(tool.name)
-        elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
+        elif tool.name == TASK_TOOL:
+            marks = {"side_effects": helper(spec_of(tool)).side_effects}
+            marks |= {MACHINERY: True} if helper_only else {}
+        elif tool.name == "execute" and not runs:
             marks = {MACHINERY: True}
         elif kept and tool.name == READ_FILE:
             marks = {KEPT_BY_RUN: True}
@@ -735,9 +744,17 @@ def _unknown(name: str) -> None:
 
 def _profiled(model: Any, window: int | None) -> Any:
     """The model, its profile naming the window ReAct uses (what Deep Agents' summarization's
-    thresholds are shares of): a copy, when it is given and the model says otherwise; the
-    model as it is when the window is not known (Deep Agents' own thresholds)."""
+    thresholds are shares of): a copy, when it is given and the model says otherwise — the
+    window the model said kept beside it (``middleware.OWN_WINDOW``) —; the model as it is
+    when the window is not known (Deep Agents' own thresholds)."""
+    from trellis.harness.middleware import OWN_WINDOW
+
     profile = getattr(model, "profile", None)
     if window is None or (isinstance(profile, dict) and profile.get("max_input_tokens") == window):
         return model
-    return model.model_copy(update={"profile": {**(profile or {}), "max_input_tokens": window}})
+    # the model's own window stays known beside the one given: a reply is reserved out of it
+    said = (profile or {}).get("max_input_tokens")
+    own = {OWN_WINDOW: said} if said else {}
+    return model.model_copy(
+        update={"profile": {**(profile or {}), **own, "max_input_tokens": window}}
+    )

@@ -520,6 +520,140 @@ def test_a_mark_the_graph_wrote_back_or_saved_is_never_read_as_the_result(
         assert found.text.splitlines()[-1] == wanted.splitlines()[-1], found.text
 
 
+@pytest.mark.parametrize("seed", range(24))
+def test_a_page_read_of_a_result_is_cut_as_a_page_and_never_kept_as_a_table(
+    journal: Journal, seed: int
+) -> None:
+    """A page ``read_file`` returns is a view of a result — its lines, numbered — not a
+    result: cut to fit a small window, it says where to read on in the file it read, from the
+    line after the last one shown, and nothing of it is kept. Kept as a result of its own,
+    its rows were the numbered lines ("2  SKU-00501"), named as a table: a join against it
+    matched nothing, and the turn ran to its step limit (one live run in three at 8,000)."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rng = random.Random(seed)
+    count, offset, limit = rng.randrange(60, 900), rng.randrange(0, 40), rng.randrange(30, 400)
+    text = "sku,units\n" + "\n".join(f"S{n},{rng.randrange(1, 500)}" for n in range(count))
+    path = results.keep(text, tool="stock")
+    assert path is not None
+    asked = {"file_path": path, "offset": offset, "limit": limit}
+    page = results.read(dict(asked))
+    call = AIMessage("", tool_calls=[{"id": "r1", "name": results.READ_FILE, "args": asked}])
+    messages = [
+        HumanMessage("which sku?"),
+        call,
+        ToolMessage(page, tool_call_id="r1", name=results.READ_FILE),
+    ]
+    given = ModelRequest(
+        model=ScriptedChatModel(turns=[]), messages=messages, tools=[], state={"messages": messages}  # type: ignore[arg-type]
+    )  # fmt: skip
+    kept = dict(journal.results)
+    cut = str(middleware._cut(given, rng.choice([1, 40, 150])).messages[-1].text)
+    assert dict(journal.results) == kept  # nothing of a page is kept
+    if cut == page:
+        return  # the page fits the window: shown as it was read
+    assert "the table" not in cut and "cut to fit the window" in cut
+    assert set(PATH.findall(cut)) == {path}  # the one file: the result it read
+    on = int(re.search(rf'{results.READ_FILE}\(file_path="{path}", offset=(\d+)\)', cut)[1])  # type: ignore[index]
+    shown = [line for line in cut.split("…[", maxsplit=1)[0].splitlines() if line.strip()]
+    lines = text.splitlines()
+    assert on == offset + len(shown)  # read on from the line after the last one shown
+    assert shown[-1].endswith(lines[on - 1]) and on < len(lines)
+    assert lines[on] in results.read({"file_path": path, "offset": on, "limit": 1})
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_after_a_summarization_every_result_the_run_keeps_is_still_named(
+    journal: Journal, seed: int
+) -> None:
+    """A summarization replaces the older messages — the ones that named the kept results —
+    with a summary in the summarizer's own words: whatever it wrote, the request the model
+    gets next still names each result the run keeps that no remaining message names, by its
+    path and its table, so each is one query away. A summary that named 0 of 56 audit paths
+    left a model saying it had "lost track of part of the audit results". Named once: a
+    result a remaining message names is not listed again, and a request with no summary is
+    as it was."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rng = random.Random(seed)
+    kept = {}
+    for _ in range(rng.randrange(1, 60)):
+        text, _ = rows_of(rng.choice(["csv", "array", "object"]), rng.randrange(5, 40), rng)
+        path = results.keep(text, tool=rng.choice(["stock", "sales", "audit"]))
+        assert path is not None
+        kept[path] = query.tables(run)[path]
+    paths = list(kept)
+    shown = rng.sample(paths, rng.randrange(0, len(paths) + 1))  # still named after it
+    said = rng.sample(shown, rng.randrange(0, len(shown) + 1))  # those the summary names
+    summary = HumanMessage(
+        "A condensed summary follows: " + " ".join(said),
+        additional_kwargs={"lc_source": "summarization"},
+    )
+    tail = [ToolMessage(f"rows at {p}", tool_call_id=f"c{i}") for i, p in enumerate(shown)]
+    calls = [{"id": f"c{i}", "name": "stock", "args": {}} for i in range(len(shown))]
+    messages = [HumanMessage("how many?"), summary, AIMessage("", tool_calls=calls), *tail]
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages, tools=[])  # type: ignore[arg-type]
+    told = middleware._held_named(run, given)  # type: ignore[arg-type]
+    read = " ".join(str(m.text) for m in told.messages)
+    for path, table in kept.items():
+        assert read.count(path) >= 1, path  # every kept result is named
+        if path not in shown:
+            assert f"{table} at {path}" in told.messages[1].text  # with its table, once
+    listed = told.messages[1].text.removeprefix(summary.text)
+    assert not [p for p in shown if p in listed]  # one a message still names: not again
+    plain = given.override(messages=[messages[0], *messages[2:]])
+    assert middleware._held_named(run, plain) is plain  # no summary: as it was
+
+
+def test_a_page_whose_call_the_request_no_longer_holds_is_shortened_as_it_stands(
+    journal: Journal,
+) -> None:
+    """A page with no call beside it (its turn left out), or with no whole line in the room
+    there is: shortened where it stands — still nothing of it kept, no table named."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    text = "sku,units\n" + "\n".join(f"S{n},{n}" for n in range(400))
+    path = results.keep(text, tool="stock")
+    assert path is not None
+    page = results.read({"file_path": path, "limit": 300})
+    line = "x" * 9_000  # a page of one long line: no whole line fits
+    asked = {"file_path": path, "offset": 0, "limit": 300}
+    call = AIMessage("", tool_calls=[{"id": "r2", "name": results.READ_FILE, "args": asked}])
+    for messages in (
+        [HumanMessage("which?"), ToolMessage(page, tool_call_id="r1", name=results.READ_FILE)],
+        [
+            HumanMessage("which?"),
+            call,
+            ToolMessage(line, tool_call_id="r2", name=results.READ_FILE),
+        ],
+    ):
+        given = ModelRequest(
+            model=ScriptedChatModel(turns=[]), messages=messages, tools=[], state={"messages": messages}  # type: ignore[arg-type]
+        )  # fmt: skip
+        kept = dict(journal.results)
+        cut = str(middleware._cut(given, 1).messages[-1].text)
+        assert dict(journal.results) == kept and "the table" not in cut
+        assert "left out to fit the window" in cut and len(cut) < len(messages[-1].text)
+
+
 def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
     """A graph cleared outside a harness run keeps no result: a cleared result's mark names
     the rows its message showed, and of a stub nothing is said that is not known."""

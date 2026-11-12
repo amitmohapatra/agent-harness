@@ -145,6 +145,7 @@ from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
+    CUT_SHORT,
     FAILED,
     UNDECLARED,
     SideEffects,
@@ -152,6 +153,7 @@ from trellis.harness.tools.base import (
     Tool,
     arguments_of,
     citations,
+    cut_short,
     data_of,
     max_age,
     not_run,
@@ -956,7 +958,7 @@ class HarnessTools(AgentMiddleware):
         call = request.tool_call
         page = await _kept_read(runtime, request) if runtime is not None else None
         if page is not None:
-            return page
+            return _cut_said(request, page)
         tool = runtime.toolbox.get(call["name"]) if runtime is not None else None
         if runtime is None or tool is None:
             return await handler(request)
@@ -972,7 +974,7 @@ class HarnessTools(AgentMiddleware):
                 )
         else:
             outcome = await bridge.call(tool, call["args"], call_id=call_id, step=step.first + n)
-        return _message(outcome, request, kept=_paged(runtime, request))
+        return _cut_said(request, _message(outcome, request, kept=_paged(runtime, request)))
 
     def _step(self, runtime: Runtime, request: ToolCallRequest) -> tuple[_Step, int]:
         """The model step the call is one of (numbered on its first call's arrival), and the
@@ -996,6 +998,17 @@ class HarnessTools(AgentMiddleware):
                 key, runtime.next_step(len(calls)), writes, ran, repeats=repeats
             )
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
+
+
+def _cut_said(request: ToolCallRequest, done: ToolMessage) -> ToolMessage:
+    """``done``, saying its call was cut where it was refused for its arguments and the reply
+    that made the call reached the model's output limit (``accounting.at_output_limit``): the
+    arguments stop where the reply did (``tools.base.CUT_SHORT``). Any other answer as it is.
+    The reply was a model call either way, and counts as a step: a limit that did not count
+    it would never end a run whose every reply is cut."""
+    name = str(request.tool_call["name"])
+    cut = cut_short(name, done.text) if accounting.at_output_limit(_step_of(request)[1]) else None
+    return done if cut is None else done.model_copy(update={"content": cut})
 
 
 def _step_of(request: ToolCallRequest) -> tuple[int, AIMessage]:
@@ -1250,9 +1263,12 @@ class ModelHooks(AgentMiddleware):
         last = state["messages"][-1] if state.get("messages") else None
         if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
             return None
+        cut = accounting.at_output_limit(last)  # arguments that stop where the reply did
         told = [
             ToolMessage(
-                not_run(c.get("name") or "unknown", _malformed(c)),
+                (CUT_SHORT.format(tool=c.get("name") or "unknown", problem=_malformed(c)))
+                if cut
+                else not_run(c.get("name") or "unknown", _malformed(c)),
                 name=c.get("name") or "unknown",
                 tool_call_id=c["id"],
                 status="error",
@@ -1273,7 +1289,7 @@ class ModelHooks(AgentMiddleware):
         prompt = await self._pinned(runtime)
         if prompt is not None:
             request = self._prompted(request, prompt)
-        request = _dated(request, runtime)
+        request = _held_named(runtime, _dated(request, runtime))
         name = _model_name(request.model)
         extra = prompt.attributes() if prompt is not None else None
         with model_span(name or "model", lambda: _said(request), extra=extra) as span:
@@ -1909,6 +1925,23 @@ class ReadTools(AgentMiddleware):
 
 
 # --------------------------------------------------------------------------- the window
+#: Where a model's profile keeps the window the model said, when ``ReAct`` was given another
+#: (``react._profiled``): the reply is reserved out of the model's own (``FitWindow._budget``).
+OWN_WINDOW: Final = "trellis_own_window"
+
+
+def _sending(model: Any) -> Any:
+    """The chat model that sends a request made of ``model``: a model name's, the one its
+    route resolves to now (its ``max_tokens`` is the reply the call asks for); any other
+    model, itself. The name itself where the route cannot make one: the call says why."""
+    if not routed(model):
+        return model
+    try:
+        return cast(Any, model).resolved()
+    except Exception:
+        return model
+
+
 #: Tools a narrowing keeps at least, beside the ones it must keep (the run's used ones, the
 #: graph's own state tools): the descriptions are compacted, the longest results cut and the
 #: older turns left out before any of them is dropped.
@@ -1945,6 +1978,14 @@ _OVERFLOW: Final = re.compile(
     re.IGNORECASE,
 )
 _OVERFLOW_SIZE: Final = re.compile(r"(?:request \(|resulted in |too long: )(\d+) tokens")
+#: And the window it says it has, in the same refusal (OpenAI's and vLLM's "maximum context
+#: length is N", Anthropic's "> N maximum", llama.cpp's "context size (N").
+_OVERFLOW_LIMIT: Final = re.compile(
+    r"maximum context length is (\d+)|> (\d+) maximum|context size \((\d+)", re.IGNORECASE
+)
+#: The window a model's server named when it refused a request, by model name: what is known
+#: of a model whose window no one else said (:meth:`FitWindow._learning`).
+_LEARNED: Final[LRU[str, int]] = LRU(64)
 _WORD: Final = re.compile(r"[a-z0-9]+")
 
 
@@ -2010,6 +2051,84 @@ def _rows_said(path: str, text: str, table: str) -> str:
     if not rows or columns == ["line"]:
         return ""
     return " " + results.table_said(path, text, table)
+
+
+#: What a summarized request says, after its summary, of the results the run keeps that no
+#: message left in it names; and the most it names (the rest are counted).
+HELD_NAMED: Final = (
+    "Results of this run that are still kept, each a table query_result computes over and "
+    "read_file pages: {named}{more}."
+)
+HELD_MOST: Final = 100
+
+
+def _held_named(runtime: Runtime | None, request: ModelRequest[Any]) -> ModelRequest[Any]:
+    """The request with its summary — a summarization's, LangChain's or Deep Agents' — saying
+    which results the run still keeps that nothing left in the request names: each by its
+    table and its path (:data:`HELD_NAMED`). A summarization replaces the messages that named
+    them with a summary in the summarizer's own words, which may name none (0 of 56, and the
+    model said it had lost track of the results); the run keeps them all the same. The
+    request's copy says it, never the graph's state. As it is with no summary, outside a run,
+    or when every kept result is still named."""
+    at = next(
+        (
+            n
+            for n in range(len(request.messages) - 1, -1, -1)
+            if request.messages[n].additional_kwargs.get("lc_source") == "summarization"
+        ),
+        None,
+    )
+    if runtime is None or at is None:
+        return request
+    read = " ".join(m.text for m in request.messages)
+    names = query.tables(runtime)
+    lost = [p for p in runtime.replay.journal.results if p not in read]
+    if not lost:
+        return request
+    named = "; ".join(f"{names[p]} at {p}" for p in lost[:HELD_MOST])
+    more = f"; and {len(lost) - HELD_MOST} more" if len(lost) > HELD_MOST else ""
+    summary = request.messages[at]
+    said = f"{summary.text}\n\n{HELD_NAMED.format(named=named, more=more)}"
+    messages = list(request.messages)
+    messages[at] = summary.model_copy(update={"content": said})
+    return request.override(messages=messages)
+
+
+def _start(text: str, room: int) -> str:
+    """The first ``room`` characters of ``text``, saying how much was left out; ``text`` when
+    it fits."""
+    left = results.SHORTENED.format(left=len(text) - room)
+    return text if room + len(left) >= len(text) else f"{text[:room]}{left}"
+
+
+def _page_cut(messages: Sequence[AnyMessage], at: int, room: int) -> str | None:
+    """The page ``read_file`` returned in ``messages[at]``, in about ``room`` characters: its
+    first whole lines, then where to read on — the file the call read, from the line after
+    the last one shown. A page is a view of a result (its lines, numbered), not a result:
+    kept as one, its rows were the numbered lines, named as a table, and a join against it
+    matched nothing. ``None``: the page fits, shows no whole line in that room, or its call
+    is not in the request (it is then cut at its start as it stands: :func:`_start`)."""
+    page = messages[at].text
+    head = page[: page.rfind("\n", 0, room) + 1]
+    call = next(
+        (
+            c
+            for m in messages[:at]
+            if isinstance(m, AIMessage)
+            for c in m.tool_calls
+            if c["id"] == cast(ToolMessage, messages[at]).tool_call_id
+        ),
+        None,
+    )
+    if room >= len(page) or not head.strip() or call is None:
+        return None
+    asked = call["args"]
+    offset = asked.get("offset")
+    start = max(0, offset) if isinstance(offset, int) else 0
+    on = start + sum(1 for line in head.splitlines() if line.strip())
+    cut = f"{len(page) - len(head)} characters cut to fit the window"
+    path = "/" + str(asked.get("file_path", "")).lstrip("/")
+    return f'{head}…[{cut}; read on: {READ_FILE}(file_path="{path}", offset={on})]'
 
 
 def _mark(message: AnyMessage) -> bool:
@@ -2089,7 +2208,7 @@ class FitWindow(AgentMiddleware):
     ) -> ModelResponse[Any]:
         budget = self._budget(request)
         if budget is None:
-            return await handler(request)
+            return await self._learning(request, handler)
         name = _model_name(request.model) or ""
         ratio = _RATIOS.get(name) or 1.0
         sent, counted = self._within(request, int(budget / ratio))
@@ -2110,6 +2229,32 @@ class FitWindow(AgentMiddleware):
             log.info("the model's server refused %s tokens: fitted again", real or "too many")
             return await handler(self._within(request, int(budget / learned), refit=True)[0])
 
+    async def _learning(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
+    ) -> ModelResponse[Any]:
+        """The call of a model whose window no one said — not the caller, not the library's
+        profile, not the route: sent as it is, and when the server refuses it as over its
+        window and names that window (:func:`_refused_limit`), fitted to it and sent again.
+        The window is the model's from then on (:data:`_LEARNED`, by its name). Nothing was
+        fitted for such a model, so its first long request ended the run with the refusal;
+        a refusal that names no window still does."""
+        try:
+            return await handler(request)
+        except Exception as exc:
+            limit = _refused_limit(exc)
+            if limit is None:
+                raise
+        name = _model_name(request.model)
+        if name:
+            _LEARNED[name] = limit
+        budget = self._budget(request, limit)
+        assert budget is not None  # a window is known now
+        FITTED["refit"] += 1
+        log.info("the model's server said its window is %s tokens: fitted to it", limit)
+        return await handler(self._within(request, budget, refit=True)[0])
+
     def _within(
         self, request: ModelRequest[Any], budget: int, *, refit: bool = False
     ) -> tuple[ModelRequest[Any], int]:
@@ -2120,19 +2265,31 @@ class FitWindow(AgentMiddleware):
         fitted = self._fitted(request, budget, refit=refit)
         return fitted, _size(fitted)
 
-    def _budget(self, request: ModelRequest[Any]) -> int | None:
+    def _budget(self, request: ModelRequest[Any], said_now: int | None = None) -> int | None:
+        """What the request may hold: the window's share (:data:`FIT_SHARE`), and no more than
+        the model's own window leaves beside the reply the call will send — a provider takes
+        input and reply together. The reply is the call's own setting, else the chat model's
+        that makes the call (a model name's: the one its route resolves to; read from the
+        name there was none, and 950,000 tokens were sent where the provider took 872,000).
+        A window the caller gives below the model's own is not what the reply is taken out
+        of: given 32,000 for a model replying up to 64,000, nothing was left for the input.
+        The window is the one given, else the model's profile's, else the one its server
+        named when it refused a request (``said_now``, :data:`_LEARNED`); ``None``: no one
+        has said it."""
         profile = getattr(request.model, "profile", None)
-        window = self.window or (
-            profile.get("max_input_tokens") if isinstance(profile, dict) else None
-        )
+        said = profile if isinstance(profile, dict) else {}
+        learned = said_now or _LEARNED.get(_model_name(request.model) or "")
+        window = self.window or said.get("max_input_tokens") or learned
         if not isinstance(window, int) or isinstance(window, bool):
             return None
+        sends = _sending(request.model)
         reply = 0
         for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-            value = request.model_settings.get(key, getattr(request.model, key, None))
+            value = request.model_settings.get(key, getattr(sends, key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 reply = max(reply, value)
-        return max(0, int(window * FIT_SHARE) - reply)
+        own = said.get(OWN_WINDOW) or window
+        return max(0, min(int(window * FIT_SHARE), int(own * FIT_SHARE) - reply))
 
     def _results(
         self, request: ModelRequest[Any], budget: int, *, refit: bool
@@ -2248,6 +2405,18 @@ def _refused_size(exc: BaseException) -> int | None:
         if isinstance(seen, ContextOverflowError) or _OVERFLOW.search(text):
             said = _OVERFLOW_SIZE.search(text)
             return int(said.group(1)) if said else 0
+        seen = seen.__cause__
+    return None
+
+
+def _refused_limit(exc: BaseException) -> int | None:
+    """The window a model server named in refusing a request as over it, or ``None``: ``exc``
+    is no such refusal (:func:`_refused_size`), or names none."""
+    seen: BaseException | None = exc if _refused_size(exc) is not None else None
+    while seen is not None:
+        said = _OVERFLOW_LIMIT.search(str(seen))
+        if said is not None:
+            return int(next(n for n in said.groups() if n))
         seen = seen.__cause__
     return None
 
@@ -2545,9 +2714,15 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     ):
         if over <= 0:
             break
-        if _mark(messages[n]):  # no result: shortened as a mark, nothing of it kept
+        if _mark(messages[n]) or messages[n].name == READ_FILE:
+            # no result: a mark is shortened as a mark, a page read of a result as a page
+            # (where to read on in the file it read) — nothing of either is kept
             whole = messages[n].text
-            less = results.shortened(whole, max(200, len(whole) - over * 4 - CUT_MARKER))
+            room = max(200, len(whole) - over * 4 - CUT_MARKER)
+            if _mark(messages[n]):
+                less = results.shortened(whole, room)
+            else:  # a page: its whole lines and where to read on, else its start as it stands
+                less = _page_cut(messages, n, room) or _start(whole, room)
             messages[n] = messages[n].model_copy(update={"content": less})
             over -= (len(whole) - len(less)) // 4
             continue

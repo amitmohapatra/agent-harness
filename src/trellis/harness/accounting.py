@@ -42,9 +42,10 @@ AT_OUTPUT_LIMIT: Final = frozenset({"length", "max_tokens", "MAX_TOKENS"})
 
 def cut_off(message: AIMessage) -> bool:
     """Whether ``message`` is a reply cut at the model's output limit before it gave an answer:
-    no text, no tool call, and the provider says it reached the limit."""
-    if message.tool_calls or message.text.strip():
-        return False
+    no text, no tool call — none whose arguments the limit cut short either — and the
+    provider says it reached the limit."""
+    if message.tool_calls or message.invalid_tool_calls or message.text.strip():
+        return False  # a call the limit cut short is a call still: made again, not answered for
     return at_output_limit(message)
 
 

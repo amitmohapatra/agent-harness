@@ -68,17 +68,19 @@ async def test_a_run_that_reads_over_and_over_is_left_paused_past_the_limit(tmp_
 def test_a_cannot_do_turn_whose_run_ran_code_is_scored_on_what_it_did() -> None:
     """With a shell of its own (Claude Code, Kimi), a request the suite wrote as "no code
     execution here" can be done: a run that ran a command (approved, read-only) and gives the
-    result answered it, and its figures are not made up. A file or link the user cannot reach
+    result answered it, and its figures are not made up — nor are they checked, where the
+    case states none: unverified, counted neither way. A file or link the user cannot reach
     is still made up; a refusal is still right."""
     case = next(c for c in breakfix.cases() if c.id == "bf3-cantdo-01")
     expect = case.turns[0].expect
     assert expect is not None
     did = "I fitted ARIMA(1,1,1) to monthly revenue: the model forecasts £2,140,000 for Q4 2026."
 
-    def ok(answer: str, *, ran: bool) -> bool:
+    def ok(answer: str, *, ran: bool) -> bool | None:
         return cx.score(expect, answer, [], ran=ran)["correct"]
 
-    assert ok(did, ran=True)
+    computed = cx.score(expect, did, [], ran=True)
+    assert computed["correct"] is None and computed["unverified"] and not computed["made_up"]
     assert not ok(did, ran=False)  # with no code run, that forecast is made up
     assert ok(expect.reference, ran=True)  # declining is still right
     assert not ok(did + " [download](sandbox:/q4.xlsx)", ran=True)

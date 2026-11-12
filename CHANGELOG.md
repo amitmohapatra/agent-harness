@@ -5,6 +5,61 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: what a ReAct run is told and sent in the cases a closing run still got wrong
+
+One change set, each part with its cause, a rule that knows no case, and generated tests
+that read the words the model is sent.
+
+- **Handing a task to a helper asks no one.** `task` was left out of the run's tool set as
+  machinery when the agent has no sub-agents of its own, so its own spec, which declares
+  nothing, was read, and a tool that says nothing asks a person: every task handed to the
+  general-purpose helper paused for an approval of nothing, on every backend. It carries
+  the helper rule's risk now (a read); each call the helper makes is governed on its own, by
+  its own name. 8 of 16 generated cells (4 backends, 2 helpers, 2 risks) failed before.
+- **The reply a call will send is reserved out of the model's own window.** `FitWindow` read
+  `max_tokens` from the request's model; for a model given by name that is the routed
+  wrapper, which has none, so nothing was reserved: 950,000 tokens could be sent where the
+  provider takes 872,000. The reply is the call's own setting, else the `max_tokens` of the
+  chat model that sends the call. It is taken out of the model's own window, which `ReAct`
+  keeps beside a `context_window` given: given 32,000 for a model replying up to 64,000,
+  the budget was zero. 51 of 60 generated models failed before.
+- **A tool call cut at the output limit is said to be cut, and is made again.** The model
+  was told an argument was missing, which it could not see was the limit's doing, and wrote
+  the same long reply again; a call the provider could not parse at all was taken for a
+  reply with no answer, and the model was made to answer with no tools. The refusal says the
+  reply reached the output limit before the call's arguments were complete. The reply is a
+  model call and counts as a step: a limit that did not count it would never end a run
+  whose every reply is cut.
+- **A file a command leaves at any depth is known to be the user's or not.** Only files
+  directly in the working directory were looked at after a command, so one written a folder
+  down (`reports/q3.csv`, or a folder inside `outputs/`) was neither, and an answer said it
+  was delivered. Every file under the working directory is looked at (hidden folders left
+  out, 5,000 at most), and a new one that is not directly in `outputs/` is named by its
+  path. The command tool's description says what cannot be seen: a file written outside the
+  working directory.
+- **A window no one says is learned from the server's own refusal.** With no
+  `context_window`, no profile in the library and a route whose model list names no window,
+  nothing was fitted, and the first request over the window ended the run with the server's
+  refusal. The refusal names the window in each server's wording the harness already reads
+  (OpenAI's and vLLM's, Anthropic's, llama.cpp's): the request is fitted to it and sent
+  again, and the window is the model's from then on. Clearing old results and the long-task
+  tools stay off for such a model (they are set when the agent is built): give
+  `context_window` to turn them on. No setting.
+- **A page read of a result is cut as a page, never kept as a table.** A `read_file` page
+  cut to fit a small window was kept as a result of its own, named as a table whose rows
+  were the numbered lines ("2  SKU-00501"): a join against it matched nothing and the turn
+  ran to its step limit. It is cut to its first whole lines and says where to read on in
+  the file it read; nothing of it is kept.
+- **After a summarization every result the run keeps is still named.** A summary is in the
+  summarizer's own words and may name none of the kept results (0 of 56 in one run, whose
+  model said it had lost track of them). The request after a summary names each result the
+  run keeps that no remaining message names, by its table and its path, once.
+- **Benchmark: a computed answer in a "cannot" case scores only against a stated figure.**
+  A request written as cannot-be-done-here that a run computed all the same was scored
+  right whatever it said. It is right only when the case states the figure and the answer
+  holds it, and unverified where the case states none: counted neither way, in its own
+  column. `cantdo-02` states what its line of Python prints, from the data.
+
 ### Fixed: a cleared result's mark names the result's own columns, and a mark is never cut as a result
 
 Two changes of this release met badly. A cleared result's mark names the table a query
