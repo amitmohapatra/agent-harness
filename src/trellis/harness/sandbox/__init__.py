@@ -116,12 +116,20 @@ LIST_OUTPUTS: Final = (
     f'for f in {OUTPUTS}/* {OUTPUTS}/.[!.]*; do [ -f "$f" ] && '
     'printf "%s %s\\n" "$(wc -c < "$f")" "${f##*/}"; done; true'
 )
-#: The working directory, each output file's size and name, an empty line, then the name of
-#: each file directly in the working directory: what the model's command or file is told with
-#: its result is read from this (:meth:`SandboxSource.outputs_said`).
+#: The most files of the working directory one look lists (a tree of dependencies is cut off
+#: here: what is new past it is not named).
+LISTED_MOST: Final = 5_000
+#: The working directory, each output file's size and name, an empty line, then the path of
+#: each file under the working directory, at any depth, that is not directly in the kept
+#: folder (hidden folders left out): what the model's command or file is told with its
+#: result is read from this (:meth:`SandboxSource.outputs_said`). Only the files directly in
+#: the working directory were listed, so one a command wrote a folder down — ``reports/``,
+#: or a folder inside the kept one — was neither said to be the user's nor not.
 OUTPUTS_NOW: Final = (
     f'printf "%s\\n" "$PWD"; {LIST_OUTPUTS}; printf "\\n"; '
-    'for f in * .[!.]*; do [ -f "$f" ] && printf "%s\\n" "$f"; done; true'
+    'find . -type d -name ".?*" -prune -o -type f '
+    f'\\( ! -path "./{OUTPUTS}/*" -o -path "./{OUTPUTS}/*/*" \\) -print 2>/dev/null '
+    f'| sed "s|^\\./||" | head -n {LISTED_MOST}; true'
 )
 #: What a command or a file that names :data:`OUTPUTS` is told: the files the user gets so
 #: far, or that there is none yet — with the folder's whole path, the one place a file for
@@ -130,8 +138,8 @@ OUTPUTS_HOLD: Final = "In {folder}/ for the user: {files}."
 OUTPUTS_EMPTY: Final = (
     "No file is in {folder}/ yet: only a file written directly there is given to the user."
 )
-#: What a command that left a new file beside that folder is told, once per file; and a file
-#: written by a path that is not directly in that folder.
+#: What a command that left a new file anywhere but directly in that folder is told, once per
+#: file; and a file written by a path that is not directly in that folder.
 OUTPUTS_BESIDE: Final = "Not in {folder}/, so not given to the user: {files}."
 #: The most new files beside the folder named at once; the rest are counted.
 BESIDE_NAMED: Final = 20
@@ -140,7 +148,9 @@ OUTPUT_MAX_BYTES: Final = 50 * 1024 * 1024
 #: What the command tool's description says about outputs.
 DELIVERS: Final = (
     f"Files you write in {OUTPUTS}/ (its working directory's) are given to the user when you "
-    "finish."
+    "finish: only those directly in it. A file a command leaves elsewhere under the working "
+    "directory is named with its result; one written outside the working directory is not "
+    "seen, and is not given to the user."
 )
 #: What the command tool's description says of the run's data: where code finds it, and what
 #: is the query's — facts the model chooses by.
@@ -356,8 +366,9 @@ class SandboxSource:
         is told with its result, so a file that is not the user's is known at once. One that
         names an :data:`OUTPUTS` folder: the files the kept folder holds (each with its size),
         or that it holds none, with the folder's whole path — another ``outputs`` (the root's,
-        another folder's) is not it. One that left a new file directly in the working
-        directory, beside the kept folder: that file, named once. ``None`` for neither."""
+        another folder's) is not it. One that left a new file under the working directory, at
+        any depth, that is not directly in the kept folder: that file, by its path, named
+        once. ``None`` for neither."""
         folder, kept, new = await self._now(runtime, box)
         said = []
         if OUTPUTS in named:
@@ -384,7 +395,7 @@ class SandboxSource:
 
     async def _now(self, runtime: Runtime, box: Sandbox) -> tuple[str, str, list[str]]:
         """The kept folder's whole path, the files it holds (each with its size), and the files
-        directly in the working directory this attempt had not seen (none at its first look:
+        under the working directory this attempt had not seen (none at its first look:
         :meth:`seen`) — one command (:data:`OUTPUTS_NOW`)."""
         listed = await box.exec(OUTPUTS_NOW, timeout=self.call_timeout)
         where, _, rest = listed.stdout.partition("\n")
