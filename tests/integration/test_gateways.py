@@ -58,7 +58,7 @@ def _no_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     gateways._endpoint_wins.cache_clear()
-    gateways._WINDOWS._data.clear()
+    gateways._LIMITS._data.clear()
 
 
 def test_one_route_is_chosen_never_a_chain() -> None:
@@ -515,6 +515,134 @@ def test_a_route_that_does_not_say_leaves_the_window_unknown(
     assert "the context window of granite-unsaid is not known" in caplog.text
 
 
+def test_a_model_langchain_does_not_know_gets_its_output_limit_from_the_route(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
+) -> None:
+    """A model newer than the installed LangChain package has no profile there, so its chat
+    model was made with LangChain's fallback of 4,096 output tokens: a reply that thought
+    first stopped mid-call or mid-table (74 of 22,385 saved model calls ended at exactly
+    4,096). The route's record of the model says its output limit beside its window: it is
+    asked once for both, and used where LangChain names none. A model LangChain knows keeps
+    LangChain's, unasked; a record that names no output limit leaves the fallback as it was."""
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    anthropic_models.records["claude-newer"] = _model_record(
+        "claude-newer", max_input_tokens=1_000_000, max_tokens=128_000
+    )
+    anthropic_models.records["claude-unsaid"] = _model_record(
+        "claude-unsaid", max_input_tokens=200_000
+    )
+    newer = routed_chat_model("claude-newer")
+    assert newer.resolved().max_tokens == 128_000
+    assert newer.profile == {"max_input_tokens": 1_000_000}
+    assert len(anthropic_models.asked) == 1  # one question for the window and the limit
+    fallback = routed_chat_model("claude-unsaid").resolved().max_tokens
+    assert fallback < 128_000  # LangChain's own, as before: no number of ours
+    known = routed_chat_model("claude-sonnet-4-5").resolved()
+    assert known.max_tokens == known.profile["max_output_tokens"]  # LangChain's, unchanged
+    assert len(anthropic_models.asked) == 2  # the known model was not asked
+    # a caller's own limit is the caller's: a chat model it made, a call's own max_tokens
+    from langchain_anthropic import ChatAnthropic
+
+    own = ChatAnthropic(model_name="claude-newer", max_tokens=900, api_key="sk-ant")  # type: ignore[call-arg,arg-type]
+    assert own.max_tokens == 900
+    assert newer.resolved().bind(max_tokens=700).kwargs == {"max_tokens": 700}
+
+
+#: Windows and output limits a route may report for a model: the pairs real records hold,
+#: one whose reply would leave little of the window, one whose reply is the whole window.
+REPORTED = [(1_000_000, 128_000), (200_000, 64_000), (200_000, 128_000), (200_000, 200_000)]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_reply_never_takes_more_of_the_window_than_the_librarys_own_convention(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any, seed: int
+) -> None:
+    """Whatever window and output limit a route reports for a model the library has no
+    profile of: the reply is given the route's limit only up to the share of the window the
+    library gives the models it does know (its largest ``max_output_tokens`` of
+    ``max_input_tokens``, read from its installed profiles), so input is never left none of
+    the window (a route saying output = window made every call one the provider refuses),
+    and never less than a model the library knows is left."""
+    import random
+
+    from langchain_anthropic.data._profiles import _PROFILES
+
+    known = [p for p in _PROFILES.values() if p.get("max_output_tokens")]
+    share = max(p["max_output_tokens"] / p["max_input_tokens"] for p in known)
+    rng = random.Random(seed)
+    window = rng.randrange(4_000, 2_000_000)
+    pairs = [*REPORTED, (window, rng.randrange(256, window + 1))]
+    window, output = pairs[seed] if seed < len(pairs) else pairs[-1]
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    name = f"claude-new-{seed}"
+    anthropic_models.records[name] = _model_record(name, max_input_tokens=window, max_tokens=output)
+    reply = routed_chat_model(name).resolved().max_tokens
+    assert reply == min(output, int(window * share))  # the route's, up to the convention
+    assert 0 < reply <= window * share < window  # and input is left the rest
+
+
+def test_a_route_that_names_no_window_or_a_library_with_no_profiles_leaves_the_fallback(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
+) -> None:
+    """Nothing bounds a reply's share where the route names no window, or the library of the
+    chat model keeps no profiles to read a convention from: its own fallback stays."""
+    from langchain_anthropic import ChatAnthropic
+
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    anthropic_models.records["claude-no-window"] = _model_record(
+        "claude-no-window", max_tokens=128_000
+    )
+    fallback = ChatAnthropic(model_name="claude-no-window", api_key="sk-ant").max_tokens  # type: ignore[call-arg,arg-type]
+    assert routed_chat_model("claude-no-window").resolved().max_tokens == fallback
+    anthropic_models.records["claude-newer"] = _model_record(
+        "claude-newer", max_input_tokens=1_000_000, max_tokens=128_000
+    )
+
+    class Other:  # a client of a package that keeps no profiles, with a fallback of its own
+        profile = None
+        max_tokens = 1_024
+
+    made = Other()
+    assert gateways._output_limited(made, "claude-newer") is made
+
+
+@pytest.mark.parametrize("seed", range(24))
+@respx.mock
+def test_a_routes_record_names_a_models_window_and_output_limit_under_its_own_fields(
+    monkeypatch: pytest.MonkeyPatch, seed: int
+) -> None:
+    """Any OpenAI-compatible route: its model list names each model's window and output limit
+    under the server's own field names, either, both or neither — the route's limits are
+    exactly what its record says, and what it does not say is not known (never a number of
+    ours)."""
+    import random
+
+    rng = random.Random(seed)
+    window = rng.choice([None, *gateways.WINDOW_FIELDS])
+    output = rng.choice([None, *gateways.OUTPUT_FIELDS])
+    said = {"window": rng.randrange(2_000, 2_000_000), "output": rng.randrange(256, 200_000)}
+    record: dict[str, Any] = {"id": "model-x", "owned_by": "lab"}
+    if window is not None:
+        record[window] = said["window"]
+    if output is not None:
+        record[output] = said["output"]
+    monkeypatch.setenv("LLM_BASE_URL", f"http://route-{seed}.test/v1")
+    models = respx.get(f"http://route-{seed}.test/v1/models").respond(
+        json={"object": "list", "data": [{"id": "other", "max_tokens": 1}, record]}
+    )
+    route = gateways.route_now()
+    wanted = (said["window"] if window else None, said["output"] if output else None)
+    assert route.limits("model-x") == wanted
+    assert route.window("model-x") == wanted[0]
+    assert gateways._limits_of("model-x") == wanted and gateways._limits_of("model-x") == wanted
+    assert models.call_count == 3  # the kept answer is not asked again
+    profile = routed_chat_model("model-x").profile
+    assert profile == ({"max_input_tokens": wanted[0]} if window else None)
+
+
 def test_a_providers_own_sdk_asks_anthropic_with_its_own_key(
     monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
 ) -> None:
@@ -534,6 +662,13 @@ def test_a_providers_own_sdk_asks_anthropic_with_its_own_key(
     assert routed_chat_model("anthropic:claude-unheard").profile is None  # a 404
     # a route a package adds, without a record of its own: none (the port's default)
     assert gateways.ModelGateway.window(ProviderSDK(), "anthropic:claude-newer") is None
+
+    class Added(ProviderSDK):  # one that says a window its own way, and no output limit
+        def window(self, model: str) -> int | None:
+            return 64_000
+
+    assert gateways.ModelGateway.limits(Added(), "granite") == (64_000, None)
+    assert ProviderSDK().window("anthropic:claude-newer") == 500_000  # the record's, asked
 
 
 def test_anthropics_own_api_is_reached_with_its_own_client() -> None:

@@ -105,10 +105,11 @@ async def test_a_cleared_result_is_queried_by_the_path_its_mark_names(
     agent = arm(memory_harness.wrap(target, id="stock"), [stock])
     done = await agent.run("count the stock", user="u")
     assert done.answer == "done", done.error
-    # the first result is cleared by then, its mark naming the path the query is asked about
-    gone = CLEARED.replace("{path}", "/large_tool_results/call_1")
+    # the first result is cleared by then: its mark names where the run keeps it (a table of
+    # 200 rows is kept, under a path of its own) and the query over its rows
+    gone = CLEARED.split("{path}", 1)[0]
     marks = [c for c in contents(model, len(model.requests) - 1) if str(c).startswith(gone)]
-    assert marks and "query_result" in marks[0]  # the mark names the query over its rows too
+    assert marks and "query_result" in marks[0] and "/large_tool_results/call_1" not in marks[0]
     # the query computes over that result's every row: the path is not "not found"
     assert contents(model, len(model.requests) - 1)[-1] == "lines,units\n200,20100"
 

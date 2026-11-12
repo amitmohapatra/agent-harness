@@ -138,6 +138,10 @@ WINDOW_FIELDS: Final = (
     "max_model_len",
     "max_context_length",
 )
+#: And the fields that name the most tokens one reply may be: Anthropic's Models API
+#: (``max_tokens``), Bifrost and LiteLLM (``max_output_tokens``), Groq and OpenRouter
+#: (``max_completion_tokens``).
+OUTPUT_FIELDS: Final = ("max_tokens", "max_output_tokens", "max_completion_tokens")
 #: How long a route is given to say a model's window, in seconds (asked when a model name
 #: LangChain has no profile of is made a chat model: once per route and model).
 WINDOW_ASKED: Final = 5.0
@@ -207,6 +211,12 @@ class ModelGateway(ABC):
         says it (a request to the endpoint); ``None``: it says none (the default: a route with
         no such record)."""
         return None
+
+    def limits(self, model: str) -> tuple[int | None, int | None]:
+        """What this route's record of ``model`` says of its size, asked once: its context
+        window (:meth:`window`) and the most tokens one reply may be (``None``: it says
+        none)."""
+        return self.window(model), None
 
     def gateway_client(self, key: str | None = None) -> Gateway | None:
         """The client of the gateway's own API (MCP tools, stored prompts, skills, the judge
@@ -309,23 +319,25 @@ def _anthropic(model: str, effort: str | None, url: str, key: str | None) -> Any
     return ChatAnthropic(model_name=model, base_url=url, api_key=key, **effort_given)  # type: ignore[call-arg,arg-type]
 
 
-def _anthropic_window(model: str, **client: Any) -> int | None:
-    """The context window Anthropic's Models API says ``model`` has (``max_input_tokens``),
-    asked with Anthropic's own client made of ``client`` (none: its SDK's own key and
-    endpoint)."""
+def _anthropic_limits(model: str, **client: Any) -> tuple[int | None, int | None]:
+    """The context window and the output limit Anthropic's Models API says ``model`` has
+    (``max_input_tokens``, ``max_tokens``), asked with Anthropic's own client made of
+    ``client`` (none: its SDK's own key and endpoint)."""
     import anthropic  # noqa: PLC0415 - the anthropic extra's
 
     with anthropic.Anthropic(max_retries=0, timeout=WINDOW_ASKED, **client) as asked:
-        return asked.models.retrieve(model).max_input_tokens
+        return _limits_said(asked.models.retrieve(model).model_dump())
 
 
-def _window_said(record: Mapping[str, Any]) -> int | None:
-    """The context window a model's record names (:data:`WINDOW_FIELDS`); ``None``: none."""
-    for field in WINDOW_FIELDS:
-        said = record.get(field)
-        if isinstance(said, int) and said > 0:
-            return said
-    return None
+def _limits_said(record: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """The context window and the output limit a model's record names (:data:`WINDOW_FIELDS`,
+    :data:`OUTPUT_FIELDS`: the first of each that is a number); ``None``: not named."""
+
+    def said(fields: tuple[str, ...]) -> int | None:
+        found = (record.get(field) for field in fields)
+        return next((n for n in found if isinstance(n, int) and n > 0), None)
+
+    return said(WINDOW_FIELDS), said(OUTPUT_FIELDS)
 
 
 class OpenAICompatible(ModelGateway):
@@ -428,17 +440,20 @@ class OpenAICompatible(ModelGateway):
         )
 
     def window(self, model: str) -> int | None:
+        return self.limits(model)[0]
+
+    def limits(self, model: str) -> tuple[int | None, int | None]:
         """Anthropic's API is asked of the model (its Models API); any other endpoint's model
         list (``/models``) is read for the model as the route names it."""
         name = self.routed(model)
         if self.anthropic:
-            return _anthropic_window(name, base_url=self.origin, api_key=self.key)
+            return _anthropic_limits(name, base_url=self.origin, api_key=self.key)
         import httpx  # noqa: PLC0415
 
         url = f"{self.url.rstrip('/')}/models"
         listed = httpx.get(url, auth=self.http_auth, timeout=WINDOW_ASKED).raise_for_status()
         records = (r for r in listed.json()["data"] if r.get("id") == name)
-        return next((_window_said(record) for record in records), None)
+        return next((_limits_said(record) for record in records), (None, None))
 
     def judge(self, model: str) -> OpenAICompatibleJudge:
         from trellis.harness.evals import OpenAICompatibleJudge  # noqa: PLC0415
@@ -554,10 +569,13 @@ class ProviderSDK(ModelGateway):
         return init_chat_model(name, model_provider=provider)
 
     def window(self, model: str) -> int | None:
+        return self.limits(model)[0]
+
+    def limits(self, model: str) -> tuple[int | None, int | None]:
         """Anthropic's SDK asks its Models API, with its own key; no other provider's is asked
         (OpenAI's model records name no window)."""
         provider, _, name = self.routed(model).partition(":")
-        return _anthropic_window(name) if provider == "anthropic" else None
+        return _anthropic_limits(name) if provider == "anthropic" else (None, None)
 
     def judge(self, model: str) -> OpenAICompatibleJudge:
         """``model`` as a judge asks it: an OpenAI model on the OpenAI SDK's own endpoint."""
@@ -651,9 +669,9 @@ def missing(gateway: ModelGateway, capability: Capability, what: str) -> str | N
 _MADE: weakref.WeakKeyDictionary[Any, LRU[tuple[Any, ...], Any]] = weakref.WeakKeyDictionary()
 #: The ones made outside an event loop.
 _MADE_NO_LOOP: LRU[tuple[Any, ...], Any] = LRU(ROUTED_KEPT)
-#: What each route answered when asked a model's window (``None``: it says none), by route
-#: and model.
-_WINDOWS: LRU[tuple[Any, ...], int | None] = LRU(ROUTED_KEPT)
+#: What each route answered when asked a model's window and output limit (``None``: it says
+#: none), by route and model.
+_LIMITS: LRU[tuple[Any, ...], tuple[int | None, int | None]] = LRU(ROUTED_KEPT)
 
 
 def per_loop(kept: weakref.WeakKeyDictionary[Any, LRU[Any, Any]], size: int) -> LRU[Any, Any]:
@@ -712,25 +730,70 @@ def _resolved(model: str, effort: str | None) -> Any:
     key = (gateway.name, gateway.url, gateway.key, gateway.auth, forced, model, effort)
     found = made.get(key)
     if found is None:
-        found = made[key] = gateway.chat_model(model, effort=effort)
+        found = made[key] = _output_limited(gateway.chat_model(model, effort=effort), model)
     return found
 
 
+def _output_limited(made: Any, model: str) -> Any:
+    """``made`` — the route's chat model of ``model`` — with the output limit the route says
+    the model has (:func:`_limits_of`), where LangChain names none and filled in a number of
+    its own: for a model newer than the installed package ``ChatAnthropic`` falls back to
+    4,096 tokens, and a reply stopped mid-call or mid-answer. It is used up to the share of
+    the window the library gives the models it knows (:func:`_reply_share`). A model
+    LangChain knows keeps its profile's limit, a client that sends none (the server's own
+    default) still sends none, and a route that says no limit, or no window to bound it by,
+    leaves the library's fallback."""
+    known = (getattr(made, "profile", None) or {}).get("max_output_tokens")
+    if known or not isinstance(getattr(made, "max_tokens", None), int):
+        return made
+    window, limit = _limits_of(model)
+    share = _reply_share(type(made).__module__.partition(".")[0])
+    if limit is None or window is None or share is None:
+        return made
+    return made.model_copy(update={"max_tokens": min(limit, int(window * share))})
+
+
+@functools.cache
+def _reply_share(package: str) -> float | None:
+    """The most of a model's window a reply is given by the LangChain package ``package``, over
+    the models it has a profile of (the largest ``max_output_tokens`` of ``max_input_tokens``:
+    its own convention, read from the profiles it is installed with). A route's output limit
+    is used up to that share of the window: input and reply must fit the window together, so
+    a route reporting a reply as large as the window would leave input none. ``None``: the
+    package keeps no profiles."""
+    try:
+        known = importlib.import_module(f"{package}.data._profiles")._PROFILES.values()
+    except (ImportError, AttributeError):
+        return None
+    shares = (
+        p["max_output_tokens"] / p["max_input_tokens"]
+        for p in known
+        if p.get("max_output_tokens") and p.get("max_input_tokens")
+    )
+    return max(shares, default=None)
+
+
 def _window_of(model: str) -> int | None:
-    """The context window the route a call made now takes (:func:`route_now`) says ``model``
-    has (:meth:`ModelGateway.window`), asked once per route and model: its answer is kept, a
-    window or none. ``None`` too when the route cannot be asked — no route configured, no key,
-    no answer within :data:`WINDOW_ASKED` — and the next chat model made of the name asks
-    again."""
+    """The context window the route a call made now takes says ``model`` has
+    (:func:`_limits_of`)."""
+    return _limits_of(model)[0]
+
+
+def _limits_of(model: str) -> tuple[int | None, int | None]:
+    """The context window and the output limit the route a call made now takes
+    (:func:`route_now`) says ``model`` has (:meth:`ModelGateway.limits`), asked once per route
+    and model: its answer is kept, a number or none. None too when the route cannot be asked —
+    no route configured, no key, no answer within :data:`WINDOW_ASKED` — and the next chat
+    model made of the name asks again."""
     try:
         gateway = route_now()
         key = (gateway.name, gateway.url, gateway.key, gateway.auth, model)
-        if key not in _WINDOWS:
-            _WINDOWS[key] = gateway.window(model)
+        if key not in _LIMITS:
+            _LIMITS[key] = gateway.limits(model)
     except Exception as exc:
-        log.debug("the context window of %s was not asked: %s", model, exc)
-        return None
-    return _WINDOWS[key]
+        log.debug("the limits of %s were not asked: %s", model, exc)
+        return None, None
+    return _LIMITS[key]
 
 
 def _profile_of(model: str) -> dict[str, Any] | None:

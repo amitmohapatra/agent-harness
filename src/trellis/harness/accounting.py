@@ -45,6 +45,11 @@ def cut_off(message: AIMessage) -> bool:
     no text, no tool call, and the provider says it reached the limit."""
     if message.tool_calls or message.text.strip():
         return False
+    return at_output_limit(message)
+
+
+def at_output_limit(message: AIMessage) -> bool:
+    """Whether the provider says ``message`` reached the model's output limit."""
     said = message.response_metadata or {}
     return any(said.get(key) in AT_OUTPUT_LIMIT for key in STOP_KEYS)
 

@@ -165,6 +165,25 @@ def table_said(path: str, text: str, name: str) -> str:
     return table if what is None else f"{query.MARKED.format(path=path)} {table}"
 
 
+#: How :data:`QUERY` names a result's table, and what a shortened mark says where it stops.
+_NAMED: Final = QUERY.split("{table}", 1)[0]
+SHORTENED: Final = " …[{left} more characters of this note left out to fit the window]"
+
+
+def shortened(mark: str, room: int) -> str:
+    """A mark — what stands in a request for a result it does not show (a cleared result's
+    line, a stub with its preview) — in about ``room`` characters: its start kept, through the
+    path and the table it names at least, and what is left out counted. A mark is no result:
+    nothing of it is kept to read again (cut as one, its "rest" was the mark's own text, and a
+    model that read it found no rows)."""
+    named = mark.find(_NAMED)
+    least = mark.find(" ", named + len(_NAMED)) if named >= 0 else mark.find("\n")
+    keep = max(room, least if least >= 0 else len(mark))
+    if keep + len(SHORTENED) >= len(mark):
+        return mark
+    return f"{mark[:keep]}{SHORTENED.format(left=len(mark) - keep)}"
+
+
 def stub_tabled(stub: str, table: str) -> str:
     """Deep Agents' own ``stub`` of a result it saved, saying ``table`` (:func:`table_said`)
     before its preview, as the harness's stubs do (:func:`_stub`)."""
