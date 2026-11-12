@@ -520,6 +520,54 @@ def test_a_mark_the_graph_wrote_back_or_saved_is_never_read_as_the_result(
         assert found.text.splitlines()[-1] == wanted.splitlines()[-1], found.text
 
 
+@pytest.mark.parametrize("seed", range(24))
+def test_a_page_read_of_a_result_is_cut_as_a_page_and_never_kept_as_a_table(
+    journal: Journal, seed: int
+) -> None:
+    """A page ``read_file`` returns is a view of a result — its lines, numbered — not a
+    result: cut to fit a small window, it says where to read on in the file it read, from the
+    line after the last one shown, and nothing of it is kept. Kept as a result of its own,
+    its rows were the numbered lines ("2  SKU-00501"), named as a table: a join against it
+    matched nothing, and the turn ran to its step limit (one live run in three at 8,000)."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rng = random.Random(seed)
+    count, offset, limit = rng.randrange(60, 900), rng.randrange(0, 40), rng.randrange(30, 400)
+    text = "sku,units\n" + "\n".join(f"S{n},{rng.randrange(1, 500)}" for n in range(count))
+    path = results.keep(text, tool="stock")
+    assert path is not None
+    asked = {"file_path": path, "offset": offset, "limit": limit}
+    page = results.read(dict(asked))
+    call = AIMessage("", tool_calls=[{"id": "r1", "name": results.READ_FILE, "args": asked}])
+    messages = [
+        HumanMessage("which sku?"),
+        call,
+        ToolMessage(page, tool_call_id="r1", name=results.READ_FILE),
+    ]
+    given = ModelRequest(
+        model=ScriptedChatModel(turns=[]), messages=messages, tools=[], state={"messages": messages}  # type: ignore[arg-type]
+    )  # fmt: skip
+    kept = dict(journal.results)
+    cut = str(middleware._cut(given, rng.choice([1, 40, 150])).messages[-1].text)
+    assert dict(journal.results) == kept  # nothing of a page is kept
+    if cut == page:
+        return  # the page fits the window: shown as it was read
+    assert "the table" not in cut and "cut to fit the window" in cut
+    assert set(PATH.findall(cut)) == {path}  # the one file: the result it read
+    on = int(re.search(rf'{results.READ_FILE}\(file_path="{path}", offset=(\d+)\)', cut)[1])  # type: ignore[index]
+    shown = [line for line in cut.split("…[", maxsplit=1)[0].splitlines() if line.strip()]
+    lines = text.splitlines()
+    assert on == offset + len(shown)  # read on from the line after the last one shown
+    assert shown[-1].endswith(lines[on - 1]) and on < len(lines)
+    assert lines[on] in results.read({"file_path": path, "offset": on, "limit": 1})
+
+
 def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
     """A graph cleared outside a harness run keeps no result: a cleared result's mark names
     the rows its message showed, and of a stub nothing is said that is not known."""

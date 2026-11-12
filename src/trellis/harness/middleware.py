@@ -2053,6 +2053,35 @@ def _rows_said(path: str, text: str, table: str) -> str:
     return " " + results.table_said(path, text, table)
 
 
+def _page_cut(messages: Sequence[AnyMessage], at: int, room: int) -> str | None:
+    """The page ``read_file`` returned in ``messages[at]``, in about ``room`` characters: its
+    first whole lines, then where to read on — the file the call read, from the line after
+    the last one shown. A page is a view of a result (its lines, numbered), not a result:
+    kept as one, its rows were the numbered lines, named as a table, and a join against it
+    matched nothing. ``None``: the page fits, shows no whole line in that room, or its call
+    is not in the request (it is then shortened as it stands)."""
+    page = messages[at].text
+    head = page[: page.rfind("\n", 0, room) + 1]
+    call = next(
+        (
+            c
+            for m in messages[:at]
+            if isinstance(m, AIMessage)
+            for c in m.tool_calls
+            if c["id"] == cast(ToolMessage, messages[at]).tool_call_id
+        ),
+        None,
+    )
+    if room >= len(page) or not head.strip() or call is None:
+        return None
+    asked = call["args"]
+    start = asked.get("offset") if isinstance(asked.get("offset"), int) else 0
+    on = max(0, start) + sum(1 for line in head.splitlines() if line.strip())
+    cut = f"{len(page) - len(head)} characters cut to fit the window"
+    path = "/" + str(asked.get("file_path", "")).lstrip("/")
+    return f'{head}…[{cut}; read on: {READ_FILE}(file_path="{path}", offset={on})]'
+
+
 def _mark(message: AnyMessage) -> bool:
     """Whether a tool message is a mark — what stands in the request for a result it does not
     show: a cleared result's line, a stub — and so never a result itself."""
@@ -2636,9 +2665,13 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     ):
         if over <= 0:
             break
-        if _mark(messages[n]):  # no result: shortened as a mark, nothing of it kept
+        if _mark(messages[n]) or messages[n].name == READ_FILE:
+            # no result: a mark is shortened as a mark, a page read of a result as a page
+            # (where to read on in the file it read) — nothing of either is kept
             whole = messages[n].text
-            less = results.shortened(whole, max(200, len(whole) - over * 4 - CUT_MARKER))
+            room = max(200, len(whole) - over * 4 - CUT_MARKER)
+            paged = None if _mark(messages[n]) else _page_cut(messages, n, room)
+            less = paged if paged is not None else results.shortened(whole, room)
             messages[n] = messages[n].model_copy(update={"content": less})
             over -= (len(whole) - len(less)) // 4
             continue
