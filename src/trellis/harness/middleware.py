@@ -145,6 +145,7 @@ from trellis.harness.telemetry import gateway_headers, model_span, usage
 from trellis.harness.telemetry import output as span_output
 from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
+    CUT_SHORT,
     FAILED,
     UNDECLARED,
     SideEffects,
@@ -152,6 +153,7 @@ from trellis.harness.tools.base import (
     Tool,
     arguments_of,
     citations,
+    cut_short,
     data_of,
     max_age,
     not_run,
@@ -956,7 +958,7 @@ class HarnessTools(AgentMiddleware):
         call = request.tool_call
         page = await _kept_read(runtime, request) if runtime is not None else None
         if page is not None:
-            return page
+            return _cut_said(request, page)
         tool = runtime.toolbox.get(call["name"]) if runtime is not None else None
         if runtime is None or tool is None:
             return await handler(request)
@@ -972,7 +974,7 @@ class HarnessTools(AgentMiddleware):
                 )
         else:
             outcome = await bridge.call(tool, call["args"], call_id=call_id, step=step.first + n)
-        return _message(outcome, request, kept=_paged(runtime, request))
+        return _cut_said(request, _message(outcome, request, kept=_paged(runtime, request)))
 
     def _step(self, runtime: Runtime, request: ToolCallRequest) -> tuple[_Step, int]:
         """The model step the call is one of (numbered on its first call's arrival), and the
@@ -996,6 +998,17 @@ class HarnessTools(AgentMiddleware):
                 key, runtime.next_step(len(calls)), writes, ran, repeats=repeats
             )
         return step, next(n for n, c in enumerate(calls) if c["id"] == call_id)
+
+
+def _cut_said(request: ToolCallRequest, done: ToolMessage) -> ToolMessage:
+    """``done``, saying its call was cut where it was refused for its arguments and the reply
+    that made the call reached the model's output limit (``accounting.at_output_limit``): the
+    arguments stop where the reply did (``tools.base.CUT_SHORT``). Any other answer as it is.
+    The reply was a model call either way, and counts as a step: a limit that did not count
+    it would never end a run whose every reply is cut."""
+    name = str(request.tool_call["name"])
+    cut = cut_short(name, done.text) if accounting.at_output_limit(_step_of(request)[1]) else None
+    return done if cut is None else done.model_copy(update={"content": cut})
 
 
 def _step_of(request: ToolCallRequest) -> tuple[int, AIMessage]:
@@ -1250,9 +1263,12 @@ class ModelHooks(AgentMiddleware):
         last = state["messages"][-1] if state.get("messages") else None
         if not isinstance(last, AIMessage) or not last.invalid_tool_calls:
             return None
+        cut = accounting.at_output_limit(last)  # arguments that stop where the reply did
         told = [
             ToolMessage(
-                not_run(c.get("name") or "unknown", _malformed(c)),
+                (CUT_SHORT.format(tool=c.get("name") or "unknown", problem=_malformed(c)))
+                if cut
+                else not_run(c.get("name") or "unknown", _malformed(c)),
                 name=c.get("name") or "unknown",
                 tool_call_id=c["id"],
                 status="error",

@@ -445,6 +445,25 @@ def not_run(tool: str, problem: str) -> str:
     return f"{tool} was not run: {problem}. {FIX_ARGUMENTS}"
 
 
+#: What the model is told of a call whose arguments were refused when the reply that made it
+#: reached the model's output limit: the call was cut, which the model cannot see for itself
+#: (told an argument was missing, it wrote the same long reply again).
+CUT_SHORT: Final = (
+    "{tool} was not run: your reply reached the output limit before this call's arguments "
+    "were complete ({problem}). Make the call again."
+)
+
+
+def cut_short(tool: str, said: str) -> str | None:
+    """What a refusal for a call's arguments (``said``: :func:`not_run`'s) reads as when the
+    call was cut at the output limit (:data:`CUT_SHORT`); ``None``: ``said`` is no such
+    refusal (the call ran, or was not run for another reason)."""
+    start, end = f"{tool} was not run: ", f". {FIX_ARGUMENTS}"
+    if not (said.startswith(start) and said.endswith(end)):
+        return None
+    return CUT_SHORT.format(tool=tool, problem=said[len(start) : -len(end)])
+
+
 def arguments_of(raw: str | None) -> dict[str, Any] | str:
     """The arguments of a call, from the text the model wrote, as an object — or what is wrong
     with them."""
