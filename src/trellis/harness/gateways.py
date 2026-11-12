@@ -738,14 +738,39 @@ def _output_limited(made: Any, model: str) -> Any:
     """``made`` — the route's chat model of ``model`` — with the output limit the route says
     the model has (:func:`_limits_of`), where LangChain names none and filled in a number of
     its own: for a model newer than the installed package ``ChatAnthropic`` falls back to
-    4,096 tokens, and a reply stopped mid-call or mid-answer. A model LangChain knows keeps
-    its profile's limit, a client that sends none (the server's own default) still sends
-    none, and a route that says none leaves the library's fallback."""
+    4,096 tokens, and a reply stopped mid-call or mid-answer. It is used up to the share of
+    the window the library gives the models it knows (:func:`_reply_share`). A model
+    LangChain knows keeps its profile's limit, a client that sends none (the server's own
+    default) still sends none, and a route that says no limit, or no window to bound it by,
+    leaves the library's fallback."""
     known = (getattr(made, "profile", None) or {}).get("max_output_tokens")
     if known or not isinstance(getattr(made, "max_tokens", None), int):
         return made
-    limit = _limits_of(model)[1]
-    return made if limit is None else made.model_copy(update={"max_tokens": limit})
+    window, limit = _limits_of(model)
+    share = _reply_share(type(made).__module__.partition(".")[0])
+    if limit is None or window is None or share is None:
+        return made
+    return made.model_copy(update={"max_tokens": min(limit, int(window * share))})
+
+
+@functools.cache
+def _reply_share(package: str) -> float | None:
+    """The most of a model's window a reply is given by the LangChain package ``package``, over
+    the models it has a profile of (the largest ``max_output_tokens`` of ``max_input_tokens``:
+    its own convention, read from the profiles it is installed with). A route's output limit
+    is used up to that share of the window: input and reply must fit the window together, so
+    a route reporting a reply as large as the window would leave input none. ``None``: the
+    package keeps no profiles."""
+    try:
+        known = importlib.import_module(f"{package}.data._profiles")._PROFILES.values()
+    except (ImportError, AttributeError):
+        return None
+    shares = (
+        p["max_output_tokens"] / p["max_input_tokens"]
+        for p in known
+        if p.get("max_output_tokens") and p.get("max_input_tokens")
+    )
+    return max(shares, default=None)
 
 
 def _window_of(model: str) -> int | None:

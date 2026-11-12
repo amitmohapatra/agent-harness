@@ -591,7 +591,8 @@ def _cleared_result(state: Any, path: str) -> str | None:
     for its call (``/large_tool_results/<call id>``) — ``None`` for any other path, and for a
     result Deep Agents evicted to its backend (its own ``read_file`` reads that file)."""
     text = _result_of(state, path)
-    return None if text is None or text.startswith(results.EVICTED) else text
+    gone = text is None or text.startswith(results.EVICTED) or _marked(text)
+    return None if gone else text
 
 
 def _state_file(state: Any, path: str, runtime: Runtime | None = None) -> str | None:
@@ -603,7 +604,7 @@ def _state_file(state: Any, path: str, runtime: Runtime | None = None) -> str | 
     found = (state.get("files") if isinstance(state, Mapping) else None) or {}
     content = (found.get(path) or {}).get("content")
     text = "\n".join(content) if isinstance(content, list) else content
-    if text is None:
+    if text is None or _marked(text):  # a mark saved as a file is no result
         text = _cleared_result(state, path)
     if text is None or runtime is None:
         return text
@@ -632,16 +633,28 @@ def _copy_of(text: str, kept: str) -> bool:
     return len(kept) < len(text) and text.startswith(kept) and text.startswith(_NOTED, len(kept))
 
 
-def _shown(text: str) -> str | None:
-    """The result a tool message's whole ``text`` shows, as a query of its call's path reads
-    it (:func:`_kept_read`): the result the run keeps, when the text is a copy of one (its
-    rows, then the note: :func:`_copy_of`) or a stub naming one; the text itself, when it is
-    neither; ``None`` for a stub of a file the run does not keep (Deep Agents' own)."""
+def _shown(text: str, path: str) -> tuple[str, str | None]:
+    """The result a tool message's whole ``text`` shows (``path``: its call's), as the run
+    holds it — where it is read, and its rows: the result the run keeps, at its own path,
+    when the text is a copy of one (its rows, then the note: :func:`_copy_of`) or a stub
+    naming one; the text itself at the call's path, when it is neither; no rows for a stub of
+    a file the run does not keep (Deep Agents' own). A kept result's own path stays readable
+    whatever the graph does with its messages: a summarization writes the cleared request
+    back as the state, and the call's path then led to the mark."""
     runtime = current()
     kept: Mapping[str, str] = runtime.replay.journal.results if runtime is not None else {}
     if text.startswith(results.EVICTED):
-        return next((kept[p] for p in _STUB_AT.findall(text) if p in kept), None)
-    return next((k for k in kept.values() if _copy_of(text, k)), text)
+        return next(((p, kept[p]) for p in _STUB_AT.findall(text) if p in kept), (path, None))
+    return next(((p, k) for p, k in kept.items() if _copy_of(text, k)), (path, text))
+
+
+def _marked(text: str) -> bool:
+    """Whether ``text`` is a cleared result's mark: no result, wherever it was written (Deep
+    Agents saves a request's large messages as files, and a summarization writes the cleared
+    request back as the graph's state: a query of that path read the mark's one line)."""
+    from trellis.harness.react import CLEARED  # noqa: PLC0415 - it builds this module's stack
+
+    return text.startswith(CLEARED.split("{path}", 1)[0])
 
 
 def _graph_results(
@@ -1976,10 +1989,9 @@ class ThisTurnsResults(ClearToolUsesEdit):
         )
         for n, message in enumerate(turn):
             if _cleared(message) and message.content == self.placeholder:
-                path = f"{results.PREFIX}/{message.tool_call_id}"
                 # the result's own rows, never the message's words: a kept table's message
                 # ends with its note, and read with it a JSON result's "columns" were its data
-                result = _shown(shown[n])
+                path, result = _shown(shown[n], f"{results.PREFIX}/{message.tool_call_id}")
                 rows = "" if result is None else _rows_said(path, result, query.TABLE)
                 said = self.placeholder.replace("{path}", path) + rows
                 turn[n] = message.model_copy(update={"content": said})

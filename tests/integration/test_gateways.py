@@ -549,6 +549,66 @@ def test_a_model_langchain_does_not_know_gets_its_output_limit_from_the_route(
     assert newer.resolved().bind(max_tokens=700).kwargs == {"max_tokens": 700}
 
 
+#: Windows and output limits a route may report for a model: the pairs real records hold,
+#: one whose reply would leave little of the window, one whose reply is the whole window.
+REPORTED = [(1_000_000, 128_000), (200_000, 64_000), (200_000, 128_000), (200_000, 200_000)]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_reply_never_takes_more_of_the_window_than_the_librarys_own_convention(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any, seed: int
+) -> None:
+    """Whatever window and output limit a route reports for a model the library has no
+    profile of: the reply is given the route's limit only up to the share of the window the
+    library gives the models it does know (its largest ``max_output_tokens`` of
+    ``max_input_tokens``, read from its installed profiles), so input is never left none of
+    the window (a route saying output = window made every call one the provider refuses),
+    and never less than a model the library knows is left."""
+    import random
+
+    from langchain_anthropic.data._profiles import _PROFILES
+
+    known = [p for p in _PROFILES.values() if p.get("max_output_tokens")]
+    share = max(p["max_output_tokens"] / p["max_input_tokens"] for p in known)
+    rng = random.Random(seed)
+    window = rng.randrange(4_000, 2_000_000)
+    pairs = [*REPORTED, (window, rng.randrange(256, window + 1))]
+    window, output = pairs[seed] if seed < len(pairs) else pairs[-1]
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    name = f"claude-new-{seed}"
+    anthropic_models.records[name] = _model_record(name, max_input_tokens=window, max_tokens=output)
+    reply = routed_chat_model(name).resolved().max_tokens
+    assert reply == min(output, int(window * share))  # the route's, up to the convention
+    assert 0 < reply <= window * share < window  # and input is left the rest
+
+
+def test_a_route_that_names_no_window_or_a_library_with_no_profiles_leaves_the_fallback(
+    monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
+) -> None:
+    """Nothing bounds a reply's share where the route names no window, or the library of the
+    chat model keeps no profiles to read a convention from: its own fallback stays."""
+    from langchain_anthropic import ChatAnthropic
+
+    monkeypatch.setenv("LLM_BASE_URL", ANTHROPIC_V1)
+    monkeypatch.setenv("LLM_API_KEY", "sk-ant")
+    anthropic_models.records["claude-no-window"] = _model_record(
+        "claude-no-window", max_tokens=128_000
+    )
+    fallback = ChatAnthropic(model_name="claude-no-window", api_key="sk-ant").max_tokens  # type: ignore[call-arg,arg-type]
+    assert routed_chat_model("claude-no-window").resolved().max_tokens == fallback
+    anthropic_models.records["claude-newer"] = _model_record(
+        "claude-newer", max_input_tokens=1_000_000, max_tokens=128_000
+    )
+
+    class Other:  # a client of a package that keeps no profiles, with a fallback of its own
+        profile = None
+        max_tokens = 1_024
+
+    made = Other()
+    assert gateways._output_limited(made, "claude-newer") is made
+
+
 @pytest.mark.parametrize("seed", range(24))
 @respx.mock
 def test_a_routes_record_names_a_models_window_and_output_limit_under_its_own_fields(

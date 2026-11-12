@@ -324,18 +324,32 @@ async def test_cancelling_a_parent_cancels_its_children(harness: Harness) -> Non
 async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
     harness: Harness,
 ) -> None:
+    started = asyncio.Event()
+
     async def slow(input: str, agent: Runtime) -> str:
+        started.set()
         await asyncio.sleep(30)
         return "never"
 
     child = harness.wrap(slow, id="slow")
-    model = ScriptedChat([("slow", {"message": "x"})])
-    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="timed"), [child])
     deadline = datetime.now(UTC) + timedelta(hours=1)
-    result = await parent.run("x", user="u", run_timeout=0.3, deadline=deadline)
-    assert result.status is RunStatus.TIMEOUT
+    # The parent's time must run out while its child runs, not before the child starts: on a
+    # busy machine a run used up 0.3 s before its first tool call, and there was no child to
+    # look at. So the limit follows the event, not a fixed clock: it is doubled until a run's
+    # child has started within it.
+    limit = 0.3
+    while True:
+        model = ScriptedChat([("slow", {"message": "x"})])
+        target = ReAct(system_prompt="p", model=model)
+        parent = arm(harness.wrap(target, id=f"timed-{limit}"), [child])
+        result = await parent.run("x", user="u", run_timeout=limit, deadline=deadline)
+        assert result.status is RunStatus.TIMEOUT
+        if started.is_set():
+            break
+        limit *= 2
+        assert limit < 60, "no child started within a minute of its parent's time"
     [kid] = await children(harness, result.run_id)
-    assert kid.timeout_seconds is not None and kid.timeout_seconds <= 0.3
+    assert kid.timeout_seconds is not None and kid.timeout_seconds <= limit
     assert kid.deadline == deadline
     assert kid.final  # it stopped with its parent
 

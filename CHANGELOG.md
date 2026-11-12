@@ -20,6 +20,13 @@ the mark, and a query of that path found no rows.
   run already keeps, the one a query of that path reads. A cleared stub names the kept
   result's columns the same way; of a file that is Deep Agents' own, nothing is said that is
   not known.
+- **A kept result's mark names the kept result's own path**, and a mark is never read as a
+  result wherever the graph wrote it. Deep Agents' summarization writes the cleared request
+  back as the graph's state and saves its messages as files, so the mark came to stand at
+  the call's path: a query there read the mark's one line (15 failed queries in 3 live runs
+  of `long-flow-02` with a backend, once the mark's columns were right and the model
+  followed it). The kept path is read whatever the graph does with its messages; a result
+  the run does not keep, whose only copy the graph replaced, is said to be gone.
 - **A mark is no result.** A cleared result's line and a stub are shortened as marks when
   the window has no room (the path and the table's name stay, what is left out is counted);
   nothing of a mark is kept, and none is cut as rows are.
@@ -50,6 +57,13 @@ arguments, and one final answer went out as a success stopping at "| S20 | £".
   none of the model and filled in its own fallback. A model LangChain knows keeps its
   profile's limit; a chat model object, or a call's own `max_tokens`, is the caller's; a
   route that names none leaves the library's fallback. No setting.
+- The route's limit is used up to the share of the window the library gives the models it
+  knows (its largest `max_output_tokens` of `max_input_tokens`, read from the profiles it is
+  installed with: 64,000 of 200,000 today). Input and reply must fit the window together: a
+  route reporting 128,000 of a 200,000 window would have left input 72,000, and one
+  reporting a reply as large as its window none. The three models this applies to today
+  report 128,000 of 1,000,000 and get it whole. A route that names no window to bound the
+  limit by leaves the library's fallback.
 - An answer whose reply reached the output limit is still the run's answer, as it is, and
   the run says so: the `output_limit` warning a reply cut before any answer already raised,
   on the stream and in the log. It is not continued.

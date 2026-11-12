@@ -474,6 +474,52 @@ def test_what_the_model_reads_of_a_held_result_is_that_result(
     assert not [p for p, kept in journal.results.items() if kept.startswith(MARKS)]
 
 
+@pytest.mark.parametrize("count", [1, 4, 5, 30, 400])
+@pytest.mark.parametrize("shape", ["csv", "array", "object"])
+def test_a_mark_the_graph_wrote_back_or_saved_is_never_read_as_the_result(
+    journal: Journal, shape: str, count: int
+) -> None:
+    """Deep Agents' summarization writes the cleared request back as the graph's state, and
+    Deep Agents saves a request's messages as files: the mark then stands where the result
+    was, at its call's path. A result the run keeps is still read whole by the path its mark
+    names (the kept result's own); one it does not keep is said to be gone. Neither is ever
+    answered from the mark's own words (a one-line table: 15 failed queries in 3 live runs)."""
+    from langchain.agents.middleware.types import ToolCallRequest
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    run.run_id = f"run-back-{shape}-{count}"  # type: ignore[union-attr]
+    text, total = rows_of(shape, count, random.Random(f"back-{shape}-{count}"))
+    call = AIMessage("", tool_calls=[{"id": "call_1", "name": "stock", "args": {}}])
+    by_call = f"{results.PREFIX}/call_1"
+    shown = ToolMessage(results.readable(text, "stock"), tool_call_id="call_1", name="stock")
+    state: dict[str, Any] = {"messages": [call, shown]}
+    mark = as_read(run, state, cleared=True, cut=False)
+    assert mark.startswith(MARKS[0])
+    # the graph now holds the mark where the result was, and a file of it at the call's path
+    state["messages"][-1] = ToolMessage(mark, tool_call_id="call_1", name="stock")
+    state["files"] = {by_call: {"content": mark.split("\n")}}
+    assert by_call not in middleware._graph_results(state, run)[0]  # type: ignore[arg-type]
+    named = PATH.search(mark)[0]  # type: ignore[index]
+    assert (named in journal.results) == (count >= results.TABLE_ROWS)  # kept: its own path
+    for path in {by_call, named}:
+        asked = {"file_path": path, "sql": "SELECT count(*) AS n, sum(units) AS u FROM result"}
+        request = ToolCallRequest(
+            tool_call={"name": query.QUERY_RESULT, "args": asked, "id": "q1", "type": "tool_call"},
+            tool=None,
+            state=state,
+            runtime=None,  # type: ignore[arg-type]
+        )
+        found = asyncio.run(middleware._kept_read(run, request))  # type: ignore[arg-type]
+        assert found is not None
+        kept = path in journal.results
+        wanted = f"{count},{total}" if kept else query.GONE.format(path=path)
+        assert found.text.splitlines()[-1] == wanted.splitlines()[-1], found.text
+
+
 def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
     """A graph cleared outside a harness run keeps no result: a cleared result's mark names
     the rows its message showed, and of a stub nothing is said that is not known."""
