@@ -603,9 +603,14 @@ def _declared(
     as any tool, reading or writing (``middleware.OUTSIDE_STATE``); ``execute`` on a backend
     that runs nothing, and the ``task`` tool when its only helper is the general-purpose one
     (``helper_only``: offered on a long task), are the graph's machinery, not tools of the
-    agent's set (``middleware.MACHINERY``)."""
+    agent's set (``middleware.MACHINERY``). ``task`` says what it does whichever helper it
+    hands to: the hand-over is a read (``adapters.base.helper`` — each call the helper then
+    makes is governed on its own). Left out of the run's set as machinery, it had said
+    nothing, and a call of a tool that says nothing asks a person: every task handed to the
+    general-purpose helper paused for an approval of nothing."""
     from deepagents.middleware.filesystem import supports_execution
 
+    from trellis.harness.adapters.base import helper
     from trellis.harness.adapters.langgraph import TASK_TOOL, graph_tools
     from trellis.harness.middleware import (
         FILE_TOOLS,
@@ -614,6 +619,7 @@ def _declared(
         READ_FILE,
         framework_made,
         outside_state,
+        spec_of,
     )
 
     runs = supports_execution(backend)
@@ -623,7 +629,10 @@ def _declared(
             continue  # the agent's own tool of that name: it says what it does itself
         if outside and tool.name in FILE_TOOLS:
             marks = outside_state(tool.name)
-        elif (tool.name == "execute" and not runs) or (tool.name == TASK_TOOL and helper_only):
+        elif tool.name == TASK_TOOL:
+            marks = {"side_effects": helper(spec_of(tool)).side_effects}
+            marks |= {MACHINERY: True} if helper_only else {}
+        elif tool.name == "execute" and not runs:
             marks = {MACHINERY: True}
         elif kept and tool.name == READ_FILE:
             marks = {KEPT_BY_RUN: True}
