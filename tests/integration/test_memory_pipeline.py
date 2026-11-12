@@ -150,7 +150,7 @@ async def test_push_sends_the_context_with_the_question(
     [call] = memory_service.named("context")
     assert call.scope["user_id"] == "u1"
     assert call.scope["thread_id"] == conversation_key("acme", "u1", "t1")  # u1's own "t1"
-    assert call.body["query"] == "how many a?" and call.body["token_budget"] == 2000
+    assert call.body["query"] == "how many a?" and call.body["token_budget"] == 8000
     assert call.body["window"] is True  # ReAct keeps no conversation of its own
     assert "tools" not in call.body  # no tools of its own: nothing learned to offer
     assert memory_service.named("tool_hints") == []
@@ -872,11 +872,18 @@ def test_a_memory_service_needs_the_api_key() -> None:
         Harness(config=Settings(memory_url="http://m", runs_url="http://r"))
 
 
-async def test_the_context_budget_follows_the_models_window(
-    memory_service: FakeMemoryService,
+@pytest.mark.parametrize(("window", "budget"), [(128_000, 8000), (16_000, 4000)])
+async def test_the_context_budget_is_the_whole_one_unless_the_window_is_small(
+    memory_service: FakeMemoryService, window: int, budget: int
 ) -> None:
+    """Memory is asked for the budget its accuracy is measured at (8,000 tokens; it packs
+    what bears on the question, so most contexts are far smaller). At 5% of the window a
+    128,000-token model got 6,400 and one whose window was not known 2,000, where a profile
+    of ordinary size no longer fits beside the memories. Only a window too small to hold it
+    gets less: a quarter of itself."""
+
     class Model:
-        context_window = 128_000
+        context_window = window
 
     async def fn(input: str, agent: Runtime) -> str:
         return "ok"
@@ -885,7 +892,7 @@ async def test_the_context_budget_follows_the_models_window(
     async with harness_with(memory_service) as h:
         await h.wrap(fn, id="windowed").run("q", user="u")
     [asked] = memory_service.named("context")
-    assert asked.body["token_budget"] == 6400  # 5 % of the window
+    assert asked.body["token_budget"] == budget
 
 
 # --------------------------------------------------------------------------- the catalog
