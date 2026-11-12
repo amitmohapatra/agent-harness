@@ -753,9 +753,8 @@ def _profiled(model: Any, window: int | None) -> Any:
     if window is None or (isinstance(profile, dict) and profile.get("max_input_tokens") == window):
         return model
     # the model's own window stays known beside the one given: a reply is reserved out of it
-    own = (
-        {OWN_WINDOW: profile["max_input_tokens"]} if (profile or {}).get("max_input_tokens") else {}
-    )
+    said = (profile or {}).get("max_input_tokens")
+    own = {OWN_WINDOW: said} if said else {}
     return model.model_copy(
         update={"profile": {**(profile or {}), **own, "max_input_tokens": window}}
     )

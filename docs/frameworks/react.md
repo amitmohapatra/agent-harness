@@ -130,6 +130,11 @@ The names are Deep Agents' where both have one. In four tiers:
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
   Deep Agents' summarization uses its own thresholds: give it for a server whose model list
   names no window (Ollama, llama.cpp's `-c`) and for a chat model object without a profile.
+  A model whose window no one said is still not sent a request its server refuses twice:
+  the refusal names the window (OpenAI-compatible servers', Anthropic's, llama.cpp's
+  wording), the request is fitted to it and sent again, and later requests are fitted at
+  once. A request is fitted to 95% of the window, and to no more than the model's own
+  window leaves beside the reply the call will send (its `max_tokens`).
   The same answer names the model's output limit (Anthropic's `max_tokens`, a server's
   `max_output_tokens` or `max_completion_tokens`): it is used where LangChain knows none of
   the model and filled in a fallback of its own (`ChatAnthropic`: 4,096 tokens), so a model

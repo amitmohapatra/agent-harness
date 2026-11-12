@@ -2116,8 +2116,9 @@ def _page_cut(messages: Sequence[AnyMessage], at: int, room: int) -> str | None:
     if room >= len(page) or not head.strip() or call is None:
         return None
     asked = call["args"]
-    start = asked.get("offset") if isinstance(asked.get("offset"), int) else 0
-    on = max(0, start) + sum(1 for line in head.splitlines() if line.strip())
+    offset = asked.get("offset")
+    start = max(0, offset) if isinstance(offset, int) else 0
+    on = start + sum(1 for line in head.splitlines() if line.strip())
     cut = f"{len(page) - len(head)} characters cut to fit the window"
     path = "/" + str(asked.get("file_path", "")).lstrip("/")
     return f'{head}…[{cut}; read on: {READ_FILE}(file_path="{path}", offset={on})]'

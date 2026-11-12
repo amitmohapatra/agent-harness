@@ -1924,7 +1924,7 @@ def test_a_computed_answer_scores_only_against_a_stated_figure(seed: int) -> Non
     rng = random.Random(seed)
     truth = round(rng.uniform(1, 9_000), 3)
     other = round(truth + rng.choice([-1, 1]) * rng.uniform(0.01, 500), 3)
-    how = rng.choice([{"queried": True}, {"ran": True}])
+    how: dict[str, Any] = rng.choice([{"queried": True}, {"ran": True}])
     stated = cx.cannot(r"\bi ran it\b", r"query|instead", "I can't.", computed=cx.ratio(truth, 3))
     unstated = cx.cannot(r"\bi ran it\b", r"query|instead", "I can't.")
     said = "It prints {} (the population standard deviation, over every line)."
@@ -1959,12 +1959,14 @@ def test_the_code_case_states_what_the_code_prints_from_the_data() -> None:
     from benchmark.cost import retail as r
 
     case = next(c for c in cx.cases() if c.id == "cantdo-02")
+    expect = case.turns[0].expect
+    assert expect is not None
     lines = r.selected(r.world(), region="west", start="2026-09-01", end="2026-09-30")
     truth = round(statistics.pstdev([line.units for line in lines]), 3)
-    assert case.turns[0].expect.value["computed"]["value"] == pytest.approx(truth, abs=1e-3)
+    assert expect.value["computed"]["value"] == pytest.approx(truth, abs=1e-3)
     answer = f"The code prints {truth}."
-    assert cx.score(case.turns[0].expect, answer, [], case.turns[0].text, queried=True)["correct"]
-    assert not cx.score(case.turns[0].expect, "It prints 3.1.", [], "", queried=True)["correct"]
+    assert cx.score(expect, answer, [], case.turns[0].text, queried=True)["correct"]
+    assert not cx.score(expect, "It prints 3.1.", [], "", queried=True)["correct"]
 
 
 def test_what_a_turn_computed_with_the_query_is_not_made_up() -> None:

@@ -359,8 +359,11 @@ one step: the reads at once, the writes one at a time in the model's order —
   offered no tool, and its answer is the run's (an `output_limit` warning); cut again, the run
   stops saying so. An answer the limit cut short (text, then the limit) is still the run's
   answer, as it is, with the same `output_limit` warning on the stream and in the log: it is
-  not continued. Claude Code continues such a reply itself, and Kimi asks again; OpenAI
-  Agents' chat model raises its own error. Any run that would still end with no answer (none,
+  not continued. A tool call the limit cut short (its arguments stop where the reply did:
+  one missing, or none parseable) is answered `... was not run: your reply reached the
+  output limit before this call's arguments were complete`, and the model makes it again;
+  that reply counts as a step. Claude Code continues such a reply itself, and Kimi asks
+  again; OpenAI Agents' chat model raises its own error. Any run that would still end with no answer (none,
   or blank text) ends `ERROR` `NO_ANSWER`, saying whether its last reply reached the output
   limit or had no text; a function target's answer is what it returns.
 * Identical calls made at once that are not one step's repeats (a function's

@@ -20,6 +20,7 @@ from trellis import Harness, ReAct, sandbox, tool
 from trellis.contracts import RunStatus
 from trellis.harness.adapters.langgraph import TASK_TOOL
 from trellis.harness.automatic import JournalBackend
+from trellis.harness.tools.base import SideEffects
 
 GENERAL = "general-purpose"
 OWN = "counter"
@@ -39,7 +40,7 @@ def backends(tmp_path: Path) -> dict[str, Any]:
 @pytest.mark.parametrize("helper", [GENERAL, OWN])
 @pytest.mark.parametrize("kind", ["state", "disk", "store", "sandbox"])
 async def test_handing_a_task_on_asks_no_one_and_the_helpers_calls_keep_their_own_risk(
-    harness: Harness, tmp_path: Path, kind: str, helper: str, risk: str
+    harness: Harness, tmp_path: Path, kind: str, helper: str, risk: SideEffects
 ) -> None:
     done: list[str] = []
 
