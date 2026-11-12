@@ -630,6 +630,21 @@ def test_a_request_is_fitted_to_what_the_provider_accepts_beside_the_reply(
     assert less == min(int(window * FIT_SHARE), int(own * FIT_SHARE) - 1_000)
 
 
+def test_a_name_no_route_can_make_reserves_nothing_and_the_call_says_why() -> None:
+    """A model name with no route to make it (no endpoint, no provider told): the budget is
+    the given window's share, nothing reserved — the call itself says what is missing."""
+    from types import SimpleNamespace
+
+    from trellis.harness.adapters.base import FIT_SHARE
+    from trellis.harness.middleware import FitWindow
+
+    model = routed_chat_model("granite")
+    with pytest.raises(Exception):  # noqa: B017 - whatever the route says is missing
+        model.resolved()
+    request = SimpleNamespace(model=model, model_settings={})
+    assert FitWindow(8_000, turns=True)._budget(request) == int(8_000 * FIT_SHARE)  # type: ignore[arg-type]
+
+
 def test_a_route_that_names_no_window_or_a_library_with_no_profiles_leaves_the_fallback(
     monkeypatch: pytest.MonkeyPatch, anthropic_models: Any
 ) -> None:

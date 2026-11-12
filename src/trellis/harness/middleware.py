@@ -2094,13 +2094,20 @@ def _held_named(runtime: Runtime | None, request: ModelRequest[Any]) -> ModelReq
     return request.override(messages=messages)
 
 
+def _start(text: str, room: int) -> str:
+    """The first ``room`` characters of ``text``, saying how much was left out; ``text`` when
+    it fits."""
+    left = results.SHORTENED.format(left=len(text) - room)
+    return text if room + len(left) >= len(text) else f"{text[:room]}{left}"
+
+
 def _page_cut(messages: Sequence[AnyMessage], at: int, room: int) -> str | None:
     """The page ``read_file`` returned in ``messages[at]``, in about ``room`` characters: its
     first whole lines, then where to read on — the file the call read, from the line after
     the last one shown. A page is a view of a result (its lines, numbered), not a result:
     kept as one, its rows were the numbered lines, named as a table, and a join against it
     matched nothing. ``None``: the page fits, shows no whole line in that room, or its call
-    is not in the request (it is then shortened as it stands)."""
+    is not in the request (it is then cut at its start as it stands: :func:`_start`)."""
     page = messages[at].text
     head = page[: page.rfind("\n", 0, room) + 1]
     call = next(
@@ -2712,8 +2719,10 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
             # (where to read on in the file it read) — nothing of either is kept
             whole = messages[n].text
             room = max(200, len(whole) - over * 4 - CUT_MARKER)
-            paged = None if _mark(messages[n]) else _page_cut(messages, n, room)
-            less = paged if paged is not None else results.shortened(whole, room)
+            if _mark(messages[n]):
+                less = results.shortened(whole, room)
+            else:  # a page: its whole lines and where to read on, else its start as it stands
+                less = _page_cut(messages, n, room) or _start(whole, room)
             messages[n] = messages[n].model_copy(update={"content": less})
             over -= (len(whole) - len(less)) // 4
             continue

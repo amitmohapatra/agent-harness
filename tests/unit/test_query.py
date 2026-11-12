@@ -617,6 +617,43 @@ def test_after_a_summarization_every_result_the_run_keeps_is_still_named(
     assert middleware._held_named(run, plain) is plain  # no summary: as it was
 
 
+def test_a_page_whose_call_the_request_no_longer_holds_is_shortened_as_it_stands(
+    journal: Journal,
+) -> None:
+    """A page with no call beside it (its turn left out), or with no whole line in the room
+    there is: shortened where it stands — still nothing of it kept, no table named."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    text = "sku,units\n" + "\n".join(f"S{n},{n}" for n in range(400))
+    path = results.keep(text, tool="stock")
+    assert path is not None
+    page = results.read({"file_path": path, "limit": 300})
+    line = "x" * 9_000  # a page of one long line: no whole line fits
+    asked = {"file_path": path, "offset": 0, "limit": 300}
+    call = AIMessage("", tool_calls=[{"id": "r2", "name": results.READ_FILE, "args": asked}])
+    for messages in (
+        [HumanMessage("which?"), ToolMessage(page, tool_call_id="r1", name=results.READ_FILE)],
+        [
+            HumanMessage("which?"),
+            call,
+            ToolMessage(line, tool_call_id="r2", name=results.READ_FILE),
+        ],
+    ):
+        given = ModelRequest(
+            model=ScriptedChatModel(turns=[]), messages=messages, tools=[], state={"messages": messages}  # type: ignore[arg-type]
+        )  # fmt: skip
+        kept = dict(journal.results)
+        cut = str(middleware._cut(given, 1).messages[-1].text)
+        assert dict(journal.results) == kept and "the table" not in cut
+        assert "left out to fit the window" in cut and len(cut) < len(messages[-1].text)
+
+
 def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
     """A graph cleared outside a harness run keeps no result: a cleared result's mark names
     the rows its message showed, and of a stub nothing is said that is not known."""
