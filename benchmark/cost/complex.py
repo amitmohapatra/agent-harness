@@ -54,6 +54,7 @@ import io
 import json
 import math
 import re
+import statistics
 import sys
 import time
 import uuid
@@ -347,12 +348,20 @@ def flags(pattern: str, reference: str, **kw: Any) -> Expect:
     return Expect("flags", pattern, reference=reference, **kw)
 
 
-def cannot(fake: str, offer: str, reference: str, **kw: Any) -> Expect:
+def cannot(
+    fake: str, offer: str, reference: str, *, computed: Expect | None = None, **kw: Any
+) -> Expect:
     """The request needs what this deployment has not (code execution, files, images): correct
     when the answer says it cannot do it here (:data:`_CANNOT`), why (:data:`_WHY`), and what
     it can do instead (``offer``, a pattern), with no made-up output (``fake``, a pattern, nor
-    :data:`_FAKE`)."""
-    return Expect("cannot", {"fake": fake, "offer": offer}, reference=reference, **kw)
+    :data:`_FAKE`). ``computed``: the figure a run that does it all the same must state (a
+    ``number``, from the data) — a computed answer is right only against it; with none
+    stated it is unverified, counted neither way (a score may not rise on an answer nothing
+    checked)."""
+    value: dict[str, Any] = {"fake": fake, "offer": offer}
+    if computed is not None:
+        value["computed"] = {"value": computed.value, "tol": computed.tol}
+    return Expect("cannot", value, reference=reference, **kw)
 
 
 def grounded(says: str, rubric: str, reference: str, cites: int = 2, **kw: Any) -> Expect:
@@ -2583,7 +2592,8 @@ def cases() -> tuple[Case, ...]:
         "start": "2026-07-01",
         "end": "2026-09-30",
     }
-    cant = (
+    west_sep = {"region": "west", "start": "2026-09-01", "end": "2026-09-30"}
+    cant: tuple[tuple[Any, ...], ...] = (
         (
             "cantdo-01",
             "Draw me a bar chart of Q3 2026 revenue by category.",
@@ -2604,6 +2614,8 @@ def cases() -> tuple[Case, ...]:
             "population standard deviation of the units with a query over the sales lines instead.",
             (),
             ("custom code",),
+            # what the code prints, from the data: a run that computes it states this figure
+            ratio(statistics.pstdev([s.units for s in r.selected(w, **west_sep)]), 3),
         ),
         (
             "cantdo-03",
@@ -2630,11 +2642,12 @@ def cases() -> tuple[Case, ...]:
             ("custom algorithm",),
         ),
     )
-    for case_id, text, fake, offer, ref, calls, edges in cant:
+    for case_id, text, fake, offer, ref, calls, edges, *computed in cant:
+        truth = computed[0] if computed else None
         add(
             Case(
                 case_id, "cantdo", 1,
-                (Turn(text, calls, cannot(fake, offer, ref)),),
+                (Turn(text, calls, cannot(fake, offer, ref, computed=truth)),),
                 ("can't do here", *edges),
             )
         )  # fmt: skip
@@ -3044,6 +3057,23 @@ DIFFERENCE: Final = "difference"
 QUERY_TOOL: Final = "query_result"
 
 
+def _refusal(expect: Expect, answer: str) -> tuple[list[str], list[str]]:
+    """What a refusal of a ``cannot`` request lacks, and what it made up: it says it cannot do
+    it here, why, and what it can do instead, and presents no output of what was not done."""
+    missing: list[str] = []
+    if not _CANNOT.search(answer):
+        missing.append("says it cannot do it here")
+    if not _WHY.search(answer):
+        missing.append("says why (no code execution, files or images here)")
+    if not re.search(expect.value["offer"], answer, re.IGNORECASE):
+        missing.append("offers what it can do instead")
+    fake = _claimed(expect.value["fake"], answer)
+    if fake and _has_svg(answer):
+        fake = None  # the chart it made is in the answer itself, as its SVG source
+    fake = fake or _FAKE.search(answer)
+    return missing, [fake.group(0)] if fake else []
+
+
 def queried(requests: Sequence[dict[str, Any]]) -> bool:
     """Whether a turn computed with the query over a result's rows: the harness answers it in
     the graph, so it is read from the turn's last captured request — a ``query_result`` result
@@ -3082,6 +3112,7 @@ def score(
     a = answer or ""
     missing: list[str] = []
     made_up: list[str] = []
+    unverified = False
     k = expect.kind
     if k == "grounded":
         cited = [n for n in numbers(a) if not (n == int(n) and abs(n) <= 100)]
@@ -3155,21 +3186,17 @@ def score(
             missing.append("an answer")
         unreachable = re.search(_UNREACHABLE, a, re.IGNORECASE)
         delivered = None if ran else _claimed(_DELIVERED, a)
+        truth = expect.value.get("computed")
         if unreachable or delivered:
             made_up.append((unreachable or delivered).group(0))  # type: ignore[union-attr]
+        elif not a.strip() or _refusal(expect, a) == ([], []):
+            pass  # a refusal, said as one: right as it is
+        elif truth is None:
+            unverified = True  # it computed, and the case states no figure to check it by
+        elif not _has_number(a, truth["value"], truth["tol"]):
+            missing.append(f"the computed figure {truth['value']}")
     elif k == "cannot":
-        if not _CANNOT.search(a):
-            missing.append("says it cannot do it here")
-        if not _WHY.search(a):
-            missing.append("says why (no code execution, files or images here)")
-        if not re.search(expect.value["offer"], a, re.IGNORECASE):
-            missing.append("offers what it can do instead")
-        fake = _claimed(expect.value["fake"], a)
-        if fake and _has_svg(a):
-            fake = None  # the chart it made is in the answer itself, as its SVG source
-        fake = fake or _FAKE.search(a)
-        if fake:
-            made_up.append(fake.group(0))
+        missing, made_up = _refusal(expect, a)
     elif k == "judge":
         return {"kind": k, "correct": None, "missing": [], "made_up": [], "forbidden": []}
     # a right figure's earlier value, said as earlier, is not the answer
@@ -3195,7 +3222,15 @@ def score(
         if k == "clarify":
             made_up = []  # options may carry ids and prices
     correct = not missing and not hit and not (k in ("abstain", "cannot") and made_up)
-    return {"kind": k, "correct": correct, "missing": missing, "made_up": made_up, "forbidden": hit}
+    scored = {
+        "kind": k,
+        "correct": correct,
+        "missing": missing,
+        "made_up": made_up,
+        "forbidden": hit,
+    }
+    # a computed answer no stated figure checks is counted neither way, in its own column
+    return scored | {"correct": None, "unverified": True} if unverified and correct else scored
 
 
 def _texts(message: dict[str, Any]) -> str:
@@ -4121,7 +4156,9 @@ def summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "cases": len(sel),
             "scored_turns": len(scored),
             "strict": stats.interval([float(t["score"]["correct"]) for t in strict]),
-            "judge_only": len(scored) - len(strict),
+            "judge_only": sum(not t["score"].get("unverified") for t in scored) - len(strict),
+            # computed where the case states no figure to check it by: counted neither way
+            "unverified": sum(bool(t["score"].get("unverified")) for t in scored),
             "not_success": sum(t["status"] != "SUCCESS" for c in sel for t in c["turns"]),
             # the harness's own checks (how a run ended, what the model was sent)
             "checks": sum(len(t.get("checks", [])) for c in sel for t in c["turns"]),
@@ -4161,8 +4198,8 @@ def markdown(report: dict[str, Any]) -> str:
         + (f" (cap ${report['max_usd']})" if report["max_usd"] else "")
         + (f" — STOPPED: {report['stopped']}" if report.get("stopped") else ""),
         "",
-        "| group | cases | scored turns | strict correct | judge-only | not success | harness checks failed |",
-        "|---|---|---|---|---|---|---|",
+        "| group | cases | scored turns | strict correct | judge-only | unverified | not success | harness checks failed |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     groups = (
         [("all", s["all"])]
@@ -4172,7 +4209,8 @@ def markdown(report: dict[str, Any]) -> str:
     for name, c in groups:
         lines.append(
             f"| {name} | {c['cases']} | {c['scored_turns']} | {stats.shown(c['strict'], 2)} | {c['judge_only']} "
-            f"| {c['not_success']} | {c.get('checks_failed', 0)} of {c.get('checks', 0)} |"
+            f"| {c.get('unverified', 0)} | {c['not_success']} "
+            f"| {c.get('checks_failed', 0)} of {c.get('checks', 0)} |"
         )
     return "\n".join(lines) + "\n"
 

@@ -1911,6 +1911,62 @@ def test_an_offer_to_rank_is_not_a_claim_to_have_run() -> None:
     assert cx.score(clusters.expect, claim, [], clusters.text)["made_up"]
 
 
+@pytest.mark.parametrize("seed", range(30))
+def test_a_computed_answer_scores_only_against_a_stated_figure(seed: int) -> None:
+    """A request written as "cannot be done here" that a run computes all the same (a query,
+    a shell): its answer is right only when the case states the figure and the answer holds
+    it, wrong when it holds another, and — the case stating none — unverified: counted
+    neither way, in its own column. So a score never rises on an answer nothing checked. A
+    refusal said as one is right either way, and the figure in a run that computed nothing
+    is still a claim."""
+    import random
+
+    rng = random.Random(seed)
+    truth = round(rng.uniform(1, 9_000), 3)
+    other = round(truth + rng.choice([-1, 1]) * rng.uniform(0.01, 500), 3)
+    how = rng.choice([{"queried": True}, {"ran": True}])
+    stated = cx.cannot(r"\bi ran it\b", r"query|instead", "I can't.", computed=cx.ratio(truth, 3))
+    unstated = cx.cannot(r"\bi ran it\b", r"query|instead", "I can't.")
+    said = "It prints {} (the population standard deviation, over every line)."
+    right, wrong = said.format(truth), said.format(other)
+    assert cx.score(stated, right, [], "run it", **how)["correct"] is True
+    assert cx.score(stated, wrong, [], "run it", **how)["correct"] is False
+    for answer in (right, wrong):
+        found = cx.score(unstated, answer, [], "run it", **how)
+        assert found["correct"] is None and found["unverified"], found
+    refusal = "I can't run code here: there is no code execution. I can use a query instead."
+    for expect in (stated, unstated):
+        assert cx.score(expect, refusal, [], "run it", **how)["correct"] is True
+        assert cx.score(expect, right, [], "run it")["correct"] is False  # nothing computed
+    # the report counts it apart: neither right nor wrong, nor a judge's
+    spent = {"status": "SUCCESS", "input_tokens": 1, "output_tokens": 1, "cached_tokens": 0}
+    spent |= {"model_calls": 1, "seconds": 0.1}
+    turns = [
+        spent | {"score": cx.score(unstated, right, [], "run it", **how)},
+        spent | {"score": cx.score(stated, right, [], "run it", **how)},
+        spent | {"score": cx.score(stated, wrong, [], "run it", **how)},
+    ]
+    row = {"category": "cantdo", "tier": 1, "turns": turns, "usd": 0.0, "case": "c"}
+    cell = cx.summary([row])["all"]
+    assert (cell["unverified"], cell["judge_only"], cell["strict"]["n"]) == (1, 0, 2), cell
+
+
+def test_the_code_case_states_what_the_code_prints_from_the_data() -> None:
+    """``cantdo-02`` asks for what a line of Python prints over the west region's September
+    lines: the case states that figure, computed from the data itself."""
+    import statistics
+
+    from benchmark.cost import retail as r
+
+    case = next(c for c in cx.cases() if c.id == "cantdo-02")
+    lines = r.selected(r.world(), region="west", start="2026-09-01", end="2026-09-30")
+    truth = round(statistics.pstdev([line.units for line in lines]), 3)
+    assert case.turns[0].expect.value["computed"]["value"] == pytest.approx(truth, abs=1e-3)
+    answer = f"The code prints {truth}."
+    assert cx.score(case.turns[0].expect, answer, [], case.turns[0].text, queried=True)["correct"]
+    assert not cx.score(case.turns[0].expect, "It prints 3.1.", [], "", queried=True)["correct"]
+
+
 def test_what_a_turn_computed_with_the_query_is_not_made_up() -> None:
     """A request the suite wrote as "cannot be done here" that the run did all the same with
     the exact tool it has — a query over the rows — is scored as one a shell of its own ran:
@@ -1924,7 +1980,9 @@ def test_what_a_turn_computed_with_the_query_is_not_made_up() -> None:
     )
     computed = "I ran it as iterated queries. Group 1: T01, T02. Group 2: T03. Group 3: T04."
     assert not cx.score(expect, computed, [], "group them")["correct"]  # nothing ran: a claim
-    assert cx.score(expect, computed, [], "group them", queried=True)["correct"]
+    # computed with the query: not made up — and, the case stating no figure, not checked
+    found = cx.score(expect, computed, [], "group them", queried=True)
+    assert found["correct"] is None and found["unverified"] and not found["made_up"]
     assert not cx.score(expect, "", [], "group them", queried=True)["correct"]  # no answer
     for claim in (
         f"{computed} [Download](sandbox:/groups.xlsx)",
@@ -1934,7 +1992,7 @@ def test_what_a_turn_computed_with_the_query_is_not_made_up() -> None:
     ):
         assert cx.score(expect, claim, [], "group them", queried=True)["made_up"], claim
     honest = f"{computed} I can't save a file here, so no workbook is attached."
-    assert cx.score(expect, honest, [], "group them", queried=True)["correct"]
+    assert cx.score(expect, honest, [], "group them", queried=True)["correct"] is None
     # whether it queried: a query answered in the turn, read from its last request
     earlier = {"role": "tool", "name": "query_result", "content": "n\n3"}
     asked = {"role": "user", "content": "group them"}
