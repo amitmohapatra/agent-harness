@@ -744,9 +744,18 @@ def _unknown(name: str) -> None:
 
 def _profiled(model: Any, window: int | None) -> Any:
     """The model, its profile naming the window ReAct uses (what Deep Agents' summarization's
-    thresholds are shares of): a copy, when it is given and the model says otherwise; the
-    model as it is when the window is not known (Deep Agents' own thresholds)."""
+    thresholds are shares of): a copy, when it is given and the model says otherwise — the
+    window the model said kept beside it (``middleware.OWN_WINDOW``) —; the model as it is
+    when the window is not known (Deep Agents' own thresholds)."""
+    from trellis.harness.middleware import OWN_WINDOW
+
     profile = getattr(model, "profile", None)
     if window is None or (isinstance(profile, dict) and profile.get("max_input_tokens") == window):
         return model
-    return model.model_copy(update={"profile": {**(profile or {}), "max_input_tokens": window}})
+    # the model's own window stays known beside the one given: a reply is reserved out of it
+    own = (
+        {OWN_WINDOW: profile["max_input_tokens"]} if (profile or {}).get("max_input_tokens") else {}
+    )
+    return model.model_copy(
+        update={"profile": {**(profile or {}), **own, "max_input_tokens": window}}
+    )

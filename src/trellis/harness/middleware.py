@@ -1909,6 +1909,23 @@ class ReadTools(AgentMiddleware):
 
 
 # --------------------------------------------------------------------------- the window
+#: Where a model's profile keeps the window the model said, when ``ReAct`` was given another
+#: (``react._profiled``): the reply is reserved out of the model's own (``FitWindow._budget``).
+OWN_WINDOW: Final = "trellis_own_window"
+
+
+def _sending(model: Any) -> Any:
+    """The chat model that sends a request made of ``model``: a model name's, the one its
+    route resolves to now (its ``max_tokens`` is the reply the call asks for); any other
+    model, itself. The name itself where the route cannot make one: the call says why."""
+    if not routed(model):
+        return model
+    try:
+        return cast(Any, model).resolved()
+    except Exception:
+        return model
+
+
 #: Tools a narrowing keeps at least, beside the ones it must keep (the run's used ones, the
 #: graph's own state tools): the descriptions are compacted, the longest results cut and the
 #: older turns left out before any of them is dropped.
@@ -2121,18 +2138,26 @@ class FitWindow(AgentMiddleware):
         return fitted, _size(fitted)
 
     def _budget(self, request: ModelRequest[Any]) -> int | None:
+        """What the request may hold: the window's share (:data:`FIT_SHARE`), and no more than
+        the model's own window leaves beside the reply the call will send — a provider takes
+        input and reply together. The reply is the call's own setting, else the chat model's
+        that makes the call (a model name's: the one its route resolves to; read from the
+        name there was none, and 950,000 tokens were sent where the provider took 872,000).
+        A window the caller gives below the model's own is not what the reply is taken out
+        of: given 32,000 for a model replying up to 64,000, nothing was left for the input."""
         profile = getattr(request.model, "profile", None)
-        window = self.window or (
-            profile.get("max_input_tokens") if isinstance(profile, dict) else None
-        )
+        said = profile if isinstance(profile, dict) else {}
+        window = self.window or said.get("max_input_tokens")
         if not isinstance(window, int) or isinstance(window, bool):
             return None
+        sends = _sending(request.model)
         reply = 0
         for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-            value = request.model_settings.get(key, getattr(request.model, key, None))
+            value = request.model_settings.get(key, getattr(sends, key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 reply = max(reply, value)
-        return max(0, int(window * FIT_SHARE) - reply)
+        own = said.get(OWN_WINDOW) or window
+        return max(0, min(int(window * FIT_SHARE), int(own * FIT_SHARE) - reply))
 
     def _results(
         self, request: ModelRequest[Any], budget: int, *, refit: bool
