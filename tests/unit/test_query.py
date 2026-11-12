@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 from collections.abc import Iterator
 from decimal import Decimal
 from types import SimpleNamespace
@@ -42,6 +43,8 @@ def ask(text: str, sql: str) -> str:
     return asyncio.run(query.query({"file_path": path, "sql": sql}))
 
 
+#: A kept result's path, as a message names it.
+PATH = re.compile(rf"{results.PREFIX}/\w+")
 ROWS = [
     {"sku": f"S{n}", "stock": n % 7, "price": n / 4, "tags": ["a"], "ok": True} for n in range(30)
 ]
@@ -342,10 +345,19 @@ def test_a_graphs_copy_of_a_kept_table_is_that_table(journal: Journal) -> None:
     assert middleware._graph_results(other, run)[0] == {copy: "sku,cat\nS1,shirts"}
 
 
-#: The states a run holds a result in: shown whole in the conversation (too small to keep),
-#: kept by the run (a table read whole, or too large to show), cleared from the request with a
-#: mark naming its call's path, and saved by Deep Agents as a file of the graph's state.
-HELD = ("shown", "kept", "cleared", "deep agents")
+#: The states a result is in when the model reads of it: shown whole in the conversation (too
+#: small to keep), kept by the run (a table read whole with its note, or too large to show: a
+#: stub), cleared from the request (a mark), cut to fit the window, saved by Deep Agents as a
+#: file of the graph's state (its stub) — and that stub cleared in turn.
+HELD = ("shown", "kept", "cleared", "cut", "deep agents", "deep agents cleared")
+#: How a mark starts: a cleared result's, and a stub's.
+MARKS = ("[result cleared", results.EVICTED)
+#: What a held result's message says of it: its table, its columns, the path to query.
+NAMED = re.compile(r"Its rows are the table (\w+)")
+SAID = re.compile(
+    rf"{NAMED.pattern} \(columns: ([^)]*)\)\. .*?"
+    rf'{query.QUERY_RESULT}\(file_path="({results.PREFIX}/\w+)"'
+)
 
 
 def rows_of(shape: str, count: int, rng: random.Random) -> tuple[str, int]:
@@ -354,19 +366,53 @@ def rows_of(shape: str, count: int, rng: random.Random) -> tuple[str, int]:
     if shape == "csv":
         return "sku,units\n" + "\n".join(f"S{n},{u}" for n, u in enumerate(units)), sum(units)
     listed = [{"sku": f"S{n}", "units": u} for n, u in enumerate(units)]
-    return json.dumps(listed if shape == "array" else {"rows": listed}), sum(units)
+    found = {"store": "S20", "rows": listed, "units": sum(units)}
+    return json.dumps(listed if shape == "array" else found), sum(units)
+
+
+def as_read(run: Any, state: dict[str, Any], *, cleared: bool, cut: bool) -> str:
+    """The call's tool message as the model reads it: Deep Agents' stubs named their table,
+    then (``cleared``) LangChain's clearing with the harness's mark, then (``cut``) the
+    request cut to fit a window with no room at all — the order ``middleware()`` runs them."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import HumanMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+    from trellis.harness.react import CLEARED
+
+    messages = [HumanMessage("how many?"), *state["messages"]]
+    request = ModelRequest(
+        model=ScriptedChatModel(turns=[]), messages=messages, tools=[], state=state  # type: ignore[arg-type]
+    )  # fmt: skip
+    request = middleware._stubs_tabled(run, request)
+    if cleared:
+        edited = [m.model_copy() for m in request.messages]
+        clearing = middleware.ThisTurnsResults(
+            trigger=0, clear_at_least=0, keep=0, placeholder=CLEARED
+        )
+        clearing.apply(edited, count_tokens=count_tokens_approximately)
+        request = request.override(messages=edited)
+    if cut:
+        request = middleware._cut(request, 1)
+    return str(request.messages[-1].text)
 
 
 @pytest.mark.parametrize("seed", range(2))
-@pytest.mark.parametrize("count", [1, 4, 29, 30, 400, 9_000])
+@pytest.mark.parametrize("count", [1, 4, 5, 29, 30, 400, 9_000])
 @pytest.mark.parametrize("shape", ["csv", "array", "object"])
 @pytest.mark.parametrize("held", HELD)
-def test_a_result_is_queried_exactly_in_whatever_state_the_run_holds_it(
+def test_what_the_model_reads_of_a_held_result_is_that_result(
     journal: Journal, held: str, shape: str, count: int, seed: int
 ) -> None:
-    """Any result the run holds is queried by the path the run names for it, over every row,
-    whatever its size, its shape and where it is held: the model is never left to add up rows
-    because a result was small, cleared or saved elsewhere."""
+    """Any result, whatever its size, its shape and the state it is in: the words the model
+    reads of it name its own columns, and the path and the table they name give every row to
+    a query — so a result is never added up by hand because it was small,
+    cleared, cut or saved elsewhere. And a mark stays a mark: cut to a window with no room, it
+    still names the path and the table, is not marked again, and is never kept as a result
+    (told from the message's words, a kept JSON table's mark named columns made of its data,
+    and the cut of that mark sent the model to read the mark: 12 runs of 12)."""
     from langchain.agents.middleware.types import ToolCallRequest
     from langchain_core.messages import AIMessage, ToolMessage
 
@@ -374,32 +420,129 @@ def test_a_result_is_queried_exactly_in_whatever_state_the_run_holds_it(
 
     run = runtime_module._current.get()
     run.kept_from = {}  # type: ignore[union-attr]
+    run.run_id = f"run-{held}-{shape}-{count}-{seed}"  # type: ignore[union-attr]
     text, total = rows_of(shape, count, random.Random(f"{held}-{shape}-{count}-{seed}"))
     call = AIMessage("", tool_calls=[{"id": "call_1", "name": "stock", "args": {}}])
     by_call = f"{results.PREFIX}/call_1"  # what a cleared result's mark, and Deep Agents, name
-    state: dict[str, object] = {"messages": [call]}
-    if held == "kept":
-        said = results.readable(text, "stock")
-        if "saved at " not in said and "saved in " not in said:
-            return  # too small to keep: the run shows it whole (the "shown" state)
-        path = next(p for p in journal.results if p in said)
-    elif held == "deep agents":  # its file in the graph's state, its stub in the conversation
-        path, state["files"] = by_call, {by_call: {"content": text.split("\n")}}
-        stub = results.STUB.split("{preview_note}")[0].format(tool_call_id="call_1", file_path=path)
-        state["messages"] = [call, ToolMessage(stub, tool_call_id="call_1")]
-    else:  # shown whole, or cleared from the request: the graph's state has the message
-        path = by_call
+    state: dict[str, Any] = {"messages": [call]}
+    if held.startswith("deep agents"):  # its file in the graph's state, its stub in the messages
+        state["files"] = {by_call: {"content": text.split("\n")}}
+        stub = results.STUB.split("{preview_note}")[0].format(
+            tool_call_id="call_1", file_path=by_call
+        )
+        state["messages"].append(ToolMessage(stub, tool_call_id="call_1", name="stock"))
+    else:  # as the harness's tool returned it: whole, whole with its note, or its stub
         shown = results.readable(text, "stock")
-        state["messages"] = [call, ToolMessage(shown, tool_call_id="call_1")]
-    asked = {"file_path": path, "sql": "SELECT count(*) AS n, sum(units) AS units FROM result"}
-    request = ToolCallRequest(
-        tool_call={"name": query.QUERY_RESULT, "args": asked, "id": "q1", "type": "tool_call"},
-        tool=None,
-        state=state,
-        runtime=None,  # type: ignore[arg-type]
+        state["messages"].append(ToolMessage(shown, tool_call_id="call_1", name="stock"))
+
+    def answer(path: str, table: str) -> str:
+        asked = {"file_path": path, "sql": f"SELECT count(*) AS n, sum(units) AS u FROM {table}"}
+        request = ToolCallRequest(
+            tool_call={"name": query.QUERY_RESULT, "args": asked, "id": "q1", "type": "tool_call"},
+            tool=None,
+            state=state,
+            runtime=None,  # type: ignore[arg-type]
+        )
+        found = asyncio.run(middleware._kept_read(run, request))  # type: ignore[arg-type]
+        assert found is not None
+        return found.text.splitlines()[-1]
+
+    assert answer(by_call, query.TABLE) == f"{count},{total}"  # by its call's path, always
+    for cut in (held == "cut", True):  # as it is read, then with no room left in the window
+        read = as_read(run, state, cleared=held.endswith("cleared"), cut=cut)
+        marks = [mark for mark in MARKS if mark in read]
+        named = NAMED.findall(read)
+        if not marks and not named:  # too small to keep, too short to cut: the rows themselves
+            assert read == text and count < results.TABLE_ROWS
+            continue
+        (path,) = set(PATH.findall(read))  # one result, at one path
+        if held == "deep agents cleared":
+            # its file is the graph's, which the clearing does not read: nothing is said of
+            # its table (never a wrong one), and the path the mark names gives its rows
+            assert marks and not named and answer(path, query.TABLE) == f"{count},{total}"
+            continue
+        # said once: its table, under which the path it names gives every row
+        assert len(named) == 1 and len(marks) <= 1, read[:900]
+        assert answer(path, named[0]) == f"{count},{total}", read[:900]
+        said = SAID.findall(read)  # whole unless the window has no room for it
+        assert said or (cut and marks), read[:900]
+        assert not said or said[0] == (named[0], "sku, units", path), read[:900]
+        if marks:  # a mark is whole or shortened, never cut as rows are, never marked twice
+            assert read.startswith(marks[0]) and "cut to fit the window" not in read, read[:900]
+            assert read.count(marks[0]) == 1
+    # and nothing the run keeps is a mark: a mark is never a result
+    assert not [p for p, kept in journal.results.items() if kept.startswith(MARKS)]
+
+
+def test_outside_a_run_a_cleared_results_mark_is_told_from_what_the_graph_shows() -> None:
+    """A graph cleared outside a harness run keeps no result: a cleared result's mark names
+    the rows its message showed, and of a stub nothing is said that is not known."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    from trellis.harness import middleware
+    from trellis.harness.react import CLEARED
+
+    stub = results.STUB.split("{preview_note}")[0].format(
+        tool_call_id="c2", file_path=f"{results.PREFIX}/c2"
     )
-    answer = asyncio.run(middleware._kept_read(run, request))  # type: ignore[arg-type]
-    assert answer is not None and answer.text.splitlines()[-1] == f"{count},{total}", answer
+    calls = [{"id": f"c{n}", "name": "stock", "args": {"n": n}} for n in (1, 2)]
+    messages = [
+        HumanMessage("how many?"),
+        AIMessage("", tool_calls=calls),
+        ToolMessage(rows_of("object", 9, random.Random(1))[0], tool_call_id="c1"),
+        ToolMessage(stub, tool_call_id="c2"),
+    ]
+    clearing = middleware.ThisTurnsResults(trigger=0, clear_at_least=0, keep=0, placeholder=CLEARED)
+    clearing.apply(messages, count_tokens=count_tokens_approximately)
+    shown, saved = (m.text for m in messages[2:])
+    assert "the table result (columns: sku, units)" in shown and f"{results.PREFIX}/c1" in shown
+    assert saved == CLEARED.replace("{path}", f"{results.PREFIX}/c2")
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_a_result_that_begins_with_anothers_rows_is_read_as_itself(
+    journal: Journal, seed: int
+) -> None:
+    """Two results of one tool, the later beginning with the earlier's rows (a longer page, a
+    wider date range): each is its own table by its call's path. The later one was taken for
+    a copy of the earlier (any text that began with a kept result's), and a count over 20
+    rows answered 10."""
+    from langchain.agents.middleware.types import ToolCallRequest
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from trellis.harness import middleware
+
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    rng = random.Random(seed)
+    shape = rng.choice(["csv", "json lines"])
+    first, more = rng.randrange(5, 60), rng.randrange(1, 60)
+    rows = [{"sku": f"S{n}", "units": rng.randrange(1, 500)} for n in range(first + more)]
+
+    def text(count: int) -> str:
+        if shape == "json lines":
+            return "\n".join(json.dumps(r) for r in rows[:count])
+        return "sku,units\n" + "\n".join(f"{r['sku']},{r['units']}" for r in rows[:count])
+
+    calls = [{"id": f"c{n}", "name": "sales", "args": {"n": n}} for n in (1, 2)]
+    shown = [results.tabled(text(first), "sales"), results.tabled(text(first + more), "sales")]
+    state = {
+        "messages": [
+            AIMessage("", tool_calls=calls),
+            *(ToolMessage(s, tool_call_id=f"c{n}") for n, s in enumerate(shown, start=1)),
+        ]
+    }
+    for n, count in ((1, first), (2, first + more)):
+        asked = {"file_path": f"{results.PREFIX}/c{n}", "sql": "SELECT count(*) FROM result"}
+        request = ToolCallRequest(
+            tool_call={"name": query.QUERY_RESULT, "args": asked, "id": "q", "type": "tool_call"},
+            tool=None,
+            state=state,
+            runtime=None,  # type: ignore[arg-type]
+        )
+        found = asyncio.run(middleware._kept_read(run, request))  # type: ignore[arg-type]
+        assert found is not None and found.text.splitlines()[-1] == str(count), found
 
 
 def test_a_very_wide_table_is_typed_in_bounded_statements() -> None:

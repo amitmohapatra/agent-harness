@@ -357,7 +357,9 @@ one step: the reads at once, the writes one at a time in the model's order —
   Deep Agents graph (the harness's narrowing copy) — the model is called once more, told
   `Your last reply reached the output limit before it gave an answer...` (`budget.CUT_OFF`) and
   offered no tool, and its answer is the run's (an `output_limit` warning); cut again, the run
-  stops saying so. Claude Code continues such a reply itself, and Kimi asks again; OpenAI
+  stops saying so. An answer the limit cut short (text, then the limit) is still the run's
+  answer, as it is, with the same `output_limit` warning on the stream and in the log: it is
+  not continued. Claude Code continues such a reply itself, and Kimi asks again; OpenAI
   Agents' chat model raises its own error. Any run that would still end with no answer (none,
   or blank text) ends `ERROR` `NO_ANSWER`, saying whether its last reply reached the output
   limit or had no text; a function target's answer is what it returns.

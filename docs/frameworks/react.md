@@ -130,6 +130,12 @@ The names are Deep Agents' where both have one. In four tiers:
   parts are off — clearing old tool results and the long-task tools — said once in the log, and
   Deep Agents' summarization uses its own thresholds: give it for a server whose model list
   names no window (Ollama, llama.cpp's `-c`) and for a chat model object without a profile.
+  The same answer names the model's output limit (Anthropic's `max_tokens`, a server's
+  `max_output_tokens` or `max_completion_tokens`): it is used where LangChain knows none of
+  the model and filled in a fallback of its own (`ChatAnthropic`: 4,096 tokens), so a model
+  newer than the installed package does not stop mid-call or mid-answer. A model LangChain
+  knows keeps its profile's limit, a chat model object or a call's own `max_tokens` is yours,
+  and a route that names no limit leaves the library's fallback.
 * `effort` — the reasoning effort sent with every call of a model name (`reasoning_effort`).
 * `middleware` — your middleware, LangChain's, Deep Agents' or your own, added to the harness's
   before `ModelHooks` (so its span shows what the model is sent): one named as the harness's is

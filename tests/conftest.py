@@ -107,9 +107,9 @@ def openai_on_httpx(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
 @pytest.fixture(autouse=True)
 def anthropic_models(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Anthropic's Models API, answered here: where the harness asks it of a model's context
-    window (``gateways._anthropic_window``), a test never reaches the real one. ``records`` are
-    the models it knows by name (none: every model is a 404), ``asked`` the requests it got.
-    Live tests ask the real API."""
+    window and output limit (``gateways._anthropic_limits``), a test never reaches the real
+    one. ``records`` are the models it knows by name (none: every model is a 404), ``asked``
+    the requests it got. Live tests ask the real API."""
     if request.node.get_closest_marker("live") is not None:
         return None
     import anthropic

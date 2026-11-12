@@ -159,3 +159,32 @@ def test_with_a_sandbox_the_query_comes_first_and_code_reads_the_kept_file(
     assert whole.endswith(results.CODE.format(path=path, tool="execute")), whole[-400:]
     run.native = {}
     assert results.CODE.split("{", 1)[0] not in results.tabled(table + "\nS9,9", tool="sales")
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_a_mark_is_shortened_as_a_mark_never_before_the_table_it_names(seed: int) -> None:
+    """A mark of any length given any room: what is left starts as the mark did, still names
+    the path and — where the mark names one — the table, says how much was left out, and is
+    never longer than the mark."""
+    import random
+
+    rng = random.Random(seed)
+    path = f"{results.PREFIX}/{rng.randrange(10**12):012d}"
+    columns = ", ".join(f"c{n}" for n in range(rng.choice([1, 3, 40, 900])))
+    said = results.QUERY.format(
+        table="sales_3", columns=columns, path=path, private=results.PRIVATE
+    )
+    head = f'[result cleared: read_file(file_path="{path}") reads it again]'
+    tail = "\n".join(f"{n}  preview line" for n in range(rng.choice([0, 5, 200])))
+    mark = rng.choice([f"{head} {said}", f"{head}\n\n{said}\n\n{tail}", f"{head}\n{tail}", head])
+    room = rng.choice([0, 50, 200, 700, len(mark) // 2, len(mark), len(mark) * 2])
+    less = results.shortened(mark, room)
+    assert len(less) <= len(mark) and path in less
+    assert ("the table sales_3 " in less) == ("the table sales_3 " in mark)
+    if less != mark:
+        kept, _, left = less.partition(" …[")
+        assert mark.startswith(kept) and len(kept) >= min(room, len(mark))
+        assert (
+            left
+            == f"{len(mark) - len(kept)} more characters of this note left out to fit the window]"
+        )

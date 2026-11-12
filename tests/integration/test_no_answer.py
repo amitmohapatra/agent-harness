@@ -85,6 +85,73 @@ async def test_react_is_told_its_reply_was_cut_and_offered_no_tool(harness: Harn
     ]
 
 
+@pytest.mark.parametrize(
+    ("said", "cut"),
+    [
+        ({"finish_reason": "length"}, True),  # an OpenAI-compatible endpoint, Ollama
+        ({"stop_reason": "max_tokens"}, True),  # Anthropic
+        ({"stopReason": "max_tokens"}, True),  # Bedrock Converse
+        ({"done_reason": "length"}, True),
+        ({"finish_reason": "MAX_TOKENS"}, True),  # Gemini
+        ({"finish_reason": "stop"}, False),
+        ({"stop_reason": "end_turn"}, False),
+        ({}, False),
+    ],
+)
+@pytest.mark.parametrize("answer", ["| S20 | £", "The top store is S08, at 9.68. " * 40])
+async def test_an_answer_cut_at_the_output_limit_is_delivered_and_said_to_be_cut(
+    harness: Harness, said: dict[str, str], cut: bool, answer: str
+) -> None:
+    """A final answer whose reply reached the output limit stops where the limit fell (a
+    table ending at "| S20 | £"): it is still the run's answer, and the run says so — the
+    ``output_limit`` warning a reply cut before any answer already raises — where it went out
+    as a plain success. An answer that ended by itself raises none."""
+    from langchain_core.messages import AIMessage
+
+    from trellis.harness.middleware import ANSWER_CUT
+
+    model = ScriptedChatModel(turns=[AIMessage(content=answer, response_metadata=said)])
+    agent = arm(harness.wrap(ReAct("s", model), id="answer-cut"), [rows])
+    events = [e async for e in agent.stream("which store?", user="u")]
+    assert events[-1].outcome is not None and events[-1].outcome.value == "success"
+    assert events[-1].data["result"] == answer  # delivered as it is, not asked again
+    assert len(model.seen) == 1
+    told = [e.data["message"] for e in events if e.data.get("code") == "output_limit"]
+    assert told == ([ANSWER_CUT] if cut else [])
+
+
+async def test_outside_a_run_a_cut_answer_is_the_graphs_answer_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A graph with the harness's middleware, invoked by itself: no run to warn, so the cut
+    answer is the graph's as it is, and the log says it."""
+    from langchain.agents import create_agent
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from trellis import middleware
+    from trellis.harness.middleware import ANSWER_CUT
+
+    cut = AIMessage(content="| S20 | £", response_metadata={"stop_reason": "max_tokens"})
+    graph = create_agent(ScriptedChatModel(turns=[cut]), tools=[], middleware=middleware())
+    with caplog.at_level("WARNING", logger="trellis.run"):
+        state = await graph.ainvoke({"messages": [HumanMessage("which store?")]})
+    assert state["messages"][-1].text == "| S20 | £"
+    assert ANSWER_CUT in caplog.text
+
+
+async def test_a_reply_at_the_limit_that_calls_a_tool_is_no_cut_answer(harness: Harness) -> None:
+    """A reply that reached the limit and holds a tool call is a step, not an answer: the
+    run goes on, and no warning says its answer was cut."""
+    from langchain_core.messages import AIMessage
+
+    call = {"name": "rows", "args": {"month": "july"}, "id": "c1"}
+    step = AIMessage(content="", tool_calls=[call], response_metadata={"finish_reason": "length"})
+    model = ScriptedChatModel(turns=[step, "2,061 rows"])
+    agent = arm(harness.wrap(ReAct("s", model), id="call-at-limit"), [rows])
+    events = [e async for e in agent.stream("how many rows?", user="u")]
+    assert events[-1].data["result"] == "2,061 rows" and _warned(events) == []
+
+
 async def test_a_reply_cut_again_ends_the_run_saying_so(harness: Harness) -> None:
     from langchain.agents import create_agent
 

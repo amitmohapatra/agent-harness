@@ -5,6 +5,55 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a cleared result's mark names the result's own columns, and a mark is never cut as a result
+
+Two changes of this release met badly. A cleared result's mark names the table a query
+computes over (its columns), and a table of 5 rows or more read whole is kept, its message
+ending with a note. The mark was built from the message's words, note and all: a JSON result
+with a note after it is no JSON, so it was read as CSV and its "columns" were its data
+(`columns: store_S20, category_knitwear, … planned_208, found_190`), about 2,250 characters
+where the mark had 132. In a small window that long mark was then cut to fit like a result,
+and the cut kept the mark's own text as the result to read on from: "the rest" of it was
+the mark, and a query of that path found no rows.
+
+- **A mark is told from the result's rows**, never from the message about it: the table the
+  run already keeps, the one a query of that path reads. A cleared stub names the kept
+  result's columns the same way; of a file that is Deep Agents' own, nothing is said that is
+  not known.
+- **A mark is no result.** A cleared result's line and a stub are shortened as marks when
+  the window has no room (the path and the table's name stay, what is left out is counted);
+  nothing of a mark is kept, and none is cut as rows are.
+- **A result that begins with another's rows is itself.** A longer page or a wider date
+  range starts with the rows of an earlier result of the same tool; it was taken for a copy
+  of that one, and a count over 20 rows answered 10. A copy is the kept rows followed by
+  their note, nothing else.
+
+Seen in the closing acceptance run: 23 of 600 case runs carried such a mark (0 of 600
+before), every run of `long-flow-02`, and one of them spent five of its twelve steps reading
+marks. The generated tests now read the words the model is sent, not only what a query
+returns: for a result of 1 to 9,000 rows as CSV, a JSON array or a JSON object, in each
+state (shown, kept, cleared, cut, saved by Deep Agents, that stub cleared), the columns
+named are the result's, the path and the table named give every row, and no request holds
+a mark of a mark — on every backend. 25 of the 90 end-to-end situations failed before
+(every cleared JSON result, and every result of a crowded step).
+
+### Fixed: a model LangChain has no profile of replies up to its own output limit, and a cut answer says so
+
+For a model newer than the installed LangChain package, `ChatAnthropic` falls back to 4,096
+output tokens. A reply that thinks first then stops mid-call or mid-answer: 74 of 22,385
+saved model calls ended at exactly 4,096 tokens, 41 of them a tool call cut before its
+arguments, and one final answer went out as a success stopping at "| S20 | £".
+
+- The route's record of the model names its output limit beside its window (Anthropic's
+  `max_tokens`, a server's `max_output_tokens` or `max_completion_tokens`): asked once for
+  both, with the same 5 seconds and the same kept answer, and used where LangChain knows
+  none of the model and filled in its own fallback. A model LangChain knows keeps its
+  profile's limit; a chat model object, or a call's own `max_tokens`, is the caller's; a
+  route that names none leaves the library's fallback. No setting.
+- An answer whose reply reached the output limit is still the run's answer, as it is, and
+  the run says so: the `output_limit` warning a reply cut before any answer already raised,
+  on the stream and in the log. It is not continued.
+
 ### Fixed: a cleared result the run already keeps as a table, and a stubbed one, are queried by their call's path
 
 A cleared result's mark names its call's path (`/large_tool_results/<call id>`) and the query

@@ -618,7 +618,30 @@ def _kept_copy(runtime: Runtime, text: str) -> str | None:
     then starts with the kept result, and what follows is the note: no table of its own (read
     as one, a JSON result was "CSV" of thousands of columns)."""
     kept: Mapping[str, str] = runtime.replay.journal.results
-    return next((p for p, k in kept.items() if len(k) < len(text) and text.startswith(k)), None)
+    return next((p for p, k in kept.items() if _copy_of(text, k)), None)
+
+
+#: How the note a table read whole carries starts, after its rows (``results.tabled``).
+_NOTED: Final = "\n\n" + results.TABLED.split("{", 1)[0]
+
+
+def _copy_of(text: str, kept: str) -> bool:
+    """Whether ``text`` is the ``kept`` result as its message carries it: its rows, then the
+    note. A result that only begins with another's rows (a longer page, a later date range)
+    is itself: taken for a copy, a count over its 20 rows answered the other's 10."""
+    return len(kept) < len(text) and text.startswith(kept) and text.startswith(_NOTED, len(kept))
+
+
+def _shown(text: str) -> str | None:
+    """The result a tool message's whole ``text`` shows, as a query of its call's path reads
+    it (:func:`_kept_read`): the result the run keeps, when the text is a copy of one (its
+    rows, then the note: :func:`_copy_of`) or a stub naming one; the text itself, when it is
+    neither; ``None`` for a stub of a file the run does not keep (Deep Agents' own)."""
+    runtime = current()
+    kept: Mapping[str, str] = runtime.replay.journal.results if runtime is not None else {}
+    if text.startswith(results.EVICTED):
+        return next((kept[p] for p in _STUB_AT.findall(text) if p in kept), None)
+    return next((k for k in kept.values() if _copy_of(text, k)), text)
 
 
 def _graph_results(
@@ -1710,6 +1733,9 @@ class StallGuard(AgentMiddleware):
         return reply
 
 
+#: What a run whose answer's reply reached the model's output limit says of it (a warning: the
+#: answer is still the run's).
+ANSWER_CUT: Final = "the model's answer reached its output limit: it may stop before its end"
 #: Why a run whose model's reply reached its output limit with no answer, twice, stopped.
 CUT_STOPPED: Final = "stopped: the model's reply reached its output limit before it gave an answer"
 
@@ -1722,13 +1748,24 @@ async def answered_in_full(
     answer (``accounting.cut_off``), the model called once more, told so (``budget.CUT_OFF``)
     and offered no tool (:func:`_answer_now`, an ``output_limit`` warning): LangChain ends its
     loop on a reply with no tool call, so the run ended with no answer (the break-and-fix
-    gate's LangGraph turns, 4,096 tokens of rows summed by hand). ``StallGuard`` has it, and a
+    gate's LangGraph turns, 4,096 tokens of rows summed by hand). An answer the limit cut
+    short is the run's as it is, said to be cut (:data:`ANSWER_CUT`, the same warning): it
+    went out as a plain success, a table stopping mid-row. ``StallGuard`` has it, and a
     ``create_agent`` graph without the harness's middleware runs it (:func:`narrowing`)."""
     reply = await handler(request)
     message = _ai(reply)
-    if message is None or not accounting.cut_off(message):
+    if message is None or not accounting.at_output_limit(message):
         return reply
-    return await _answer_now(request, handler, budget.CUT_OFF, CUT_STOPPED, warning="output_limit")
+    if accounting.cut_off(message):
+        return await _answer_now(
+            request, handler, budget.CUT_OFF, CUT_STOPPED, warning="output_limit"
+        )
+    if not message.tool_calls:  # an answer, cut where the limit fell: the run's, said so
+        runtime = current()
+        log.warning("run %s %s", runtime.run_id if runtime else "-", ANSWER_CUT)
+        if runtime is not None:
+            runtime.events.warning("output_limit", ANSWER_CUT)
+    return reply
 
 
 def no_tool(model: Any) -> Any:
@@ -1940,7 +1977,10 @@ class ThisTurnsResults(ClearToolUsesEdit):
         for n, message in enumerate(turn):
             if _cleared(message) and message.content == self.placeholder:
                 path = f"{results.PREFIX}/{message.tool_call_id}"
-                rows = _rows_said(path, shown[n], query.TABLE)
+                # the result's own rows, never the message's words: a kept table's message
+                # ends with its note, and read with it a JSON result's "columns" were its data
+                result = _shown(shown[n])
+                rows = "" if result is None else _rows_said(path, result, query.TABLE)
                 said = self.placeholder.replace("{path}", path) + rows
                 turn[n] = message.model_copy(update={"content": said})
         messages[start:] = turn
@@ -1958,6 +1998,14 @@ def _rows_said(path: str, text: str, table: str) -> str:
     if not rows or columns == ["line"]:
         return ""
     return " " + results.table_said(path, text, table)
+
+
+def _mark(message: AnyMessage) -> bool:
+    """Whether a tool message is a mark — what stands in the request for a result it does not
+    show: a cleared result's line, a stub — and so never a result itself."""
+    return _cleared(message) or (
+        isinstance(message, ToolMessage) and message.text.startswith(results.EVICTED)
+    )
 
 
 def _cleared(message: AnyMessage) -> TypeGuard[ToolMessage]:
@@ -2463,7 +2511,10 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     that reads on from the line the cut starts on (offered with it), so no row of it is out of
     the model's reach. A kept table's note (``results.noted``: its path and the table to query)
     stays whole after the cut: without it, the model guessed a table name and read another
-    result's rows; a result with rows and no note is given one (:func:`_rows_said`)."""
+    result's rows; a result with rows and no note is given one (:func:`_rows_said`). A mark
+    (:func:`_mark`) is no result: it is shortened as one (``results.shortened``), never kept —
+    cut as a result, a cleared result's mark was kept as one, and "the rest" of it was the
+    mark's own words."""
     tools = list(request.tools)
     runtime = current()
     inside = runtime is not None and any(isinstance(m, ToolMessage) for m in request.messages)
@@ -2482,6 +2533,12 @@ def _cut(request: ModelRequest[Any], budget: int, *, latest: bool = False) -> Mo
     ):
         if over <= 0:
             break
+        if _mark(messages[n]):  # no result: shortened as a mark, nothing of it kept
+            whole = messages[n].text
+            less = results.shortened(whole, max(200, len(whole) - over * 4 - CUT_MARKER))
+            messages[n] = messages[n].model_copy(update={"content": less})
+            over -= (len(whole) - len(less)) // 4
+            continue
         text, note = results.noted(messages[n].text)
         # tokens to characters, as the count does, and room for the marker said in its place
         keep = max(200, len(text) - over * 4 - CUT_MARKER)
