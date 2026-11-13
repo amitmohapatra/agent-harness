@@ -5,6 +5,37 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: OpenAI Agents and ACP features that did not work through the harness
+
+Each of the two libraries' own features was run through a wrapped agent with a scripted model
+(`tests/integration/test_openai_agents_features.py`, `test_openai_agents_mcp.py`,
+`test_acp.py`, `test_function_agent.py`); five did not work and do now:
+
+- **An SDK approval inside an agent tool.** A `needs_approval` tool of an agent called as a
+  tool (`Agent.as_tool`) paused the run, and every approval paused it again: the agent tool's
+  unfinished call was journaled as done, so the resume replayed it and the run inside never
+  continued. The call is now a pause to the bridge while the SDK holds its run waiting, its
+  child run stays open, and the approval (or rejection) continues it, from another worker too.
+- **The run's own `RunHooks`.** `framework_options={"hooks": ...}` was refused; the SDK's
+  `RunHooks` are now called beside the harness's own (which still count every reply toward
+  the budget). `starting_agent` and `input` stay the harness's.
+- **An MCP server's resources.** The governed copy of an agent's MCP server answered
+  `list_resources`, `list_resource_templates`, `read_resource` and `cached_tools` with the
+  SDK base class's defaults; they are the server's own.
+- **A shell tool's approval.** The SDK's approval of a call with no arguments of that name (a
+  `ShellTool`'s commands) showed the person an empty call: it shows the call as the model
+  made it.
+- **One question for one call (ACP).** A call of an ACP agent's own that declares nothing (a
+  tool of Kimi's own MCP servers, any tool of an agent with no profile) asked a person twice:
+  governance's question, then the agent's. `bridge.permitted(..., framework=)` asks the
+  framework's question only when no person was just asked about the call. An agent with no
+  profile is named "the agent" in it, not Kimi Code.
+
+Recorded as they are today (`test_today_...`): a `function_tool` failure the SDK formats is
+recorded `ok`; `failure_error_function=None` does not end a harness run; the tools the SDK
+runs itself (a local shell, a patch editor, a computer) are not governed or recorded unless
+they have their own `needs_approval`.
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000
