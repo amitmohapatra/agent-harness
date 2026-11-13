@@ -1,21 +1,29 @@
 """What the memory service offers, used on every run, against a running memory service
 (``MEMORY_URL``, ``TRELLIS_API_KEY``): a sub-agent reads its parent's hand-off notes and writes
-to its delegation tree's group; a sampled run is verified, and the judge's verdict labels it; a
-person's verdict cites what the answer rested on; a run's context draws on the
+to its delegation tree's group; a sampled run is verified, and the judge's verdict — a model's
+word, waiting for the tenant's administrator — labels it once accepted; a person's verdict cites
+what the answer rested on; a run's context draws on the
 documents it names. No model: function agents, so each assertion is about the service."""
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
 
 import pytest
 
-from tests.live.conftest import live_harness, needs_memory
+from tests.live.conftest import MEMORY_URL, live_harness, needs_memory
+from tests.live.support import eventually
 from trellis import Harness, Runtime
 from trellis.contracts import RunStatus
+from trellis.harness.clients.memory import PUSHED_MEMORIES
+from trellis.memory import MemoryClient
 
 pytestmark = [pytest.mark.live, needs_memory]
+
+#: The tenant administrator's memory key: reviews the judge's verdict.
+ADMIN_KEY = os.environ.get("TRELLIS_ADMIN_KEY", "").strip() or None
 
 
 async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
@@ -55,6 +63,9 @@ async def test_a_sub_agent_reads_its_parents_notes_and_writes_to_its_group(
     assert note not in str(other.answer)
 
 
+@pytest.mark.skipif(
+    ADMIN_KEY is None, reason="TRELLIS_ADMIN_KEY (the tenant administrator's memory key) is not set"
+)
 async def test_a_sampled_run_is_labelled_by_its_check_and_cited_by_a_person() -> None:
     async with live_harness(sampled=1.0) as harness:
         await _labelled_and_cited(harness)
@@ -86,10 +97,31 @@ async def _labelled_and_cited(harness: Harness) -> None:
     verdicts = {f.source: f for f in page.items}
     assert "judge" in verdicts, "a sampled run is checked"
     judge = verdicts["judge"]
-    assert judge.projection is not None and judge.projection.action == "run_labelled"
+    # a model's verdict changes nothing until the tenant's administrator accepts it
+    assert judge.review is not None and judge.review.state == "pending", judge
+    assert judge.projection is None
+    assert MEMORY_URL is not None
+    async with MemoryClient(MEMORY_URL, api_key=ADMIN_KEY) as client:
+        admin = client.bind(tenant_id=await harness._tenant())
+        await admin.feedback.approve(judge.feedback_id)
+
+        async def labelled() -> bool:
+            got = await scope.feedback.get(judge.feedback_id)  # read in the run's scope
+            return got.projection is not None and got.projection.action == "run_labelled"
+
+        assert await eventually(labelled, within=60)
+    # a person's verdict cites what the answer rested on: the memories the judge's verdict
+    # cites, else (the judge's verdict raises no evidence of its own) those the run's context
+    # showed, which its own outcome record keeps
     stored = await harness.feedback(result.run_id, "confirm")
     assert stored is not None
-    assert {r.source_id for r in stored.evidence_refs} == {r.source_id for r in judge.evidence_refs}
+    [own] = [f for f in page.items if f.source == "system"]
+    shown = set(own.metadata.get(PUSHED_MEMORIES, ()))
+    rested_on = {r.source_id for r in judge.evidence_refs} or shown
+    cited = {r.source_id for r in stored.evidence_refs}
+    assert cited and cited == rested_on, (cited, rested_on)
+    remembered = [(await scope.advanced.memories.get(m)).content for m in cited]
+    assert any(marker in text for text in remembered), remembered  # the locker code
 
 
 async def test_a_runs_context_draws_on_the_documents_it_names(harness: Harness) -> None:
