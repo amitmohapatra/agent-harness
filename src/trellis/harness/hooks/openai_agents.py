@@ -1,7 +1,9 @@
 """What the harness watches of an OpenAI Agents SDK run's model calls, through the SDK's own
 ``RunHooks``: a wrapped agent's runs get it from the harness (``Runner.run(...,
-hooks=ModelHooks())``). It runs no hooks of yours: a model call is the SDK's own, observed with your
-agent's own ``AgentHooks`` (``Agent(hooks=...)``: ``on_llm_start``, ``on_llm_end``). In a run, every
+hooks=ModelHooks(...))``). The SDK takes one ``RunHooks`` for a run, so the run's own (the
+``hooks=`` framework option) are called from it, each event before the harness reads it; a model
+call is the SDK's own, observed with them or with your agent's own ``AgentHooks``
+(``Agent(hooks=...)``: ``on_llm_start``, ``on_llm_end``). In a run, every
 reply's usage counts toward the run's budget (``budget.py``), every call is watched for a stall from
 its start to its reply (``Runtime.model_started``: the provider's hosted tools run inside it), and
 the hosted tool calls a reply carries — file search, web search, code interpreter, image generation,
@@ -29,11 +31,32 @@ from trellis.harness.tools.base import arguments_of
 
 class ModelHooks(RunHooks[Any]):
     """Around every model call of a harness run of the SDK: the stall watch, the hosted tool
-    calls recorded, the usage counted toward the run's budget."""
+    calls recorded, the usage counted toward the run's budget. ``theirs``: the run's own
+    ``RunHooks``, called with every event the SDK reports (its agents starting and ending,
+    its handoffs, its tool calls, its model calls), as ``Runner.run(hooks=theirs)`` calls
+    them."""
 
-    def __init__(self) -> None:
+    def __init__(self, theirs: RunHooks[Any] | None = None) -> None:
         #: the model each agent of the run is calling, by its name, and when the call began
         self._calls: dict[str, tuple[str | None, float]] = {}
+        self._theirs = theirs if theirs is not None else RunHooks()
+
+    async def on_agent_start(self, context: Any, agent: Any) -> None:
+        await self._theirs.on_agent_start(context, agent)
+
+    async def on_agent_end(self, context: Any, agent: Any, output: Any) -> None:
+        await self._theirs.on_agent_end(context, agent, output)
+
+    async def on_handoff(self, context: Any, from_agent: Any, to_agent: Any) -> None:
+        await self._theirs.on_handoff(context, from_agent, to_agent)
+
+    async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        _stopped()
+        await self._theirs.on_tool_start(context, agent, tool)
+
+    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        _stopped()
+        await self._theirs.on_tool_end(context, agent, tool, result)
 
     async def on_llm_start(
         self,
@@ -42,6 +65,8 @@ class ModelHooks(RunHooks[Any]):
         system_prompt: str | None,
         input_items: list[Any],
     ) -> None:
+        _stopped()
+        await self._theirs.on_llm_start(context, agent, system_prompt, input_items)
         model = agent.model if isinstance(agent.model, str) else None
         self._calls[agent.name] = (model, time.time())
         runtime = current()
@@ -51,6 +76,7 @@ class ModelHooks(RunHooks[Any]):
     async def on_llm_end(
         self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse
     ) -> None:
+        await self._theirs.on_llm_end(context, agent, response)
         model, started = self._calls.pop(agent.name)
         runtime = current()
         if runtime is not None:  # what the run spent (``budget.py``)
@@ -68,6 +94,17 @@ class ModelHooks(RunHooks[Any]):
                 output_tokens=usage.output_tokens,
                 cached=int(getattr(details, "cached_tokens", 0) or 0),
             )
+
+
+def _stopped() -> None:
+    """The run stops here when a call of a tool the SDK runs on this machine paused it inside
+    the SDK's own ``try`` (``tools.convert.openai_local.paused_inside``): the pause is raised
+    out of the SDK's run before its next step."""
+    from trellis.harness.tools.convert.openai_local import paused_inside  # noqa: PLC0415
+
+    paused = paused_inside(current())
+    if paused is not None:
+        raise paused
 
 
 def _step(agent: Agent[Any]) -> str:

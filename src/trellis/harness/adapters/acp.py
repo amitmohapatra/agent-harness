@@ -21,8 +21,9 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   configuration, it runs): a harness tool is let through (the bridge is its check); any other
   is decided as a harness call is — the run's hooks, governance by its risk
   (:data:`KIMI_BUILTINS`) and the tool catalog's rules — and then, as the agent asked, a
-  person is asked (``bridge.asked``: a durable pause), unless the call only reads (a read
-  tool, or a shell command ``governance.shell.read_only`` reads as read-only). A rejection,
+  person is asked (``bridge.asked``: a durable pause; once for a call governance asks about
+  too), unless the call only reads (a read tool, or a shell command
+  ``governance.shell.read_only`` reads as read-only). A rejection,
   and an edit, end the turn there and the agent is told in a prompt of its own (ACP's answer
   carries no reason and no arguments): why, or to call the tool again with the edited
   arguments — that call is approved when it comes. The agent's own questions (Kimi's
@@ -225,12 +226,18 @@ AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
 REPEAT_BREAKER: Final = "repeat_breaker"
 
 
+#: What an ACP agent the harness has no profile of is called when a person is asked about a
+#: call it asks about.
+THE_AGENT: Final = "The agent"
+
+
 @dataclass(frozen=True, slots=True)
 class Profile:
     """What the harness knows of an ACP agent it tested: its name (the ``compat.BINARIES``
     key), its built-in tools and their risk, the tools that start sub-agents (``helpers``) and
     swarms (``swarms``), its question tool (asked as the run's questions), how a run routes its
-    model through the gateway (``routed``), and where it logs its usage (``usage``)."""
+    model through the gateway (``routed``), where it logs its usage (``usage``), and what it
+    is called when a person is asked about a call it asks about (``label``)."""
 
     name: str
     builtins: Mapping[str, SideEffects]
@@ -249,6 +256,7 @@ class Profile:
     #: what is set in the agent's environment whatever its own says: what a run of it, which
     #: ends with each attempt, cannot keep, turned off (Kimi's scheduling)
     env: Mapping[str, str] = field(default_factory=dict)
+    label: str = THE_AGENT
 
 
 def _kimi_routed(env: dict[str, str], runtime: Runtime, model: str | None) -> None:
@@ -372,6 +380,7 @@ KIMI: Final = Profile(
     home="KIMI_CODE_HOME",
     swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
     env=KIMI_ENV,
+    label=KIMI_CODE,
 )
 
 
@@ -1266,8 +1275,9 @@ class Attempt:
         found = runtime.native.get(name)
         spec = found or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
         runtime.model_ended(STEP)
+        asks_as = self.profile.label if self.profile is not None else THE_AGENT
         try:
-            decided = await _permitted(spec, args, self.shell)
+            decided = await _permitted(spec, args, self.shell, asks_as)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
@@ -1576,20 +1586,19 @@ def _said_reads(agent_id: str) -> None:
     log.warning("%s: %s", agent_id, READS_NOT_ISOLATED, extra={"agent_id": agent_id})
 
 
-async def _permitted(spec: ToolSpec, args: dict[str, Any], shell: Shell) -> ToolCall | ToolOutcome:
+async def _permitted(
+    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str
+) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
-    (``bridge.permitted``: hooks, governance), then — since the agent asks — a person asked
-    (``bridge.asked``), unless it only reads (a read tool, or a shell command
-    ``shell`` reads as read-only: placed from the agent's working folder, or the call's own
-    ``cwd``, and reading only what the run may read) or the run changed its arguments (the
-    agent is told to call it again so: that call is the one let through). A pause
-    propagates."""
-    decided = await bridge.permitted(spec, args)
-    if isinstance(decided, ToolOutcome) or decided.args != args or spec.side_effects == "read":
-        return decided
-    if shell.read_only(spec.name, args):
-        return decided
-    return await bridge.asked(spec, args, KIMI_CODE)
+    (``bridge.permitted``: hooks, governance), and — since the agent asks — a person asked
+    (``asks_as``: what the agent is called in the question), once for the call: not again when
+    governance or a hook just asked about it. Not asked for the agent's sake when it only
+    reads (a read tool, or a shell command ``shell`` reads as read-only: placed from the
+    agent's working folder, or the call's own ``cwd``, and reading only what the run may read)
+    or when the run changed its arguments (the agent is told to call it again so: that call is
+    the one let through). A pause propagates."""
+    reads = spec.side_effects == "read" or shell.read_only(spec.name, args)
+    return await bridge.permitted(spec, args, framework=None if reads else asks_as)
 
 
 def _chosen(options: list[Any], kind: str) -> Any:

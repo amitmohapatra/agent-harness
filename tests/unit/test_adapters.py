@@ -635,3 +635,26 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
         budget.account = account
     assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
     assert journal.session_cost == 0.0 and "" not in costs
+
+
+def test_the_question_is_the_last_user_message_the_harness_put_after_the_context() -> None:
+    """``_question``: what this run asked, from the input the harness made, the input a run
+    resumed from its input runs again, or a resumed run's saved state; ``None`` when there is
+    none to read."""
+    from trellis.harness.adapters.openai_agents import _Again, _Continue, _question
+
+    made = [
+        {"role": "user", "content": "earlier"},
+        {"role": "system", "content": "ctx"},
+        {"role": "user", "content": "first part"},
+        {"role": "assistant", "content": "said"},
+        {"role": "user", "content": "the question"},
+    ]
+    assert _question(made, "ctx") == "the question"
+    assert _question(_Again(made, told="again"), "ctx") == "the question"
+    state = {"original_input": made}
+    assert _question(_Continue(state, "call_1", approve=True), "ctx") == "the question"
+    assert _question(_Continue({}, "call_1", approve=True), "ctx") is None
+    assert _question("a question as text", "ctx") is None
+    assert _question([{"role": "system", "content": "ctx"}], "ctx") is None
+    assert _question([{"role": "user", "content": "q"}], None) == "q"  # no context: from the top

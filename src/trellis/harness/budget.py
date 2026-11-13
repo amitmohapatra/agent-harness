@@ -182,11 +182,12 @@ def gateway_cost(metadata: dict[str, Any]) -> float | None:
     return float(total) if isinstance(total, int | float) and not isinstance(total, bool) else None
 
 
-def count_tool_call(runtime: Runtime) -> None:
-    """One harness tool call, on the run and every run it works inside."""
+def count_tool_call(runtime: Runtime, *, times: int = 1) -> None:
+    """One harness tool call, on the run and every run it works inside (``times=-1``: one
+    counted that is not over — it asked a person, and is made again when the run resumes)."""
     for run in _runs(runtime):
         spent = run.replay.journal.spent
-        spent["tool_calls"] = spent.get("tool_calls", 0) + 1
+        spent["tool_calls"] = spent.get("tool_calls", 0) + times
 
 
 def reached(runtime: Runtime) -> str | None:

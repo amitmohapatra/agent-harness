@@ -7,8 +7,9 @@
 * run: ``Runner.run``/``Runner.run_streamed`` on a clone of the agent carrying the harness
   tools next to its own (the caller's agent is never changed) — and every agent it can hand off
   to cloned too, recursively, each one's own tools governed (:func:`governed_agents`) — with
-  the harness's ``RunHooks`` always (``hooks.openai_agents``): the run's hooks around its model
-  calls, and every reply's usage counted toward the run's budget;
+  the harness's ``RunHooks`` always (``hooks.openai_agents``): every reply's usage counted
+  toward the run's budget, and the run's own ``RunHooks`` (``hooks=``, a framework option)
+  called as the SDK calls them;
 * history: a ``session``, ``conversation_id``, ``previous_response_id`` or
   ``auto_previous_response_id`` given as a run option is the framework keeping the thread
   (``history``): memory's window is left out, unless the session is kept in RAM only. Given
@@ -35,7 +36,7 @@
   with the edited arguments — and that call, when the model makes it with exactly those
   arguments, is approved in the same attempt instead of asking again;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
-  ``run_config``, ``context``...), except the ones the harness gives itself
+  ``run_config``, ``context``, ``hooks``...), except the ones the harness gives itself
   (:data:`OWN_ARGUMENTS`), which are refused; a call to a tool the model made up is an error
   the model reads (``RunConfig.tool_not_found_behavior``), as on every other adapter.
 """
@@ -65,6 +66,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.adapters.base import (
     Extracted,
@@ -93,8 +95,8 @@ from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 log = logging.getLogger("trellis.harness")
 
 #: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
-#: tools), its input (with the memory context, or the resumed state) and the run's hooks.
-OWN_ARGUMENTS: Final = ("starting_agent", "input", "hooks")
+#: tools) and its input (with the memory context, or the resumed state).
+OWN_ARGUMENTS: Final = ("starting_agent", "input")
 #: ``Runner.run``'s arguments that keep the conversation on OpenAI's servers: the framework's
 #: thread, durable (``history``).
 SERVER_THREAD: Final = ("conversation_id", "previous_response_id", "auto_previous_response_id")
@@ -177,9 +179,11 @@ class OpenAIAgentsAdapter:
     history_in: HistoryIn = "messages"
     sessions = False
 
-    def __init__(self) -> None:
+    def __init__(self, target: Any = None) -> None:
         #: the tools the agents declare (:meth:`native`), once read
         self._static: list[ToolSpec] | None = None
+        if target is not None:  # every agent it reaches can be read, or ``h.wrap`` says why
+            reachable(target)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The run's ``session``, or the conversation OpenAI's servers keep
@@ -210,9 +214,9 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
+        agent = self._agent(target, run, helpers, await _gated(run))
         options = _options(run.runtime, target, native_input)
-        error: BaseException | None = None
+        hooks = _hooks(options.pop("hooks", None))
         try:
             given = await self._input(agent, native_input)
             result = await Runner.run(agent, given, hooks=hooks, **options)
@@ -221,18 +225,18 @@ class OpenAIAgentsAdapter:
                 resumed = None  # an edited call is approved once
                 result = await Runner.run(agent, state, hooks=hooks, **options)
         except BaseException as exc:
-            error = exc
+            await helpers.closed(exc)
             raise
-        finally:
-            await helpers.closed(error)
+        await _closed(helpers, result)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
+        agent = self._agent(target, run, helpers, await _gated(run))
         options = _options(run.runtime, target, native_input)
+        hooks = _hooks(options.pop("hooks", None))
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         error: BaseException | None = None
@@ -253,7 +257,9 @@ class OpenAIAgentsAdapter:
             # it: its tool calls end (on the run's stream too) before the run does
             assert result.run_loop_task is not None  # set by run_streamed
             await asyncio.wait({result.run_loop_task})
-            await helpers.closed(error)
+            if error is not None:
+                await helpers.closed(error)
+        await _closed(helpers, result)
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -261,15 +267,12 @@ class OpenAIAgentsAdapter:
         pause = None
         if output.interruptions:
             item = output.interruptions[0]
-            # the SDK pauses on a call before reading its arguments: ones that are not a JSON
-            # object reach the person as the model wrote them
-            args = _arguments(item)
             pause = NativePause(
                 value=None,
                 native_id=item.call_id,
                 state=output.to_state().to_json(),
                 tool=item.name,
-                args=args if isinstance(args, dict) else {"arguments": item.arguments},
+                args=_asked_about(item),
             )
         return Extracted(answer=output.final_output, transcript=transcript, pause=pause)  # type: ignore[arg-type]
 
@@ -322,12 +325,19 @@ class OpenAIAgentsAdapter:
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         from agents import Runner
+        from agents.lifecycle import RunHooksBase
 
         own = [key for key in options if key in OWN_ARGUMENTS]
         if own:
             raise ConfigurationError(
                 f"framework_options {', '.join(map(repr, own))}: the harness gives Runner.run "
-                "its agent, its input and its hooks itself (hooks go on h.wrap(hooks=))"
+                "its agent and its input itself"
+            )
+        hooks = options.get("hooks")
+        if hooks is not None and not isinstance(hooks, RunHooksBase):
+            raise ConfigurationError(
+                f"framework_options 'hooks': Runner.run's hooks are the SDK's RunHooks, not "
+                f"{type(hooks).__name__} (the harness's own hooks go on h.wrap(hooks=))"
             )
         taken = inspect.signature(Runner.run).parameters
         unknown = [key for key in options if key not in taken]
@@ -374,6 +384,15 @@ class OpenAIAgentsAdapter:
         return state
 
 
+async def _closed(helpers: Helpers, result: Any) -> None:
+    """The attempt's helpers ended with the SDK's run (``Helpers.closed``) — unless the run
+    paused on an approval of the SDK's own (its ``interruptions``): an agent tool waiting on
+    one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
+    which makes its call again, ends it."""
+    if not result.interruptions:
+        await helpers.closed(None)
+
+
 def governed_agents(
     target: Any,
     *,
@@ -391,8 +410,9 @@ def governed_agents(
     run the governed copy of their agent — recursively, each agent copied once, so handoffs that
     lead back are kept — ``added`` (the run's harness tools) on ``target``'s and ``shared``
     (the run's memory tools) on every other's. A tool an agent carries already (built with
-    the harness) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
-    its tools cannot be reached, which is said once. With ``helpers``, each agent tool's call is
+    the harness) is not added twice. A ``Handoff`` object (``handoff(agent, ...)``) is kept
+    with all it gives the SDK — its name, its input filter, its callback — and hands off to the
+    governed copy of its agent (:func:`_handed`). With ``helpers``, each agent tool's call is
     a helper of the run. The function tools ``gated`` names (those governance may ask about,
     :func:`_gated`) are held at the SDK's own approval gate when it asks
     (``tools.convert.openai_agents.held``). The agents you wrapped are not changed."""
@@ -433,8 +453,7 @@ def governed_agents(
             if isinstance(handoff, Agent):
                 handoffs.append(copied(handoff, shared))
             else:
-                _hidden_handoff(agent_id, str(getattr(handoff, "agent_name", "")))
-                handoffs.append(handoff)
+                handoffs.append(_handed(handoff, lambda a: copied(a, shared), agent_id))
         copy.handoffs = handoffs
         return copy
 
@@ -462,11 +481,14 @@ class GovernedServer:
     """An OpenAI agent's MCP server as the harness runs it: every call of its tools inside a
     run goes through the bridge (``tools.bridge.call``: hooks, the catalog's rules — its tools'
     annotations as they were listed for their risk —, a person when governance asks, the
-    journal, the record), the server itself as it was (connected, listed, cleaned up by its
-    owner). A call that pauses the run raises out of the SDK's run (``_failure_error_function``
-    ``None``: the SDK raises instead of telling the model), and a tool's own error is the
-    result the model reads, as before. Made by :meth:`of`, a subclass of the SDK's
-    ``MCPServer`` built when first needed."""
+    journal, the record), the server itself as it was (connected, listed, its prompts and
+    resources read, cleaned up by its owner). A tool's own error (the server's result) is the
+    result the model reads, as before. A call the server could not take (the call itself
+    raised) is recorded as the call's failure and is then the SDK's to tell, as without the
+    harness: the model reads what the server's — else the agent's — ``failure_error_function``
+    makes of it, and with ``failure_error_function=None`` the run ends with the error. A
+    call that pauses the run raises out of the SDK's run whatever that function is. Made by
+    :meth:`of`, a subclass of the SDK's ``MCPServer`` built when first needed."""
 
     @staticmethod
     def of(server: Any) -> Any:
@@ -481,12 +503,25 @@ def _governed_server() -> type:
     from mcp.types import CallToolResult, TextContent
 
     class Governed(MCPServer, GovernedServer):  # type: ignore[misc]
-        #: a pause raises out of the SDK's run rather than becoming an error text
-        _failure_error_function = None
-
         def __init__(self, inner: Any) -> None:  # the SDK's own state is the inner server's
             self._inner = inner
             self._annotations: dict[str, Any] = {}
+
+        def _get_failure_error_function(self, agent_failure_error_function: Any) -> Any:
+            """The server's own way of telling the model a call failed (else its agent's),
+            except while the run is pausing: a pause raises out of the SDK's run rather than
+            becoming an error text."""
+            theirs = self._inner._get_failure_error_function(agent_failure_error_function)
+            if theirs is None:
+                return None
+
+            def told(context: Any, error: Exception) -> Any:
+                runtime = current()
+                if runtime is not None and runtime.pending is not None:
+                    raise error
+                return theirs(context, error)
+
+            return told
 
         def __getattr__(self, name: str) -> Any:
             return getattr(self._inner, name)
@@ -512,6 +547,21 @@ def _governed_server() -> type:
         async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
             return await self._inner.get_prompt(name, arguments)
 
+        # what the SDK's base class answers itself (no tools cached, no resources): the
+        # inner server's own
+        @property
+        def cached_tools(self) -> Any:
+            return self._inner.cached_tools
+
+        async def list_resources(self, cursor: str | None = None) -> Any:
+            return await self._inner.list_resources(cursor)
+
+        async def list_resource_templates(self, cursor: str | None = None) -> Any:
+            return await self._inner.list_resource_templates(cursor)
+
+        async def read_resource(self, uri: str) -> Any:
+            return await self._inner.read_resource(uri)
+
         async def call_tool(
             self, tool_name: str, arguments: dict[str, Any] | None, meta: Any = None
         ) -> Any:
@@ -519,8 +569,14 @@ def _governed_server() -> type:
             if current() is None:
                 return await inner.call_tool(tool_name, arguments, meta)
 
+            raised: list[Exception] = []
+
             async def run(args: dict[str, Any]) -> Any:
-                result = await inner.call_tool(tool_name, args, meta)
+                try:
+                    result = await inner.call_tool(tool_name, args, meta)
+                except Exception as error:
+                    raised.append(error)
+                    raise
                 if result.is_error:
                     said = "".join(getattr(c, "text", "") for c in result.content)
                     raise ToolError(said or f"{tool_name} failed", source="mcp")
@@ -536,6 +592,8 @@ def _governed_server() -> type:
             outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
             if outcome.ok and isinstance(outcome.output, dict):
                 return CallToolResult.model_validate(outcome.output)
+            if raised and not is_pause_signal(raised[-1]):
+                raise raised[-1]  # the call itself failed: the SDK's to tell, or to raise
             text = outcome.output if isinstance(outcome.output, str) else json.dumps(outcome.output)
             return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
@@ -576,9 +634,57 @@ def _running(tool: Any, agent: Any) -> Any | None:
     return made
 
 
+#: The field of the SDK's ``Handoff`` that holds the agent a ``handoff(agent, ...)`` hands off
+#: to (a weak reference; the SDK's own run state finds the agent by it). The SDK has no public
+#: way to read it, so it is checked where an agent is wrapped (:func:`handed_to`).
+HANDOFF_AGENT: Final = "_agent_ref"
+
+
+def handed_to(handoff: Any) -> Any | None:
+    """The agent a ``Handoff`` object hands off to, as the SDK keeps it (:data:`HANDOFF_AGENT`);
+    ``None`` for one built by hand, which names none before it runs. An SDK whose ``Handoff``
+    no longer has that field is refused: its agents would run ungoverned."""
+    from agents import Handoff
+
+    if HANDOFF_AGENT not in {f.name for f in dataclasses.fields(Handoff)}:
+        raise ConfigurationError(
+            "this OpenAI Agents SDK's Handoff no longer says the agent it hands off to "
+            f"({HANDOFF_AGENT}), so that agent's tools cannot be governed: hand off to the "
+            "Agent itself, or use a tested SDK release (docs/versioning.md)"
+        )
+    ref = getattr(handoff, HANDOFF_AGENT, None)
+    return ref() if callable(ref) else None
+
+
+def _handed(handoff: Any, copied: Callable[[Any], Any], agent_id: str) -> Any:
+    """A ``Handoff`` object as the run's copy: everything it gives the SDK kept, the agent it
+    returns when invoked replaced by that agent's governed copy (``copied``) — and the agent it
+    names (:func:`handed_to`) the copy too, which the SDK's run state finds it by on a resume.
+    One built by hand, which names no agent before it runs, is governed from the moment it
+    hands off; its agent's tools are not of the run's tool set before then (said once)."""
+    from agents import Agent
+
+    target = handed_to(handoff)
+    governed_target = copied(target) if isinstance(target, Agent) else None
+    if governed_target is None:
+        _hidden_handoff(agent_id, str(getattr(handoff, "agent_name", "")))
+    original = handoff.on_invoke_handoff
+
+    async def invoke(context: Any, input_json: str | None = None) -> Any:
+        returned = await original(context, input_json)
+        # the copy is held here (the SDK's handle on it is weak), the same one ``copied`` gives
+        return governed_target if returned is target else copied(returned)
+
+    made = dataclasses.replace(handoff, on_invoke_handoff=invoke)
+    if governed_target is not None:
+        setattr(made, HANDOFF_AGENT, weakref.ref(governed_target))
+    return made
+
+
 def reachable(target: Any) -> list[Any]:
-    """``target`` and every agent it can reach: those it hands off to (an ``Agent``; a
-    ``Handoff`` object hides its own) and those its agent tools run, recursively, each once."""
+    """``target`` and every agent it can reach: those it hands off to (an ``Agent``, or the
+    agent a ``Handoff`` object names: :func:`handed_to`) and those its agent tools run,
+    recursively, each once."""
     from agents import Agent
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL
@@ -590,7 +696,10 @@ def reachable(target: Any) -> list[Any]:
         if id(agent) in found:
             continue
         found[id(agent)] = agent
-        pending.extend(h for h in agent.handoffs if isinstance(h, Agent))
+        for handoff in agent.handoffs:
+            to = handoff if isinstance(handoff, Agent) else handed_to(handoff)
+            if isinstance(to, Agent):
+                pending.append(to)
         inner = (getattr(tool, AGENT_OF_TOOL, None) for tool in agent.tools)
         pending.extend(i for i in inner if isinstance(i, Agent))
     return list(found.values())
@@ -665,8 +774,9 @@ async def _listed(server: Any) -> list[ToolSpec]:
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and handoff, of the most recent
 def _hidden_handoff(agent_id: str, to: str) -> None:
     log.warning(
-        "a handoff is a Handoff object, which hides its agent until it is invoked: that "
-        "agent's own tools are not governed (hand off to the Agent itself)",
+        "a Handoff object built by hand names no agent until it is invoked: that agent's own "
+        "tools are governed once it hands off, but are not of the run's tool set (tool hints, "
+        "catalog) before (use handoff(agent, ...), or hand off to the Agent itself)",
         extra={"agent_id": agent_id, "handoff": to},
     )
 
@@ -708,7 +818,8 @@ def _options(runtime: Runtime, target: Any, native_input: Any) -> dict[str, Any]
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
     told = _told_unknown_tools(options)
-    asked = _dated(runtime, _asked_with(runtime, told))
+    question = _question(native_input, runtime.pushed_context)
+    asked = _dated(runtime, _asked_with(runtime, told, question))
     again = native_input.told if isinstance(native_input, _Again) else None
     return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked, again)))
 
@@ -737,7 +848,7 @@ def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
                 bare,
                 [*given.run_data.history, told],
                 max_turns=1,
-                hooks=_hooks(),
+                hooks=_hooks(options.get("hooks")),
                 run_config=options.get("run_config"),
                 context=given.context.context,
             )
@@ -787,13 +898,39 @@ def _filtered(options: dict[str, Any], change: Callable[[Any], Any]) -> dict[str
     return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=changed)}
 
 
-def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+def _question(native_input: Any, context: str | None) -> Any:
+    """What this run asked — the content of the last user message of the input the harness
+    made (``prepare_input``: after the memory context's system message), as a resumed run's
+    saved state holds it too — or ``None`` when it cannot be read."""
+    if isinstance(native_input, _Again):
+        native_input = native_input.input
+    elif isinstance(native_input, _Continue):
+        native_input = native_input.state.get("original_input")
+    if not isinstance(native_input, list):
+        return None
+    items = [i for i in native_input if isinstance(i, dict)]
+    start = next(
+        (
+            n
+            for n, i in enumerate(items)
+            if i.get("role") == "system" and i.get("content") == context
+        ),
+        0,
+    )
+    asked = [i for i in items[start:] if i.get("role") == "user"]
+    return asked[-1].get("content") if asked else None
+
+
+def _asked_with(runtime: Runtime, options: dict[str, Any], question: Any = None) -> dict[str, Any]:
     """The options with the pushed memory context sent as the first part of the user's turn,
     marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
     (``middleware.with_question``), and not as a system message of its own (:func:`_filtered`).
     Haiku, a question 14 products match: given the context as its own system message it
     answered for one of them 9 times in 10, given it in the user's turn it asked which one was
-    meant."""
+    meant. The turn is this run's question (``question``: its content, :func:`_question`) —
+    the first user message after the context that says it, wherever the run's
+    ``session_input_callback`` put the earlier turns —, else the last user message after the
+    context."""
     from agents.run_config import ModelInputData
 
     context = runtime.pushed_context
@@ -810,20 +947,16 @@ def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
             ),
             None,
         )
-        question = next(
-            (
-                n
-                for n in range(len(items) - 1, at if at is not None else len(items), -1)
-                if isinstance(items[n], dict) and items[n].get("role") == "user"
-            ),
-            None,
-        )
-        if at is None or question is None:
+        after = range(at + 1, len(items)) if at is not None else range(0)
+        users = [n for n in after if isinstance(items[n], dict) and items[n].get("role") == "user"]
+        said_it = [n for n in users if question is not None and items[n].get("content") == question]
+        found = said_it[0] if said_it else users[-1] if users else None
+        if at is None or found is None:
             return given
-        said = items[question].get("content")
+        said = items[found].get("content")
         parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
         marked = {"type": "input_text", "text": ASKED_WITH.format(context=context)}
-        items[question] = {**items[question], "content": [marked, *parts]}
+        items[found] = {**items[found], "content": [marked, *parts]}
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)
 
@@ -953,12 +1086,14 @@ def _thread_store(options: Mapping[str, Any]) -> Any:
     return ServerThread(server) if server is not None else MEMORY_THREAD
 
 
-def _hooks() -> Any:
+def _hooks(theirs: Any = None) -> Any:
     """The harness's ``RunHooks``, always: every model call watched for a stall, its hosted
-    tool calls recorded, and its usage counted toward the run's budget (``budget.py``)."""
+    tool calls recorded, and its usage counted toward the run's budget (``budget.py``) — and
+    the run's own ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with
+    everything the SDK reports."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
-    return ModelHooks()
+    return ModelHooks(theirs)
 
 
 async def _deltas(result: Any) -> AsyncIterator[str]:
@@ -1055,6 +1190,21 @@ def _function_output(raw: Any) -> str | None:
 
 def _output(output: Any) -> str:
     return output if isinstance(output, str) else json.dumps(output, default=str)
+
+
+def _asked_about(item: Any) -> dict[str, Any]:
+    """What a person is shown of the call the SDK waits on (its ``ToolApprovalItem``): its
+    arguments — the SDK pauses on a call before reading them, so ones that are not a JSON
+    object reach the person as the model wrote them — and, for a call that has none of that
+    name (the SDK's tools that run here: a shell's commands, a patch's operation), what the
+    call does as the model made it (``openai_local.call_args``: what governance decides on
+    when it runs, so the person's answer is the one answer the call needs)."""
+    if item.arguments is None:
+        from trellis.harness.tools.convert.openai_local import call_args
+
+        return call_args(item.raw_item)
+    args = _arguments(item)
+    return args if isinstance(args, dict) else {"arguments": item.arguments}
 
 
 def _arguments(item: Any) -> Any:

@@ -184,6 +184,50 @@ store that takes time (agent-runs, over HTTP) the second came while the first wa
 being recorded and started a second child run of the same subagent, which then ended at
 once. A helper's start now takes its key one at a time (`bridges.helpers.Helpers.start`).
 
+### Fixed: OpenAI Agents and ACP features that did not work through the harness
+
+Each of the two libraries' own features was run through a wrapped agent with a scripted model
+(`tests/integration/test_openai_agents_features.py`, `test_openai_agents_mcp.py`,
+`test_acp.py`, `test_function_agent.py`); five did not work and do now:
+
+- **An SDK approval inside an agent tool.** A `needs_approval` tool of an agent called as a
+  tool (`Agent.as_tool`) paused the run, and every approval paused it again: the agent tool's
+  unfinished call was journaled as done, so the resume replayed it and the run inside never
+  continued. The call is now a pause to the bridge while the SDK holds its run waiting, its
+  child run stays open, and the approval (or rejection) continues it, from another worker too.
+- **The run's own `RunHooks`.** `framework_options={"hooks": ...}` was refused; the SDK's
+  `RunHooks` are now called beside the harness's own (which still count every reply toward
+  the budget). `starting_agent` and `input` stay the harness's.
+- **An MCP server's resources.** The governed copy of an agent's MCP server answered
+  `list_resources`, `list_resource_templates`, `read_resource` and `cached_tools` with the
+  SDK base class's defaults; they are the server's own.
+- **A shell tool's approval.** The SDK's approval of a call with no arguments of that name (a
+  `ShellTool`'s commands) showed the person an empty call: it shows the call as the model
+  made it.
+- **One question for one call (ACP).** A call of an ACP agent's own that declares nothing (a
+  tool of Kimi's own MCP servers, any tool of an agent with no profile) asked a person twice:
+  governance's question, then the agent's. `bridge.permitted(..., framework=)` asks the
+  framework's question only when no person was just asked about the call. An agent with no
+  profile is named "the agent" in it, not Kimi Code.
+
+Then, closing what was left:
+
+- **The tools the SDK runs on this machine** (`ShellTool` with a local executor,
+  `LocalShellTool`, `ApplyPatchTool`, `ComputerTool`, `CustomTool`) ran with no governance
+  and no record: an `rm -rf` the model asked for ran unseen. Each call now goes through the
+  bridge where the SDK hands it to the tool's code (`tools.convert.openai_local`): governed
+  (one that declares nothing asks; the person sees the call), journaled, recorded, counted;
+  reject and edit work; a call the tool's own `needs_approval` held is asked about once.
+- **A `handoff(agent, ...)` object's agent** ran ungoverned: it now hands off to the governed
+  copy of its agent (read from the SDK's `Handoff._agent_ref`, checked at `h.wrap`).
+- **A tool's failure** the SDK formats is recorded as a failed call; **its own timeout** as
+  that tool's call that timed out (it said "the run was cancelled"); **`failure_error_function
+  =None`** (a function tool's, an MCP server's, an agent tool's) ends the run with the error, as the SDK does; an agent tool that fails under the default policy is a failed child run whose caller reads the SDK's default text (it read the harness's `check failed: ...`).
+- **A call that pauses inside** (a question in a tool, an approval inside an agent tool)
+  counted twice toward `max_tool_calls`: once now.
+- **A `session_input_callback`** that put the earlier turns after the new input got the memory
+  context marked into an earlier question: it goes into this run's.
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

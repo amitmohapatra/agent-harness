@@ -24,7 +24,10 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   ``{"stop": "refusal"}`` ends the turn so; ``{"step_limit": n}`` ends it at Kimi's step limit (no
   answer, the reason only in its log's ``turn.ended``); ``{"prompt_usage": {...}}`` puts ACP's own usage on
   the prompt's answer; ``{"plan": true}`` a plan update; ``{"wait": seconds}`` a tool call that
-  runs that long (a cancel stops it).
+  runs that long (a cancel stops it); ``{"updates": true}`` every other update ACP has (a
+  thought, a message chunk that is not text, its commands, its mode, its usage, the session's
+  title), an extension notification and an extension request (its answer, or the client's
+  refusal, recorded).
 
 ``FAKE_ACP_RECORD`` names a file it writes what it was started and asked with to (its
 environment's ``KIMI_*`` and ``HOME``, its working directory, the client's capabilities, each
@@ -49,7 +52,11 @@ from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
     AgentPlanUpdate,
+    AgentThoughtChunk,
+    AvailableCommand,
+    AvailableCommandsUpdate,
     ContentToolCallContent,
+    CurrentModeUpdate,
     EnvVariable,
     Implementation,
     InitializeResponse,
@@ -58,12 +65,15 @@ from acp.schema import (
     PermissionOption,
     PlanEntry,
     PromptResponse,
+    ResourceContentBlock,
     ResumeSessionResponse,
+    SessionInfoUpdate,
     SetSessionModeResponse,
     ToolCallProgress,
     ToolCallStart,
     ToolCallUpdate,
     Usage,
+    UsageUpdate,
 )
 
 SCRIPT: list[dict[str, Any]] = json.loads(os.environ.get("FAKE_ACP_SCRIPT", "[]"))
@@ -289,6 +299,31 @@ class FakeAgent:
         save(session_id, data)
         return PromptResponse(stop_reason="end_turn", usage=usage)
 
+    async def updates(self, session_id: str) -> None:
+        """Every update ACP has beside text, plans and tool calls, then the extension points:
+        a notification, and a request whose answer (or refusal) is recorded."""
+        link = ResourceContentBlock(type="resource_link", name="notes", uri="file:///notes.md")
+        sent: list[Any] = [
+            AgentThoughtChunk(
+                session_update="agent_thought_chunk", content=text_block("thinking it over")
+            ),
+            AgentMessageChunk(session_update="agent_message_chunk", content=link),
+            AvailableCommandsUpdate(
+                session_update="available_commands_update",
+                available_commands=[AvailableCommand(name="init", description="Start.")],
+            ),
+            CurrentModeUpdate(session_update="current_mode_update", current_mode_id="default"),
+            UsageUpdate(session_update="usage_update", used=10, size=100),
+            SessionInfoUpdate(session_update="session_info_update", title="A session"),
+        ]
+        for update in sent:
+            await self.conn.session_update(session_id, update)
+        await self.conn.ext_notification("fake/progress", {"done": 1})
+        try:
+            record("extensions", await self.conn.ext_method("fake/ask", {"q": 1}))
+        except RequestError as refused:
+            record("extensions", {"refused": refused.code})
+
     async def say(self, session_id: str, text: str) -> None:
         await self.conn.session_update(
             session_id,
@@ -340,6 +375,9 @@ class FakeAgent:
                     entries=[PlanEntry(content="look", priority="high", status="pending")],
                 ),
             )
+            return None
+        if "updates" in step:
+            await self.updates(session_id)
             return None
         if "question" in step:
             return await self.question(session_id, step)

@@ -679,19 +679,113 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
     assert [t.name for t in billing.tools] == ["refund"]  # yours, unchanged
 
 
-async def test_a_handoff_object_is_said_once_and_kept(
-    harness: Harness, caplog: pytest.LogCaptureFixture
+async def test_a_handoff_objects_agent_is_governed_and_recorded_as_the_runs(
+    memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
+    """``handoff(agent, input_filter=...)``: the agent behind the ``Handoff`` object runs as a
+    governed copy — its own tool is of the run's tool set, asks as the catalog rules, runs once
+    after the approval and is recorded — while the handoff keeps everything the SDK gives it
+    (its name, its filter, its callback). The team's agent is not changed."""
     from agents import handoff
 
-    model = ScriptedModel(["hi", "hi"])
-    target = Agent(name="t", model=model, handoffs=[handoff(Agent(name="x", model=model))])
-    agent = harness.wrap(target, id="hidden")
+    filtered: list[int] = []
+
+    def nothing_before(data: Any) -> Any:
+        filtered.append(len(data.new_items))
+        return data.clone(input_history=(), pre_handoff_items=(), new_items=())
+
+    @function_tool
+    def refund(order: str) -> str:
+        done.append(f"refund {order}")
+        return f"refunded {order}"
+
+    clerk_model = ScriptedModel([("refund", {"order": "o1"}), "refunded o1"], ids="c")
+    clerk = Agent(name="clerk", model=clerk_model, tools=[refund])
+    desk_model = ScriptedModel([("to_refunds", {})], ids="d")
+    desk = Agent(
+        name="desk",
+        model=desk_model,
+        handoffs=[handoff(clerk, tool_name_override="to_refunds", input_filter=nothing_before)],
+    )
+    memory_service.catalog = {"refund": {"side_effects": "irreversible"}}
+    agent = memory_harness.wrap(desk, id="hidden")
+    assert "refund" in {s.name for s in await agent.adapter.native(desk)}
+    paused = await agent.run("refund o1", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "refund"
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "refunded o1"
+    assert done == ["refund o1"] and filtered and clerk_model.inputs[0] == []
+    assert len(desk_model.inputs) == 1  # the approval continued the SDK's run in the clerk
+    await memory_harness.writes.drain()
+    recorded = [c.body["tool"] for c in memory_service.named("record_tool")]
+    assert recorded == ["refund"]
+    assert clerk.tools == [refund]  # yours, unchanged
+
+
+async def test_a_handoff_built_by_hand_is_governed_when_it_hands_off(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``Handoff`` built by hand names no agent before it runs: its agent is governed from
+    the moment the handoff returns it."""
+    from agents import Handoff
+
+    asked: list[str] = []
+
+    @function_tool
+    def wipe(order: str) -> str:
+        done.append(f"wipe {order}")
+        return "wiped"
+
+    # its tools are not of the run's tool set, so the approval is a pause of the harness's: the
+    # resume runs the agents again from the input, against the journal
+    clerk = Agent(
+        name="clerk",
+        model=ScriptedModel([("wipe", {"order": "o1"}), ("wipe", {"order": "o1"}), "wiped o1"]),
+        tools=[wipe],
+    )
+
+    async def to_clerk(context: Any, input_json: str | None) -> Any:
+        asked.append("handed")
+        return clerk
+
+    by_hand = Handoff(
+        tool_name="to_clerk",
+        tool_description="Hand to the clerk.",
+        input_json_schema={},
+        on_invoke_handoff=to_clerk,
+        agent_name="clerk",
+    )
+    desk_model = ScriptedModel([("to_clerk", {}), ("to_clerk", {})], ids="d")
+    desk = Agent(name="desk", model=desk_model, handoffs=[by_hand])
+    agent = declaring(harness, wipe="irreversible").wrap(desk, id="by-hand")
     with caplog.at_level("WARNING", logger="trellis.harness"):
-        await agent.run("hi", user="u1")
-        await agent.run("hi", user="u1")
-    said = [r for r in caplog.records if "Handoff object" in r.getMessage()]
+        paused = await agent.run("wipe o1", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "wipe"
+    assert done == [] and asked == ["handed"]
+    with caplog.at_level("WARNING", logger="trellis.harness"):
+        finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and done == ["wipe o1"]  # once
+    said = [r for r in caplog.records if "Handoff object built by hand" in r.getMessage()]
     assert len(said) == 1
+
+
+def test_an_sdk_that_no_longer_says_a_handoffs_agent_is_refused_where_it_is_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent behind a ``handoff()`` object is read from the SDK's ``Handoff`` (its
+    ``_agent_ref``): an SDK whose ``Handoff`` no longer has it fails at ``h.wrap``, never runs
+    that agent ungoverned. An agent with no ``Handoff`` object is not affected."""
+    from agents import handoff
+
+    from trellis.contracts import ConfigurationError
+    from trellis.harness.adapters import detect, openai_agents
+
+    monkeypatch.setattr(openai_agents, "HANDOFF_AGENT", "_no_such_field")
+    with pytest.raises(ConfigurationError, match="Handoff"):
+        detect(Agent(name="desk", handoffs=[handoff(Agent(name="clerk"))]))
+    detect(Agent(name="desk", handoffs=[Agent(name="clerk")]))
 
 
 @tool(side_effects="read")

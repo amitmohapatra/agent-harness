@@ -271,7 +271,7 @@ await agent.run(question, user="ada", framework_options={"tags": ["vip"]})
 | Target | Where they go | The harness keeps for itself |
 |---|---|---|
 | LangGraph, Deep Agents, `ReAct` | the `config` of `ainvoke`/`astream` (`RunnableConfig` keys: `recursion_limit`, `configurable`, `tags`, `metadata`, `callbacks`, `max_concurrency`, `run_name`) | `configurable.thread_id`: refused (the thread is `run(thread=)`) |
-| OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`...) | `starting_agent`, `input`, `hooks`: refused |
+| OpenAI Agents | keyword arguments of `Runner.run`/`run_streamed` (`max_turns`, `run_config`, `context`, `session`, `hooks`...) | `starting_agent`, `input`: refused |
 | Claude Agent SDK | `ClaudeAgentOptions` fields set on the run's copy of the options (`max_turns`, `model`, `allowed_tools`...) | `resume`, `continue_conversation`, `permission_prompt_tool_name`: refused; `system_prompt`, `can_use_tool` and `mcp_servers` merged (the context appended, the callback asked when Claude Code would ask, after governance, the `trellis` server added beside — a server of that name refused); `env` routed through Bifrost's Anthropic route when it serves the harness, its headers added to `ANTHROPIC_CUSTOM_HEADERS` |
 | a function | — (no framework run call) | any: refused |
 

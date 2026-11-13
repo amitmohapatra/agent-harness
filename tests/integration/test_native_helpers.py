@@ -482,12 +482,35 @@ async def test_an_agent_tool_paused_inside_is_the_same_child_after_the_resume(
 
 
 async def test_an_agent_tool_that_fails_is_a_failed_child(harness: Harness) -> None:
+    """Under the SDK's default failure policy an agent tool that fails is a failed child run,
+    and the run goes on: the calling model reads the SDK's default text."""
     broken = Agent(name="checker", model=ScriptedModel([], ids="checker_"))  # no reply to give
-    tool_ = broken.as_tool("check", "Check.", failure_error_function=None)
+    tool_ = broken.as_tool("check", "Check.")
     model = ScriptedModel([("check", {"input": "check o1"}), "it failed"])
     result = await harness.wrap(Agent(name="desk", model=model, tools=[tool_]), id="d").run(
         "check o1", user="u"
     )
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
+    [child] = await children(harness, result.run_id)
+    assert child.status is RunStatus.ERROR
+    told = [i["output"] for i in model.inputs[-1] if i.get("type") == "function_call_output"]
+    assert told == [
+        "An error occurred while running the tool. Please try again. Error: pop from empty list"
+    ]
+
+
+async def test_an_agent_tool_that_asks_to_raise_ends_the_run_as_the_sdk_does(
+    harness: Harness,
+) -> None:
+    """``failure_error_function=None`` on an agent tool: its failure ends the run with the
+    SDK's error (as ``Runner.run`` does without the harness), the child run failed too."""
+    broken = Agent(name="checker", model=ScriptedModel([], ids="checker_"))
+    tool_ = broken.as_tool("check", "Check.", failure_error_function=None)
+    model = ScriptedModel([("check", {"input": "check o1"}), "never"])
+    result = await harness.wrap(Agent(name="desk", model=model, tools=[tool_]), id="d").run(
+        "check o1", user="u"
+    )
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Error running tool check" in result.error.message and len(model.inputs) == 1
     [child] = await children(harness, result.run_id)
     assert child.status is RunStatus.ERROR
