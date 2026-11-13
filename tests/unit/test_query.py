@@ -101,8 +101,16 @@ def test_a_query_is_bounded_in_time_rows_and_length(
 ) -> None:
     text = "n,sq\n" + "\n".join(f"{n},{n * n}" for n in range(1_000))
     many = ask(text, "SELECT n FROM result")
-    assert many.count("\n") == query.ROWS + 1 and "only the first 200 rows" in many
-    assert ask(text, "SELECT 1" + " + 1" * query.SQL_CHARS).startswith("Error: the query is longer")
+    assert many.count("\n") == 200 + 1 and "only the first 200 rows" in many
+    assert ask(text, "SELECT n FROM result LIMIT 200").count("\n") == 200  # all of them
+    longest = "SELECT '" + "x" * 4_986 + "' AS v"
+    assert len(longest) == 5_000 and ask(text, longest) == "v\n" + "x" * 4_986  # the longest
+    longer = "SELECT '" + "x" * 4_987 + "' AS v"
+    assert ask(text, longer) == "Error: the query is longer than 5000 characters"
+    wide = ask(text, "SELECT repeat('x', 19998) AS t FROM result LIMIT 1")
+    assert wide == "t\n" + "x" * 19_998  # 20,000 characters with its header: whole
+    cut = ask(text, "SELECT repeat('x', 19999) AS t FROM result LIMIT 1")
+    assert cut == "t\n" + "x" * 19_998 + "\n…[cut at 20000 characters: aggregate more]"
     monkeypatch.setattr(query, "SECONDS", 0.0)
     endless = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT max(x) FROM c"
     assert "took too long" in ask(text, endless)
