@@ -385,11 +385,17 @@ class LiveSession:
                     return
         finally:
             left = turn.listening and not turn.answered
+            under_way = list(turn.calls)
             self._detach(turn)
             # an interrupt stops the background work too (the CLI's own rule): with any
             # under way, the turn ends at its next tool call instead (:meth:`_ends`)
             if left and not self.closed and not self.working:
                 self._aside_run(self._interrupt())
+            # the calls it left under way end with it (cancelled above), as a query's own
+            # process ends its calls when it is closed: what one says as it ends (a helper's
+            # run: ``helper_finished``) is on the run's stream before the run's end
+            if under_way:
+                await asyncio.wait(under_way)
 
     def _attach(self, turn: Turn) -> None:
         self.turn = turn

@@ -46,6 +46,7 @@ from trellis.harness.adapters.claude import (
 from trellis.harness.agent import Agent
 from trellis.harness.bridges import claude_live
 from trellis.harness.bridges.claude_live import UNATTENDED, LiveSession
+from trellis.harness.events import RunEvents
 from trellis.harness.identity import conversation_key
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -710,6 +711,54 @@ async def test_cancelling_a_turn_with_nothing_in_the_background_interrupts_it(
     assert after.status is RunStatus.SUCCESS and after.answer == "after"
     one, *_ = served(tmp_path)
     assert [turn["pid"] for turn in served(tmp_path)] == [one["pid"]] * 3
+
+
+async def test_cancelling_a_turn_ends_its_call_under_way_before_the_run_ends(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn cancelled while a harness tool of it is under way (a helper's run, say): the
+    call is cancelled with the turn, and what it emits as it ends — a helper's
+    ``helper_finished`` — is on the run's stream before its ``RUN_FINISHED``, never after:
+    as in a process of its own, whose query ends its calls as it is closed (the feature
+    matrix's X10 and X16 on the AG-UI and A2A surfaces, whose runs are a conversation's)."""
+    emitted: list[Any] = []
+    listening = RunEvents.__init__
+
+    def tapped(events: RunEvents, *args: Any, **kwargs: Any) -> None:
+        listening(events, *args, **kwargs)
+        events.listen(emitted.append)
+
+    monkeypatch.setattr(RunEvents, "__init__", tapped)
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def hold() -> str:
+        """Wait for the record to come in."""
+        runtime = current()
+        assert runtime is not None
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(0)  # a call that needs a moment to end, as a helper's run does
+            runtime.events.custom("hold_ended")
+        return "held"
+
+    scripts = [[{"tool": "hold"}, {"text": "never said"}], [{"text": "after"}]]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="held"), [hold])
+    turn = asyncio.create_task(agent.run("Look it up.", user="u1", thread="t1"))
+    await asyncio.wait_for(started.wait(), 10)
+    [run_id] = agent.running
+    await agent.cancel(run_id, reason="the user left")
+    assert (await turn).status is RunStatus.CANCELLED
+    await asyncio.sleep(0.2)  # whatever would come late has come
+    mine = [e for e in emitted if e.run_id == run_id]
+    names = [e.data.get("name") if e.type is RunEventType.CUSTOM else e.type.value for e in mine]
+    assert names[-1] == "RUN_FINISHED" and names.count("RUN_FINISHED") == 1, names
+    assert "hold_ended" in names  # the call ended with the turn: before the run's end
+    after = await agent.run("and now?", user="u1", thread="t1")
+    assert after.status is RunStatus.SUCCESS and after.answer == "after", after.error
+    assert len({turn["pid"] for turn in served(tmp_path)}) == 1  # the session went on
 
 
 # --------------------------------------------------------------------------- a busy conversation
