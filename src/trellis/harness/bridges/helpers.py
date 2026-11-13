@@ -157,10 +157,19 @@ def named(runtime: Runtime) -> dict[str, Any] | None:
     """What an approval asked while a helper of ``runtime``'s run works carries in its
     payload: the helper (``{HELPER: {"run_id", "name"}}``) — the run its call is recorded
     under, which the person's decision is feedback on (:func:`asked_inside`)."""
-    helper = inside(runtime)
-    if helper is None:
-        return None
-    return {HELPER: {"run_id": helper.run_id, "name": helper.name}}
+    return _naming(inside(runtime))
+
+
+def held(runtime: Runtime) -> dict[str, Any] | None:
+    """The same, for an approval of the framework's own the run paused on when a helper's
+    work holds it (``Helpers.held``: an OpenAI agent tool whose own tool waits on the SDK's
+    approval): the helper, whose run records the call."""
+    helpers = runtime.helpers
+    return _naming(None if helpers is None else helpers.held)
+
+
+def _naming(helper: Helper | None) -> dict[str, Any] | None:
+    return None if helper is None else {HELPER: {"run_id": helper.run_id, "name": helper.name}}
 
 
 class Helpers:
@@ -181,6 +190,8 @@ class Helpers:
         self._workers: dict[str, str] = {}
         #: the calls waiting to learn whose a worker is (:meth:`of`)
         self._learning: dict[str, asyncio.Event] = {}
+        #: the helper whose work holds an approval of the framework's own (:func:`held`)
+        self.held: Helper | None = None
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
     async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:

@@ -322,7 +322,9 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
             )
         if helpers.runtime.pending is not None:  # paused inside: the SDK told it as an error text
             raise Paused(helpers.runtime.pending.interrupt)
-        if not waits_inside(context):
+        if waits_inside(context):  # the run pauses on the SDK's approval: this helper's call
+            helpers.held = helper
+        else:
             await helpers.end(key, output=text_of(answer))
         return answer
 

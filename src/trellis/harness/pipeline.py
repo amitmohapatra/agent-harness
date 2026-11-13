@@ -61,6 +61,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, carries, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.bridges.helpers import held
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
@@ -925,6 +926,9 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
             tool_call=ToolCall(
                 tool=native.tool, args=native.args or {}, idempotency_key=native.native_id
             ),
+            # a call a helper's work holds (an agent tool's own tool): the helper, whose run
+            # recorded it
+            payload=held(runtime),
         )
         return Pending(
             key=native.tool,
