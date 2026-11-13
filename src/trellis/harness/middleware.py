@@ -68,7 +68,7 @@ from collections.abc import (
 )
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, Final, NotRequired, TypeGuard, cast, get_args
+from typing import Annotated, Any, Final, NoReturn, NotRequired, TypeGuard, cast, get_args
 
 from bifrost_sdk import RETRYABLE
 from langchain.agents.factory import _chain_async_model_call_handlers
@@ -408,6 +408,9 @@ async def governed_call(
     messages a tool may return, included — and, replayed from the journal, the same: the
     message the model read, or the ``Command`` as the tool made it (:func:`_kept_update`), so
     the state update of a call that ran before a pause is not lost with the step run again.
+    An error the tool raised is recorded as the call's failure and raised again as it was
+    (:func:`_failed`): the graph's own handling of it — LangChain's ``ToolRetryMiddleware`` and
+    ``ToolErrorMiddleware``, a wrapper of the builder's — sees what the library gives it.
     The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
     :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
@@ -433,6 +436,7 @@ async def governed_call(
         # the harness's own: its call goes through the bridge
         return _kept_own(runtime, request, await handler(request))
     produced: list[Any] = []
+    raised: list[Exception] = []
 
     async def run(args: dict[str, Any]) -> Any:
         token = _GOVERNING.set((call["name"], str(call["id"])))
@@ -448,15 +452,24 @@ async def governed_call(
         return Sourced(text_of(_told(done)), cited) if cited else text_of(_told(done))
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
-        return await handler(request.override(tool_call={**call, "args": args}))
+        raised.clear()
+        try:
+            return await handler(request.override(tool_call={**call, "args": args}))
+        except Exception as exc:
+            raised.append(exc)
+            raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
     made = Tool(spec, run, confined=framework_made(own))  # Deep Agents' files: its own
+    _tried_again(runtime, call)
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
         return update  # the graph's state update, as the tool made it
-    return _message(outcome, request, kept=_paged(runtime, request))
+    message = _message(outcome, request, kept=_paged(runtime, request))
+    if raised and not outcome.ok:
+        _failed(raised[-1], message)
+    return message
 
 
 #: The journal's mark, in a call's record, of what a framework's own tool returned in a
@@ -533,13 +546,19 @@ def _update_of(kept: Sequence[str], call_id: str) -> Any:
 
 @dataclass(slots=True, eq=False)
 class _Calling:
-    """One call of a tool node, from its first wrapper to its tool: whether it is ``waiting``
-    (it paused, and waits for the node's other calls) or has ``ended``."""
+    """One call of a tool node, from its first wrapper to its tool: the governed tries made of
+    it so far, and the latest one that failed — the error its tool raised, and the message
+    the model reads for it when nothing of the graph's handles the error; whether it is
+    ``waiting`` (it paused, and waits for the node's other calls) or has ``ended``."""
 
+    tries: int = 0
+    failed: tuple[BaseException, ToolMessage] | None = None
     waiting: bool = False
     ended: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+#: The tool node's call under way (:func:`govern_tool_nodes`), where the tries of it meet.
+_CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
 #: The calls under way of each tool node's step, by the state object the node handed them.
 _BESIDE: Final[dict[int, set[_Calling]]] = {}
 
@@ -554,6 +573,35 @@ async def _others_ended(calling: _Calling, beside: Collection[_Calling]) -> None
     calling.waiting = True
     for other in [c for c in beside if c is not calling and not c.waiting]:
         await other.ended.wait()
+
+
+def _under_way() -> _Calling:
+    """The tool node's call under way — or, where a wrapper of the graph's ran the call
+    outside the node's context (a thread, a context of its own), one nothing else reads."""
+    return _CALLING.get() or _Calling()
+
+
+def _tried_again(runtime: Runtime, call: Mapping[str, Any]) -> None:
+    """A try of the tool node's call under way: a second one — a wrapper of the graph's making
+    the call again after its error (LangChain's ``ToolRetryMiddleware``) — is the same call
+    tried again, not a model repeating itself, so it does not count toward the run's stall
+    (``bridge.MAX_REPEATS``, counted by the bridge at each call it is given)."""
+    calling = _under_way()
+    calling.tries += 1
+    key, times = runtime.repeating
+    if calling.tries > 1 and key == content_key("call", call["name"], call["args"]):
+        runtime.repeating = (key, max(times - 1, 0))
+
+
+def _failed(error: Exception, message: ToolMessage) -> NoReturn:
+    """A governed call's tool raised ``error`` (recorded: the call failed, ``message`` what
+    the model reads for it): raised again as it was, so what the graph does with a tool's
+    error is the library's — a wrapper that retries, rewords or answers in its place gets the
+    error, as without the harness. An error nothing of the graph handles ends as ``message``
+    at the tool node's call (:func:`govern_tool_nodes`): the model reads it, and the run goes
+    on."""
+    _under_way().failed = (error, message)
+    raise error
 
 
 def _message(outcome: ToolOutcome, request: ToolCallRequest, *, kept: bool = False) -> ToolMessage:
@@ -942,9 +990,11 @@ def govern_tool_nodes() -> None:
     once per process, on the tool node's one execution of a call (after its own wrappers);
     outside a harness run it changes nothing.
 
-    The node's one call (before its wrappers) is installed on too: a call that pauses (it
-    asks a person) leaves the node once the node's other calls have ended
-    (:func:`_others_ended`)."""
+    The node's one call (before its wrappers) is installed on too: the error of a governed
+    call's tool that nothing of the graph handled — the node's own ``handle_tool_errors``, a
+    wrapper — ends there as the message the model reads (:func:`_failed`), not as the graph's
+    failure; and a call that pauses (it asks a person) leaves the node once the node's other
+    calls have ended (:func:`_others_ended`)."""
     execute = ToolNode._execute_tool_async
     if getattr(execute, _INSTALLED, False):
         return
@@ -972,6 +1022,7 @@ def govern_tool_nodes() -> None:
         if current() is None:
             return await run_one(self, call, input_type, tool_runtime)
         calling = _Calling()
+        token = _CALLING.set(calling)
         # the node's calls made at once (it gathers them) are handed the one state object
         beside = _BESIDE.setdefault(id(tool_runtime.state), set())
         beside.add(calling)
@@ -980,8 +1031,11 @@ def govern_tool_nodes() -> None:
         except Exception as exc:
             if is_pause_signal(exc):
                 await _others_ended(calling, beside)
-            raise
+            if calling.failed is None or calling.failed[0] is not exc:
+                raise
+            return calling.failed[1]
         finally:
+            _CALLING.reset(token)
             calling.ended.set()
             beside.discard(calling)
             if not beside:
