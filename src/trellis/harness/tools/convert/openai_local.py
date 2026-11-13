@@ -342,8 +342,8 @@ def _skipped(said: str) -> None:
     and is told why in the input of its next model call (:func:`unsaid`: a computer call's
     output is a screenshot, with nowhere to say it)."""
     runtime = current()
-    if runtime is not None:
-        _UNSAID.setdefault(runtime, []).append(said)
+    assert runtime is not None  # a call is refused only inside a run (:func:`through`)
+    _UNSAID.setdefault(runtime, []).append(said)
 
 
 def unsaid(runtime: Runtime) -> list[str]:

@@ -500,14 +500,16 @@ def _answered(
     result: then it is that result. A failure the hooks worded otherwise is raised all the same
     (the graph's retry, its wrappers and its tool node act on it as ever), and the failed
     message the graph makes of it is the hooks' (``_Calling.said``)."""
+    calling = _under_way()
+    calling.said = None  # this try's: what an earlier one's hooks said is not this one's
     if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
         return reported[0][0]
     message = _message(outcome, request, kept=_paged(runtime, request))
-    failed = bool(raised) and not outcome.ok
-    # a failure the run's after_tool hooks worded: the graph's own handling of the error still
-    # runs, and the failed message it makes of it says the hooks' words (:func:`govern_tool_nodes`)
-    _under_way().said = message if failed and bridge.hooked(outcome) else None
-    if failed:
+    if raised and not outcome.ok:
+        if bridge.hooked(outcome):
+            # a failure the run's after_tool hooks worded: the graph's own handling of the
+            # error still runs, and the failed message it makes of it says the hooks' words
+            calling.said = message
         _failed(raised[-1], message)
     return message
 
