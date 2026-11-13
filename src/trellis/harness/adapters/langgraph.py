@@ -88,6 +88,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.events import STREAMED
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
@@ -205,18 +206,30 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
+        from langgraph.types import GraphOutput
+
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        values: Any = None
+        interrupts: list[Any] = []
         try:
             given = await _continued(target, native_input, run)
-            output = await self._graph(target, run.runtime).ainvoke(
+            # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the graph's
+            # nodes write to the stream is the run's (:func:`_written`)
+            async for part in self._graph(target, run.runtime).astream(
                 given,
                 self._config(target, run),
+                stream_mode=["values", "custom"],
                 version="v2",
                 **_run_arguments(run.runtime, target),
-            )
-            _ended_with(target, run.runtime, output.value)
-            return output
+            ):
+                if part["type"] == "custom":
+                    _written(run.runtime, part["data"])
+                else:
+                    values = part["data"]
+                    interrupts.extend(part["interrupts"])
+            _ended_with(target, run.runtime, values)
+            return GraphOutput(value=values, interrupts=tuple(interrupts))
         except BaseException as exc:
             error = exc
             raise
@@ -236,11 +249,13 @@ class LangGraphAdapter:
             async for part in self._graph(target, run.runtime).astream(
                 given,
                 self._config(target, run),
-                stream_mode=["messages", "values"],
+                stream_mode=["messages", "values", "custom"],
                 version="v2",
                 **_run_arguments(run.runtime, target),
             ):
-                if part["type"] == "messages":
+                if part["type"] == "custom":
+                    _written(run.runtime, part["data"])
+                elif part["type"] == "messages":
                     chunk = part["data"][0]
                     if (
                         isinstance(chunk, AIMessage)
@@ -248,7 +263,7 @@ class LangGraphAdapter:
                         and chunk.content
                     ):
                         yield chunk.content
-                elif part["type"] == "values":
+                else:  # "values"
                     values = part["data"]
                     interrupts = part["interrupts"] or interrupts
         except BaseException as exc:
@@ -394,6 +409,15 @@ class LangGraphAdapter:
         if _checkpointed(target) and not run_scoped(target):  # its checkpoints: the run's
             config["metadata"] = {**options.get("metadata", {}), RUN_METADATA: runtime.run_id}
         return config
+
+
+def _written(runtime: Runtime, value: Any) -> None:
+    """What a node of the graph wrote to LangGraph's ``custom`` stream mode
+    (``get_stream_writer()``, a middleware's ``runtime.stream_writer``): a ``CUSTOM`` event of
+    the run (:data:`~trellis.harness.events.STREAMED`), its ``value`` the write as JSON."""
+    from pydantic_core import to_jsonable_python
+
+    runtime.events.custom(STREAMED, value=to_jsonable_python(value, fallback=str))
 
 
 def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:

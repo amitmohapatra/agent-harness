@@ -48,6 +48,9 @@ class Sink(Protocol):
 WARNING: Final = "warning"
 #: The ``CUSTOM`` event name of a write-tier tool call, announced to the people watching.
 NOTICE: Final = "tool_notice"
+#: The ``CUSTOM`` event name of what a framework's agent writes to its own stream for its
+#: caller (LangGraph's ``custom`` stream mode: ``get_stream_writer()``), its ``value`` the write.
+STREAMED: Final = "custom"
 #: The ``CUSTOM`` event name of ``trellis.current().log(...)``.
 LOG: Final = "log"
 #: The ``CUSTOM`` event name of a person's decision the run goes on with: at the start of the

@@ -501,24 +501,70 @@ async def test_a_checkpoint_of_the_thread_is_forked_and_run_on_from(harness: Har
 
 
 # ----------------------------------------------------------------- what a node writes to see
-async def test_today_what_a_node_writes_to_the_custom_stream_is_not_on_the_runs_events(
-    harness: Harness,
-) -> None:
-    """LangGraph's ``get_stream_writer()`` writes to the ``custom`` stream mode of
-    ``graph.astream``. The run's stream is the harness's events, read from the graph's
-    ``messages`` and ``values`` modes: what a node writes there is on none of them (the
-    harness's own way is ``trellis.current().events``)."""
+def writing() -> Any:
+    """A graph whose node writes to LangGraph's ``custom`` stream mode (``get_stream_writer``),
+    a dict and a value of another kind."""
 
     def step(state: Tried) -> dict[str, Any]:
-        get_stream_writer()({"progress": "half way"})
+        write = get_stream_writer()
+        write({"progress": "half way"})
+        write(42)
         return {"n": 1}
 
     graph = StateGraph(Tried)
     graph.add_node("step", step)
     graph.add_edge(START, "step")
     graph.add_edge("step", END)
-    events = [e async for e in harness.wrap(graph.compile(), id="writes").stream({}, user="u")]
-    assert [e.type for e in events] == [RunEventType.RUN_STARTED, RunEventType.RUN_FINISHED]
+    return graph.compile()
+
+
+def custom(events: list[Any]) -> list[Any]:
+    return [e.data for e in events if e.type is RunEventType.CUSTOM and e.data["name"] == "custom"]
+
+
+async def test_what_a_node_writes_to_the_custom_stream_is_a_custom_event_of_the_run(
+    harness: Harness,
+) -> None:
+    """LangGraph's ``get_stream_writer()`` writes to the ``custom`` stream mode: each write is
+    a ``CUSTOM`` event of the run named ``custom``, its ``value`` the write as it was written —
+    on the run's stream, and in AG-UI's ``CUSTOM`` event."""
+    from trellis.harness.agui.translate import translate
+
+    events = [e async for e in harness.wrap(writing(), id="writes").stream({}, user="u")]
+    assert custom(events) == [
+        {"name": "custom", "value": {"progress": "half way"}},
+        {"name": "custom", "value": 42},
+    ]
+    [shown] = [e for e in events if e.type is RunEventType.CUSTOM and e.data["value"] == 42]
+    seen = translate(shown)
+    assert seen is not None and (seen.name, seen.value) == ("custom", {"value": 42})
+
+
+async def test_a_run_not_streamed_has_the_custom_writes_among_its_events(harness: Harness) -> None:
+    """``agent.run`` emits the same events as ``agent.stream`` (its log, ``agent.events``, a
+    surface): the writes are among them."""
+    seen: list[Any] = []
+
+    def listen(state: Tried) -> dict[str, Any]:
+        runtime = current()
+        assert runtime is not None
+        runtime.events.listen(seen.append)
+        return {}
+
+    def write(state: Tried) -> dict[str, Any]:
+        get_stream_writer()({"progress": "half way"})
+        get_stream_writer()(42)
+        return {"n": 1}
+
+    graph = StateGraph(Tried)
+    graph.add_node("listen", listen)
+    graph.add_node("write", write)
+    graph.add_edge(START, "listen")
+    graph.add_edge("listen", "write")
+    graph.add_edge("write", END)
+    result = await harness.wrap(graph.compile(), id="writes").run({}, user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert [d["value"] for d in custom(seen)] == [{"progress": "half way"}, 42]
 
 
 # ---------------------------------------------------------------------- what a tool is handed
