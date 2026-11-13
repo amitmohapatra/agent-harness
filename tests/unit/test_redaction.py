@@ -7,7 +7,6 @@ from trellis.contracts import TelemetryRedactor
 from trellis.harness.redaction import (
     DEFAULT,
     MAX_DEPTH,
-    MAX_VALUE_CHARS,
     REDACTED,
     TOO_DEEP,
     redact_attributes,
@@ -36,7 +35,9 @@ def test_secret_names_and_credential_values_are_dropped() -> None:
 
 
 def test_long_values_are_cut_and_payloads_redacted_recursively() -> None:
-    assert len(redact_attributes({"text": "x" * 5000})["text"]) < MAX_VALUE_CHARS + 50
+    assert redact_attributes({"text": "x" * 2000})["text"] == "x" * 2000  # 2000: kept whole
+    cut = redact_attributes({"text": "x" * 2001})["text"]
+    assert cut == "x" * 2000 + "...[truncated 1 chars]"
     assert DEFAULT.redact_input({"user": {"password": "p", "name": "n"}}) == {
         "user": {"password": REDACTED, "name": "n"}
     }
@@ -47,7 +48,7 @@ def test_a_value_of_a_megabyte_is_redacted_in_linear_time() -> None:
     started = time.perf_counter()
     out = DEFAULT.redact_output("x" * (1024 * 1024) + " write to ada.l+x@mail.example.com")
     assert time.perf_counter() - started < 1.0
-    assert isinstance(out, str) and out.startswith("x" * MAX_VALUE_CHARS + "...[truncated")
+    assert isinstance(out, str) and out.startswith("x" * 2000 + "...[truncated")
 
 
 def test_outbound_payloads_are_redacted_like_inbound_ones() -> None:
