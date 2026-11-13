@@ -88,7 +88,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import session_store, with_context
-from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.bridges.helpers import Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
@@ -670,9 +670,10 @@ class Steps:
     """One query's steps as the stall watchdog sees them (``Runtime.model_started``): Claude is
     waited on from one message to the next, except while a tool call runs (from its
     ``PreToolUse`` to its ``PostToolUse``: a tool's own time is not a stalled model); and the
-    calls under way, by Claude's id, with when each began (what ``PostToolUse`` records)."""
+    calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
+    the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "calls", "runtime")
+    __slots__ = ("adapter", "calls", "helped", "runtime")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -680,6 +681,21 @@ class Steps:
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
         self.calls: dict[str, tuple[str, dict[str, Any], float]] = {}
+        #: the calls a subagent makes, by Claude's id: the helper whose work each is — the
+        #: CLI names the subagent in the ``PreToolUse`` hook (``agent_type``), and its
+        #: permission request (``can_use_tool``) for the same call is the same helper's
+        self.helped: dict[str, Helper] = {}
+
+    def helper_of(self, call_id: str, given: Mapping[str, Any]) -> Helper | None:
+        """The helper whose work the call ``call_id`` is, from the ``PreToolUse`` hook's input
+        (``given``: the CLI names a subagent's call ``agent_type``), kept for the call's
+        permission request; ``None``: the run's own call."""
+        helpers = self.runtime.helpers
+        assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
+        working = helpers.named(str(given["agent_type"])) if "agent_type" in given else None
+        if working is not None:
+            self.helped[call_id] = working
+        return working
 
     def waiting(self) -> None:
         """Claude is to answer now (unless a call runs): watched for a stall."""
@@ -691,6 +707,7 @@ class Steps:
         self.runtime.model_ended(STEP)
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
+        self.helped.pop(call_id, None)
         found = self.calls.pop(call_id, None)
         self.waiting()
         return found
@@ -843,11 +860,16 @@ def _governance(steps: Steps) -> Any:
         if name.startswith(f"mcp__{SERVER}__"):
             steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
+        assert runtime.helpers is not None  # the query runs with the attempt's helpers
         try:
-            decided = await bridge.permitted(_spec(runtime, name), args)
+            # a subagent's call is decided as its helper's work: an approval names the helper
+            with runtime.helpers.working(steps.helper_of(call_id, given)):
+                decided = await bridge.permitted(_spec(runtime, name), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
+            steps.helped.pop(call_id, None)
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         if isinstance(decided, ToolOutcome):
+            steps.helped.pop(call_id, None)
             return _decided("deny", str(decided.output))
         if name in SUBAGENT_TOOLS:
             ran = await _briefed(runtime, call_id, name, decided.args)
@@ -910,8 +932,12 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         elif spec.side_effects == "read" or shell.read_only(name, args, moving=moving()):
             verdict = PermissionResultAllow()
         else:
+            helpers = runtime.helpers
+            assert helpers is not None  # the query runs with the attempt's helpers
             try:
-                decided = await bridge.asked(spec, args, CLAUDE_CODE)
+                # the same helper's work as the call's PreToolUse said (``Steps.helped``)
+                with helpers.working(steps.helped.get(this)):
+                    decided = await bridge.asked(spec, args, CLAUDE_CODE)
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:
