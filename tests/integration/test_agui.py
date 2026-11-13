@@ -589,6 +589,9 @@ async def test_a_refusal_is_a_problem_document(client: httpx.AsyncClient) -> Non
     assert (missing.status_code, missing.json()["code"]) == (404, "NOT_FOUND")
     gone = await client.get(f"{PATH}/runs/run_nope/artifacts/art_1")
     assert (gone.status_code, gone.json()["code"]) == (404, "NOT_FOUND")
+    named = await client.post(f"{PATH}/run", json=body("hi", runId="not an id!"))
+    assert (named.status_code, named.json()["code"]) == (422, "VALIDATION")
+    assert named.headers["content-type"] == "application/problem+json"
     client.headers["x-user"] = ""
     nobody = await client.post(f"{PATH}/run", json=body("hi"))
     assert (nobody.status_code, nobody.json()["code"]) == (401, "AUTHENTICATION")
