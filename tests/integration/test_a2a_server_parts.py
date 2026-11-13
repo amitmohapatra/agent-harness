@@ -365,6 +365,28 @@ def test_an_ending_without_an_error_says_how_it_ended() -> None:
     assert timeout.parts[0].text == "the run ended timeout"
 
 
+def test_every_ending_is_the_task_state_a2a_names() -> None:
+    states = {
+        RunOutcome.SUCCESS: TaskState.TASK_STATE_COMPLETED,
+        RunOutcome.PARTIAL: TaskState.TASK_STATE_COMPLETED,  # an answer, cut short
+        RunOutcome.INTERRUPT: TaskState.TASK_STATE_INPUT_REQUIRED,
+        RunOutcome.ERROR: TaskState.TASK_STATE_FAILED,
+        RunOutcome.TIMEOUT: TaskState.TASK_STATE_FAILED,
+        RunOutcome.REJECTED: TaskState.TASK_STATE_REJECTED,
+        RunOutcome.CANCELLED: TaskState.TASK_STATE_CANCELED,
+    }
+    assert set(states) == set(RunOutcome)
+    asked = {"interrupt": {"question": "Which plan?"}}
+    for outcome, state in states.items():
+        data = asked if outcome is RunOutcome.INTERRUPT else {}
+        update = update_for(event(RunEventType.RUN_FINISHED, outcome=outcome, data=data))
+        assert update is not None and update.state == state, outcome
+    partial = update_for(
+        event(RunEventType.RUN_FINISHED, outcome=RunOutcome.PARTIAL, data={"result": "half"})
+    )
+    assert partial is not None and partial.result == "half"
+
+
 def test_values_and_parts_convert_both_ways() -> None:
     assert value_part(object()).WhichOneof("content") == "text"  # not JSON: its text
     assert value_part({"a": 1}).WhichOneof("content") == "data"
