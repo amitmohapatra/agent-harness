@@ -1083,6 +1083,67 @@ async def test_e_today_cancelling_the_turn_leaves_the_task_running_for_the_next_
     assert server.status(server.task_id) == "cancelled"
 
 
+# --------------------------------------------------------------------------- a busy conversation
+#: How ``list_async_tasks`` names the task while it runs.
+LISTED: Final = "task_id: {}  agent: optimizer  status: running"
+
+
+@pytest.mark.parametrize("mode", ["queue", "interrupt", "steer"])
+async def test_a_message_to_a_busy_conversation_that_has_a_background_task(
+    harness: Harness, server: StandIn, mode: str
+) -> None:
+    """What a message does when its conversation's turn is under way (``mode``, as
+    ``docs/runs.md`` says it), in a conversation that carries a task list: it waits its turn
+    (``queue``), takes the turn from the working run (``interrupt``) or is given to it before
+    its next model call (``steer``) — and in each case the list is the one the first turn
+    left: the task is found, none is started again, and it goes on running on its server."""
+    server.seconds = 60
+    started, release = asyncio.Event(), asyncio.Event()
+
+    @tool(side_effects="read")
+    async def hold() -> str:
+        """Wait for the record to come in."""
+        started.set()
+        await release.wait()
+        return "held"
+
+    model = Model(turns=[START, reports_the_id])
+    target = ReAct("You help.", model, tools=[hold], subagents=[subagent(server)])
+    agent = harness.wrap(target, id="bg")
+    await say(agent, "run the optimization")
+    listing = [("list_async_tasks", {}), says_what_the_tool_said]
+    listed = LISTED.format(server.task_id)
+    # the working turn calls ``hold``; what follows is whichever turn's model call comes next
+    model.turns += [("hold", {}), *([] if mode == "interrupt" else ["looked it up"]), *listing]
+    first = asyncio.create_task(say(agent, "Look it up."))
+    await asyncio.wait_for(started.wait(), 10)
+    second = asyncio.create_task(say(agent, "Which tasks are there?", mode=mode))
+    await asyncio.sleep(0.3)  # it arrives while the first works
+    if mode == "interrupt":
+        a = await asyncio.wait_for(first, 10)
+        assert a.status is RunStatus.CANCELLED  # the newer message took over
+        release.set()
+        b = await asyncio.wait_for(second, 10)
+        # the turn that took over starts with the list the conversation carries
+        assert b.status is RunStatus.SUCCESS and listed in b.answer, b.error
+    else:
+        assert not second.done()  # it waits, or the first run took it
+        release.set()
+        a, b = await asyncio.wait_for(asyncio.gather(first, second), 10)
+        assert a.status is RunStatus.SUCCESS and a.answer == "looked it up", a.error
+        assert b.status is RunStatus.SUCCESS and b.run_id != a.run_id, b.error
+        if mode == "queue":
+            assert listed in b.answer  # its own turn, after the first, with the list
+        else:
+            assert b.answer == a.answer  # the working run answered both
+            said = [str(m.content) for m in model.seen[-1]]
+            assert "Which tasks are there?" in said  # given to it before that model call
+            third = await say(agent, "And now?")  # the list outlived the steered turn
+            assert third.status is RunStatus.SUCCESS and listed in third.answer, third.error
+    assert not model.turns  # every scripted turn was asked for: no call went astray
+    assert len(server.runs) == 1 and server.status(server.task_id) == "running"
+
+
 # --------------------------------------------------------------------------- f. configuration
 async def test_f_what_the_server_is_sent(harness: Harness, server: StandIn) -> None:
     """The spec's ``url`` and ``headers`` are all an app configures: the SDK's default
@@ -1149,5 +1210,47 @@ async def test_through_the_ag_ui_routes_t1_t2_and_t3_work(server: StandIn) -> No
             model.turns += [calls("check_async_task"), says_what_the_tool_said]
             third = await post(http, "is the optimization done?")
             assert RESULT in third[-1]["result"]
+    finally:
+        await harness.aclose()
+
+
+#: The AG-UI event types of a turn that calls no tool, as ``main`` streamed them before the
+#: task list was carried (9e60203, the same ``POST /agui/run`` on the same scripted chat).
+PLAIN_TURN: Final = [
+    "RUN_STARTED",
+    "TEXT_MESSAGE_START",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
+    "RUN_FINISHED",
+]
+
+
+async def test_through_the_ag_ui_routes_a_turn_with_no_task_streams_what_it_did_before(
+    server: StandIn,
+) -> None:
+    """Carrying the task list adds nothing to a turn's stream: a turn that calls no tool
+    streams the same event types in a thread with no task, and in the thread that carries one
+    (T2, after T1 started it) — the types ``main`` streamed (:data:`PLAIN_TURN`)."""
+    harness = Harness(config=Settings())
+    model = Model(turns=["4", START, reports_the_id, "4"])
+    agent = chat(harness, server, model)
+    app = FastAPI()
+    agent.serve_chat(app, identity=lambda request: request.headers.get("x-user", ""))
+    transport = httpx.ASGITransport(app=app)
+
+    async def types(http: httpx.AsyncClient, text: str, thread: str) -> list[str]:
+        messages = [{"id": str(uuid.uuid4()), "role": "user", "content": text}]
+        response = await http.post("/agui/run", json={"threadId": thread, "messages": messages})
+        assert response.status_code == 200, response.text
+        return [event["type"] for _, event in decode(response.text)]
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://agui", headers={"x-user": USER}
+        ) as http:
+            assert await types(http, "what is 2+2?", "no-task") == PLAIN_TURN
+            started = await types(http, "run the optimization", THREAD)
+            assert "TOOL_CALL_RESULT" in started and server.status(server.task_id) == "running"
+            assert await types(http, "what is 2+2?", THREAD) == PLAIN_TURN  # T2, list carried
     finally:
         await harness.aclose()
