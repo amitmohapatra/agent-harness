@@ -102,6 +102,10 @@ CUT: Final = {
     CANCELLED: "{tool} was cut short: the run was cancelled",
     ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
 }
+#: What a framework's own call made again reads, when the same call already ran for the run
+#: (:func:`permitted`): its framework begins work again that it did before (a subagent paused
+#: in its work, started again) — the call is not run a second time.
+RAN_BEFORE: Final = "{tool} was not run again: this same call already ran. Its result: {output}"
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
 #: What a model that stalled — the same call with the same arguments over and over — is told,
@@ -189,12 +193,23 @@ async def permitted(
     (denied, rejected). A pause propagates. ``framework``: the framework asks its own user
     about this call too (:func:`asked`, its name in the question) — asked here once the call
     is let through as it was made, unless a person was just asked about it (governance's
-    question, a hook's): one call, one question."""
+    question, a hook's): one call, one question. The same call made again after it ran for
+    the run (:func:`observed`: its framework began that work again — a subagent paused in its
+    work, started again) is not let through: its result is what it reads."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     with runtime.replay.calling(key):
+        replayed, output = runtime.replay.call(key)  # it ran for the run (:func:`observed`)
+        if replayed:
+            said = _replayed(spec.name, output).output
+            return ToolOutcome(
+                tool=spec.name,
+                status=ToolStatus.REJECTED,
+                output=RAN_BEFORE.format(tool=spec.name, output=said),
+                cached=True,
+            )
         call, verdict = await _hooked(runtime, call, key)
         if isinstance(verdict, Deny):
             return denied(call, verdict)
@@ -282,6 +297,9 @@ async def observed(
         if not outcome.ok:
             span.set_status(StatusCode.ERROR, str(outcome.status.value))
     runtime.used.add(spec.name)
+    if outcome.ok:  # made again (its framework begins that work again), it is not run twice
+        key = content_key("call", spec.name, args)
+        runtime.replay.record_call(key, _journaled(outcome), scope=key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
