@@ -30,6 +30,7 @@ the helper again, ends it.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -85,6 +86,16 @@ class Helper:
     began: float = field(default_factory=time.monotonic)
 
 
+#: The runs of the helpers handed on past their attempt (:meth:`Helpers.detached`), until
+#: whoever keeps each going ends it (:func:`released`).
+_DETACHED: set[str] = set()
+
+
+def released(run_id: str) -> None:
+    """The detached helper's run ``run_id`` was ended by whoever kept it going."""
+    _DETACHED.discard(run_id)
+
+
 #: The helper whose work is running in this task (:meth:`Helpers.working`).
 _INSIDE: ContextVar[Helper | None] = ContextVar("trellis_helper", default=None)
 
@@ -104,6 +115,10 @@ class Helpers:
         self.runtime = runtime
         self.framework = framework
         self._open: dict[str, Helper] = {}
+        #: the helpers handed on past this attempt (:meth:`detached`), by the same key
+        self._detached: dict[str, Helper] = {}
+        #: one start of a key at a time
+        self._starting: dict[str, asyncio.Lock] = {}
         #: how many times this attempt started each helper on each task
         self._started: Counter[tuple[str, str]] = Counter()
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
@@ -111,8 +126,15 @@ class Helpers:
     async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
         """The helper ``key`` started on ``task``: its run record started (found again on a
         later attempt), its memory bound, and the memory context for its task fetched
-        (:meth:`briefed` hands it over). A key already open is that helper."""
-        found = self._open.get(key)
+        (:meth:`briefed` hands it over). A key already open is that helper, and so is one
+        handed on (:meth:`detached`) and one being started (a framework that says a helper
+        started two ways — Claude's hook and its message — may say both before the run store
+        answered the first)."""
+        async with self._starting.setdefault(key, asyncio.Lock()):
+            return await self._started_as(key, kind=kind, name=name, task=task)
+
+    async def _started_as(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
+        found = self._open.get(key) or self._detached.get(key)
         if found is not None:
             return found
         parent = self.runtime
@@ -163,6 +185,18 @@ class Helpers:
             yield
         finally:
             _INSIDE.reset(token)
+
+    def detached(self, key: str) -> Helper | None:
+        """The open helper ``key`` handed on to whoever keeps it going past this attempt (a
+        Claude subagent that works in the background of its conversation's session:
+        ``bridges.claude_live``), which ends its run: it is no longer this attempt's to end
+        (:meth:`end`, :meth:`closed`), nor a later attempt's to end as left open, until it is
+        :func:`released`. ``None``: no such helper is open."""
+        helper = self._open.pop(key, None)
+        if helper is not None:
+            self._detached[key] = helper
+            _DETACHED.add(helper.run_id)
+        return helper
 
     def named(self, name: str) -> Helper | None:
         """The open helper called ``name`` started last (a framework that names the helper
@@ -235,6 +269,7 @@ class Helpers:
             async for child in runs.iterate(
                 parent_run_id=parent.run_id, status=RunStatus.RUNNING, tenant=parent.tenant
             )
+            if child.run_id not in _DETACHED  # kept going past the attempt that started it
         ]
         for run_id in left:
             record = await runs.get(run_id, tenant=parent.tenant)

@@ -18,16 +18,34 @@ that work goes on between the turns. A turn ends at the result of its own prompt
 task; a pause ends the turn and keeps the process, and the resumed attempt is sent into it;
 cancelling a turn stops that turn only (Claude Code's own interrupt stops its background work
 too, so with any under way the turn ends at its next tool call instead). Each turn's hooks,
-permission check and harness tools still run for that turn's run. Between two turns there is
-no run: a tool call background work makes then is refused, not run unchecked, and the next
-run says so (`claude_session`). A turn is charged what the process's running cost grew
-by. With no live process (a restart, another server, one closed for being idle, a
+permission check and harness tools still run for that turn's run. A background subagent
+keeps the child run its `Agent` call started: open until the SDK says its task ended
+(`SUCCESS` with what it said last, `ERROR` for a failed task or a session that ended first,
+`CANCELLED` for one stopped in Claude Code), its calls decided, run and recorded for that
+run — hooks, governance, `can_use_tool`, harness tools — with or without a turn being
+answered. A call of it that asks a person pauses that run and waits in Claude Code; the
+question is asked in the conversation's next turn, before its prompt, and the answer goes
+on to the run (nothing answers a child run directly today). Its limits are the agent's
+`run_timeout` and `budget`; past them, or cancelled (`agent.cancel(child_run_id)`), the task
+is stopped with the SDK's `stop_task`, that subagent only. The process's running cost is
+shared at each result by the tokens each used, so a subagent's work between two turns is
+charged to its run and the next turn its own. Any other call made between two turns (the
+main agent's, in a turn the session injected) has no run and is refused, not run unchecked,
+and the next run says so (`claude_session`). With no live process (a restart, another server, one closed for being idle, a
 run with no `thread`) a turn runs as before, resuming the session from the journal, which
 holds what was mirrored between the turns too. Limits and what is not kept:
 [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#conversations).
 `TaskStop` (a write) and six tools that only list or look up (reads) have a declared risk;
 they asked a person on every call. Claude Code's own schedules (`CronCreate`,
 `ScheduleWakeup`) stay off: a turn they fire has no run.
+
+### Fixed: a Claude subagent is one child run when the run store takes time to answer
+
+Claude Code says a subagent started two ways, its `Agent` call's `PreToolUse` hook and the
+message that carries the call, and each started the helper by the call's id. With a run
+store that takes time (agent-runs, over HTTP) the second came while the first was still
+being recorded and started a second child run of the same subagent, which then ended at
+once. A helper's start now takes its key one at a time (`bridges.helpers.Helpers.start`).
 
 ### Changed: memory is asked for its whole budget unless the model's window is small
 

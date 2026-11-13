@@ -202,7 +202,9 @@ its task (the `PreToolUse` hook's update), its built-in and MCP tool calls are g
 recorded under its own run (by the subagent the CLI names; the harness's own tools it calls are
 recorded under the run), its turns go to memory, its spending is in the query's
 `ResultMessage`, and a subagent cut by a crash is ended by the worker that continues the run
-([subagents.md](../subagents.md#automatic)). A wrapped agent called from a tool of yours
+([subagents.md](../subagents.md#automatic)). A subagent that works in the background of a
+conversation's process keeps its child run open until its task ends
+([below](#conversations)). A wrapped agent called from a tool of yours
 (`await other.run(...)`) is a child run too, and the wrapped options are a `ReAct`'s sub-agent
 like any agent (`subagents=[agent]`). Runnable:
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
@@ -229,14 +231,52 @@ started it ends at its own answer, the next ones are answered while it runs, and
 session holds its notification when it ends. A turn ends at the result of its own prompt: a
 turn the session runs by itself (a finished task's notification) is never a user's answer.
 
-* Between two turns no run is under way, so nothing can check a tool call (your hooks,
-  governance, an approval, the budget) or record it: a call background work makes then is
-  refused, and the conversation's next run says how many were (`claude_session` warning).
-  A call it makes while a turn is being answered is decided and recorded for that turn's run.
-  A background shell command needs no call to go on; a background subagent does.
-* A result's cost is the process's running total (its usage is the turn's own): a turn is
-  charged what the cost grew by, so what background work cost between two turns is on the
-  next one. Its tokens are in no turn's usage.
+* **A background subagent keeps its child run.** The child run its `Agent` call started
+  ([below](#sub-agents-and-child-runs)) stays `RUNNING` from there until the SDK says its
+  task ended (the CLI says which subagents it runs in the background: `task_started` with
+  `is_backgrounded`; the bundled CLI, 2.1.283, driven against a scripted model, did so
+  unless the call said `run_in_background: false`). It ends `SUCCESS` with what the subagent said last, `ERROR` when the task
+  failed, `CANCELLED` when it was stopped in Claude Code (Claude's own `TaskStop`); and
+  `ERROR`, saying so, when the session ends first (it closed, its process died).
+* **Its calls are its run's**, whether or not a turn is being answered: the CLI names the
+  subagent in each hook and permission request (`agent_id`: the task's id), and the
+  harness decides, runs and records the call for that run — your hooks, governance by
+  risk and the tool catalog, then Claude Code's own check and `can_use_tool`; the
+  `TOOL_CALL_*` events on its stream (`agent.events(child_run_id)`); a harness tool run
+  for it.
+* **A call that asks a person** pauses that run as any run pauses (its `awaiting`, its
+  journal), and the call waits in Claude Code: the process and the task stay. Nothing
+  answers a child run's own question today (`agent.resume` refuses a run that has a
+  parent, and the chat's thread stream lists a thread's turns only), so it is asked in
+  the conversation's **next turn**, before that turn's prompt is sent: the turn pauses
+  with the question (`payload["subagent"]` names the run, with `background: true`), and
+  its answer goes on to the subagent's run — approved or edited the call runs once,
+  rejected the subagent reads why — then the turn's prompt is sent. A question nobody
+  answers in 12 hours ends the run `CANCELLED` and stops the task (the CLI is told to
+  wait 24 hours for a hook, so it never gives the call up first: a hook it gives up on
+  fails the call, it does not run it).
+* **Its limits** are the agent's own `run_timeout` and `budget`, as for a run nothing
+  else bounds (the turn that started it has ended): its replies' tokens count as they
+  come. Past either, and when the run is cancelled (`agent.cancel(child_run_id)`, the
+  chat's cancel route), the task is stopped with the SDK's `stop_task` — that subagent
+  only. Cancelling the turn that started it, while that turn still runs, cancels it too;
+  cancelling a later turn leaves it.
+* **Spending.** A result's cost is the process's running total (its usage is the turn's
+  own). What it grew by since the last result is shared by the tokens each used: the turn
+  its own, a background run what its subagent's replies used since — so a subagent's
+  work between two turns is charged to its run, and the next turn its own. The turn the
+  session runs for a finished task is charged to that task's run, which waits for it (30
+  seconds at most) before it ends. The shares are exact when every reply costs the same
+  per token, an estimate otherwise (another model, cached tokens).
+* Any other call made between two turns has no run, so nothing can check it (your hooks,
+  governance, an approval, the budget) or record it: the main agent's own, in the turn
+  the session runs for a finished task, is refused, and the conversation's next run says
+  how many were (`claude_session` warning). A background shell command needs no call to
+  go on (its `Bash` call was decided when it was made) and has no run; what it and
+  injected turns cost with no background run to charge is on the next turn.
+* Not done: a background subagent's own subagents have no run of their own kept open; a
+  child run's end is not delivered to an open chat (Claude's next answer has it); after a
+  server restart a background run stays `RUNNING` in the run store with nothing behind it.
 * A turn that is left — its run paused, or cancelled — is stopped with the SDK's `interrupt`
   only when nothing runs in the background: Claude Code's interrupt stops the background work
   too. With work under way the run ends at once and the CLI's turn at its next tool call
@@ -249,7 +289,8 @@ turn the session runs by itself (a finished task's notification) is never a user
   whatever does, when a turn's options are not the ones it was started with
   (`framework_options`, another set of harness tools), and with the harness
   (`Harness.aclose`). Background work that ends with it is said in the conversation's next
-  run (`claude_session`); a restart loses it.
+  run (`claude_session`), and a background subagent's run ends saying so; a restart loses
+  it.
 * Not kept: a run with no `thread`, a sub-agent's run, the last answer at the turn limit, and
   options with a `ClaudeSkills` plugin or an in-process MCP server of your own
   (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn).

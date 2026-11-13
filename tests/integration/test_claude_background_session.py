@@ -32,9 +32,17 @@ from claude_agent_sdk import (
 from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk._internal.message_parser import parse_message
 
-from tests.support.arm import arm
-from trellis import Deny, Harness, Hooks, Settings, current, tool
-from trellis.contracts import RunEventType, RunStatus, ToolCall
+from tests.support.arm import arm, with_governance
+from tests.support.catalog import FakeCatalog
+from trellis import Budget, Deny, Harness, Hooks, Settings, current, tool
+from trellis.contracts import (
+    ConfigurationError,
+    RunEvent,
+    RunEventType,
+    RunRecord,
+    RunStatus,
+    ToolCall,
+)
 from trellis.harness import budget
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
@@ -45,7 +53,11 @@ from trellis.harness.adapters.claude import (
 from trellis.harness.agent import Agent
 from trellis.harness.bridges import claude_live
 from trellis.harness.bridges.claude_live import UNATTENDED, LiveSession
+from trellis.harness.bridges.helpers import HELPER
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import conversation_key
+from trellis.harness.subagents import SUBAGENT
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
 #: A subagent started in the background: its ``Agent`` call returns at once, task ``t1`` runs.
@@ -116,6 +128,62 @@ def open_sessions(agent: Agent) -> int:
 
 def warned(events: list[Any]) -> list[str]:
     return [e.data["message"] for e in events if e.data.get("code") == "claude_session"]
+
+
+def turn_running(agent: Agent) -> str:
+    """The one turn of a conversation under way (a background subagent's run, which is under
+    way too, has a parent)."""
+    [run_id] = [r for r, at in agent.running.items() if at.identity.parent_run is None]
+    return run_id
+
+
+async def child_of(harness: Harness, run_id: str) -> RunRecord:
+    """The one child run of ``run_id``."""
+    [child] = [r async for r in harness.runs.iterate(parent_run_id=run_id, tenant="default")]
+    record = await harness.runs.get(child.run_id, tenant="default")
+    assert record is not None
+    return record
+
+
+async def when(harness: Harness, run_id: str, status: RunStatus, seconds: float = 5.0) -> RunRecord:
+    """The run's record once it is ``status``."""
+    async with asyncio.timeout(seconds):
+        while True:
+            record = await harness.runs.get(run_id, tenant="default")
+            if record is not None and record.status is status:
+                return record
+            await asyncio.sleep(0.02)
+
+
+async def calls(tmp_path: Path, step: dict[str, Any], task: str = "t1") -> dict[str, Any]:
+    """Task ``task`` makes the call ``step`` now: what it was answered."""
+    asked, answered = tmp_path / "tasks" / f"{task}.call", tmp_path / "tasks" / f"{task}.called"
+    asked.write_text(json.dumps(step))
+    await until(answered.exists)
+    said: dict[str, Any] = json.loads(answered.read_text())
+    answered.unlink()
+    return said
+
+
+async def followed(agent: Agent, run_id: str) -> tuple[list[RunEvent], asyncio.Task[None]]:
+    """The run's events from now on, as they come."""
+    seen: list[RunEvent] = []
+
+    async def follow() -> None:
+        async for event in agent.events(run_id):
+            seen.append(event)
+
+    following = asyncio.create_task(follow())
+    await until(lambda: agent.watchers(run_id))
+    return seen, following
+
+
+def results(events: list[RunEvent]) -> list[str]:
+    return [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+
+
+READS: dict[str, Any] = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
+WRITES: dict[str, Any] = {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "x"}}
 
 
 # --------------------------------------------------------------------------- one chat
@@ -288,26 +356,49 @@ async def test_a_turn_a_live_session_serves_has_its_own_run_hooks_spending_and_g
     ]
 
 
-async def test_what_background_work_spent_between_turns_is_on_the_next_turn(
+async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the_next_turn(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    counted: list[dict[str, Any]] = []
+    """A result's cost is the process's running total: what it grew by between two turns —
+    the subagent's own replies, the turn the session ran for its end — is charged to the
+    subagent's run, with its replies' tokens, and the next turn is charged its own."""
+    counted: list[tuple[str, int, float, int]] = []
     account = budget.account
-    monkeypatch.setattr(
-        budget, "account", lambda run, **kw: (counted.append(kw), account(run, **kw))
-    )
+
+    def count(run: Any, **kw: Any) -> None:
+        tokens = kw["input_tokens"] + kw["output_tokens"]
+        counted.append((run.run_id, tokens, kw["cost"], kw.get("calls", 1)))
+        account(run, **kw)
+
+    monkeypatch.setattr(budget, "account", count)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
     target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
     agent = harness.wrap(target, id="spent")
-    await agent.run("research the market", user="u1", thread="t1")
-    live = live_of(agent)
-    assert live is not None
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    seen, following = await followed(agent, child.run_id)
+    assert await calls(tmp_path, READS) == {"result": "Read ran", "ok": True}
     (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
-    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
-    await agent.run("thanks", user="u1", thread="t1")
-    # two steps; then one of its own, at the cost of three: the task's own step and the
-    # session's own turn for it were paid for between the turns
-    assert [(c["input_tokens"], c["cost"]) for c in counted] == [(20, 1.0), (10, 1.5)]
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    second = await agent.run("thanks", user="u1", thread="t1")
+    await following
+    assert counted == [
+        (first.run_id, 30, 1.0, 1),  # two steps
+        (child.run_id, 15, 0.0, 1),  # the subagent's reply that made its call
+        (child.run_id, 15, 0.0, 1),  # its last reply
+        # what both cost, known at the session's next result and shared by their tokens;
+        # and the turn the session ran for the task's end
+        (child.run_id, 0, 1.0, 0),
+        (child.run_id, 0, 0.5, 0),
+        (second.run_id, 15, 0.5, 1),  # one step of its own
+    ]
+    assert seen[-1].data["spent"] == {
+        "tokens": 30,
+        "cached_tokens": 0,
+        "cost": 1.5,
+        "model_calls": 2,
+        "tool_calls": 0,
+    }
 
 
 # --------------------------------------------------------------------------- no live session
@@ -494,8 +585,7 @@ async def test_a_session_that_owes_a_left_turns_result_for_too_long_is_replaced(
     await agent.run("research the market", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
     await until(lambda: len(served(tmp_path)) == 2)
-    [run_id] = agent.running
-    await agent.cancel(run_id)
+    await agent.cancel(turn_running(agent))
     assert (await slow).status is RunStatus.CANCELLED
     events = [e async for e in agent.stream("and now?", user="u1", thread="t1")]
     assert events[-1].data["result"] == "after"
@@ -566,40 +656,472 @@ async def test_background_work_that_ends_with_its_session_is_said_in_the_next_ru
     assert open_sessions(agent) == 1  # the new process is the conversation's session now
 
 
-async def test_a_tool_call_of_background_work_runs_only_while_a_run_can_check_it(
+# --------------------------------------------------------------------------- a background run
+async def test_a_background_subagents_calls_are_checked_and_recorded_for_its_own_run(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Between two turns no run is under way: a call the background task makes then is
-    refused, not run unchecked, and the next run says so. One it makes while a turn is being
-    answered is decided and recorded for that turn's run."""
+    """A subagent at work in the background keeps the child run its ``Agent`` call started:
+    the calls it makes are decided, run and recorded for that run — between two turns, and
+    while a turn is answered too (they are not that turn's)."""
+
+    @tool(side_effects="read")
+    def whoami() -> str:
+        """The run this call is made in."""
+        runtime = current()
+        assert runtime is not None
+        return runtime.run_id
+
+    class Guard(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            return Deny("no searching here") if call.tool == "Grep" else None
+
     scripts = [
         [BACKGROUND, {"text": "started it"}],
         [{"stall": 0.8}, {"text": "done"}],
     ]
-    agent = harness.wrap(options(tmp_path, scripts), id="unattended")
-    await agent.run("research the market", user="u1", thread="t1")
-    tasks = tmp_path / "tasks"
-    reads = json.dumps({"builtin": "Read", "args": {"file_path": "notes.txt"}})
-    (tasks / "t1.call").write_text(reads)
-    await until((tasks / "t1.called").exists)
-    assert json.loads((tasks / "t1.called").read_text()) == {"result": UNATTENDED, "ok": False}
-    assert built_ins(tmp_path) == []
-    (tasks / "t1.called").unlink()
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="attended", hooks=[Guard()]), [whoami])
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    assert child.status is RunStatus.RUNNING and child.metadata[HELPER]["name"] == "researcher"
+    seen, following = await followed(agent, child.run_id)
     live = live_of(agent)
-    assert live is not None and list(live.working) == ["t1"]  # refused, the task goes on
+    assert live is not None and live.turn is None  # no turn is being answered
+
+    assert await calls(tmp_path, READS) == {"result": "Read ran", "ok": True}
+    grep = {"builtin": "Grep", "args": {"pattern": "x"}}
+    assert await calls(tmp_path, grep) == {
+        "result": "Grep was not run: no searching here",  # the run's hooks
+        "ok": False,
+    }
+    # a harness tool is the run's own too
+    assert await calls(tmp_path, {"tool": "whoami"}) == {"result": child.run_id, "ok": True}
+    assert built_ins(tmp_path) == [{"tool": "Read", "args": {"file_path": "notes.txt"}}]
+    assert results(seen) == ["Read", "whoami"] and list(live.working) == ["t1"]
 
     async def during_the_turn() -> None:
         await until(lambda: len(served(tmp_path)) == 2)
-        (tasks / "t1.call").write_text(reads)
+        (tmp_path / "tasks" / "t1.call").write_text(json.dumps(READS))
 
     calling = asyncio.create_task(during_the_turn())
     events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
     await calling
     assert events[-1].data["result"] == "done"
-    assert json.loads((tasks / "t1.called").read_text()) == {"result": "Read ran", "ok": True}
-    assert [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_RESULT] == ["Read"]
+    called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
+    assert called == {"result": "Read ran", "ok": True}
+    assert results(events) == [] and results(seen) == ["Read", "whoami", "Read"]
+    assert warned(events) == [] and not live.refused  # none was refused
+    following.cancel()
+
+
+async def test_a_background_subagents_run_stays_open_across_turns_and_ends_with_its_result(
+    harness: Harness, tmp_path: Path
+) -> None:
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "4"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="open")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    assert (child.status, child.parent_run_id) == (RunStatus.RUNNING, first.run_id)
+    assert child.input == "research the market"
+    second = await agent.run("what is 2+2?", user="u1", thread="t1")
+    assert second.answer == "4"
+    assert (await child_of(harness, first.run_id)).status is RunStatus.RUNNING
+    assert child.run_id in agent.running
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    ended = await when(harness, child.run_id, RunStatus.SUCCESS)
+    assert ended.output == "the market is growing"
+    await until(lambda: child.run_id not in agent.running)
+    live = live_of(agent)
+    assert live is not None and not live.background and not live.closed
+
+
+@pytest.mark.parametrize(
+    ("ending", "status", "why"),
+    [
+        ("failed", RunStatus.ERROR, "the source was down"),
+        ("stop", RunStatus.CANCELLED, ""),  # stopped in Claude Code (its own ``TaskStop``)
+    ],
+)
+async def test_a_background_subagents_run_ends_as_its_task_ended(
+    harness: Harness, tmp_path: Path, ending: str, status: RunStatus, why: str
+) -> None:
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id=f"ended-{ending}")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    (tmp_path / "tasks" / f"t1.{ending}").write_text(why)
+    ended = await when(harness, child.run_id, status)
+    assert (ended.error.message if ended.error is not None else "") == why
+    assert not (tmp_path / "tasks" / "t1.stopped").exists()  # the harness stopped nothing
+    after = await agent.run("and?", user="u1", thread="t1")
+    assert after.answer == "ok" and len({turn["pid"] for turn in served(tmp_path)}) == 1
+
+
+async def test_a_background_subagents_run_is_closed_as_lost_when_its_session_ends(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The session's process died, or was replaced: the run says so, and is not left open."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="lost-run")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    [one] = served(tmp_path)
+    os.kill(one["pid"], signal.SIGKILL)
+    died = await when(harness, child.run_id, RunStatus.ERROR)
+    assert died.error is not None
+    assert "session was closed (its process ended)" in died.error.message
+    assert "background subagent" in died.error.message
+
+    again = await agent.run("research the market", user="u1", thread="t2")
+    other = await child_of(harness, again.run_id)
+    options_changed = {"max_turns": 7}
+    await agent.run("and now?", user="u1", thread="t2", framework_options=options_changed)
+    replaced = await when(harness, other.run_id, RunStatus.ERROR)
+    assert replaced.error is not None
+    assert "options are not the ones it was started with" in replaced.error.message
+
+
+async def test_a_background_subagents_write_asks_a_person_in_the_next_turn_and_then_runs(
+    tmp_path: Path,
+) -> None:
+    """A call the catalog asks a person about pauses the subagent's run as any run pauses,
+    and waits in Claude Code (its process and the task stay). Nothing answers a child run's
+    own question today (``Agent.resume`` refuses a run that has a parent), so it is asked in
+    the conversation's next turn, before that turn's prompt is sent: the turn pauses with
+    it, and its answer lets the call through."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
+    catalog = FakeCatalog({"Write": Rule(risk="write", approve_when="true")})
+    async with with_governance(Harness(config=Settings()), Governance(catalog)) as h:
+        agent = h.wrap(options(tmp_path, scripts, allowed_tools=["Write"]), id="asks")
+        first = await agent.run("research the market", user="u1", thread="t1")
+        child = await child_of(h, first.run_id)
+        (tmp_path / "tasks" / "t1.call").write_text(json.dumps(WRITES))
+        paused = await when(h, child.run_id, RunStatus.PAUSED)
+        asked = paused.awaiting
+        assert asked is not None and asked.tool_call is not None
+        assert (asked.tool_call.tool, asked.tool_call.args) == ("Write", WRITES["args"])
+        live = live_of(agent)
+        [one] = served(tmp_path)
+        assert live is not None and list(live.working) == ["t1"] and alive(one["pid"])
+        assert built_ins(tmp_path) == [] and not (tmp_path / "tasks" / "t1.called").exists()
+        with pytest.raises(ConfigurationError, match="answer the question its parent run"):
+            await agent.resume(asked.interrupt_id, "approve", reviewer="u1")
+
+        turn = await agent.run("how is it going?", user="u1", thread="t1")
+        assert turn.status is RunStatus.PAUSED and turn.interrupt is not None
+        named = (turn.interrupt.payload or {})[SUBAGENT]
+        assert (named["run_id"], named["interrupt_id"]) == (child.run_id, asked.interrupt_id)
+        assert turn.interrupt.tool_call == asked.tool_call
+        assert len(served(tmp_path)) == 1  # its prompt was not sent yet
+
+        done = await agent.resume(turn.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS
+        assert done.answer == "you asked: research the market | how is it going?"
+        await until((tmp_path / "tasks" / "t1.called").exists)
+        called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
+        assert called == {"result": "Write ran", "ok": True}
+        assert built_ins(tmp_path) == [{"tool": "Write", "args": WRITES["args"]}]  # once
+        assert (await when(h, child.run_id, RunStatus.RUNNING)).attempt == 2
+        (tmp_path / "tasks" / "t1.done").write_text("written")
+        assert (await when(h, child.run_id, RunStatus.SUCCESS)).output == "written"
+        _, two = served(tmp_path)
+        assert two["pid"] == one["pid"] and two["prompt"] == "how is it going?"
+
+
+async def test_a_rejected_call_of_a_background_subagent_is_told_to_it(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code asks before a shell command that writes: the harness answers it for the
+    subagent's run (``can_use_tool``), a person decides in the next turn, and the subagent
+    reads the rejection."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="rejects")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)
+    turn = await agent.run("how is it going?", user="u1", thread="t1")
+    assert turn.status is RunStatus.PAUSED and turn.interrupt is not None
+    done = await agent.resume(
+        turn.interrupt.interrupt_id, "reject", reviewer="u1", comment="not there"
+    )
+    assert done.answer == "ok"
+    await until((tmp_path / "tasks" / "t1.called").exists)
+    called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
+    assert called == {
+        "result": "Bash was not run: the approver rejected it (not there)",
+        "ok": False,
+    }
+    assert built_ins(tmp_path) == []
+    assert (await when(harness, child.run_id, RunStatus.RUNNING)).attempt == 2
+
+
+async def test_a_background_subagents_harness_tool_asks_a_person_and_runs_once(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A harness tool the subagent calls is its run's too: one that asks first pauses that
+    run, its call waits in Claude Code, and the approved call runs once."""
+    refunds.clear()
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="bg-refund"), [refund])
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    step = {"tool": "refund", "args": {"order": "o9"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(step))
+    paused = await when(harness, child.run_id, RunStatus.PAUSED)
+    assert paused.awaiting is not None and paused.awaiting.tool_call is not None
+    assert paused.awaiting.tool_call.tool == "refund" and refunds == []
+    turn = await agent.run("how is it going?", user="u1", thread="t1")
+    assert turn.status is RunStatus.PAUSED and turn.interrupt is not None
+    done = await agent.resume(turn.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.answer == "ok"
+    await until((tmp_path / "tasks" / "t1.called").exists)
+    called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
+    assert called == {"result": "refunded o9", "ok": True} and refunds == ["o9"]
+
+
+async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_task(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call waits in Claude Code's hook, which the CLI is told to wait for longer than the
+    harness waits for a person: unanswered, the run is cancelled and the task stopped —
+    never left to the CLI's own timeout."""
+    monkeypatch.setattr(claude_live, "ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(claude_live, "WAITS_SECONDS", 0.1)
+    scripts = [[BACKGROUND, {"text": "started it"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="unanswered")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)
+    await when(harness, child.run_id, RunStatus.CANCELLED)
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    await until((tmp_path / "tasks" / "t1.called").exists)
+    called = json.loads((tmp_path / "tasks" / "t1.called").read_text())
+    assert called == {"result": UNATTENDED, "ok": False} and built_ins(tmp_path) == []
+    live = live_of(agent)
+    assert live is not None and not live.closed
+    hooks = live.client.options.hooks
+    assert {m.timeout for matchers in hooks.values() for m in matchers} == {
+        claude_live.HOOK_SECONDS
+    }
+
+
+async def test_cancelling_a_background_subagents_run_stops_that_subagent_only(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``agent.cancel`` of the child run stops its task with the SDK's own ``stop_task`` (an
+    interrupt would stop every task): the other subagent, its run and the session go on."""
+    other = {"background": {"id": "t2", "agent": "writer", "prompt": "write it up"}}
+    scripts = [[BACKGROUND, other, {"text": "started both"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="stops-one")
+    first = await agent.run("research and write", user="u1", thread="t1")
+    found = [r async for r in harness.runs.iterate(parent_run_id=first.run_id, tenant="default")]
+    records = [await harness.runs.get(r.run_id, tenant="default") for r in found]
+    by_task = {r.input: r.run_id for r in records if r is not None}
+    assert set(by_task) == {"research the market", "write it up"}  # a run each
+    research, writing = by_task["research the market"], by_task["write it up"]
+    seen, following = await followed(agent, writing)
+
+    cancelled = await agent.cancel(research, reason="not needed")
+    assert cancelled.status is RunStatus.CANCELLED
+    tasks = tmp_path / "tasks"
+    await until((tasks / "t1.stopped").exists)
+    live = live_of(agent)
+    assert live is not None
+    await until(lambda: list(live.working) == ["t2"])
+    assert not (tasks / "t2.stopped").exists() and not live.closed
+    # each subagent's calls are its own run's
+    assert await calls(tmp_path, READS, task="t2") == {"result": "Read ran", "ok": True}
+    assert results(seen) == ["Read"]
+    assert (await agent.run("and?", user="u1", thread="t1")).answer == "ok"
+    (tasks / "t2.done").write_text("written up")
+    assert (await when(harness, writing, RunStatus.SUCCESS)).output == "written up"
+    assert len({turn["pid"] for turn in served(tmp_path)}) == 1
+    following.cancel()
+
+
+async def test_cancelling_a_background_run_that_waits_for_a_person_stops_its_task(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused run is cancelled at once, wherever it is cancelled from; the session, which
+    looks every few seconds, then stops the task and answers the call that waited."""
+    monkeypatch.setattr(claude_live, "WAITS_SECONDS", 0.1)
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="cancel-paused")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)
+    assert (await agent.cancel(child.run_id)).status is RunStatus.CANCELLED
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    await until((tmp_path / "tasks" / "t1.called").exists)
+    assert built_ins(tmp_path) == []
+    after = await agent.run("and?", user="u1", thread="t1")  # nothing is asked any more
+    assert after.status is RunStatus.SUCCESS and after.answer == "ok"
+
+
+async def test_a_background_subagents_run_past_its_time_is_stopped_with_stop_task(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The run's limit is its agent's ``run_timeout``, as for a run nothing else bounds: the
+    turn that started it has ended."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="timed", run_timeout=3.0)
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    timed_out = await when(harness, child.run_id, RunStatus.TIMEOUT, seconds=15.0)
+    assert timed_out.error is not None and timed_out.error.code == "run_timeout"
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    live = live_of(agent)
+    assert live is not None and not live.closed
+    await until(lambda: not live.working)
+    assert (await agent.run("and?", user="u1", thread="t1")).answer == "ok"
+
+
+async def test_a_background_subagents_run_past_its_budget_is_stopped_with_stop_task(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Its replies' tokens count toward its run's budget (the agent's), between turns too."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts)
+    agent = harness.wrap(target, id="capped", budget=Budget(max_tokens=40))
+    first = await agent.run("research the market", user="u1", thread="t1")  # 30 of its own
+    child = await child_of(harness, first.run_id)
+    for _ in range(2):  # 15 a reply
+        assert await calls(tmp_path, READS) == {"result": "Read ran", "ok": True}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(READS))  # the third: past 40
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    partial = await when(harness, child.run_id, RunStatus.PARTIAL)
+    assert partial.output == "stopped"
+
+
+async def test_cancelling_the_turn_that_started_a_background_subagent_stops_it_too(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A cancelled run's children are cancelled with it: the subagent it started and that
+    still works is stopped — unlike a later turn's cancel, which leaves it."""
+    scripts = [[BACKGROUND, {"stall": 30}, {"text": "never said"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="parent-cancelled")
+    slow = asyncio.create_task(agent.run("research the market", user="u1", thread="t1"))
+    await until(lambda: len(agent.running) == 2)
+    started = turn_running(agent)
+    child = await child_of(harness, started)
+    await agent.cancel(started)
+    assert (await slow).status is RunStatus.CANCELLED
+    await when(harness, child.run_id, RunStatus.CANCELLED)
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    after = await agent.run("and now?", user="u1", thread="t1")
+    assert after.status is RunStatus.SUCCESS and after.answer == "after"
+
+
+async def test_a_turn_resumed_after_its_own_pause_leaves_its_background_run_open(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The turn that started the subagent paused on a call of its own: the attempt that
+    follows the answer does not end the subagent's run as one it left open."""
+    refunds.clear()
+    script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    agent = arm(harness.wrap(options(tmp_path, [script]), id="paused-parent"), [refund])
+    paused = await agent.run("research, then refund o9", user="u1", thread="t1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    child = await child_of(harness, paused.run_id)
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and refunds == ["o9"]
+    assert (await child_of(harness, paused.run_id)).status is RunStatus.RUNNING
+    assert await calls(tmp_path, READS) == {"result": "Read ran", "ok": True}
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    assert (await when(harness, child.run_id, RunStatus.SUCCESS)).output == (
+        "the market is growing"
+    )
+
+
+async def test_the_main_agents_own_call_with_no_turn_is_still_refused(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Only background work that has a run may act between turns: a call the main agent
+    makes in the turn the session runs for a finished task has none, and is refused."""
+    injected = json.dumps([READS, {"text": "Noted: {last}"}])
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts, env={"FAKE_CLAUDE_INJECTED": injected})
+    agent = harness.wrap(target, id="main-unattended")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    live = live_of(agent)
+    assert live is not None
+    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
+    [noted] = [m.result for m in live.kept if isinstance(m, ResultMessage)]
+    assert noted == f"Noted: {UNATTENDED}" and built_ins(tmp_path) == []
+    events = [e async for e in agent.stream("and?", user="u1", thread="t1")]
     [said] = warned(events)
     assert "were refused" in said and "Read x1" in said
+
+
+async def test_another_users_thread_of_the_same_name_sees_nothing_of_a_background_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Ada's subagent waits for a person: Bob's thread of the same name has its own session
+    and its own subagent's run, and is asked nothing of hers."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="two-users-bg")
+    hers = await agent.run("research the market", user="ada", thread="t1")
+    child = await child_of(harness, hers.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)
+    his = await agent.run("research the market", user="bob", thread="t1")
+    assert his.status is RunStatus.SUCCESS and his.interrupt is None
+    again = await agent.run("how is it going?", user="bob", thread="t1")
+    assert again.status is RunStatus.SUCCESS and again.answer == "ok"  # asked nothing
+    theirs, mine = live_of(agent, "ada"), live_of(agent, "bob")
+    assert theirs is not None and mine is not None and theirs is not mine
+    [her_run], [his_run] = theirs.background.values(), mine.background.values()
+    other = await child_of(harness, his.run_id)
+    assert (her_run.run_id, his_run.run_id) == (child.run_id, other.run_id)
+    assert (child.user_id, other.user_id) == ("ada", "bob") and other.status is RunStatus.RUNNING
+    asked = await agent.run("how is it going?", user="ada", thread="t1")
+    assert asked.status is RunStatus.PAUSED  # hers to answer
+
+
+async def test_today_the_thread_stream_lists_a_threads_turns_and_not_its_background_runs(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """What ``GET {path}/threads/{thread}/events`` replays and follows is the runs whose
+    record names the thread: a conversation's turns. A subagent's child run is a helper's
+    record, whose thread is its own (its run id): it is not on the stream, so its result
+    reaches an open chat only through Claude's next answer. Delivery is not built here."""
+    from trellis.harness.agui.threads import Threads
+
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="streamed")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    second = await agent.run("and?", user="u1", thread="t1")
+    listed = await Threads(agent)._replayed("default", "u1", "t1")
+    assert [r.run_id for r in listed] == [first.run_id, second.run_id]
+    assert child.thread_id == child.run_id and child.agent_id == agent.id
+
+
+async def test_a_foreground_subagents_run_ends_with_its_call_in_a_live_session_too(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A subagent the CLI does not run in the background is the turn's own helper, as in a
+    query's own process: its child run ends with its ``Agent`` call's result."""
+    steps = [{"builtin": "Read", "args": {"file_path": "notes.txt"}}, {"text": "found it"}]
+    script = [{"agent": "researcher", "prompt": "look it up", "steps": steps}, {"text": "{last}"}]
+    agent = harness.wrap(options(tmp_path, [script], allowed_tools=["Read"]), id="foreground")
+    first = await agent.run("look it up", user="u1", thread="t1")
+    assert first.answer == "found it"
+    child = await child_of(harness, first.run_id)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, "found it")
+    live = live_of(agent)
+    assert live is not None and not live.background
 
 
 # --------------------------------------------------------------------------- its life
@@ -674,8 +1196,7 @@ async def test_cancelling_a_turn_ends_it_at_its_next_call_and_leaves_the_backgro
     assert live is not None
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
     await until(lambda: len(served(tmp_path)) == 2)  # the CLI has its prompt
-    [run_id] = agent.running
-    await agent.cancel(run_id, reason="changed my mind")
+    await agent.cancel(turn_running(agent), reason="changed my mind")
     result = await slow
     assert result.status is RunStatus.CANCELLED and live.owed == 1  # the run ended first
     await until(lambda: live.owed == 0)  # then the CLI's turn, at its call

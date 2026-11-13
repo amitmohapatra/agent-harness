@@ -15,8 +15,18 @@ it (``client.query``) instead of into a new process that resumes the session.
   one ``trellis`` MCP server, while each turn has its own (bound to its run). The process is
   given relays: each hands the CLI's request to the turn being served, in a copy of that
   turn's context — ``trellis.current()``, the trace and the tool's own run are that turn's.
-* **No run.** Between two turns no run is under way: nothing can decide a tool call (the
-  run's hooks, governance, a person's approval, its budget) or record it. Such a call is
+* **A background subagent's run.** A subagent the CLI runs in the background
+  (``task_started`` with ``is_backgrounded``) keeps the child run its ``Agent`` call started
+  (``bridges.helpers``) open until its task ends (:class:`Background`): that run's attempts
+  go through the pipeline as any run's, and the subagent's hooks, permission requests and
+  harness tool calls — which the CLI names it in (``agent_id``: the task's id) — are
+  relayed to the attempt under way, turn or no turn. A call that asks a person pauses that
+  run as any run pauses, and waits in the CLI's callback: the question is asked in the
+  conversation's next turn (as a sub-agent's is asked through its parent), and the attempt
+  that follows the answer decides the call from its journal.
+* **No run.** Any other call made between two turns — the main agent's in a turn the
+  session injected, a subagent's with no run — has no run under way: nothing can decide it
+  (the run's hooks, governance, a person's approval, its budget) or record it. Such a call is
   refused (:data:`UNATTENDED`), never run unchecked, and the conversation's next run says
   how many were. Messages that arrive then are kept, the most recent
   (:func:`unattended` — the one place a later change delivers them from); Claude's own
@@ -31,9 +41,12 @@ it (``client.query``) instead of into a new process that resumes the session.
   own: a prompt is sent only once the result of the one before came, and no turn of the
   session's own is seen under way (:meth:`LiveSession.settled`).
 * **Spending.** A result's cost is the process's running total; its usage is the turn's own.
-  A turn is charged what the cost grew by since the last charge
-  (:meth:`LiveSession.charged`) — what background work and injected turns cost in between is
-  on the conversation's next turn; their tokens are in no turn's usage.
+  What the cost grew by since the last result charged (:meth:`LiveSession.charged`) is
+  shared by the tokens each used: the turn the result ends its own usage, each background
+  run what its subagent's replies used since (the share of a turn the session injected
+  for an ended task is that task's run's). With no background run, what injected turns and
+  background shell commands cost is on the conversation's next turn, as their tokens are in
+  no turn's usage.
 * **Its life.** One process per conversation, in this process only; at most :data:`KEPT`. It
   closes :data:`IDLE_SECONDS` after its last activity when nothing works in it, and
   :data:`WORKING_SECONDS` after its last turn whatever does; when a turn needs other options
@@ -52,12 +65,20 @@ import contextvars
 import dataclasses
 import logging
 from collections import Counter, deque
-from collections.abc import AsyncGenerator, Awaitable, Coroutine, Mapping
-from typing import Any, Final
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
+from typing import TYPE_CHECKING, Any, Final
 
+from trellis.contracts import Interrupt, InterruptResolution, RunStatus
+from trellis.harness import budget
+from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
+from trellis.harness.bridges import helpers
 from trellis.harness.bridges.claude import JournalSessions
-from trellis.harness.journal import Journal
+from trellis.harness.journal import Journal, content_key
+from trellis.runs import ConflictError
+
+if TYPE_CHECKING:
+    from trellis.harness.runtime import Runtime
 
 log = logging.getLogger("trellis.harness")
 
@@ -81,6 +102,28 @@ UNATTENDED: Final = (
 )
 #: Why a turn whose session's process ended before its result failed.
 ENDED: Final = "Claude Code's process ended before the turn's result"
+#: How long a background subagent's run waits for a person's answer before it is given up
+#: (cancelled, saying so), and how long the CLI is told to wait for a hook's answer (twice
+#: that: the harness answers first, and a call the CLI gave up on is one it did not run).
+ANSWER_SECONDS: Final = 12 * 3600.0
+HOOK_SECONDS: Final = 2 * ANSWER_SECONDS
+#: How often a background run that waits for a person looks whether it was cancelled there.
+WAITS_SECONDS: Final = 10.0
+#: Why a background subagent's run ended with its session, when no person answered it, and
+#: when its task was stopped in Claude Code (by Claude, or with the turn it was started in).
+LOST: Final = (
+    "Claude's session was closed ({why}): the background subagent's task was stopped with it"
+)
+UNANSWERED: Final = "nobody answered the background subagent's question in {hours:g} hours"
+STOPPED: Final = "the background subagent's task was stopped in Claude Code"
+#: What a background subagent's run answers when its task ended with no word of its own.
+COMPLETED: Final = "The task completed."
+#: Why a background subagent's run whose task failed without saying why ended.
+FAILED: Final = "the background subagent's task failed"
+#: What an attempt of a background run is nudged with: its run paused, or its task ended.
+_NUDGE: Final = object()
+#: What a request relayed to a background run is answered when that run has ended.
+_OVER: Final = object()
 
 
 class Left(Exception):
@@ -123,6 +166,312 @@ class Turn:
         if task.cancelled():
             raise Left
         return task.result()
+
+
+def _tokens(usage: Mapping[str, Any] | None) -> int:
+    """The tokens a reply (or a turn's result) says it used, read and written."""
+    used = usage or {}
+    keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    return sum(int(used.get(key) or 0) for key in (*keys, "output_tokens"))
+
+
+def _waits(answer: Any) -> bool:
+    """Whether a relayed request was answered that its run pauses on it — the adapter's
+    hook (its ``stopReason``), its permission check (its message), a harness tool (its
+    result)."""
+    from trellis.harness.tools.convert.claude import WAITING
+
+    if not isinstance(answer, dict):
+        return getattr(answer, "message", None) == WAITING
+    content = answer.get("content")
+    said = isinstance(content, list) and any(c.get("text") == WAITING for c in content)
+    return answer.get("stopReason") == WAITING or (bool(answer.get("is_error")) and said)
+
+
+class Background:
+    """A subagent at work in the background of a session, and the child run that is its
+    record: the helper its ``Agent`` call started (``bridges.helpers``), kept open from
+    there until the SDK says the task ended.
+
+    The run's attempts go through the pipeline (:meth:`_run`): each is served the
+    subagent's own messages (:meth:`served`) and ends with a result made of the task's end —
+    ``SUCCESS`` with what the subagent said last, ``ERROR`` for a task that failed,
+    ``CANCELLED`` for one stopped in Claude Code — or as any run ends: paused, cancelled,
+    out of time, its budget spent (its task is stopped then with the SDK's own
+    ``stop_task``: an interrupt would stop every task). The requests the CLI makes for the
+    subagent are done in the attempt under way (:meth:`asked`); one the run pauses on waits
+    there for the attempt that follows the person's answer."""
+
+    def __init__(self, session: LiveSession, task_id: str, call_id: str, helper: Any) -> None:
+        turn = session.turn
+        assert turn is not None  # the turn that started it is being served
+        self.session = session
+        #: the SDK's id of the task: the ``agent_id`` of the subagent's hooks and requests
+        self.task_id = task_id
+        #: the ``Agent`` call that started it: its messages' ``parent_tool_use_id``
+        self.call_id = call_id
+        self.run_id: str = helper.run_id
+        self.parent_run_id: str = helper.parent_run_id
+        self.name: str = helper.name
+        self.agent = turn.runtime.agent
+        self.tenant = turn.runtime.tenant
+        #: the framework options of the turn that started it: what the process has
+        self.given = dict(turn.runtime.framework_options)
+        #: the attempt under way
+        self.turn: Turn | None = None
+        #: the run has ended
+        self.over = False
+        #: how the task ended, as the SDK said: its status and summary
+        self.ended: tuple[str, str] | None = None
+        #: why the run cannot go on (:meth:`abandoned`)
+        self.lost: str | None = None
+        #: what the subagent said last
+        self.said = ""
+        #: the question the run is paused on, until the conversation's next turn asked it
+        self.question: Interrupt | None = None
+        #: the tokens its replies used since the process's cost was last shared out
+        self.unbilled = 0
+        #: the cost charged while no attempt was under way, and the replies' usage
+        self._owed: list[tuple[Mapping[str, Any] | None, float]] = []
+        self._backlog: list[Any] = []
+        self._counted: set[str] = set()
+        self._waiting: list[asyncio.Future[None]] = []
+        self._settled = asyncio.Event()
+        self._answer: asyncio.Future[InterruptResolution | None] | None = None
+        self.task = asyncio.get_running_loop().create_task(
+            self._run(), context=contextvars.Context()
+        )
+
+    # ------------------------------------------------------------------ its run
+    async def _run(self) -> None:
+        """The run's attempts, one after each answer, until it ends."""
+        from trellis.harness import pipeline
+
+        agent, runs = self.agent, self.agent.harness.runs
+        try:
+            record = await runs.get(self.run_id, tenant=self.tenant)
+            assert record is not None  # its ``Agent`` call started it
+            result = await pipeline.attempt(agent, record, record.input)
+            while result.status is RunStatus.PAUSED:
+                self.question = result.interrupt
+                resolution = await self._answered()
+                self.question = None
+                paused = await runs.get(self.run_id, tenant=self.tenant)
+                if resolution is None or paused is None or paused.status is not RunStatus.PAUSED:
+                    break
+                # as any paused run goes on (one the person abandons ends there)
+                result = await agent._continue(paused, resolution)
+        except Exception:
+            log.exception("background run %s of task %s", self.run_id, self.task_id)
+        finally:
+            self.over = True
+            self._woken()
+            self.session._over(self)
+
+    async def _answered(self) -> InterruptResolution | None:
+        """The person's answer to the question the run is paused on (``None``: the run ended
+        there — cancelled, :meth:`abandoned`)."""
+        loop = asyncio.get_running_loop()
+        self._answer, asked = loop.create_future(), loop.time()
+        try:
+            while True:
+                done, _ = await asyncio.wait({self._answer}, timeout=WAITS_SECONDS)
+                if done:
+                    return self._answer.result()
+                record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
+                if record is None or record.status is not RunStatus.PAUSED:
+                    return None  # cancelled where it waited (``agent.cancel``)
+                if loop.time() - asked > ANSWER_SECONDS:
+                    await self.abandoned(UNANSWERED.format(hours=ANSWER_SECONDS / 3600))
+        finally:
+            self._answer = None
+
+    def answered(self, resolution: InterruptResolution) -> None:
+        """The person answered the run's question (asked in the conversation's turn)."""
+        self.question = None
+        if self._answer is not None and not self._answer.done():
+            self._answer.set_result(resolution)
+
+    async def abandoned(self, why: str) -> None:
+        """The run cannot go on (its session closed, nobody answered it, its task was stopped
+        while it waited): an attempt under way fails saying ``why``, a run that waits for a
+        person is cancelled with ``why`` as the reason."""
+        self.lost = why
+        self._settled.set()
+        if self.turn is not None:
+            self.turn.queue.put_nowait(None)
+        elif self._answer is not None and not self._answer.done():
+            with contextlib.suppress(ConflictError):  # it ended meanwhile
+                await self.agent.harness.runs.cancel(self.run_id, reason=why, tenant=self.tenant)
+            if self._answer is not None and not self._answer.done():
+                self._answer.set_result(None)
+
+    def cancel(self, reason: str) -> None:
+        """The attempt under way cancelled, as ``Agent.cancel`` cancels a run's."""
+        runtime = None if self.turn is None else self.turn.runtime
+        if runtime is not None and runtime.running_in is not None:
+            runtime.cancelled = reason
+            runtime.running_in.cancel()
+
+    # ------------------------------------------------------------------ an attempt
+    async def served(self, turn: Turn) -> AsyncGenerator[Any, None]:
+        """One attempt of the run: the subagent's messages while its task works, then the
+        result of the task's end. It ends before that when the run pauses (the call that
+        asked waits: :meth:`asked`)."""
+        if self.lost is not None:
+            raise RuntimeError(self.lost)
+        self._attach(turn)
+        try:
+            while True:
+                message = await turn.queue.get()
+                if message is None:
+                    raise RuntimeError(self.lost or ENDED)
+                if turn.runtime.pending is not None:
+                    if message is not _NUDGE:  # kept for the attempt that follows
+                        self._backlog.append(message)
+                    return
+                if message is not _NUDGE:
+                    yield message
+                elif self.ended is not None:
+                    break
+            # what the task cost is known at the session's next result (``LiveSession.charged``)
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(SETTLE_SECONDS):
+                    await self._settled.wait()
+            yield self._result(turn.runtime)
+        finally:
+            self._detach(turn)
+
+    def _attach(self, turn: Turn) -> None:
+        """``turn`` is the attempt under way: it has what came while there was none, and the
+        requests that waited for it go on."""
+        self.turn = turn
+        for message in self._backlog:
+            turn.queue.put_nowait(message)
+        self._backlog.clear()
+        owed, self._owed = self._owed, []
+        for usage, cost in owed:
+            self.spent(usage, cost)
+        if self.ended is not None:
+            turn.queue.put_nowait(_NUDGE)
+        self._woken()
+
+    def _detach(self, turn: Turn) -> None:
+        """The attempt ended: its requests under way end with it, and what it did not take
+        is kept for the next."""
+        for call in list(turn.calls):
+            call.cancel()
+        self.turn = None
+        while not turn.queue.empty():
+            message = turn.queue.get_nowait()
+            if message is not None and message is not _NUDGE:
+                self._backlog.append(message)
+
+    def _result(self, runtime: Runtime) -> Any:
+        """The result an attempt ends with, made of the task's end."""
+        from claude_agent_sdk import ResultMessage
+
+        assert self.ended is not None
+        status, summary = self.ended
+        ended: dict[str, Any] = {"duration_ms": 0, "duration_api_ms": 0, "num_turns": 0}
+        if status == "completed" or runtime.budget_spent is not None:
+            said = self.said or summary or COMPLETED
+            return ResultMessage("success", is_error=False, session_id="", result=said, **ended)
+        if status == "failed":
+            why = [summary or FAILED]
+            return ResultMessage("failed", is_error=True, session_id="", errors=why, **ended)
+        raise RunCancelled(STOPPED)
+
+    def took(self, message: Any) -> None:
+        """One of the subagent's own messages: its reply's usage on the run, the message to
+        the attempt under way (kept for the next when there is none)."""
+        from claude_agent_sdk import AssistantMessage, TextBlock
+
+        if self.over:  # its task is being stopped
+            return
+        if isinstance(message, AssistantMessage):
+            self.said = "".join(b.text for b in message.content if isinstance(b, TextBlock)) or (
+                self.said
+            )
+            # a reply comes as one message a block, each with the reply's id and usage
+            if message.usage and message.message_id not in self._counted:
+                if message.message_id:
+                    self._counted.add(message.message_id)
+                self.unbilled += _tokens(message.usage)
+                self.spent(message.usage, 0.0)
+        if self.turn is not None:
+            self.turn.queue.put_nowait(message)
+        else:
+            self._backlog.append(message)
+
+    def finished(self, status: str, summary: str) -> None:
+        """The SDK said the task ended (its notification, or an update to a terminal status:
+        either may be all that comes, and the notification has the summary)."""
+        self.ended = (status, summary or (self.ended or ("", ""))[1])
+        if self.turn is not None:
+            self.turn.queue.put_nowait(_NUDGE)
+        elif self._answer is not None:  # it waits for an answer about a call that is no more
+            self.session._aside_run(self.abandoned(STOPPED))
+
+    def spent(self, usage: Mapping[str, Any] | None, cost: float) -> None:
+        """A reply's ``usage``, or a share of the process's ``cost``, on the run — the
+        attempt under way, else the next — and on its budget: spent, the task is stopped."""
+        turn = self.turn
+        if turn is None:
+            self._owed.append((usage, cost))
+            return
+        used = usage or {}
+        cached = int(used.get("cache_read_input_tokens") or 0)
+        output = int(used.get("output_tokens") or 0)
+        budget.account(
+            turn.runtime,
+            model=turn.options.model,
+            input_tokens=_tokens(used) - output,
+            output_tokens=output,
+            cached=cached,
+            cost=cost,
+            calls=1 if usage else 0,
+        )
+        reached = budget.reached(turn.runtime)
+        if reached is not None and turn.runtime.budget_spent is None:
+            budget.stopped(turn.runtime, reached)
+            self.session._aside_run(self.session._stop(self.task_id))
+
+    # ------------------------------------------------------------------ its requests
+    async def asked(self, make: Callable[[Turn], Coroutine[Any, Any, Any]]) -> Any:
+        """A request the CLI makes for the subagent — a hook, a permission check, a harness
+        tool's call — done by ``make`` in the attempt under way, in its context. When the
+        run pauses on it, the request waits and is done again in the attempt that follows
+        the person's answer, whose journal answers it. :data:`_OVER`: the run has ended."""
+        while True:
+            turn = await self._attempt()
+            if turn is None:
+                return _OVER
+            try:
+                answer = await turn.within(make(turn))
+            except Left:
+                continue
+            if turn.runtime.pending is None or not _waits(answer):
+                return answer
+            turn.queue.put_nowait(_NUDGE)  # the attempt ends paused
+
+    async def _attempt(self) -> Turn | None:
+        """The attempt under way, waited for (``None``: the run ended): after a pause, the
+        one that follows the answer."""
+        while not self.over:
+            turn = self.turn
+            if turn is not None and turn.runtime.pending is None:
+                return turn
+            waiter = asyncio.get_running_loop().create_future()
+            self._waiting.append(waiter)
+            await waiter
+        return None
+
+    def _woken(self) -> None:
+        waiting, self._waiting = self._waiting, []
+        for waiter in waiting:
+            if not waiter.done():
+                waiter.set_result(None)
 
 
 class Mirror:
@@ -172,6 +521,12 @@ class LiveSession:
         self.mirror: Mirror | None = None
         #: the background tasks under way, by id: what each is
         self.working: dict[str, str] = {}
+        #: the background subagents that have a run, by their task's id
+        self.background: dict[str, Background] = {}
+        #: the harness tool calls their hook let through, by call: whose each is
+        self._calling: dict[str, tuple[str, dict[str, Any], Background]] = {}
+        #: why the session was closed (``LiveSessions.forget``)
+        self.why = "the harness was closed"
         #: the messages no turn took (:func:`unattended`)
         self.kept: deque[Any] = deque(maxlen=UNATTENDED_KEPT)
         #: the tool calls refused since the last turn for want of a run, by tool
@@ -230,7 +585,10 @@ class LiveSession:
         return {
             event: [
                 dataclasses.replace(
-                    matcher, hooks=[self._hook(event, m, c) for c in range(len(matcher.hooks))]
+                    matcher,
+                    hooks=[self._hook(event, m, c) for c in range(len(matcher.hooks))],
+                    # a background run's call may wait for a person in its hook
+                    timeout=matcher.timeout or HOOK_SECONDS,
                 )
                 for m, matcher in enumerate(matchers)
             ]
@@ -238,11 +596,23 @@ class LiveSession:
         }
 
     def _hook(self, event: str, matcher: int, callback: int) -> Any:
-        """The relay of one hook: the same hook of the turn being served; with none, a tool
-        call is refused (:data:`UNATTENDED`) and any other event passes."""
+        """The relay of one hook: the same hook of the turn being served — of the attempt of
+        its run, for a background subagent that has one (:class:`Background`); with none, a
+        tool call is refused (:data:`UNATTENDED`) and any other event passes."""
 
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
-            turn = self.turn
+            found = self.background.get(str(given.get("agent_id") or ""))
+            if found is not None:
+                answer = await found.asked(
+                    lambda at: at.options.hooks[event][matcher].hooks[callback](
+                        given, tool_use_id, hook
+                    )
+                )
+                if answer is not _OVER:
+                    self._noted(event, given, answer, found)
+                    return answer
+            # a subagent whose run has ended (cancelled, out of time) has none to decide it
+            turn = self.turn if found is None else None
             if turn is not None:
                 try:
                     own = turn.options.hooks[event][matcher].hooks[callback]
@@ -264,6 +634,23 @@ class LiveSession:
 
         return relay
 
+    def _noted(self, event: str, given: Any, answer: Any, found: Background) -> None:
+        """Whose a harness tool's call is, once its hook let it through (the call itself
+        comes with no word of who makes it: :meth:`_call`); forgotten when a hook refused
+        it, and once it ran."""
+        from trellis.harness.tools.convert.claude import SERVER
+
+        name, ref = str(given.get("tool_name") or ""), str(given.get("tool_use_id") or "")
+        if not name.startswith(f"mcp__{SERVER}__"):
+            return
+        said = answer.get("hookSpecificOutput") if isinstance(answer, dict) else None
+        decided = (said or {}).get("permissionDecision")
+        if event == "PreToolUse" and decided == "allow":
+            args = dict(given.get("tool_input") or {})
+            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), args, found)
+        elif event != "PreToolUse" or decided == "deny":
+            self._calling.pop(ref, None)
+
     def _ends(self, agent_id: Any) -> bool:
         """Whether a call no turn can take ends the CLI's turn: the main agent's own
         (a subagent's names it), in a turn that was left and whose result is still to come."""
@@ -272,7 +659,12 @@ class LiveSession:
     async def _can_use_tool(self, name: str, args: dict[str, Any], context: Any) -> Any:
         from claude_agent_sdk import PermissionResultDeny
 
-        turn = self.turn
+        found = self.background.get(str(getattr(context, "agent_id", None) or ""))
+        if found is not None:
+            answer = await found.asked(lambda at: at.options.can_use_tool(name, args, context))
+            if answer is not _OVER:
+                return answer
+        turn = self.turn if found is None else None
         if turn is not None:
             with contextlib.suppress(Left):
                 return await turn.within(turn.options.can_use_tool(name, args, context))
@@ -282,10 +674,21 @@ class LiveSession:
         return PermissionResultDeny(message=UNATTENDED)
 
     async def _call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        """A harness tool's call: the tool of that name the turn being served has."""
+        """A harness tool's call: the tool of that name the turn being served has — or, the
+        call a background subagent's (:meth:`_noted`), the attempt of its run."""
         from trellis.harness.tools.convert import claude as convert
 
-        turn = self.turn
+        ref = next((r for r, (n, a, _) in self._calling.items() if (n, a) == (name, args)), None)
+        found = None if ref is None else self._calling.pop(ref)[2]
+        if found is not None:
+
+            async def made(at: Turn) -> dict[str, Any]:
+                return await convert.handler(at.tools, name)(args)
+
+            answer = await found.asked(made)
+            if answer is not _OVER:
+                return answer
+        turn = self.turn if found is None else None
         if turn is not None:
             # the turn lists what the process lists (its shape): it has the tool
             own = convert.handler(turn.tools, name)
@@ -317,6 +720,10 @@ class LiveSession:
         if isinstance(found, str) and found:
             self.session_id = found
         self._tracked(message)
+        whose = self._of(getattr(message, "parent_tool_use_id", None))
+        if whose is not None:  # a background subagent's own message: its run's
+            whose.took(message)
+            return
         result = isinstance(message, ResultMessage)
         origin = getattr(message, "origin", None)
         own = origin is None or origin.get("kind") == "human"
@@ -336,8 +743,11 @@ class LiveSession:
             self.owed = 0
         if turn is not None and mine and (own if result else not self.injected):
             turn.answered = result
-            turn.queue.put_nowait(message)
+            charged = self.charged(message, own=own, taken=True) if result else message
+            turn.queue.put_nowait(charged)
         else:
+            if result:
+                self.charged(message, own=own, taken=False)
             unattended(self, message)
             if turn is None:
                 self._rest()
@@ -358,10 +768,80 @@ class LiveSession:
 
         if isinstance(message, TaskStartedMessage):
             self.working[message.task_id] = message.description
+            self._launched(message)
         elif isinstance(message, TaskNotificationMessage) or (
             isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES
         ):
             self.working.pop(message.task_id, None)
+            found = self.background.get(message.task_id)
+            if found is not None:
+                found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
+                if found.over:  # its run ended first: its task was stopped
+                    self.background.pop(message.task_id, None)
+
+    def _launched(self, message: Any) -> None:
+        """A subagent the turn being served started in the background (the CLI says which
+        it runs so: ``is_backgrounded``): the child run its ``Agent`` call started is kept
+        open from here (:class:`Background`), no longer that turn's to end."""
+        turn = self.turn
+        started = None if turn is None else turn.runtime.helpers
+        if started is None or not message.tool_use_id or not message.data.get("is_backgrounded"):
+            return
+        helper = started.detached(message.tool_use_id)
+        if helper is not None:
+            found = Background(self, message.task_id, message.tool_use_id, helper)
+            self.background[message.task_id] = self.sessions.attended[found.run_id] = found
+
+    def _of(self, call_id: Any) -> Background | None:
+        """The background run of the subagent the ``Agent`` call ``call_id`` started."""
+        return next((b for b in self.background.values() if b.call_id == call_id), None)
+
+    def _over(self, found: Background) -> None:
+        """``found``'s run ended: a task still at work is stopped, with the SDK's own stop
+        (an interrupt would stop every task of the session), and what it asks until it ends
+        is refused."""
+        self.sessions.attended.pop(found.run_id, None)
+        helpers.released(found.run_id)
+        if found.ended is not None:
+            self.background.pop(found.task_id, None)
+        elif not self.closed:
+            self._aside_run(self._stop(found.task_id))
+
+    async def _stop(self, task_id: str) -> None:
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(SETTLE_SECONDS):
+                await self.client.stop_task(task_id)
+
+    async def asks(self, runtime: Runtime) -> None:
+        """The questions the session's background runs are paused on, asked in ``runtime``'s
+        run — a turn of the conversation, before its prompt is sent — as a sub-agent's
+        question is asked through its parent (``subagents.child_run``): the turn pauses with
+        each, and its answer is handed to the run that asked."""
+        from trellis.harness.subagents import ASKED, SUBAGENT
+
+        for found in list(self.background.values()):
+            asked = found.question
+            if asked is None:
+                continue
+            record = await found.agent.harness.runs.get(asked.run_id, tenant=found.tenant)
+            if record is None or record.status is not RunStatus.PAUSED:
+                continue  # cancelled where it waited: nothing to ask any more
+            named = {
+                "agent_id": found.name,
+                "run_id": asked.run_id,
+                "interrupt_id": asked.interrupt_id,
+                "background": True,
+            }
+            answered = await runtime.interrupt(
+                content_key("subagent", asked.run_id, asked.interrupt_id),
+                payload={**(asked.payload or {}), SUBAGENT: named},
+                **{name: getattr(asked, name) for name in ASKED},
+            )
+            found.answered(
+                answered.model_copy(
+                    update={"interrupt_id": asked.interrupt_id, "run_id": asked.run_id}
+                )
+            )
 
     def _ended(self) -> None:
         """The process ended of itself: the turn being served is told, the session is gone."""
@@ -414,6 +894,11 @@ class LiveSession:
         for call in list(turn.calls):
             call.cancel()
         self.turn = None
+        for found in self.background.values():
+            # a cancelled run's children are cancelled with it
+            cancelled: str | None = turn.runtime.cancelled
+            if cancelled is not None and found.parent_run_id == turn.runtime.run_id:
+                found.cancel(cancelled)
         if self.mirror is not None:
             self.mirror.into = None
         if not self.closed:
@@ -443,16 +928,40 @@ class LiveSession:
             async with asyncio.timeout(SETTLE_SECONDS):
                 await self.client.interrupt()
 
-    def charged(self, result: Any) -> Any:
-        """``result`` with the cost this turn is charged: what the process's running total
-        grew by since the last charged result (a total that did not grow is taken as the
-        turn's own: never less than nothing). Its usage is the turn's own already."""
-        if result.total_cost_usd is None:
+    def charged(self, result: Any, *, own: bool = True, taken: bool = True) -> Any:
+        """``result`` with the cost the turn it ends is charged (``taken``: the turn being
+        served; ``own``: a turn a caller sent, not one the session injected). The cost a
+        result carries is the process's running total: what it grew by since the last result
+        charged (a total that did not grow is taken as the growth: never less than nothing)
+        is shared by the tokens each used since — the turn its own usage, each background
+        run what its subagent's replies used. The share of a turn no run is served for is
+        the run's whose task's end the session ran it for; with none, it stays for the
+        conversation's next turn, as the whole does with no background run to charge."""
+        open_ = [b for b in self.background.values() if not b.over]
+        runs = [b for b in open_ if b.unbilled]
+        after = None if own else next((b for b in open_ if b.ended is not None), None)
+        for found in open_:
+            if found.ended is not None:  # what its task cost is known now
+                found._settled.set()
+        if result.total_cost_usd is None or not (taken or runs or after):
             return result
         total = float(result.total_cost_usd)
         more = total - self.billed
+        more = more if more >= 0 else total
+        mine = _tokens(result.usage)
+        whole = mine + sum(b.unbilled for b in runs)
+        share = more * mine / whole if whole else more
+        for found in runs:
+            found.spent(None, more * found.unbilled / whole)
+            found.unbilled = 0
         self.billed = total
-        return dataclasses.replace(result, total_cost_usd=more if more >= 0 else total)
+        if taken:
+            return dataclasses.replace(result, total_cost_usd=share)
+        if after is not None:
+            after.spent(None, share)
+        else:
+            self.billed -= share
+        return result
 
     # ------------------------------------------------------------------ its end
     def _rest(self) -> None:
@@ -489,6 +998,9 @@ class LiveSession:
         turn = self.turn
         if turn is not None:
             turn.queue.put_nowait(None)
+        runs = list(self.background.values())
+        for found in runs:  # each ends saying why
+            await found.abandoned(LOST.format(why=self.why))
         kept = None if self.kept_in is None else self.kept_in.get(self.key)
         if self.mirror is not None and kept is not None and kept[0] == self.session_id:
             assert self.kept_in is not None
@@ -500,6 +1012,8 @@ class LiveSession:
         if self.client is not None:
             with contextlib.suppress(Exception):
                 await self.client.disconnect()
+        if runs:
+            await asyncio.wait({found.task for found in runs})
 
 
 class LiveSessions:
@@ -507,6 +1021,8 @@ class LiveSessions:
 
     def __init__(self) -> None:
         self._open: dict[str, LiveSession] = {}
+        #: the background subagents' runs under way in them, by run (:class:`Background`)
+        self.attended: dict[str, Background] = {}
         #: what each conversation's next run is told of work that ended with its session
         self._lost: LRU[str, str] = LRU()
 
@@ -539,6 +1055,7 @@ class LiveSessions:
         """``session`` is no longer the conversation's; the work that ends with it is what
         the conversation's next run is told (:meth:`told`)."""
         self._open.pop(session.key, None)
+        session.why = why
         if session.working:
             tasks = "; ".join(f"{task} ({what})" for task, what in session.working.items())
             self._lost[session.key] = (
@@ -582,4 +1099,12 @@ async def _apart[T](work: Awaitable[T]) -> T:
         raise
 
 
-__all__ = ["IDLE_SECONDS", "KEPT", "UNATTENDED", "LiveSession", "LiveSessions", "Turn"]
+__all__ = [
+    "IDLE_SECONDS",
+    "KEPT",
+    "UNATTENDED",
+    "Background",
+    "LiveSession",
+    "LiveSessions",
+    "Turn",
+]

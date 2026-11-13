@@ -32,7 +32,9 @@
   sent into it (``bridges.claude_live``: the SDK's ``ClaudeSDKClient``), so what Claude started
   in the background — a subagent with ``background``, a shell command — goes on between the
   turns; a turn ends at the result of its own prompt, and a turn the session injects (a
-  finished task's notification) is never its answer. A run with no conversation, a sub-agent's
+  finished task's notification) is never its answer. A subagent the CLI runs in the
+  background keeps its child run open until its task ends, its calls decided and recorded
+  for that run (``claude_live.Background``). A run with no conversation, a sub-agent's
   run, and a turn with no live session (another server, a restart, one closed) run as below:
   one process for the query, resuming the conversation's session;
 * pause: an approval or ``trellis.current().ask`` stops consuming the query (the CLI process
@@ -98,7 +100,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import JournalSessions, session_store, with_context
-from trellis.harness.bridges.claude_live import LiveSession, LiveSessions, Turn
+from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -266,6 +268,9 @@ class ClaudeInput:
     denied: bool = False
     #: the person answered a question that call asked while it ran (not its approval)
     asked: bool = False
+    #: the run paused before its prompt was sent — on the question of a background
+    #: subagent's run of its conversation (``claude_live.LiveSession.asks``): it is sent now
+    unsent: bool = False
 
 
 class ClaudeRunError(RuntimeError):
@@ -355,6 +360,10 @@ class ClaudeAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
+        from trellis.harness.subagents import asked_by
+
+        if (asked_by(pending.interrupt) or {}).get("background"):
+            return dataclasses.replace(native_input, unsent=True)
         return dataclasses.replace(
             native_input,
             answered=pending.call,
@@ -411,8 +420,15 @@ class ClaudeAdapter:
         run (``bridges.helpers``) from its ``Agent`` call to that call's result."""
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        # a background subagent's run has no query of its own: its task works in a session
+        found = self.live.attended.get(run.runtime.run_id)
+        source = (
+            self._messages(target, native_input, run)
+            if found is None
+            else self._attended(target, run, found)
+        )
         try:
-            async with aclosing(self._messages(target, native_input, run)) as messages:
+            async with aclosing(source) as messages:
                 async for message in messages:
                     await _subagents(helpers, message)
                     yield message
@@ -421,6 +437,28 @@ class ClaudeAdapter:
             raise
         finally:
             await helpers.closed(error)
+
+    async def _attended(
+        self, target: Any, run: Invocation, found: Background
+    ) -> AsyncGenerator[Any, None]:
+        """One attempt of a background subagent's run (``claude_live.Background``): the
+        subagent's messages while its task works in its conversation's live session, then
+        the result made of the task's end. The attempt's own hooks, permission check and
+        harness tools — made as a query's are — decide and record the calls the CLI makes
+        for the subagent, and its steps are watched for a stall as a query's."""
+        runtime = run.runtime
+        target = dataclasses.replace(target, **found.given) if found.given else target
+        steps = Steps(runtime, self)
+        options = _options(target, None, run, None, steps, kept=True)
+        steps.waiting()
+        try:
+            async with aclosing(found.served(_turn(run, options))) as messages:
+                async for message in messages:
+                    steps.waiting()
+                    yield message
+        finally:
+            steps.closed = True
+            runtime.model_ended(STEP)
 
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
@@ -539,7 +577,7 @@ class ClaudeAdapter:
             options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
-        first = last or session is None or runtime.attempt == 1
+        first = last or session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         # each reply's usage by its message id, until the query's result counts them all
@@ -548,7 +586,7 @@ class ClaudeAdapter:
         try:
             if kept:
                 assert key is not None
-                live = await self._live(key, options, run, session)
+                live = await self._live(key, options, run, session, unsent=first)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
                 _said(self.live, runtime)
@@ -566,8 +604,8 @@ class ClaudeAdapter:
                     if isinstance(found, str):
                         runtime.replay.journal.session = found
                     if isinstance(message, ResultMessage):
-                        # a live session's result carries its process's running totals
-                        _spent(runtime, options, message if live is None else live.charged(message))
+                        # a live session's result comes with what its turn is charged
+                        _spent(runtime, options, message)
                         replies = None
                     elif replies is not None and isinstance(message, AssistantMessage):
                         if message.message_id and message.usage:
@@ -586,12 +624,14 @@ class ClaudeAdapter:
                 _spent(runtime, options, None, replies.values())
 
     async def _live(
-        self, key: str, options: Any, run: Invocation, session: str | None
+        self, key: str, options: Any, run: Invocation, session: str | None, *, unsent: bool
     ) -> LiveSession | None:
         """The conversation's live session for this query: the one kept, when it was started
         with these options, holds the session the query continues and owes no earlier turn's
         result; else a new one, started as a query's own process is (``resume=``). ``None``:
-        there is no room for one (``claude_live.KEPT``)."""
+        there is no room for one (``claude_live.KEPT``). ``unsent``: the turn's own prompt is
+        still to send — what the session's background runs wait to ask a person is asked
+        first, in this run (``LiveSession.asks``)."""
         runtime = run.runtime
         shape = _shape(options)
         found = self.live.get(key)
@@ -610,6 +650,8 @@ class ClaudeAdapter:
             transcripts = runtime.replay.journal.transcripts
             found = await self.live.open(key, shape, options, transcripts)
         _said(self.live, runtime)
+        if found is not None and unsent:
+            await found.asks(runtime)
         return found
 
 

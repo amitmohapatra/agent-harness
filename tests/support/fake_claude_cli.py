@@ -65,9 +65,15 @@ Background work, as far as the SDK's message types say its shape (``task_started
 with ``run_in_background`` (``"shell": "<command>"`` instead: a ``Bash`` one) that returns at
 once and leaves task ``t1`` running. Files in ``FAKE_CLAUDE_TASKS`` drive a running task from
 the test: ``t1.call`` (a JSON step) is a tool call the task makes, as a subagent's — its
-result is written to ``t1.called``; ``t1.done`` (a summary) ends the task: a
-``task_notification``, then — after the turn under way, if any — a turn the session injects,
-scripted by ``FAKE_CLAUDE_INJECTED`` (``{summary}``: the task's). An ``interrupt`` control
+hooks and its permission request name the subagent by the task's id (``agent_id``), and its
+result is written to ``t1.called``; ``t1.done`` (a summary) ends the task: the subagent's last
+reply, a ``task_updated`` and a ``task_notification``, then — after the turn under way, if any
+— a turn the session injects,
+scripted by ``FAKE_CLAUDE_INJECTED`` (``{summary}``: the task's). ``t1.failed`` (why) ends it
+``failed``, and ``t1.stop`` stops it as the "model"'s own ``TaskStop`` does; a ``stop_task``
+control request stops the task it names (named in ``t1.stopped``), leaving the others: either
+way a ``task_updated`` ``killed``, a ``task_notification`` ``stopped`` and an injected turn,
+as the bundled CLI sends them. An ``interrupt`` control
 request ends the turn under way with the result of an interrupted turn — and stops every
 background task, as the bundled CLI does (``task_updated`` ``killed``, ``task_notification``
 ``stopped``); a hook's ``continue: false`` and a denied permission's ``interrupt`` end the turn
@@ -190,11 +196,25 @@ class Cli:
             if message["request"].get("subtype") == "interrupt":
                 self.stopping = self.in_turn
                 self.stopped()
+            self.asked_to_stop(message)
             acknowledge(message)
 
-    def stopped(self) -> None:
-        """An interrupt stops what runs in the background, as the real CLI's does."""
+    def asked_to_stop(self, message: dict[str, Any]) -> None:
+        """A ``stop_task`` control request stops the task it names, and no other."""
+        request = message["request"]
+        if request.get("subtype") == "stop_task" and request["task_id"] in self.tasks:
+            folder = os.environ.get("FAKE_CLAUDE_TASKS")
+            if folder:
+                (Path(folder) / f"{request['task_id']}.stopped").write_text("stop_task")
+            self.stopped(request["task_id"])
+            self.owed.append("stopped")
+
+    def stopped(self, only: str | None = None) -> None:
+        """An interrupt stops what runs in the background, as the real CLI's does (``only``:
+        the one task a ``stop_task`` names)."""
         for task_id, task in list(self.tasks.items()):
+            if only not in (None, task_id):
+                continue
             del self.tasks[task_id]
             frame = {"type": "system", "task_id": task_id, "session_id": self.session}
             send({**frame, "subtype": "task_updated", "patch": {"status": "killed"}})
@@ -238,10 +258,7 @@ class Cli:
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
                 was, self.working = (
                     self.working,
-                    {
-                        "agent_id": f"agent_{task['tool_id']}",
-                        "agent_type": task["agent"],
-                    },
+                    {"agent_id": task_id, "agent_type": task["agent"]},
                 )
                 try:
                     said, ok, _ = self.tool(
@@ -257,24 +274,36 @@ class Cli:
                 (Path(folder) / f"{task_id}.called").write_text(
                     json.dumps({"result": said, "ok": ok})
                 )
-            done = Path(folder) / f"{task_id}.done"
-            if done.exists():
-                summary = done.read_text()
-                done.unlink()
+            if task_id not in self.tasks:  # stopped while its call waited
+                continue
+            if (Path(folder) / f"{task_id}.stop").exists():
+                (Path(folder) / f"{task_id}.stop").unlink()
+                self.stopped(task_id)
+                self.owed.append("stopped")
+                continue
+            done, failed = Path(folder) / f"{task_id}.done", Path(folder) / f"{task_id}.failed"
+            ended = done if done.exists() else failed if failed.exists() else None
+            if ended is not None:
+                summary = ended.read_text()
+                ended.unlink()
                 del self.tasks[task_id]
                 self.steps += 1  # what the task's own model steps spent
+                status = "completed" if ended is done else "failed"
+                frame = {"type": "system", "task_id": task_id, "session_id": self.session}
+                if task["agent"] != "shell":  # the subagent's last reply
+                    said = [{"type": "text", "text": summary}]
+                    send(assistant(self.session, said, parent=task["tool_id"]))
+                send({**frame, "subtype": "task_updated", "patch": {"status": status}})
                 send(
                     {
-                        "type": "system",
+                        **frame,
                         "subtype": "task_notification",
-                        "task_id": task_id,
                         "tool_use_id": task["tool_id"],
-                        "status": "completed",
+                        "status": status,
                         "output_file": f"/tmp/fake-claude/{task_id}.output",
                         "summary": summary,
                         "usage": {"total_tokens": 15, "tool_uses": 0, "duration_ms": 1},
                         "uuid": str(uuid.uuid4()),
-                        "session_id": self.session,
                     }
                 )
                 self.owed.append(summary)
@@ -345,6 +374,7 @@ class Cli:
                 "tool_use_id": tool_id,
                 "description": spec.get("prompt") or spec.get("shell"),
                 "task_type": kind,
+                "is_backgrounded": True,
                 "uuid": str(uuid.uuid4()),
                 "session_id": session,
             }
@@ -528,6 +558,7 @@ class Cli:
                 "input": args,
                 "permission_suggestions": None,
                 "tool_use_id": tool_id,
+                **{k: v for k, v in self.working.items() if k == "agent_id"},
             }
         )
 
@@ -1018,6 +1049,7 @@ def main() -> None:
         if kind == "control_request":
             if message["request"].get("subtype") == "initialize":
                 cli.hooks = message["request"].get("hooks") or {}
+            cli.asked_to_stop(message)
             acknowledge(message)
         elif kind == "user":
             cli.turn(message["message"]["content"])

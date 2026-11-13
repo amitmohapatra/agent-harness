@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -121,6 +122,41 @@ async def test_a_helper_an_earlier_attempt_left_open_and_the_next_did_not_take_u
     record = await runs.get(run_id)
     assert status is RunStatus.ERROR and record is not None and record.error is not None
     assert record.error.message == NOT_CONTINUED
+
+
+async def test_today_a_call_of_one_of_two_helpers_of_one_name_is_taken_for_the_last() -> None:
+    """Claude Code names the subagent a call comes from by its type (``agent_type``), which
+    two subagents at work at once may share: ``named`` answers the one started last, so the
+    first one's calls are recorded under the second one's run. The hook's ``agent_id`` (the
+    task's id, which ``task_started`` ties to the ``Agent`` call) tells them apart; only a
+    background subagent's calls are routed by it (``bridges.claude_live``)."""
+    runs = LocalRuns()
+    helpers = Helpers(runtime(runs), "claude_agent_sdk")
+    kind, name = Kind.SUBAGENT, "general-purpose"
+    first = await helpers.start("call_1", kind=kind, name=name, task="check o1")
+    second = await helpers.start("call_2", kind=kind, name=name, task="check o2")
+    assert first.run_id != second.run_id
+    assert helpers.named(name) is second  # whichever of the two made the call
+
+
+async def test_a_helper_started_twice_at_once_is_one_helper() -> None:
+    """A run store that takes time to answer: the second start of a key, come meanwhile,
+    is the first's helper, not a second record."""
+    runs = LocalRuns()
+    start = runs.start
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.01)
+        return await start(*args, **kwargs)
+
+    runs.start = slow  # type: ignore[method-assign]
+    helpers = Helpers(runtime(runs), "claude_agent_sdk")
+    kind, name = Kind.SUBAGENT, "checker"
+    one, two = await asyncio.gather(
+        helpers.start("k", kind=kind, name=name, task="check o1"),
+        helpers.start("k", kind=kind, name=name, task="check o1"),
+    )
+    assert one is two and await statuses(runs) == [RunStatus.RUNNING]
 
 
 def test_a_helpers_answer_is_its_text() -> None:

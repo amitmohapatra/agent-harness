@@ -6,6 +6,7 @@ record (``bridges.helpers``)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -270,6 +271,32 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
     [brief] = [json.loads(line) for line in (tmp_path / "briefs.jsonl").read_text().splitlines()]
     assert brief["prompt"] == f"{memory_service.context_text}\n\n{TASK_HEADING}check o1"
     a_full_child(memory_service, result.run_id, child.run_id, ["Read"])
+
+
+async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI says a subagent started two ways — its ``Agent`` call's ``PreToolUse`` hook, and
+    the message that carries the call — and each starts the helper by the call's id. With a
+    run store that takes time to answer (agent-runs, over HTTP) the second comes while the
+    first is still being recorded: it is the same helper, not a second child run."""
+    async with Harness(config=Settings()) as h:
+        start = h.runs.start
+
+        async def slow(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.05)
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(h.runs, "start", slow)
+        options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+        result = await h.wrap(options, id="desk").run("check o1", user="u")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked"
+        [child] = await children(h, result.run_id)
+        record = await h.runs.get(child.run_id)
+    assert record is not None and (record.status, record.output) == (
+        RunStatus.SUCCESS,
+        "o1 is fine",
+    )
 
 
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
