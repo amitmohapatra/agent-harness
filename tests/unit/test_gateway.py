@@ -13,7 +13,6 @@ import respx
 from tests.support.gateway import FakeGateway
 from trellis.contracts import ConfigurationError
 from trellis.harness import fresh
-from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway, PromptPin, pinned, prompt_ref
 from trellis.harness.identity import IDENTITY_HEADER
 from trellis.harness.runtime import _current
@@ -55,7 +54,9 @@ async def test_a_prompt_resolves_to_its_id_and_latest_version_once_then_after_it
     await gateway.prompt("triage")
     assert fake.asked("/api/prompt-repo/prompts") == 3  # one read per reference
     fake.prompts["triage"].append(SYSTEM)
-    clock[0] += bifrost.REPOSITORY_TTL_SECONDS + 1
+    clock[0] += 299
+    assert (await gateway.prompt("triage")).version == 2  # kept for 5 minutes
+    clock[0] += 2
     assert (await gateway.prompt("triage")).version == 3
     assert pin.attributes() == {
         "trellis.prompt.name": "triage",
