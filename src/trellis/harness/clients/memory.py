@@ -69,6 +69,10 @@ SOURCE_SYSTEM: Final = "trellis-harness"
 #: ``output``: "at most 256 KiB of JSON"; a larger one is refused with a 422 and the call's
 #: record is lost): a larger output is recorded cut to it (:func:`recorded_output`).
 RECORDED_OUTPUT_MAX_BYTES: Final = 256 * 1024
+#: The memory service's bounds on a caller's ``metadata`` object (its ``api/validation.py``):
+#: its nesting (a flat object is 1) and its size serialised; past them it refuses the record.
+METADATA_MAX_DEPTH: Final = 2
+METADATA_MAX_BYTES: Final = 8 * 1024
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
 #: The keys of a run's own outcome record's metadata that keep what its pushed context showed —
@@ -385,9 +389,14 @@ class RunMemory:
         return list(refs.values())[:CITED_MAX]
 
     async def feedback(self, record: Any) -> None:
-        """A contracts ``Feedback`` record as it is (an interrupt's decision). Its id is the
-        idempotency key: an interrupt's feedback id is fixed by its run and interrupt, so the
-        client may retry a failed send and the service stores and counts it once."""
+        """A contracts ``Feedback`` record (an interrupt's decision), its ``metadata`` within the
+        service's bounds (:func:`within_bounds`: a call's nested arguments would have it
+        refused, and the decision never counted). Its id is the idempotency key: an
+        interrupt's feedback id is fixed by its run and interrupt, so the client may retry a
+        failed send and the service stores and counts it once."""
+        bounded = within_bounds(record.metadata)
+        if bounded is not record.metadata:
+            record = record.model_copy(update={"metadata": bounded})
         await self.ctx.feedback(record, idempotency_key=record.feedback_id)
 
     # ------------------------------------------------------------------ documents, model key
@@ -482,3 +491,57 @@ def recorded_output(output: Any) -> Any:
     # the cut text is sent as a JSON string (quotes and escapes): half the limit leaves room
     cut = text.encode("utf-8")[: RECORDED_OUTPUT_MAX_BYTES // 2].decode("utf-8", "ignore")
     return f"{cut}... ({size} bytes; cut to the service's limit)"
+
+
+def within_bounds(metadata: dict[str, Any]) -> dict[str, Any]:
+    """``metadata`` as the memory service takes it (:data:`METADATA_MAX_DEPTH`,
+    :data:`METADATA_MAX_BYTES`): each value nested past its bound kept as its JSON text — a
+    tool call's arguments keep their names, a nested one its content as text — and, still too
+    large, each text cut to fit, saying so. ``metadata`` itself when it fits."""
+    if _fits(metadata):
+        return metadata
+    flat = {key: _flattened(value, METADATA_MAX_DEPTH - 1) for key, value in metadata.items()}
+    if _fits(flat):
+        return flat
+    room = max(64, METADATA_MAX_BYTES // (2 * max(1, _texts(flat))))
+    return {key: _cut(value, room) for key, value in flat.items()}
+
+
+def _fits(metadata: Mapping[str, Any]) -> bool:
+    size = len(json.dumps(metadata, separators=(",", ":"), default=str).encode())
+    return _depth(metadata) <= METADATA_MAX_DEPTH and size <= METADATA_MAX_BYTES
+
+
+def _depth(value: Any) -> int:
+    if isinstance(value, Mapping):
+        return 1 + max((_depth(v) for v in value.values()), default=0)
+    if isinstance(value, list | tuple):
+        return 1 + max((_depth(v) for v in value), default=0)
+    return 0
+
+
+def _flattened(value: Any, depth: int) -> Any:
+    """``value`` nested ``depth`` levels at most: a mapping deeper keeps its keys, a value at
+    the last level that nests is its JSON text."""
+    if depth <= 0:
+        nested = isinstance(value, Mapping | list | tuple)
+        return json.dumps(value, sort_keys=True, default=str) if nested else value
+    if isinstance(value, Mapping):
+        return {str(k): _flattened(v, depth - 1) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def _texts(value: Any) -> int:
+    if isinstance(value, Mapping):
+        return sum(_texts(v) for v in value.values())
+    return 1 if isinstance(value, str) else 0
+
+
+def _cut(value: Any, room: int) -> Any:
+    if isinstance(value, Mapping):
+        return {k: _cut(v, room) for k, v in value.items()}
+    if isinstance(value, str) and len(value.encode()) > room:
+        return value.encode()[:room].decode("utf-8", "ignore") + " [cut]"
+    return value
