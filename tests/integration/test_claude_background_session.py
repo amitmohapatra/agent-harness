@@ -1034,10 +1034,13 @@ async def test_cancelling_the_turn_that_started_a_background_subagent_stops_it_t
 ) -> None:
     """A cancelled run's children are cancelled with it: the subagent it started and that
     still works is stopped — unlike a later turn's cancel, which leaves it."""
-    scripts = [[BACKGROUND, {"stall": 30}, {"text": "never said"}], [{"text": "after"}]]
+    scripts = [[BACKGROUND, {"stall": 2}, {"text": "never said"}], [{"text": "after"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="parent-cancelled")
     slow = asyncio.create_task(agent.run("research the market", user="u1", thread="t1"))
     await until(lambda: len(agent.running) == 2)
+    live = live_of(agent)
+    assert live is not None
+    await until(lambda: all(found.turn is not None for found in live.background.values()))
     started = turn_running(agent)
     child = await child_of(harness, started)
     await agent.cancel(started)
@@ -1046,6 +1049,65 @@ async def test_cancelling_the_turn_that_started_a_background_subagent_stops_it_t
     await until((tmp_path / "tasks" / "t1.stopped").exists)
     after = await agent.run("and now?", user="u1", thread="t1")
     assert after.status is RunStatus.SUCCESS and after.answer == "after"
+
+
+async def test_a_turn_cancelled_before_its_background_subagents_run_began_stops_it_too(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The subagent's run was started but its first attempt had not begun to serve it (its
+    hooks were still starting) when the turn that started it was cancelled: it does not go
+    on unchecked — it ends ``CANCELLED`` and its task is stopped."""
+    held = asyncio.Event()
+
+    class Slow(Hooks):
+        async def on_run_start(self, run: Any) -> None:
+            if run.identity.parent_run is not None:  # the subagent's run
+                await held.wait()
+
+    scripts = [[BACKGROUND, {"stall": 2}, {"text": "never said"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="cancelled-early", hooks=[Slow()])
+    slow = asyncio.create_task(agent.run("research the market", user="u1", thread="t1"))
+    await until(lambda: len(agent.running) == 2)
+    started = turn_running(agent)
+    child = await child_of(harness, started)
+    await agent.cancel(started)
+    assert (await slow).status is RunStatus.CANCELLED
+    held.set()
+    await when(harness, child.run_id, RunStatus.CANCELLED)
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    await until(lambda: child.run_id not in agent.running)
+    after = await agent.run("and now?", user="u1", thread="t1")
+    assert after.status is RunStatus.SUCCESS and after.answer == "after"
+
+
+async def test_a_background_run_cancelled_before_its_first_attempt_began_stops_its_task(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``agent.cancel`` finds no attempt of the run in this process yet (it is still being
+    set up) and cancels its record: the attempt that then begins does not serve a run that
+    has ended — the task is stopped."""
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="cancelled-unborn")
+    held = asyncio.Event()
+    bound = agent.run_memory
+
+    async def slow(identity: Any, *args: Any, **kwargs: Any) -> Any:
+        if identity.parent_run is not None:  # the subagent's run
+            await held.wait()
+        return await bound(identity, *args, **kwargs)
+
+    monkeypatch.setattr(agent, "run_memory", slow)
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    assert child.run_id not in agent.running
+    assert (await agent.cancel(child.run_id)).status is RunStatus.CANCELLED
+    held.set()
+    await until((tmp_path / "tasks" / "t1.stopped").exists)
+    live = live_of(agent)
+    assert live is not None
+    await until(lambda: not live.background and child.run_id not in agent.running)
+    assert (await child_of(harness, first.run_id)).status is RunStatus.CANCELLED
+    assert (await agent.run("and?", user="u1", thread="t1")).answer == "ok"
 
 
 async def test_a_turn_resumed_after_its_own_pause_leaves_its_background_run_open(

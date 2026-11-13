@@ -116,6 +116,7 @@ LOST: Final = (
 )
 UNANSWERED: Final = "nobody answered the background subagent's question in {hours:g} hours"
 STOPPED: Final = "the background subagent's task was stopped in Claude Code"
+CANCELLED_FIRST: Final = "the background subagent's run was cancelled before it began"
 #: What a background subagent's run answers when its task ended with no word of its own.
 COMPLETED: Final = "The task completed."
 #: Why a background subagent's run whose task failed without saying why ended.
@@ -225,6 +226,8 @@ class Background:
         self.ended: tuple[str, str] | None = None
         #: why the run cannot go on (:meth:`abandoned`)
         self.lost: str | None = None
+        #: why it was cancelled with the run that started it (:meth:`cancel`)
+        self.stopped: str | None = None
         #: what the subagent said last
         self.said = ""
         #: the question the run is paused on, until the conversation's next turn asked it
@@ -307,8 +310,10 @@ class Background:
                 self._answer.set_result(None)
 
     def cancel(self, reason: str) -> None:
-        """The attempt under way cancelled, as ``Agent.cancel`` cancels a run's."""
-        runtime = None if self.turn is None else self.turn.runtime
+        """The run cancelled with the run that started it: its attempt under way as
+        ``Agent.cancel`` cancels a run's, and one that has not begun to serve it does not."""
+        self.stopped = reason
+        runtime = self.agent.running.get(self.run_id)
         if runtime is not None and runtime.running_in is not None:
             runtime.cancelled = reason
             runtime.running_in.cancel()
@@ -320,6 +325,11 @@ class Background:
         asked waits: :meth:`asked`)."""
         if self.lost is not None:
             raise RuntimeError(self.lost)
+        # cancelled while this attempt was being set up: with the run that started it, or
+        # in the run store (``Agent.cancel`` found no attempt of it yet)
+        record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
+        if self.stopped is not None or record is None or record.final:
+            raise RunCancelled(self.stopped or CANCELLED_FIRST)
         self._attach(turn)
         try:
             while True:
