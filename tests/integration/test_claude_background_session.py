@@ -1627,6 +1627,62 @@ async def test_a_turn_resumed_after_its_own_pause_leaves_its_background_run_open
     )
 
 
+async def test_a_turn_resumed_after_its_background_subagent_ended_goes_on_in_its_session(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A background subagent the turn handed on has ended by the time the turn is resumed:
+    nothing holds the session elsewhere, and the resumed attempt is sent into the live
+    session, as any resume (no fork)."""
+    refunds.clear()
+    script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    agent = arm(harness.wrap(options(tmp_path, [script]), id="ended-bg"), [refund])
+    paused = await agent.run("research, then refund o9", user="u1", thread="t1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    child = await child_of(harness, paused.run_id)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and refunds == ["o9"]
+    pids = {turn["pid"] for turn in served(tmp_path)}
+    assert len(pids) == 1 and all("--fork-session" not in t["argv"] for t in served(tmp_path))
+
+
+async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
+    """``LiveSession.outcome``: the result of a turn left and interrupted, past the messages
+    that came before it; none when the process ended first (and the turn is no longer the
+    one whose result is owed)."""
+    import contextvars
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    session = LiveSession("k", None, claude_live.LiveSessions())
+    turn = claude_live.Turn(None, None, None, contextvars.copy_context(), stopped=True)
+    said = AssistantMessage(content=[TextBlock("…")], model="m")
+    ended = ResultMessage("success", 1, 1, False, 1, "s")
+    for message in (said, ended):
+        turn.queue.put_nowait(message)
+    assert await session.outcome(turn) is ended
+    session.left = turn
+    turn.queue.put_nowait(None)  # the process ended
+    assert await session.outcome(turn) is None and session.left is None
+    turn.queue.put_nowait(None)  # and another's result is the one owed now
+    session.left = other = claude_live.Turn(None, None, None, contextvars.copy_context())
+    assert await session.outcome(turn) is None and session.left is other
+
+
+async def test_a_background_run_wakes_only_the_requests_still_waiting_for_an_attempt() -> None:
+    """A request that stopped waiting for its run's next attempt (cancelled with the
+    session's close) is passed over when the run wakes those that wait."""
+    from types import SimpleNamespace
+
+    loop = asyncio.get_running_loop()
+    gone, waiting = loop.create_future(), loop.create_future()
+    gone.cancel()
+    found: Any = SimpleNamespace(_waiting=[gone, waiting])
+    claude_live.Background._woken(found)
+    assert waiting.result() is None and found._waiting == []
+
+
 async def test_a_turn_resumed_on_another_worker_leaves_the_first_its_background_subagent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

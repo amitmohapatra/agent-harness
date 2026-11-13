@@ -14,6 +14,7 @@ from trellis.contracts import AgentExecutionContext, RunEvent, RunStart, RunStat
 from trellis.harness.bridges.helpers import HELPER, NOT_CONTINUED, Helpers, Kind, text_of
 from trellis.harness.events import RunEvents
 from trellis.harness.identity import Identity
+from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
 
 
@@ -39,6 +40,7 @@ def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
         run_memory=None,
         pending=None,
         deadline=None,
+        replay=SimpleNamespace(journal=Journal()),
     )
 
 
