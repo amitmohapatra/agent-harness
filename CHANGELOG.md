@@ -252,6 +252,14 @@ names the helper in its payload (`{"native_helper": {"run_id", "name"}}`, beside
 sub-agent's), and the resume sends the decision on the helper's run
 (`Feedback.agent_run_id`, the run the feedback is about).
 
+### Fixed: an in-process run store's temporary folder goes with the store
+
+`LocalRuns` (no `RUNS_URL`) kept a checkpoint's segments in a `trellis-runs-*` folder it made
+in the temporary directory, and nothing removed it: one left behind for every harness
+started without `RUNS_URL` (a run of this repository's tests left thousands). The folder is
+removed when the store is closed, and when a store nobody closed is collected or the process
+exits. A folder passed as `payload_root` is the caller's and stays.
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

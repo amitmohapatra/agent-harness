@@ -41,8 +41,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import shutil
 import tempfile
 import time
+import weakref
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -309,6 +311,14 @@ class LocalRuns:
         #: payload objects (a checkpoint's segments), in agent-runs' own filesystem store and
         #: format (``trellis.runs.payloads``), in ``payload_root`` (a temporary folder unset)
         self._payload_root = payload_root or Path(tempfile.mkdtemp(prefix="trellis-runs-"))
+        #: the temporary folder's removal (never a folder the caller gave): at :meth:`aclose`,
+        #: or when the store is collected or the process exits unclosed, as
+        #: ``tempfile.TemporaryDirectory`` removes its own
+        self._made = (
+            None
+            if payload_root
+            else weakref.finalize(self, shutil.rmtree, self._payload_root, ignore_errors=True)
+        )
         self._payloads = FilesystemBlobStore(self._payload_root)
         self._lock = asyncio.Lock()
         self.artifacts = LocalArtifacts(self)
@@ -524,7 +534,9 @@ class LocalRuns:
         )
 
     async def aclose(self) -> None:
-        return None
+        """The temporary folder of the store's payloads removed, when it made one (once)."""
+        if self._made is not None:
+            self._made()
 
     # ------------------------------------------------------------------ internals
     def _require(self, run_id: str, tenant: str | None) -> RunRecord:

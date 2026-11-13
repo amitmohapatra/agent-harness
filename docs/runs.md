@@ -168,7 +168,8 @@ reads the journal before it answers the run, so a journal that cannot be read le
 waiting. A checkpoint that lists no segments is refused: segments are the only format. With
 no `RUNS_URL` the store is this process's memory, and the
 segments are files in a temporary folder (`LocalRuns(payload_root=)`), in the same format:
-it bounds nothing, and the same reference is kept there with the run.
+it bounds nothing, and the same reference is kept there with the run. A folder the store made
+itself goes with it (closed, collected, or at the process's exit); one you pass is yours.
 
 ## Continuing where a run stopped
 

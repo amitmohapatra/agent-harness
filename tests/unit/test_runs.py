@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -404,19 +405,54 @@ def kept_under(folder: Path, named: str) -> list[bytes]:
     return [kept.read_bytes() for kept in sorted(found.rglob("*")) if kept.is_file()]
 
 
-async def test_today_the_folder_of_a_stores_payloads_outlives_the_store(
+def made(folder: Path) -> list[Path]:
+    """The folders stores made for their payloads under ``folder``."""
+    return list(folder.glob("trellis-runs-*"))
+
+
+async def test_the_folder_a_store_made_for_its_payloads_goes_with_the_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Today: a store given no ``payload_root`` keeps its payload objects (a checkpoint's
-    segments) in a temporary folder it makes (``trellis-runs-*``) and nothing removes it:
-    ``aclose`` leaves the folder and what the runs wrote in it, in the machine's temporary
-    directory, for good — one more for every harness that starts without ``RUNS_URL`` (one
-    run of this suite leaves about 2,100). "Nothing survives a restart" holds for the runs,
-    not for their payloads on the disk. What a user needs: the folder goes with the store."""
+    """A store given no ``payload_root`` keeps its payload objects (a checkpoint's segments)
+    in a temporary folder it makes (``trellis-runs-*``): closing the store removes the folder
+    and what the runs wrote in it ("nothing survives a restart" holds on the disk too), and
+    a second close changes nothing."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     runs = LocalRuns()
     await runs.start(start())
     await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
-    await runs.aclose()
-    # still there, closed, with what the run wrote
     assert kept_under(tmp_path, "trellis-runs-*") == [b"a checkpoint's segment"]
+    await runs.aclose()
+    assert made(tmp_path) == []
+    await runs.aclose()
+
+
+async def test_the_folder_of_a_store_never_closed_goes_when_the_store_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store nobody closes (a harness with no ``RUNS_URL`` leaves its store open) takes its
+    folder with it when it is collected — or, at the latest, when the process exits — as
+    ``tempfile.TemporaryDirectory`` does."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    [folder] = made(tmp_path)
+    del runs
+    gc.collect()
+    assert not folder.exists()
+
+
+async def test_a_folder_the_caller_gave_the_store_is_left_alone(tmp_path: Path) -> None:
+    """``payload_root`` is the caller's: neither closing the store nor its end removes it or
+    what the runs wrote in it."""
+    given = tmp_path / "payloads"
+    given.mkdir()
+    runs = LocalRuns(payload_root=given)
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    await runs.aclose()
+    del runs
+    gc.collect()
+    kept = [f.read_bytes() for f in sorted(given.rglob("*")) if f.is_file()]
+    assert kept == [b"a checkpoint's segment"]
