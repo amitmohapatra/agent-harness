@@ -325,10 +325,14 @@ class Background:
         if self.turn is not None:
             self.turn.queue.put_nowait(None)
         elif self._answer is not None and not self._answer.done():
-            with contextlib.suppress(ConflictError):  # it ended meanwhile
-                await self.agent.harness.runs.cancel(self.run_id, reason=why, tenant=self.tenant)
-            if self._answer is not None and not self._answer.done():
-                self._answer.set_result(None)
+            try:
+                with contextlib.suppress(ConflictError):  # it ended meanwhile
+                    await self.agent.harness.runs.cancel(
+                        self.run_id, reason=why, tenant=self.tenant
+                    )
+            finally:  # it waits no more, whether or not the run store took the cancel
+                if self._answer is not None and not self._answer.done():
+                    self._answer.set_result(None)
 
     def cancel(self, reason: str) -> None:
         """The run cancelled with the run that started it: its attempt under way as
@@ -1027,7 +1031,8 @@ class LiveSession:
     async def close(self) -> None:
         """The process ended (its stdin closed; stopped if it does not end) and its reader
         with it; the conversation's session kept, with all that was mirrored, for a turn that
-        resumes it."""
+        resumes it. The process ends whatever its background runs' ends meet (a run store
+        that cannot be reached): the first such error is raised once it has."""
         if self.closed:
             return
         self.closed = True
@@ -1039,21 +1044,28 @@ class LiveSession:
         if turn is not None:
             turn.queue.put_nowait(None)
         runs = list(self.background.values())
-        for found in runs:  # each ends saying why
-            await found.abandoned(LOST.format(why=self.why))
-        kept = None if self.kept_in is None else self.kept_in.get(self.key)
-        if self.mirror is not None and kept is not None and kept[0] == self.session_id:
-            assert self.kept_in is not None
-            self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts))
-        current = asyncio.current_task()
-        for task in (self._reader, *self._aside):
-            if task is not None and task is not current:
-                task.cancel()
-        if self.client is not None:
-            with contextlib.suppress(Exception):
-                await self.client.disconnect()
+        try:  # each ends saying why
+            ended = await asyncio.gather(
+                *(found.abandoned(LOST.format(why=self.why)) for found in runs),
+                return_exceptions=True,
+            )
+        finally:
+            kept = None if self.kept_in is None else self.kept_in.get(self.key)
+            if self.mirror is not None and kept is not None and kept[0] == self.session_id:
+                assert self.kept_in is not None
+                self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts))
+            current = asyncio.current_task()
+            for task in (self._reader, *self._aside):
+                if task is not None and task is not current:
+                    task.cancel()
+            if self.client is not None:
+                with contextlib.suppress(Exception):
+                    await self.client.disconnect()
         if runs:
             await asyncio.wait({found.task for found in runs})
+        failed = next((e for e in ended if isinstance(e, BaseException)), None)
+        if failed is not None:
+            raise failed
 
 
 class LiveSessions:
@@ -1116,9 +1128,13 @@ class LiveSessions:
             await session.close()
 
     async def aclose(self) -> None:
-        """Every session closed: the harness is closing."""
+        """Every session closed: the harness is closing. Each is closed whatever another's
+        close meets; the first error is raised once all are."""
         sessions, self._open = list(self._open.values()), {}
-        await asyncio.gather(*(s.close() for s in sessions))
+        closed = await asyncio.gather(*(s.close() for s in sessions), return_exceptions=True)
+        failed = next((e for e in closed if isinstance(e, BaseException)), None)
+        if failed is not None:
+            raise failed
 
 
 async def _apart[T](work: Awaitable[T]) -> T:

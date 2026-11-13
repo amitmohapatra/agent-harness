@@ -59,6 +59,7 @@ from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import conversation_key
+from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -633,7 +634,6 @@ async def test_today_a_background_subagents_run_a_restart_left_open_stays_runnin
     session still runs, so it cannot end the run either. What a user needs: a run nothing
     works on is ended saying so — the run store would need to know who holds it."""
     from trellis.contracts import RunStart
-    from trellis.harness.runs import LocalRuns
 
     store = LocalRuns()
     async with Harness(config=Settings(), runs=store) as before:
@@ -1495,6 +1495,52 @@ async def test_closing_the_harness_closes_every_session_and_its_process(tmp_path
     assert open_sessions(agent) == 0
     assert all(s is not None and s.closed and s.client._query is None for s in sessions)
     assert not any(alive(pid) for pid in pids)  # no process is left behind
+
+
+async def test_closing_the_harness_ends_every_process_and_part_even_when_the_run_store_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A session's close ends the background run that waits for a person (cancelled in the
+    run store) before it ends its CLI: a run store that fails then (agent-runs unreachable)
+    still leaves no process behind, and the harness still closes every other part — the
+    queued writes, the spans, the MCP sources, its clients — before it raises that error
+    (the first; any other is logged)."""
+    from trellis.harness import telemetry
+
+    store = LocalRuns()
+    harness = Harness(config=Settings(), runs=store)
+    scripts = [[BACKGROUND, {"text": "started it"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="closing")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)  # its call waits for a person
+    [one] = served(tmp_path)
+
+    async def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionError("agent-runs is unreachable")
+
+    monkeypatch.setattr(store, "cancel", unreachable)
+    closed: list[str] = []
+    writes = harness.writes.aclose
+    monkeypatch.setattr(harness.writes, "aclose", lambda: (closed.append("writes"), writes())[1])
+
+    async def unexported() -> None:
+        closed.append("spans")
+        raise RuntimeError("the collector is gone")
+
+    monkeypatch.setattr(telemetry, "flush", unexported)
+    try:
+        with pytest.raises(ConnectionError, match="unreachable"):
+            await harness.aclose()
+        assert closed == ["writes", "spans"]  # the rest was closed all the same
+        assert "closing the harness: the collector is gone" in caplog.text
+        await until(lambda: not alive(one["pid"]))
+        assert open_sessions(agent) == 0
+    finally:
+        if alive(one["pid"]):
+            os.kill(one["pid"], signal.SIGKILL)
 
 
 async def test_another_users_thread_of_the_same_name_has_a_session_of_its_own(

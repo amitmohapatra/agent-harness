@@ -428,16 +428,26 @@ class Harness:
     async def aclose(self) -> None:
         """End what the agents' frameworks keep running between runs (``Agent.aclose``), finish
         the queued writes, export the queued spans and close the clients built here (the blocks
-        given are their owner's to close)."""
-        await asyncio.gather(*(a.aclose() for a in self.agents.values()))
-        await self.writes.aclose()
-        await telemetry.flush()
-        await asyncio.gather(*(s.aclose() for s in self._mcp_sources()))
+        given are their owner's to close). Every part is closed whatever closing another
+        meets (a run store that cannot be reached as a live session ends its background
+        runs): the first error is raised once all are, any other logged."""
         judge = self.evals.judge_gateway
         judge = judge if judge is not self.gateway else None
         clients = (*self._made, judge, self.evals.langfuse)
-        closers = [c.aclose() for c in clients if c is not None]
-        await asyncio.gather(*closers)
+        failed: list[BaseException] = []
+        for parts in (
+            lambda: [a.aclose() for a in self.agents.values()],
+            lambda: [self.writes.aclose()],
+            lambda: [telemetry.flush()],
+            lambda: [s.aclose() for s in self._mcp_sources()],
+            lambda: [c.aclose() for c in clients if c is not None],
+        ):
+            closed = await asyncio.gather(*parts(), return_exceptions=True)
+            failed += [e for e in closed if isinstance(e, BaseException)]
+        for later in failed[1:]:
+            log.warning("closing the harness: %s", later, exc_info=later)
+        if failed:
+            raise failed[0]
 
     def _mcp_sources(self) -> list[MCPSource]:
         """The MCP servers this harness's agents reach themselves."""

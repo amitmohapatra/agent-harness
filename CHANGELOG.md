@@ -13,6 +13,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   (`trellis.current().ask(...)`: a ticket number) let a shell write run unapproved. Only the
   answer to the approval of that call (governance's question, whatever made it ask) spares
   it Claude Code's own question now (`journal.approvals_read`).
+- **Closing the harness ends every CLI and every part.** A live session ended its
+  background runs (one that waits for a person is cancelled in the run store) before its
+  CLI: a run store that failed then left the CLI process running, and `Harness.aclose`
+  stopped there — the queued writes, the spans, the MCP sources and the clients were never
+  closed. Each session's process now ends whatever its runs' ends meet, and `Harness.aclose`
+  closes every part before it raises the first error (any other is logged).
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
