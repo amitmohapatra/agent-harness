@@ -681,18 +681,22 @@ class LiveSession:
 
     def _noted(self, event: str, given: Any, answer: Any, found: Background) -> None:
         """Whose a harness tool's call is, once its hook let it through (the call itself
-        comes with no word of who makes it: :meth:`_call`); forgotten when a hook refused
-        it, and once it ran."""
+        comes with no word of who makes it: :meth:`_call`), with the arguments Claude Code
+        makes it with — a hook's ``updatedInput`` over those it was given; forgotten when a
+        hook refused it, and once it ran."""
         from trellis.harness.tools.convert.claude import SERVER
 
         name, ref = str(given.get("tool_name") or ""), str(given.get("tool_use_id") or "")
         if not name.startswith(f"mcp__{SERVER}__"):
             return
-        said = answer.get("hookSpecificOutput") if isinstance(answer, dict) else None
-        decided = (said or {}).get("permissionDecision")
+        said = (answer.get("hookSpecificOutput") if isinstance(answer, dict) else None) or {}
+        decided = said.get("permissionDecision")
         if event == "PreToolUse" and decided == "allow":
-            args = dict(given.get("tool_input") or {})
-            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), args, found)
+            kept = self._calling.get(ref)
+            args = said.get("updatedInput") or (
+                kept[1] if kept is not None else dict(given.get("tool_input") or {})
+            )
+            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), dict(args), found)
         elif event != "PreToolUse" or decided == "deny":
             self._calling.pop(ref, None)
 
@@ -728,7 +732,7 @@ class LiveSession:
         if found is not None:
 
             async def made(at: Turn) -> dict[str, Any]:
-                return await convert.handler(at.tools, name)(args)
+                return await _handler(at, name)(args)
 
             answer = await found.asked(made)
             if answer is not _OVER:
@@ -1173,6 +1177,32 @@ class LiveSessions:
         failed = next((e for e in closed if isinstance(e, BaseException)), None)
         if failed is not None:
             raise failed
+
+
+def _handler(at: Turn, name: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """The harness tool ``name`` a background subagent's call runs in ``at``, its run's
+    attempt: the one its run's own server lists — or, one the process lists that its run was
+    not offered (the hints narrow each run by its own task), made of its run's tool set and
+    offered to it now: the subagent was offered what the process lists."""
+    from trellis.harness.tools.convert import claude as convert
+
+    if convert.lists(at.tools, name):
+        return convert.handler(at.tools, name)
+    found = at.runtime.toolbox.get(name)
+    if found is None:
+        return _unknown(name)
+    at.runtime.offer([name])
+    return convert.tool_handler(found)
+
+
+def _unknown(name: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """What a call of a tool its run does not have is answered."""
+
+    async def refused(args: dict[str, Any]) -> dict[str, Any]:
+        said = f"{name} is not a tool of this run: it was not run"
+        return {"content": [{"type": "text", "text": said}], "is_error": True}
+
+    return refused
 
 
 async def _apart[T](work: Awaitable[T]) -> T:

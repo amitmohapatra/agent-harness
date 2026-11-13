@@ -1303,6 +1303,83 @@ async def test_a_background_subagents_harness_tool_asks_a_person_and_runs_once(
     assert called == {"result": "refunded o9", "ok": True} and refunds == ["o9"]
 
 
+async def test_a_background_subagents_harness_tool_call_a_hook_rewrote_is_its_runs(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A team's own ``PreToolUse`` hook that rewrites a background subagent's harness tool
+    call (``updatedInput``): the call Claude Code makes, with the rewritten arguments, is
+    still known as that subagent's, and runs in its run — not refused for want of one, nor
+    run in a turn being answered meanwhile."""
+
+    @tool(side_effects="read")
+    def echo(x: str) -> str:
+        """Say which run this call is made in, and what it was given."""
+        runtime = current()
+        assert runtime is not None
+        return f"{runtime.run_id}:{x}"
+
+    async def rewrite(given: Any, tool_use_id: Any, hook: Any) -> Any:
+        if given.get("tool_name") != "mcp__trellis__echo":
+            return {}
+        decided = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+        return {"hookSpecificOutput": {**decided, "updatedInput": {"x": "rewritten"}}}
+
+    from claude_agent_sdk import HookMatcher
+
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts, hooks={"PreToolUse": [HookMatcher(hooks=[rewrite])]})
+    agent = arm(harness.wrap(target, id="bg-rewritten"), [echo])
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    said = await calls(tmp_path, {"tool": "echo", "args": {"x": "given"}})
+    assert said == {"result": f"{child.run_id}:rewritten", "ok": True}
+
+
+async def test_a_background_subagents_call_of_a_tool_its_own_run_was_not_offered(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    narrowing: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hints narrow each run's tools by its own task: the process lists the tools the
+    turn that started it was offered, and the background subagent's run may be offered
+    others. The subagent is offered what the process lists, so its call of a tool its own
+    run was not offered runs, in its run (``read_file`` and such are offered to any)."""
+
+    def lookup(i: int) -> Any:
+        def find(key: str) -> str:
+            runtime = current()
+            assert runtime is not None
+            return f"t{i}:{key}:{runtime.run_id}"
+
+        return tool(find, name=f"t{i}", side_effects="read")
+
+    hinted = iter([["t0"]])  # the turn's, then the subagent's own (its task: "dig")
+    monkeypatch.setattr(memory_service, "_candidates", lambda task, available: next(hinted, ["t1"]))
+    dig = {"background": {"id": "t1", "agent": "researcher", "prompt": "dig"}}
+    scripts = [[dig, {"text": "started it"}], [{"text": "ok"}]]
+    agent = arm(memory_harness.wrap(options(tmp_path, scripts), id="bg-narrowed"),
+                [lookup(i) for i in range(3)])  # fmt: skip
+    first = await agent.run("research the market", user="u1", thread="t1")
+    [listed] = served(tmp_path)
+    assert "t0" in listed["tools"] and "t1" not in listed["tools"]
+    child = await child_of(memory_harness, first.run_id, None)
+    said = await calls(tmp_path, {"tool": "t0", "args": {"key": "k"}})
+    assert said == {"result": f"t0:k:{child.run_id}", "ok": True}
+
+
+async def test_a_background_subagents_call_of_a_tool_its_run_does_not_have_is_refused() -> None:
+    """A tool the process lists that the subagent's run has not at all (another tool set)
+    is refused, saying so: it never runs outside a run."""
+    import contextvars
+    from types import SimpleNamespace
+
+    at = claude_live.Turn(SimpleNamespace(toolbox={}), None, None, contextvars.copy_context())
+    answer = await claude_live._handler(at, "gone")({})
+    assert answer["is_error"] and "gone is not a tool of this run" in answer["content"][0]["text"]
+
+
 async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_task(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1340,7 +1417,7 @@ async def test_a_teams_own_hooks_keep_their_timeout_in_a_live_session(
     own, that time."""
     from claude_agent_sdk import HookMatcher
 
-    async def own(given: Any, tool_use_id: Any, hook: Any) -> dict[str, Any]:
+    async def own(given: Any, tool_use_id: Any, hook: Any) -> Any:
         return {}
 
     hooks = {

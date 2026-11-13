@@ -78,6 +78,16 @@ def handler(server: McpSdkServerConfig, name: str) -> Handler:
     return cast("Handler", found)
 
 
+def lists(server: McpSdkServerConfig | None, name: str) -> bool:
+    """Whether ``server`` (none: no harness tool) lists the tool ``name``."""
+    return server is not None and any(t.name == name for t in _SERVED[server["instance"]])
+
+
+def tool_handler(tool: Tool) -> Handler:
+    """The handler a server :func:`convert` makes gives ``tool``, made alone."""
+    return cast("Handler", _one(tool).handler)
+
+
 def relayed(
     server: McpSdkServerConfig, call: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 ) -> McpSdkServerConfig:

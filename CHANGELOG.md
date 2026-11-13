@@ -45,6 +45,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   process's memory): no later attempt ends it on any worker, and a session another worker's
   live session holds is forked (`fork_session`) — the turn goes on on worker 2, the subagent
   on worker 1.
+- **A background subagent's harness tool calls are its own in two more cases.** A team's own
+  `PreToolUse` hook that rewrote such a call (`updatedInput`) left the call unknown when it
+  came with the rewritten arguments: refused for want of a run, or run in the turn being
+  answered then. And a tool the process lists that the subagent's run was not offered (the
+  hints narrow each run by its own task) failed in the relay ("not enough values to
+  unpack"): the subagent is offered what the process lists, so it runs, in its run.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
