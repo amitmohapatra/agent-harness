@@ -115,8 +115,7 @@ def asked_inside(interrupt: Interrupt) -> str | None:
     """The run of the helper whose call ``interrupt`` asks about (its payload names it,
     :func:`named`), if a helper's call is what it asks about."""
     named = (interrupt.payload or {}).get(HELPER)
-    run_id = named.get("run_id") if isinstance(named, dict) else None
-    return run_id if isinstance(run_id, str) and run_id else None
+    return str(named["run_id"]) if isinstance(named, dict) and named.get("run_id") else None
 
 
 def named(runtime: Runtime) -> dict[str, Any] | None:
