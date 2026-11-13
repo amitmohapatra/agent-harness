@@ -374,6 +374,13 @@ def test_endings_that_are_not_errors_or_successes() -> None:
     rejected = translate(RunEvent.finished(context, RunOutcome.REJECTED, 0))
     assert rejected is not None and rejected.type is AGUIEventType.RUN_ERROR
     assert (rejected.message, rejected.code) == ("rejected", "REJECTED")
+    timed_out = translate(RunEvent.finished(context, RunOutcome.TIMEOUT, 0))
+    assert timed_out is not None and timed_out.type is AGUIEventType.RUN_ERROR
+    assert (timed_out.message, timed_out.code) == ("timeout", "TIMEOUT")
+    partial = translate(RunEvent.finished(context, RunOutcome.PARTIAL, 0))
+    assert partial is not None and partial.type is AGUIEventType.RUN_FINISHED  # an answer
+    asked = RunEvent.of(context, RunEventType.INTERRUPT, 0, data={"question": "Which?"})
+    assert translate(asked) is None  # RUN_FINISHED carries it
 
 
 def test_an_event_the_protocol_has_no_type_for_is_not_sent(
