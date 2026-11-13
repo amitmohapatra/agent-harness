@@ -22,7 +22,6 @@ from trellis.harness.sandbox.docker import (
     DEFAULT_IMAGE,
     IDLE,
     OUTPUT_BYTES,
-    PIDS_LIMIT,
     SNAPSHOT,
     WORKDIR,
     WRAPPER,
@@ -52,7 +51,7 @@ async def test_a_sandbox_is_a_hardened_container_named_after_its_run_with_its_fi
         "Init": True,
         "CapDrop": ["ALL"],
         "SecurityOpt": ["no-new-privileges"],
-        "PidsLimit": PIDS_LIMIT,
+        "PidsLimit": 512,  # at most 512 processes
         "NanoCpus": 500_000_000,
         "Memory": 256 * 1024 * 1024,
     }
