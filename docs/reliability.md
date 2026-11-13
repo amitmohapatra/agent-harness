@@ -194,6 +194,8 @@ error that may pass; a call that does more runs once.
 governance sees them: the catalog's `risk` over the tool's own declaration.
 
 **Where.** Every harness tool call, every adapter; `governed` in Way 2 (`side_effects="read"`).
+Not a LangGraph graph's own tool: its error is raised into the graph, whose retry policy
+(`ToolRetryMiddleware`, a node's `RetryPolicy`, or none) is the one that counts.
 
 **How it decides.** An error may pass when it says so (`AgentError.of(exc).retryable`: its own
 `retryable`, or its category — a timeout, a rate limit, a dependency down). An OpenAPI
@@ -227,7 +229,7 @@ them bounds them.
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
-| harness tool retries | a read (or idempotent) tool after an error that may pass | 3 attempts, 0.5 s doubling, random | the tool's timeout, the run's time |
+| harness tool retries | a read (or idempotent) tool after an error that may pass — not a LangGraph graph's own tool, which the graph's own retry tries | 3 attempts, 0.5 s doubling, random | the tool's timeout, the run's time |
 | background writes | memory writes, judges, the grounding check | 3 attempts, 0.5 s doubling, full jitter; then the spool | the drain bound (10 s) at shutdown |
 | agent-runs: run retries | a queued run its worker ended `ERROR` with a retryable error | 3 more attempts, after 10 s, 20 s, 40 s (jittered, ≤ 10 min) | the run's `timeout` and `deadline` |
 | agent-runs: lapsed leases | a queued run whose worker stopped heartbeating | up to 5 lapses, after 5 s doubling (≤ 1 min); then `ERROR` (`lease_expired`) | the run's `timeout` and `deadline` |

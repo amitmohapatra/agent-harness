@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
@@ -375,3 +376,23 @@ async def test_under_the_harness_middleware_the_hooks_word_on_an_error_is_read_t
     result = await harness.wrap(react, id="react", hooks=[Kinder()]).run("a?", user="u")
     assert result.answer == "noon"
     assert (told(model).status, told(model).content) == ("error", "the shelf will be back at noon")
+
+
+# --------------------------------------------------------------------------- one retry policy
+@pytest.mark.parametrize("graph_of", ["create_agent", "react"])
+async def test_the_graphs_retry_policy_is_the_one_that_tries_the_call(
+    harness: Harness, graph_of: str
+) -> None:
+    """A read whose error may pass (the shelf service refusing the connection) in a graph that
+    retries it itself (``ToolRetryMiddleware(max_retries=2)``): the tool is tried as often as
+    the graph says — 3 times — not each of the graph's tries tried again by the harness."""
+    fails.extend([httpx.ConnectError("shelf service refused the connection")] * 3)
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "down"])
+    retry = ToolRetryMiddleware(max_retries=2, initial_delay=0, jitter=False)
+    graph = (
+        create_agent(model, [stock], middleware=[retry])
+        if graph_of == "create_agent"
+        else ReAct(system_prompt="Count.", model=model, tools=[stock], middleware=[retry])
+    )
+    result = await harness.wrap(graph, id="shelf").run("a?", user="u")
+    assert result.answer == "down" and ran == ["stock a"] * 3

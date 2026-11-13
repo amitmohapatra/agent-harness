@@ -414,7 +414,9 @@ async def governed_call(
     message the model read, or the ``Command`` as the tool made it (:func:`_kept_update`), so
     the state update of a call that ran before a pause is not lost with the step run again.
     An error the tool raised is recorded as the call's failure and raised again as it was
-    (:func:`_failed`): the graph's own handling of it — LangChain's ``ToolRetryMiddleware`` and
+    (:func:`_failed`), with no tries of the harness's own before (``Tool.retried``): whether
+    the call is tried again is the graph's retry policy's, its tries each a call of the run.
+    The graph's own handling of the error — LangChain's ``ToolRetryMiddleware`` and
     ``ToolErrorMiddleware``, a wrapper of the builder's, the tool node's ``handle_tool_errors``
     — sees what the library gives it, and the failed message the graph made of it (the tool
     node's, a wrapper's) is the one the model reads, as the graph worded it, unless the run's
@@ -474,7 +476,8 @@ async def governed_call(
             raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
-    made = Tool(spec, run, confined=framework_made(own))  # Deep Agents' files: its own
+    # Deep Agents' files: its own; tried as the graph tries it (its error is raised into it)
+    made = Tool(spec, run, confined=framework_made(own), retried=False)
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:

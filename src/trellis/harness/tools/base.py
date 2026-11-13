@@ -169,6 +169,11 @@ class Tool:
     #: made), its memory, a sub-agent (whose own calls are governed) — or a framework's own tool
     #: (Deep Agents' files and ``execute``). Set by the harness only.
     confined: bool = False
+    #: Tried again after an error that may pass (:func:`retries_of`): ``False`` for a framework's
+    #: own tool whose error goes back to its framework (a LangGraph graph's: raised into it),
+    #: where what the graph's own retry policy says is what the call gets — its
+    #: ``ToolRetryMiddleware``'s tries, its node's ``RetryPolicy``, or none. Set by the harness.
+    retried: bool = True
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
@@ -308,7 +313,7 @@ async def execute(
     began = time.monotonic()
     try:
         async with within or asyncio.timeout(tool.timeout):
-            retries = retries_of(tool.spec, reads=reads)
+            retries = retries_of(tool.spec, reads=reads) if tool.retried else 0
             output = await retried(once, retries=retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
