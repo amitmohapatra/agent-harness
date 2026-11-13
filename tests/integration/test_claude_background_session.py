@@ -312,6 +312,36 @@ async def test_what_background_work_spent_between_turns_is_on_the_next_turn(
     assert [(c["input_tokens"], c["cost"]) for c in counted] == [(20, 1.0), (10, 1.5)]
 
 
+async def test_today_the_options_own_budget_is_spent_by_the_turns_of_a_live_session_together(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Today: ``ClaudeAgentOptions(max_budget_usd=)`` is the CLI's own cap on what a process
+    spends. A turn's own process started from nothing, so every turn had the cap to itself; a
+    conversation's live process goes on counting, and the turns reach the cap together. The
+    turn that passes it is answered "Reached maximum budget"; the harness reads that as a
+    session that could not be continued and asks again in a new session, which holds nothing
+    of the conversation (and what worked in the old one's background is gone with it). What
+    a user needs: the cap a team set for a query stays a query's. The stand-in counts as the
+    bundled CLI reports cost (the process's running total): whether the real CLI's cap
+    counts so is a live run's to show."""
+    scripts = [[{"text": "you asked: {heard}"}]]
+    target = options(
+        tmp_path, scripts, model="m", max_budget_usd=1.2, env={"FAKE_CLAUDE_COST": "0.5"}
+    )
+    agent = harness.wrap(target, id="capped")
+    for number in (1, 2, 3):  # a step each, at 0.5: 1.5 in all, none above 1.2 by itself
+        done = await agent.run(f"turn {number}", user="u1", thread="t1")
+        assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == "you asked: turn 1 | turn 2 | turn 3"
+    events = [e async for e in agent.stream("turn 4", user="u1", thread="t1")]
+    [said] = warned(events)
+    assert "was not resumed (Reached maximum budget" in said
+    one, *_, capped, again = served(tmp_path)
+    assert capped["pid"] == one["pid"] and again["pid"] != one["pid"]
+    assert again["resume"] is None and again["session"] != one["session"]  # a new session
+    assert events[-1].data["result"] == "you asked: turn 4"  # with none of the conversation
+
+
 # --------------------------------------------------------------------------- no live session
 async def test_a_run_with_no_conversation_runs_in_a_process_of_its_own_as_before(
     harness: Harness, tmp_path: Path
