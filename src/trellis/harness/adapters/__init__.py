@@ -31,7 +31,7 @@ def detect(target: Any) -> Adapter:
         from agents import Agent
 
         if isinstance(target, Agent):
-            return OpenAIAgentsAdapter()
+            return OpenAIAgentsAdapter(target)
     if module.startswith("claude_agent_sdk."):
         from claude_agent_sdk import ClaudeAgentOptions
 

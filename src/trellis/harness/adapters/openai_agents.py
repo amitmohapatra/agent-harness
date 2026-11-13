@@ -179,9 +179,11 @@ class OpenAIAgentsAdapter:
     history_in: HistoryIn = "messages"
     sessions = False
 
-    def __init__(self) -> None:
+    def __init__(self, target: Any = None) -> None:
         #: the tools the agents declare (:meth:`native`), once read
         self._static: list[ToolSpec] | None = None
+        if target is not None:  # every agent it reaches can be read, or ``h.wrap`` says why
+            reachable(target)
 
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The run's ``session``, or the conversation OpenAI's servers keep
@@ -408,8 +410,9 @@ def governed_agents(
     run the governed copy of their agent — recursively, each agent copied once, so handoffs that
     lead back are kept — ``added`` (the run's harness tools) on ``target``'s and ``shared``
     (the run's memory tools) on every other's. A tool an agent carries already (built with
-    the harness) is not added twice. A ``Handoff`` object hides its agent until it is invoked:
-    its tools cannot be reached, which is said once. With ``helpers``, each agent tool's call is
+    the harness) is not added twice. A ``Handoff`` object (``handoff(agent, ...)``) is kept
+    with all it gives the SDK — its name, its input filter, its callback — and hands off to the
+    governed copy of its agent (:func:`_handed`). With ``helpers``, each agent tool's call is
     a helper of the run. The function tools ``gated`` names (those governance may ask about,
     :func:`_gated`) are held at the SDK's own approval gate when it asks
     (``tools.convert.openai_agents.held``). The agents you wrapped are not changed."""
@@ -450,8 +453,7 @@ def governed_agents(
             if isinstance(handoff, Agent):
                 handoffs.append(copied(handoff, shared))
             else:
-                _hidden_handoff(agent_id, str(getattr(handoff, "agent_name", "")))
-                handoffs.append(handoff)
+                handoffs.append(_handed(handoff, lambda a: copied(a, shared), agent_id))
         copy.handoffs = handoffs
         return copy
 
@@ -632,9 +634,57 @@ def _running(tool: Any, agent: Any) -> Any | None:
     return made
 
 
+#: The field of the SDK's ``Handoff`` that holds the agent a ``handoff(agent, ...)`` hands off
+#: to (a weak reference; the SDK's own run state finds the agent by it). The SDK has no public
+#: way to read it, so it is checked where an agent is wrapped (:func:`handed_to`).
+HANDOFF_AGENT: Final = "_agent_ref"
+
+
+def handed_to(handoff: Any) -> Any | None:
+    """The agent a ``Handoff`` object hands off to, as the SDK keeps it (:data:`HANDOFF_AGENT`);
+    ``None`` for one built by hand, which names none before it runs. An SDK whose ``Handoff``
+    no longer has that field is refused: its agents would run ungoverned."""
+    from agents import Handoff
+
+    if HANDOFF_AGENT not in {f.name for f in dataclasses.fields(Handoff)}:
+        raise ConfigurationError(
+            "this OpenAI Agents SDK's Handoff no longer says the agent it hands off to "
+            f"({HANDOFF_AGENT}), so that agent's tools cannot be governed: hand off to the "
+            "Agent itself, or use a tested SDK release (docs/versioning.md)"
+        )
+    ref = getattr(handoff, HANDOFF_AGENT, None)
+    return ref() if callable(ref) else None
+
+
+def _handed(handoff: Any, copied: Callable[[Any], Any], agent_id: str) -> Any:
+    """A ``Handoff`` object as the run's copy: everything it gives the SDK kept, the agent it
+    returns when invoked replaced by that agent's governed copy (``copied``) — and the agent it
+    names (:func:`handed_to`) the copy too, which the SDK's run state finds it by on a resume.
+    One built by hand, which names no agent before it runs, is governed from the moment it
+    hands off; its agent's tools are not of the run's tool set before then (said once)."""
+    from agents import Agent
+
+    target = handed_to(handoff)
+    governed_target = copied(target) if isinstance(target, Agent) else None
+    if governed_target is None:
+        _hidden_handoff(agent_id, str(getattr(handoff, "agent_name", "")))
+    original = handoff.on_invoke_handoff
+
+    async def invoke(context: Any, input_json: str | None = None) -> Any:
+        returned = await original(context, input_json)
+        # the copy is held here (the SDK's handle on it is weak), the same one ``copied`` gives
+        return governed_target if returned is target else copied(returned)
+
+    made = dataclasses.replace(handoff, on_invoke_handoff=invoke)
+    if governed_target is not None:
+        setattr(made, HANDOFF_AGENT, weakref.ref(governed_target))
+    return made
+
+
 def reachable(target: Any) -> list[Any]:
-    """``target`` and every agent it can reach: those it hands off to (an ``Agent``; a
-    ``Handoff`` object hides its own) and those its agent tools run, recursively, each once."""
+    """``target`` and every agent it can reach: those it hands off to (an ``Agent``, or the
+    agent a ``Handoff`` object names: :func:`handed_to`) and those its agent tools run,
+    recursively, each once."""
     from agents import Agent
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL
@@ -646,7 +696,10 @@ def reachable(target: Any) -> list[Any]:
         if id(agent) in found:
             continue
         found[id(agent)] = agent
-        pending.extend(h for h in agent.handoffs if isinstance(h, Agent))
+        for handoff in agent.handoffs:
+            to = handoff if isinstance(handoff, Agent) else handed_to(handoff)
+            if isinstance(to, Agent):
+                pending.append(to)
         inner = (getattr(tool, AGENT_OF_TOOL, None) for tool in agent.tools)
         pending.extend(i for i in inner if isinstance(i, Agent))
     return list(found.values())
@@ -721,8 +774,9 @@ async def _listed(server: Any) -> list[ToolSpec]:
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent and handoff, of the most recent
 def _hidden_handoff(agent_id: str, to: str) -> None:
     log.warning(
-        "a handoff is a Handoff object, which hides its agent until it is invoked: that "
-        "agent's own tools are not governed (hand off to the Agent itself)",
+        "a Handoff object built by hand names no agent until it is invoked: that agent's own "
+        "tools are governed once it hands off, but are not of the run's tool set (tool hints, "
+        "catalog) before (use handoff(agent, ...), or hand off to the Agent itself)",
         extra={"agent_id": agent_id, "handoff": to},
     )
 

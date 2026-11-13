@@ -48,8 +48,12 @@ the memory tools.
 **Handoffs.** Every agent reachable through its `handoffs` (recursively, cycles included) runs
 as a copy whose own tools are governed like the wrapped agent's — hooks, the catalog's rules,
 the journal — and that has the memory tools; your agents are not changed. A `Handoff` object
-(`handoff(agent, ...)`) hides its agent until it is invoked, so that agent's tools are not
-governed (said once at the first run): hand off to the `Agent` itself.
+(`handoff(agent, ...)`, with its name, `input_filter`, `on_handoff` and input type kept) hands
+off to the governed copy of its agent the same way; its agent is read from the SDK's
+`Handoff` where the agent is wrapped, and an SDK release whose `Handoff` no longer says it is
+refused at `h.wrap`. A `Handoff` built by hand names no agent before it runs: its agent is
+governed from the moment it hands off, but its tools are not of the run's tool set before then
+(said once).
 
 ```python
 refunds = Agent(name="refunds", instructions="You refund orders.", model=model, tools=[refund])
