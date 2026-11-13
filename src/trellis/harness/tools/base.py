@@ -170,9 +170,9 @@ class Tool:
     #: (Deep Agents' files and ``execute``). Set by the harness only.
     confined: bool = False
     #: Tried again after an error that may pass (:func:`retries_of`): ``False`` for a framework's
-    #: own tool whose error goes back to its framework (a LangGraph graph's: raised into it),
-    #: where what the graph's own retry policy says is what the call gets — its
-    #: ``ToolRetryMiddleware``'s tries, its node's ``RetryPolicy``, or none. Set by the harness.
+    #: own tool whose error goes back to a framework that could try it again itself (a LangGraph
+    #: graph's, through a wrapper around its tool node: its ``ToolRetryMiddleware``), whose
+    #: tries are then the call's. Set by the harness.
     retried: bool = True
 
     def __post_init__(self) -> None:

@@ -403,6 +403,8 @@ def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[An
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    *,
+    retried: bool = False,
 ) -> ToolMessage | Command[Any]:
     """A framework's own tool call, inside a harness run, run as the harness's are: governance
     decides it (the catalog's risk, else the tool's declared one in its
@@ -414,8 +416,10 @@ async def governed_call(
     message the model read, or the ``Command`` as the tool made it (:func:`_kept_update`), so
     the state update of a call that ran before a pause is not lost with the step run again.
     An error the tool raised is recorded as the call's failure and raised again as it was
-    (:func:`_failed`), with no tries of the harness's own before (``Tool.retried``): whether
-    the call is tried again is the graph's retry policy's, its tries each a call of the run.
+    (:func:`_failed`): whether the call is tried again is the graph's retry policy's, its tries
+    each a call of the run — the harness tries a read whose error may pass again itself
+    (``Tool.retried``) only where nothing of the graph could (``retried``: a tool node with no
+    wrapper of the graph's around its calls; :func:`govern_tool_nodes`).
     The graph's own handling of the error — LangChain's ``ToolRetryMiddleware`` and
     ``ToolErrorMiddleware``, a wrapper of the builder's, the tool node's ``handle_tool_errors``
     — sees what the library gives it, and the failed message the graph made of it (the tool
@@ -476,8 +480,8 @@ async def governed_call(
             raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
-    # Deep Agents' files: its own; tried as the graph tries it (its error is raised into it)
-    made = Tool(spec, run, confined=framework_made(own), retried=False)
+    # Deep Agents' files: its own; tried again by the harness only where the graph cannot
+    made = Tool(spec, run, confined=framework_made(own), retried=retried)
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
@@ -1066,7 +1070,10 @@ def govern_tool_nodes() -> None:
         async def handler(given: ToolCallRequest) -> Any:
             return await execute(self, given, input_type, config)
 
-        return await governed_call(request, handler)
+        # a node with no wrapper around its calls (no ToolRetryMiddleware, no wrap_tool_call):
+        # nothing of the graph's can try a call again, so the harness's retries stand
+        alone = self._awrap_tool_call is None and self._wrap_tool_call is None
+        return await governed_call(request, handler, retried=alone)
 
     run_one = ToolNode._arun_one
 

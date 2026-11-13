@@ -29,6 +29,7 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, ReAct
 from trellis.contracts import RunEventType, RunStatus, ToolOutcome, ToolStatus
 from trellis.harness.hooks import Hooks
+from trellis.harness.tools import base
 from trellis.harness.tools.bridge import MAX_REPEATS
 
 ran: list[str] = []
@@ -397,6 +398,20 @@ async def test_the_graphs_retry_policy_is_the_one_that_tries_the_call(
     )
     result = await harness.wrap(graph, id="shelf").run("a?", user="u")
     assert result.answer == "down" and ran == ["stock a"] * 3
+
+
+async def test_a_graph_with_nothing_that_could_retry_its_tool_keeps_the_harnesss_retries(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool node with no wrapper around its calls (``create_agent`` with no tool-call
+    middleware): nothing of the graph's could try the call again, so a read whose error may
+    pass is tried again by the harness, as every harness call is."""
+    monkeypatch.setattr(base, "RETRY_BACKOFF_SECONDS", 0.001)
+    fails.extend([httpx.ConnectError("shelf service refused the connection")] * 2)
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    result = await harness.wrap(create_agent(model, [stock]), id="shelf").run("a?", user="u")
+    assert result.answer == "7" and ran == ["stock a"] * 3
+    assert told(model).content == "a: 7"
 
 
 # --------------------------------------------------------------------------- one question

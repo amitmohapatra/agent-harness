@@ -30,8 +30,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   conditional write: across servers the window narrows, it does not close).
 - **A LangGraph graph's retry policy is the only one for its own tools.** The harness tried a
   read whose error may pass again inside each of the graph's tries:
-  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times. A graph's own tool is now
-  tried as the graph says (no retry of its own: once); the harness's tools keep their retries.
+  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times. Where a wrapper of the graph's
+  could try the call again (any `wrap_tool_call` around its tool node's calls, the harness's
+  `GovernTools` included), the graph's tries are the call's; a tool node with no wrapper keeps
+  the harness's retries, and so do the harness's own tools.
 - **An OpenAI function tool's own `timeout` is always that tool's timed-out call.** Counted
   from when its task began, a call whose task began late (another call holding the loop) was
   recorded as cut by a cancelled run, its start left open; it is counted from when the SDK
