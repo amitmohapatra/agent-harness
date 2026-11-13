@@ -16,12 +16,13 @@ import pytest
 from deepagents import SubAgent, create_deep_agent
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.graph import START, MessagesState, StateGraph, add_messages
 from langgraph.prebuilt import InjectedState, ToolNode, ToolRuntime, tools_condition
 from langgraph.types import Command
+from pydantic import BaseModel
 
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, current
@@ -288,6 +289,37 @@ async def test_a_write_beside_a_call_that_asks_ends_before_the_pause_however_it_
     assert done.status is RunStatus.SUCCESS and done.answer == "paid"
     assert ran == ["note a", "pay 5"]
     assert [m.content for m in model.seen[-1] if m.type == "tool"] == ["noted a", "paid 5"]
+
+
+class Typed(BaseModel):
+    """A graph state of a model class: a tool node hands its calls no mapping of messages."""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+async def test_a_write_beside_a_call_that_asks_in_a_state_of_its_own_kind_ends_first(
+    harness: Harness,
+) -> None:
+    """Where the state a tool node hands its calls holds no mapping of messages to find their
+    model step in (a model class), the calls it gathers wait for each other as the one state
+    object they share: the write beside the call that asks ends before the pause."""
+    model = ScriptedChatModel(turns=[[("note", {"text": "a"}), ("pay", {"amount": 5})], "paid"])
+    bound = model.bind_tools([note, pay])
+
+    async def think(state: Typed) -> dict[str, Any]:
+        return {"messages": [await bound.ainvoke(state.messages)]}
+
+    graph = StateGraph(Typed)
+    graph.add_node("model", think)
+    graph.add_node("tools", ToolNode([note, pay]))
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition)
+    graph.add_edge("tools", "model")
+    agent = harness.wrap(graph.compile(checkpointer=InMemorySaver()), id="typed")
+    paused = await agent.run("note a and pay 5", user="u", thread="t")
+    assert paused.status is RunStatus.PAUSED and ran == ["note a"]
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "pay"
 
 
 async def test_two_calls_of_a_step_that_both_ask_are_approved_one_after_the_other(
