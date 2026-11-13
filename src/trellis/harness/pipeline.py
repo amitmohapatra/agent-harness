@@ -1068,7 +1068,9 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
         for s in runtime.steers
         if question_id(runtime.conversation, s.run_id) not in reported
     ]
-    messages = identified([*asked, *steered, *said], runtime, answered=status is not RunStatus.PAUSED)
+    messages = identified(
+        [*asked, *steered, *said], runtime, answered=status is not RunStatus.PAUSED
+    )
     return _with_facts(messages, runtime, status)
 
 

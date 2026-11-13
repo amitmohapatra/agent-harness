@@ -701,9 +701,8 @@ class Runtime:
         (``governance.decision.choices``), offered as the interrupt's options and said after
         the question, for plain chat. A call a helper the framework spawned makes names the
         helper in the payload (``bridges.helpers.named``)."""
-        from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
-
         from trellis.harness.bridges.helpers import named  # noqa: PLC0415 - a cycle
+        from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
 
         said = SAID.get(tuple(choices))
         return await self.interrupt(

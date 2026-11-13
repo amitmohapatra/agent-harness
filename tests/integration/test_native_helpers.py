@@ -425,7 +425,9 @@ def approved_where_recorded(service: FakeMemoryService, tool_name: str, run_id: 
 
 @pytest.fixture
 async def asks_with_memory(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
-    async with with_governance(Harness(config=Settings(), memory=memory_service.client()), ASKS) as h:
+    async with with_governance(
+        Harness(config=Settings(), memory=memory_service.client()), ASKS
+    ) as h:
         yield h
 
 
