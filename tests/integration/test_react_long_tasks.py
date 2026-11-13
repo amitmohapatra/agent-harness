@@ -305,7 +305,8 @@ async def test_the_journal_holds_a_file_of_100_000_characters_and_a_run_of_1_000
     graph = create_deep_agent(model, backend=JournalBackend())
     # ten files of 100,000 characters: the run's 1,000,000 exactly
     files = {f"/f{n}.md": create_file_data("x" * 100_000) for n in range(10)}
-    out = await graph.ainvoke({"messages": [HumanMessage(STEPS + "write")], "files": files})
+    given: Any = {"messages": [HumanMessage(STEPS + "write")], "files": files}
+    out = await graph.ainvoke(given)
     said = [str(m.content) for m in out["messages"] if isinstance(m, ToolMessage)]
     assert "/big.md would hold 100001 characters; a file holds at most 100000" in said[0]
     assert "would hold 1000001 characters; a run's files hold at most 1000000" in said[1]
@@ -317,7 +318,7 @@ def test_a_task_is_long_once_its_conversation_is_past_half_the_window() -> None:
     from langchain.agents.middleware import ModelRequest
     from langchain_core.messages.utils import count_tokens_approximately
 
-    messages = [HumanMessage("stock report line. " * 200)]
+    messages: list[Any] = [HumanMessage("stock report line. " * 200)]
     request = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages)
     half = count_tokens_approximately(messages)
     assert not long_task(request, 2 * half)  # at half: not past it
