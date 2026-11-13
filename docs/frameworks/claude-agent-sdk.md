@@ -281,8 +281,9 @@ turn the session runs by itself (a finished task's notification) is never a user
   its answer goes on to the subagent's run — approved or edited the call runs once,
   rejected the subagent reads why — then the turn's prompt is sent. A question nobody
   answers in 12 hours ends the run `CANCELLED` and stops the task (the CLI is told to
-  wait 24 hours for a hook, so it never gives the call up first: a hook it gives up on
-  fails the call, it does not run it).
+  wait 24 hours for the harness's own hooks, so it never gives the call up first: a hook
+  it gives up on fails the call, it does not run it). Your own hooks keep the timeout you
+  gave them — none, Claude Code's own default — as in a process of their own.
 * **Its limits** are the agent's own `run_timeout` and `budget`, as for a run nothing
   else bounds (the turn that started it has ended): its replies' tokens count as they
   come. Past either, and when the run is cancelled (`agent.cancel(child_run_id)`, the

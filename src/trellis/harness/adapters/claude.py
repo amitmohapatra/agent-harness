@@ -101,7 +101,12 @@ from trellis.harness.adapters.base import (
     unique,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
-from trellis.harness.bridges.claude import JournalSessions, session_store, with_context
+from trellis.harness.bridges.claude import (
+    JournalSessions,
+    harness_matcher,
+    session_store,
+    with_context,
+)
 from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
@@ -1194,7 +1199,6 @@ def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell
 def _steering() -> Any:
     """The ``PostToolUse`` hook that gives Claude the messages steered into the run since its
     last tool call (``Runtime.steered``), as the context a hook adds after the call's result."""
-    from claude_agent_sdk import HookMatcher
 
     async def steered(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         runtime = current()
@@ -1204,7 +1208,7 @@ def _steering() -> Any:
         said = "\n\n".join(f"{STEERED_SAYS}{s.text}" for s in taken)
         return {"hookSpecificOutput": {"hookEventName": RAN_EVENT, "additionalContext": said}}
 
-    return HookMatcher(hooks=[steered])
+    return harness_matcher(steered)
 
 
 def _governance(steps: Steps) -> Any:
@@ -1216,8 +1220,6 @@ def _governance(steps: Steps) -> Any:
     its prompt briefed (:func:`_briefed`). Before Claude takes a step, the run's progress is
     saved — its session as mirrored so far among it — so a worker that dies during the step
     continues the session from there, not from an earlier step."""
-    from claude_agent_sdk import HookMatcher
-
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
@@ -1254,7 +1256,7 @@ def _governance(steps: Steps) -> Any:
             return _decided("ask", updated=decided.args)
         return {}  # Claude Code's own permission check decides
 
-    return HookMatcher(hooks=[pre_tool_use])
+    return harness_matcher(pre_tool_use)
 
 
 def _shell(options: Any, env: Mapping[str, str]) -> Shell:
@@ -1373,8 +1375,6 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
     the bridge's. Either way the stall watch goes on once no call runs. A shell command of
     Claude's own (not a subagent's: the CLI keeps their folder) is where the shell may have
     moved (``Shell.ran``)."""
-    from claude_agent_sdk import HookMatcher
-
     from trellis.harness.tools.convert.claude import SERVER
 
     async def post_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
@@ -1405,7 +1405,7 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
             await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
         return {}
 
-    return HookMatcher(hooks=[post_tool_use])
+    return harness_matcher(post_tool_use)
 
 
 async def _declared(target: Any) -> list[ToolSpec]:

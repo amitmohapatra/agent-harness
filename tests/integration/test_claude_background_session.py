@@ -1186,6 +1186,33 @@ async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_t
     }
 
 
+async def test_a_teams_own_hooks_keep_their_timeout_in_a_live_session(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Only the harness's own hooks, which may wait for a person's answer about a background
+    subagent's call, are given the long timeout in a live session: a team's own hook keeps
+    what it set — none, Claude Code's own default, as in a process of its own; a time of its
+    own, that time."""
+    from claude_agent_sdk import HookMatcher
+
+    async def own(given: Any, tool_use_id: Any, hook: Any) -> dict[str, Any]:
+        return {}
+
+    hooks = {
+        "Stop": [HookMatcher(hooks=[own])],
+        "PreToolUse": [HookMatcher(hooks=[own], timeout=7)],
+    }
+    agent = harness.wrap(options(tmp_path, [[{"text": "ok"}]], hooks=hooks), id="own-hooks")
+    await agent.run("hi", user="u1", thread="t1")
+    live = live_of(agent)
+    assert live is not None
+    given = live.client.options.hooks
+    [stop] = given["Stop"]
+    team, *ours = given["PreToolUse"]
+    assert (stop.timeout, team.timeout) == (None, 7)
+    assert ours and {m.timeout for m in ours} == {claude_live.HOOK_SECONDS}
+
+
 async def test_cancelling_a_background_subagents_run_stops_that_subagent_only(
     harness: Harness, tmp_path: Path
 ) -> None:

@@ -19,6 +19,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   stopped there — the queued writes, the spans, the MCP sources and the clients were never
   closed. Each session's process now ends whatever its runs' ends meet, and `Harness.aclose`
   closes every part before it raises the first error (any other is logged).
+- **A team's own hooks keep their timeout in a live session.** A live session told the CLI
+  to wait 24 hours for every hook with no timeout, the team's own too (a hook that hung held
+  a turn for a day): only the harness's own hooks, which may wait for a person's answer
+  about a background subagent's call, are; a team's keep what they set (none: Claude Code's
+  default), as in a process of their own.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

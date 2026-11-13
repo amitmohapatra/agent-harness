@@ -74,7 +74,7 @@ from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
-from trellis.harness.bridges.claude import JournalSessions
+from trellis.harness.bridges.claude import JournalSessions, ours
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
 
@@ -625,8 +625,9 @@ class LiveSession:
                 dataclasses.replace(
                     matcher,
                     hooks=[self._hook(event, m, c) for c in range(len(matcher.hooks))],
-                    # a background run's call may wait for a person in its hook
-                    timeout=matcher.timeout or HOOK_SECONDS,
+                    # a background run's call may wait for a person in the harness's hooks;
+                    # a team's keep what they set (none: Claude Code's own default)
+                    timeout=HOOK_SECONDS if ours(matcher) else matcher.timeout,
                 )
                 for m, matcher in enumerate(matchers)
             ]

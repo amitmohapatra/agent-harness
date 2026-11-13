@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import weakref
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
@@ -31,20 +32,37 @@ from trellis.harness.history import in_ram
 from trellis.harness.journal import Journal
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import HookContext, HookInput
+    from claude_agent_sdk import HookContext, HookInput, HookMatcher
     from claude_agent_sdk.types import SyncHookJSONOutput
 
 log = logging.getLogger("trellis.harness")
 
 #: The hook event the context is added at.
 PROMPT_EVENT: Final = "UserPromptSubmit"
+#: The harness's own hook callbacks (:func:`harness_matcher`), told apart from a team's.
+_OURS: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def harness_matcher(hook: Any) -> HookMatcher:
+    """A hook matcher of the harness's own, with ``hook`` (:func:`ours` says so): a live
+    session tells the CLI to wait for it as long as a person may take to answer about a
+    background subagent's call (``claude_live.HOOK_SECONDS``); a team's own matchers keep
+    the timeout they set."""
+    from claude_agent_sdk import HookMatcher
+
+    _OURS.add(hook)
+    return HookMatcher(hooks=[hook])
+
+
+def ours(matcher: Any) -> bool:
+    """Whether a hook matcher is the harness's own (:func:`harness_matcher`)."""
+    return bool(matcher.hooks) and all(hook in _OURS for hook in matcher.hooks)
 
 
 def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dict[str, Any]:
     """The options' hooks with one more ``UserPromptSubmit`` matcher, whose hook adds
     ``context`` to every prompt — nothing, when there is none — (the options' own hooks run
     as they did)."""
-    from claude_agent_sdk import HookMatcher
 
     async def add_context(
         given: HookInput, tool_use_id: str | None, hook: HookContext
@@ -54,7 +72,7 @@ def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dic
         return {"hookSpecificOutput": {"hookEventName": PROMPT_EVENT, "additionalContext": context}}
 
     own = dict(hooks or {})
-    own[PROMPT_EVENT] = [*own.get(PROMPT_EVENT, ()), HookMatcher(hooks=[add_context])]
+    own[PROMPT_EVENT] = [*own.get(PROMPT_EVENT, ()), harness_matcher(add_context)]
     return own
 
 
