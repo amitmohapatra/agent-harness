@@ -286,21 +286,21 @@ async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -
 
 
 async def test_a_call_comes_from_the_graph_task_it_is_made_in_and_none_outside_one() -> None:
-    from langgraph.graph import END, START, StateGraph
+    from langgraph.graph import END, START, MessagesState, StateGraph
 
     from trellis.harness.adapters.langgraph import _task
 
     seen: list[str | None] = []
 
-    def node(state: dict[str, Any]) -> dict[str, Any]:
+    def node(state: MessagesState) -> dict[str, Any]:
         seen.append(_task())
         return {}
 
-    graph = StateGraph(dict)
+    graph = StateGraph(MessagesState)
     graph.add_node("node", node)
     graph.add_edge(START, "node")
     graph.add_edge("node", END)
-    await graph.compile().ainvoke({})
+    await graph.compile().ainvoke({"messages": []})
     assert _task() is None and len(seen) == 1 and isinstance(seen[0], str)
 
 
