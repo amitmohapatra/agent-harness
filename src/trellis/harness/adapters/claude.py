@@ -106,7 +106,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, answers_read
+from trellis.harness.journal import Pending, answers_read, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -1336,20 +1336,23 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     with their answers."""
     made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
+    # the answers it reads are this call's: read again when it is made again after a pause
+    calling = runtime.replay.calling(content_key("call", QUESTION_TOOL, made.args))
     async with runtime.limited(None, made=made):
-        for asked in made.args.get("questions") or ():
-            options = [o for o in asked.get("options") or () if o.get("label")]
-            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-            picked = await ask_question(
-                asked["question"],
-                [str(o["label"]) for o in options],
-                multiple=bool(asked.get("multiSelect")),
-                recommended=best.get("label"),
-                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-            )
-            answers[asked["question"]] = (
-                ", ".join(picked) if isinstance(picked, list) else str(picked)
-            )
+        with calling:
+            for asked in made.args.get("questions") or ():
+                options = [o for o in asked.get("options") or () if o.get("label")]
+                best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+                picked = await ask_question(
+                    asked["question"],
+                    [str(o["label"]) for o in options],
+                    multiple=bool(asked.get("multiSelect")),
+                    recommended=best.get("label"),
+                    why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+                )
+                answers[asked["question"]] = (
+                    ", ".join(picked) if isinstance(picked, list) else str(picked)
+                )
     runtime.replay.ended(made)
     return {**made.args, "answers": answers}
 

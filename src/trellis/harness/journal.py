@@ -146,6 +146,8 @@ class Save(BaseModel):
 
 #: The keys of the recorded answers read in this context, while :func:`answers_read` watches.
 _READ: ContextVar[list[str] | None] = ContextVar("trellis_answers_read", default=None)
+#: The call the code running now decides or runs (its key): :meth:`Replay.calling`.
+_CALLING: ContextVar[str | None] = ContextVar("trellis_calling", default=None)
 
 
 @contextlib.contextmanager
@@ -245,6 +247,15 @@ class Journal(BaseModel):
     #: how many tool calls the run has made to their end: the place of the next, where an
     #: attempt goes on from the framework's own state (its session, its serialised run)
     place: int = 0
+    #: how far the calls made before the call the run paused on read each record and answer
+    #: (``"c:<key>"``, ``"a:<key>"``: its cursor), where an attempt goes on from the
+    #: framework's own state: it does not make those calls again, so the call it makes again
+    #: reads its own records, not an earlier identical call's (:meth:`Replay.paused`)
+    cursors: dict[str, int] = Field(default_factory=dict)
+    #: per call record (``calls``, in its order), the answers and records the call read
+    #: besides its own (``"a:<key>"``: its approval...), by cursor: a re-run that replays the
+    #: call reads past them too, so an identical call after it reads its own (:meth:`Replay.call`)
+    reads: dict[str, list[dict[str, int]]] = Field(default_factory=dict)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
@@ -392,7 +403,18 @@ class Journal(BaseModel):
 class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    __slots__ = ("_goes_on", "_made", "_seen", "_session", "_turns", "journal", "resumed", "where")
+    __slots__ = (
+        "_began",
+        "_goes_on",
+        "_made",
+        "_seeded",
+        "_seen",
+        "_session",
+        "_turns",
+        "journal",
+        "resumed",
+        "where",
+    )
 
     def __init__(self, journal: Journal, *, goes_on: bool = False) -> None:
         self.journal = journal
@@ -405,12 +427,71 @@ class Replay:
         #: before are not made again
         self._goes_on = goes_on
         self._session = journal.session
+        #: the cursors this attempt has started where the calls made before left them
+        #: (:meth:`_index`), and where each call's own reads began (:meth:`calling`)
+        self._seeded: set[str] = set()
+        self._began: dict[str, dict[str, int]] = {}
         #: the step a call is being made in now (its graph's checkpoint id), for a graph that
         #: keeps a checkpoint (``adapters.langgraph``); ``None`` elsewhere
         self.where: Callable[[], str | None] | None = None
         #: the checkpoint the attempt's graph resumed from: the records of the steps before it
         #: are passed over (:meth:`_index`)
         self.resumed: str | None = None
+
+    def _continues(self) -> bool:
+        """Whether the attempt goes on from the framework's own state — its serialised run, or
+        the session the journal holds while the framework keeps to it: the calls made before
+        are not made again."""
+        kept = self._session is not None and self.journal.session == self._session
+        return self._goes_on or kept
+
+    @contextlib.contextmanager
+    def calling(self, key: str, *, again: bool = False) -> Iterator[None]:
+        """The code inside decides or runs one call of ``key`` (a harness tool's call, a
+        framework's own call its permission check asks about): what it reads of the journal
+        is that call's (``again``: the same call's check goes on — Claude Code's own question
+        after the ``PreToolUse`` decision), read again when the run pauses on it and an
+        attempt that goes on makes it again (:meth:`paused`)."""
+        if not again or key not in self._began:
+            self._began[key] = {}
+        token = _CALLING.set(key)
+        try:
+            yield
+        finally:
+            _CALLING.reset(token)
+
+    def cursor(self) -> dict[str, int]:
+        """How far this attempt has read the journal now: each cursor read so far."""
+        return {name: self._seen[name] for name in self._seeded}
+
+    def paused(self, *, since: dict[str, int] | None = None) -> None:
+        """The run pauses on the call the code running now decides or runs: how far the calls
+        made before it read each record and answer is kept (``Journal.cursors``) — the cursors as
+        they are, the paused call's own put back where it began — so an attempt that goes on
+        from the framework's own state, which makes only the paused call again, starts there
+        (:meth:`_index`). ``since``: the cursors when the work the framework begins again
+        started (a subagent paused in its work: ``Helpers.begun_again``), all of whose reads
+        are put back. An attempt run again from its input makes every call again: it keeps
+        nothing of an earlier attempt's."""
+        kept = dict(self.journal.cursors) if self._continues() else {}
+        kept.update(self._seen)
+        calling = _CALLING.get()
+        if calling is not None:
+            kept.update(self._began.get(calling, {}))
+        if since is not None:
+            kept.update({name: since.get(name, self._seed(name)) for name in self._seeded})
+        self.journal.cursors = {name: n for name, n in kept.items() if n}
+
+    def _seed(self, name: str) -> int:
+        """Where cursor ``name`` starts in this attempt: past the reads of the calls made
+        before, where the attempt goes on from the framework's own state."""
+        return self.journal.cursors.get(name, 0) if self._continues() else 0
+
+    def _moved(self, name: str) -> None:
+        """Cursor ``name`` moves on: where it was, kept for the call reading it now."""
+        calling = _CALLING.get()
+        if calling is not None:
+            self._began.setdefault(calling, {}).setdefault(name, self._seen[name])
 
     def exclusive(self, key: str) -> asyncio.Lock:
         """What one call of ``key`` holds from its replay to its record: identical calls made
@@ -425,8 +506,7 @@ class Replay:
         from the framework's own state: then it is the next after the calls already made
         (``Journal.place``)."""
         if self._made is None:
-            kept = self._session is not None and self.journal.session == self._session
-            if not (self._goes_on or kept):
+            if not self._continues():
                 self.journal.place = 0  # run again from its input
             self._made = self.journal.place
         at, self._made = self._made, self._made + 1
@@ -445,6 +525,7 @@ class Replay:
         index = self._index("a", key, len(self.journal.answers.get(key, ())))
         recorded = self.journal.answers.get(key, [])
         if index < len(recorded):
+            self._moved(f"a:{key}")
             self._seen[f"a:{key}"] = index + 1
             self._mark("a", key, index, self._here())
             watching = _READ.get()
@@ -479,19 +560,34 @@ class Replay:
             self.journal.started.pop(key, None)
 
     def call(self, key: str) -> tuple[bool, Any]:
-        """``(True, output)`` when this occurrence of the call already ran."""
+        """``(True, output)`` when this occurrence of the call already ran — and what it read
+        besides is read past (``Journal.reads``: its approval's answer, which the next
+        identical call does not take for its own)."""
         index = self.occurrence(key)
         recorded = self.journal.calls.get(key, [])
         if index >= len(recorded):
             return False, None
+        self._moved(f"c:{key}")
         self._seen[f"c:{key}"] = index + 1
+        reads = self.journal.reads.get(key, [])
+        for name, n in (reads[index] if index < len(reads) else {}).items():
+            kind, read = name.split(":", 1)
+            self._index(kind, read, 0)  # seeded where the attempt starts it
+            self._moved(name)
+            self._seen[name] += n
         tags = self.journal.steps.get(f"c:{key}")
         if tags is not None and index < len(tags) and tags[index] is not None:
             self._mark("c", key, index, self._here())  # a step's record: now this step's
         return True, recorded[index]
 
     def record_call(
-        self, key: str, output: Any, *, tool: str | None = None, stepped: bool = False
+        self,
+        key: str,
+        output: Any,
+        *,
+        tool: str | None = None,
+        stepped: bool = False,
+        scope: str | None = None,
     ) -> None:
         """Record what this occurrence of ``key`` produced: a tool's output (``tool`` names
         it, and it stays offered after a pause), or a model step of a loop the harness runs.
@@ -501,7 +597,20 @@ class Replay:
         recorded = self.journal.calls.setdefault(key, [])
         index = self.occurrence(key)
         recorded.append(output)
+        self._moved(f"c:{key}")
         self._seen[f"c:{key}"] = index + 1
+        # what the call read besides its own record, when it is the call being made (the
+        # code inside its ``calling``, or ``scope``: its key, after its framework ran it)
+        began = self._began.get(scope or key, {}) if (scope or _CALLING.get()) == key else {}
+        read = {
+            name: self._seen[name] - n
+            for name, n in began.items()
+            if name.startswith("a:") and self._seen[name] > n
+        }
+        if read or key in self.journal.reads:
+            reads = self.journal.reads.setdefault(key, [])
+            reads.extend({} for _ in range(len(recorded) - 1 - len(reads)))
+            reads.append(read)
         if stepped:
             self._mark("c", key, len(recorded) - 1, self._here())
         if tool is not None and tool not in self.journal.used:
@@ -532,6 +641,10 @@ class Replay:
             del entries[:gone], tags[:gone]
             if not entries:
                 kept.pop(key, None)
+            if kind == "c" and key in self.journal.reads:
+                del self.journal.reads[key][:gone]
+                if not entries:
+                    del self.journal.reads[key]
             if not tags:
                 del steps[marked]
             self._seen[marked] = max(0, self._seen[marked] - gone)
@@ -550,6 +663,9 @@ class Replay:
         from (made in an earlier attempt: the graph does not make that call again, so this one
         is a later step's)."""
         seen = f"{kind}:{key}"
+        if seen not in self._seeded:
+            self._seeded.add(seen)  # the calls made before are not made again: past theirs
+            self._seen[seen] = max(self._seen[seen], self._seed(seen))
         index = self._seen[seen]
         tags = self.journal.steps.get(seen)
         if tags is None or self.resumed is None:

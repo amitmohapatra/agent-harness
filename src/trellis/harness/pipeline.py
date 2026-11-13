@@ -913,6 +913,9 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     runtime._asked += 1
     ident = interrupt_id(runtime.run_id, runtime.attempt, runtime._asked)
     if native.tool is not None:
+        # the framework goes on from its saved run: what the calls before read stays read
+        helpers = runtime.helpers
+        runtime.replay.paused(since=None if helpers is None else helpers.begun_again())
         interrupt = Interrupt(
             interrupt_id=ident,
             tenant_id=runtime.tenant,

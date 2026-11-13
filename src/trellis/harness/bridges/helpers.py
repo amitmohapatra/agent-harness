@@ -106,6 +106,10 @@ class Helper:
     #: how its work in the background ended, once the framework said: whether it failed,
     #: and what it said (:meth:`Helpers.settled`)
     ended: tuple[bool, str] | None = None
+    #: how the framework spawned it
+    kind: Kind | None = None
+    #: how far the run had read its journal when it started (``Replay.cursor``)
+    read: dict[str, int] = field(default_factory=dict)
 
 
 #: The runs of the helpers handed on past their attempt (:meth:`Helpers.detached`), until
@@ -217,7 +221,9 @@ class Helpers:
                 },
             )
         )
-        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)])
+        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
+        if kind is Kind.SUBAGENT:  # its framework starts it again after a pause in its work
+            helper.read = parent.replay.cursor()
         helper.memory = self._memory(run_id)
         helper.context = await self._pushed(helper, task)
         self._open[key] = helper
@@ -290,6 +296,14 @@ class Helpers:
                     await learning.wait()
         key = self._workers.get(worker)
         return self.named(name) if key is None else self._open.get(key)
+
+    def begun_again(self) -> dict[str, int] | None:
+        """Where the run had read its journal when the first of its open subagents started
+        (Claude's, an ACP agent's, in the foreground): the framework, going on from its
+        session after a pause in a subagent's work, starts that subagent again, and it makes
+        its calls again (``Replay.paused``). ``None``: no such subagent is at work."""
+        working = [h for h in self._open.values() if h.kind is Kind.SUBAGENT and not h.background]
+        return min(working, key=lambda h: h.began).read if working else None
 
     def waits(self, key: str) -> bool:
         """Whether the open helper ``key`` works in the background: its call's result is

@@ -145,7 +145,8 @@ async def call(
     key = content_key("call", tool.name, made.args)
     step = runtime.next_step() if step is None else step
     async with runtime.replay.exclusive(key):
-        outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
+        with runtime.replay.calling(key):
+            outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
     runtime.replay.ended(made)
     return outcome
 
@@ -193,10 +194,11 @@ async def permitted(
     assert runtime is not None  # a framework asks inside the run it works for
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
-    call, verdict = await _hooked(runtime, call, key)
-    if isinstance(verdict, Deny):
-        return denied(call, verdict)
-    decision, call, rejected = await _decided(runtime, spec, call, verdict)
+    with runtime.replay.calling(key):
+        call, verdict = await _hooked(runtime, call, key)
+        if isinstance(verdict, Deny):
+            return denied(call, verdict)
+        decision, call, rejected = await _decided(runtime, spec, call, verdict)
     if rejected is not None:
         return rejected
     if framework is None or decision.asks or call.args != args:
@@ -216,7 +218,8 @@ async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCal
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     why = FRAMEWORK_ASKS.format(framework=framework)
-    _, call, rejected = await _decided(runtime, spec, call, Ask(why))
+    with runtime.replay.calling(key, again=True):  # the check of the call permitted
+        _, call, rejected = await _decided(runtime, spec, call, Ask(why))
     return call if rejected is None else rejected
 
 

@@ -802,6 +802,9 @@ class Runtime:
             call = _call.get()
             inside = call.made if call is not None and self.suspend is None else None
             self.pending = Pending(key=key, interrupt=interrupt, inside=inside)
+            if self.suspend is None:  # what the calls before this one read stays read
+                helpers = self.helpers
+                self.replay.paused(since=None if helpers is None else helpers.begun_again())
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         # the framework's own pause (LangGraph's ``interrupt``): its resume is answered from the
