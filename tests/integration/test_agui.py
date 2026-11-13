@@ -332,6 +332,8 @@ def test_every_harness_event_has_its_agui_members() -> None:
 
     assert one(RunEventType.RUN_STARTED).type is AGUIEventType.RUN_STARTED
     assert one(RunEventType.STEP_STARTED, step="plan").step_name == "plan"
+    finished = one(RunEventType.STEP_FINISHED, step="plan")
+    assert (finished.type, finished.step_name) == (AGUIEventType.STEP_FINISHED, "plan")
     start = one(RunEventType.TEXT_MESSAGE_START, message_id="m1", data={})
     assert (start.message_id, start.role, start.delta) == ("m1", "assistant", None)
     content = one(RunEventType.TEXT_MESSAGE_CONTENT, message_id="m1", data={"delta": "hi"})
