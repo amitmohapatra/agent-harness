@@ -34,6 +34,7 @@ from claude_agent_sdk._internal.message_parser import parse_message
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
+from tests.support.memory import FakeMemoryService
 from trellis import Budget, Deny, Harness, Hooks, Settings, current, tool
 from trellis.contracts import (
     ConfigurationError,
@@ -138,10 +139,10 @@ def turn_running(agent: Agent) -> str:
     return run_id
 
 
-async def child_of(harness: Harness, run_id: str) -> RunRecord:
+async def child_of(harness: Harness, run_id: str, tenant: str | None = "default") -> RunRecord:
     """The one child run of ``run_id``."""
-    [child] = [r async for r in harness.runs.iterate(parent_run_id=run_id, tenant="default")]
-    record = await harness.runs.get(child.run_id, tenant="default")
+    [child] = [r async for r in harness.runs.iterate(parent_run_id=run_id, tenant=tenant)]
+    record = await harness.runs.get(child.run_id, tenant=tenant)
     assert record is not None
     return record
 
@@ -442,6 +443,108 @@ async def test_a_run_with_no_conversation_runs_in_a_process_of_its_own_as_before
     [only] = served(tmp_path)
     assert open_sessions(agent) == 0
     await until(lambda: not alive(only["pid"]))  # its process ended with the query
+
+
+async def launched(agent: Agent, events: list[RunEvent]) -> str:
+    """The run whose ``Agent`` call has returned (a background subagent's launch)."""
+    await until(lambda: "Agent" in results(events))
+    return events[0].run_id
+
+
+async def test_a_background_subagent_of_a_run_with_no_conversation_keeps_its_child_run(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run with no conversation has a process of its own, which the SDK keeps while a
+    background subagent works in it (its ``query`` goes on past the turn's result until the
+    task ended and the session ran its turn for it). The subagent's child run is open that
+    long, not ended at its launch: its calls are recorded under it, it ends with what its
+    task said, and the run says so (``helper_finished``). The run's answer is its own turn's;
+    the process's running cost is charged once, not again with every result."""
+    costs: list[float] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (costs.append(kw["cost"] or 0.0), account(run, **kw))
+    )
+    scripts = [[BACKGROUND, {"text": "started it"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = memory_harness.wrap(target, id="alone")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("research the market", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    run_id = await launched(agent, seen)
+    child = await child_of(memory_harness, run_id, None)
+    assert child.status is RunStatus.RUNNING and open_sessions(agent) == 0
+    assert await calls(tmp_path, READS) == {"result": "Read ran", "ok": True}
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await running
+    await following
+    assert events[-1].data["result"] == "started it"
+    child = await child_of(memory_harness, run_id, None)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, "the market is growing")
+    [ended] = [e.data for e in events if e.data.get("name") == "helper_finished"]
+    assert (ended["run_id"], ended["status"]) == (child.run_id, "success")
+    await memory_harness.writes.drain()
+    made = {c.body["tool"]: c.scope["agent_run_id"] for c in memory_service.named("record_tool")}
+    assert made == {"Agent": run_id, "Read": child.run_id}
+    # five steps at 0.5 in all (two of the turn, the subagent's two, the session's own turn)
+    assert sum(costs) == 2.5
+
+
+async def followed_first(
+    agent: Agent, events: list[RunEvent]
+) -> tuple[list[RunEvent], asyncio.Task[None]]:
+    """The events of the run about to start, as they come (``events`` gets them at its end)."""
+    seen: list[RunEvent] = []
+
+    async def follow() -> None:
+        await until(lambda: agent.running)
+        async for event in agent.events(next(iter(agent.running))):
+            seen.append(event)
+
+    return seen, asyncio.create_task(follow())
+
+
+@pytest.mark.parametrize(
+    ("ending", "why"),
+    [
+        ("failed", "no market data"),
+        ("stop", "its work in the background was stopped"),
+        ("quit", "its work in the background was cut off"),
+    ],
+)
+async def test_a_background_subagent_of_a_run_with_no_conversation_that_did_not_finish_is_an_error(
+    harness: Harness, tmp_path: Path, ending: str, why: str
+) -> None:
+    """Its task failed, was stopped in Claude Code, or was cut off with the process (which
+    ended before the task did): the child run is an error saying which — never a success
+    for work that was not done — while the run's own answer stands."""
+    last = {"text": "started it", "quit": True} if ending == "quit" else {"text": "started it"}
+    agent = harness.wrap(options(tmp_path, [[BACKGROUND, last]]), id="alone")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("research the market", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    run_id = await launched(agent, seen)
+    if ending != "quit":
+        (tmp_path / "tasks" / f"t1.{ending}").write_text("no market data")
+    await running
+    await following
+    assert events[-1].data["result"] == "started it"
+    child = await child_of(harness, run_id)
+    assert child.status is RunStatus.ERROR and child.error is not None
+    assert why in child.error.message
+    [ended] = [e.data for e in events if e.data.get("name") == "helper_finished"]
+    assert (ended["run_id"], ended["status"]) == (child.run_id, "error")
 
 
 async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_process(

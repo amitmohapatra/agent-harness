@@ -101,7 +101,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import JournalSessions, session_store, with_context
 from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
-from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.bridges.helpers import STOPPED, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
@@ -213,6 +213,11 @@ SUBAGENT_TOOLS: Final = frozenset({"Agent", "Task"})
 GENERAL_PURPOSE: Final = "general-purpose"
 #: Why a subagent whose call failed without saying why ended.
 SUBAGENT_FAILED: Final = "the subagent's call failed"
+#: The statuses a task ends with that say how (the SDK's ``TaskNotificationStatus`` and
+#: ``TaskUpdatedStatus``): it completed, it failed; any other terminal one, it was stopped.
+TASK_COMPLETED: Final = "completed"
+TASK_FAILED: Final = "failed"
+TASK_STOPPED: Final = "stopped"
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -329,7 +334,9 @@ class ClaudeAdapter:
         messages: list[Any] = []
         async for message in self._helped(target, native_input, run):
             messages.append(message)
-            if isinstance(message, AssistantMessage):
+            # the main agent's text: a subagent's (forwarded naming its ``Agent`` call) is
+            # its own run's, as in the answer and the transcript
+            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
                         yield block.text
@@ -422,6 +429,8 @@ class ClaudeAdapter:
         error: BaseException | None = None
         # a background subagent's run has no query of its own: its task works in a session
         found = self.live.attended.get(run.runtime.run_id)
+        if found is not None:  # the calls its subagent makes are this run's own
+            helpers.attribute(found.task_id, None)
         source = (
             self._messages(target, native_input, run)
             if found is None
@@ -580,8 +589,7 @@ class ClaudeAdapter:
         first = last or session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
-        # each reply's usage by its message id, until the query's result counts them all
-        replies: dict[str, dict[str, Any]] | None = {}
+        spending = Spending(runtime, options)
         live: LiveSession | None = None
         try:
             if kept:
@@ -604,12 +612,9 @@ class ClaudeAdapter:
                     if isinstance(found, str):
                         runtime.replay.journal.session = found
                     if isinstance(message, ResultMessage):
-                        # a live session's result comes with what its turn is charged
-                        _spent(runtime, options, message)
-                        replies = None
-                    elif replies is not None and isinstance(message, AssistantMessage):
-                        if message.message_id and message.usage:
-                            replies[message.message_id] = message.usage
+                        spending.ended(message, shared=live is not None)
+                    elif isinstance(message, AssistantMessage):
+                        spending.replied(message)
                     yield message
                     if runtime.pending is not None:
                         # the run paused: stop here; a process of its own goes with it
@@ -618,10 +623,11 @@ class ClaudeAdapter:
             steps.closed = True
             runtime.model_ended(STEP)
             skills.removed(written)
-            # it ended with no result (paused, stopped): what its replies said — in a live
-            # session, the running totals of the next result charged hold it
-            if replies and live is None:
-                _spent(runtime, options, None, replies.values())
+            # it ended with no result (paused, stopped), or its subagents went on after its
+            # last: what the replies no result counted said — in a live session, the
+            # running totals of the next result charged hold it
+            if live is None:
+                spending.left()
 
     async def _live(
         self, key: str, options: Any, run: Invocation, session: str | None, *, unsent: bool
@@ -751,10 +757,24 @@ async def _briefed(
 async def _subagents(helpers: Helpers, message: Any) -> None:
     """A subagent's start (the main agent's ``Agent`` call: its ``subagent_type`` and
     ``prompt``; started already when its ``PreToolUse`` came first: :func:`_briefed`) or end
-    (that call's result) in ``message``."""
-    from claude_agent_sdk import AssistantMessage, ToolResultBlock, ToolUseBlock, UserMessage
+    (that call's result) in ``message``; and whose task it is (``task_started``: the task's
+    id is the ``agent_id`` Claude Code names the subagent by in its calls' hooks). A
+    subagent Claude Code runs in the background (``is_backgrounded``: its call's result is
+    its launch) ends when its task does (``task_notification``; a ``task_updated`` to a
+    terminal status may be all that comes). In a conversation's live session such a
+    subagent's run is the session's to keep (``claude_live.Background``): it is no longer
+    one of these helpers."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        SystemMessage,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
 
-    if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+    if isinstance(message, SystemMessage):
+        await _tasks(helpers, message)
+    elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
         for call in message.content:
             if isinstance(call, ToolUseBlock) and call.name in SUBAGENT_TOOLS:
                 await helpers.start(
@@ -769,8 +789,32 @@ async def _subagents(helpers: Helpers, message: Any) -> None:
                 text = _result_text(result.content)
                 if result.is_error:
                     await helpers.end(result.tool_use_id, error=text or SUBAGENT_FAILED)
-                else:
+                elif not helpers.waits(result.tool_use_id):  # not a background one's launch
                     await helpers.end(result.tool_use_id, output=text)
+
+
+async def _tasks(helpers: Helpers, message: Any) -> None:
+    """A task's start or end in a system ``message``: whose helper its worker works for,
+    and how a background helper's work ended."""
+    from claude_agent_sdk import (
+        TERMINAL_TASK_STATUSES,
+        TaskNotificationMessage,
+        TaskStartedMessage,
+        TaskUpdatedMessage,
+    )
+
+    if isinstance(message, TaskStartedMessage):
+        if message.tool_use_id:
+            background = bool(message.data.get("is_backgrounded"))
+            helpers.attribute(message.task_id, message.tool_use_id, background=background)
+    elif isinstance(message, TaskNotificationMessage):
+        failed = message.status != TASK_COMPLETED
+        said = message.summary if message.status != TASK_STOPPED else STOPPED
+        await helpers.settled(message.task_id, failed=failed, said=said)
+    elif isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
+        failed = message.status != TASK_COMPLETED
+        said = "" if message.status in (TASK_COMPLETED, TASK_FAILED) else STOPPED
+        await helpers.settled(message.task_id, failed=failed, said=said, final=False)
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:
@@ -821,13 +865,61 @@ def _result_text(content: Any) -> str:
     return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
 
+class Spending:
+    """What one query spends, charged to its run as its results come. A result's usage is
+    the main agent's own for that turn, and its cost the process's running total, the
+    subagents' included (the bundled CLI's results, driven against a scripted model): so each
+    reply's usage is kept by its message id until a result counts it — the main agent's are
+    in the result's usage, its subagents' are counted with it — and a process of the query's
+    own, which gives a result for the turn and one for every turn the session ran for a
+    background task, is charged what its cost grew by each time."""
+
+    __slots__ = ("billed", "helped", "options", "own", "runtime")
+
+    def __init__(self, runtime: Runtime, options: Any) -> None:
+        self.runtime = runtime
+        self.options = options
+        self.own: dict[str, dict[str, Any]] = {}
+        self.helped: dict[str, dict[str, Any]] = {}
+        #: the process's running cost, as its last result carried it
+        self.billed = 0.0
+
+    def replied(self, message: Any) -> None:
+        """An assistant message: its reply's usage (one reply comes as a message a block)."""
+        if message.message_id and message.usage:
+            whose = self.own if message.parent_tool_use_id is None else self.helped
+            whose[message.message_id] = message.usage
+
+    def ended(self, result: Any, *, shared: bool) -> None:
+        """A turn's result. ``shared``: a live session's, which comes with what its turn is
+        charged (``claude_live.LiveSession.charged``)."""
+        cost = result.total_cost_usd
+        if not shared and cost is not None:
+            cost, self.billed = max(0.0, cost - self.billed), cost
+        _spent(self.runtime, self.options, result, self.helped.values(), cost=cost)
+        self.own.clear()
+        self.helped.clear()
+
+    def left(self) -> None:
+        """The query ended: what the replies no result counted said."""
+        if self.own or self.helped:
+            _spent(self.runtime, self.options, None, [*self.own.values(), *self.helped.values()])
+
+
 def _spent(
-    runtime: Runtime, options: Any, result: Any, replies: Iterable[dict[str, Any]] = ()
+    runtime: Runtime,
+    options: Any,
+    result: Any,
+    replies: Iterable[dict[str, Any]] = (),
+    *,
+    cost: float | None = None,
 ) -> None:
-    """A query's usage and cost (its ``ResultMessage``: the subagents' included) on the run's
-    budget; with no result (a query that paused or was stopped), the usage its ``replies``
-    carried, which the CLI gives no cost for."""
-    usages = [result.usage or {}] if result is not None else list(replies)
+    """What a query spent, on the run's budget: its result's usage (the main agent's), the
+    usage of its subagents' ``replies`` since the result before, and ``cost`` (what the
+    result's ``total_cost_usd`` — the subagents' included — is charged for). With no result
+    (a query that paused or was stopped), the usage its ``replies`` carried, which the CLI
+    gives no cost for."""
+    usages = [*([] if result is None else [result.usage or {}]), *replies]
 
     def total(key: str) -> int:
         return sum(int(u.get(key) or 0) for u in usages)
@@ -839,7 +931,7 @@ def _spent(
         input_tokens=total("input_tokens") + cached + written,
         output_tokens=total("output_tokens"),
         cached=cached,
-        cost=result.total_cost_usd if result is not None else None,
+        cost=cost,
     )
 
 
@@ -1203,8 +1295,10 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         spec = steps.runtime.native.get(name) or native_spec(name)
         helpers = steps.runtime.helpers
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
-        # a call a subagent made (the CLI names it: ``agent_type``) is recorded under its run
-        working = helpers.named(str(given["agent_type"])) if "agent_type" in given else None
+        # a call a subagent made is recorded under its run: the CLI names the subagent by
+        # its task's id (``agent_id``), which its ``task_started`` tied to its ``Agent`` call
+        who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
+        working = None if who is None else await helpers.of(str(who), kind)
         with helpers.working(working):
             await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
         return {}

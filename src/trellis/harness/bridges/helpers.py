@@ -25,7 +25,14 @@ hooks (the spawning stays the framework's):
 
 A helper still open when the attempt ends is ended with it — ``SUCCESS`` when the run's answer
 came, ``ERROR`` when the run failed — except on a pause or a crash: the next attempt, which runs
-the helper again, ends it.
+the helper again, ends it. One the framework runs in the background of the run (its call
+returned at once: :meth:`Helpers.attribute`) ends when the framework says its work ended
+(:meth:`Helpers.settled`), not with its call; still at work when the attempt ends, it was cut
+off: ``ERROR``, whatever the run answered.
+
+A framework that runs several helpers at once says whose each tool call is by its own id of
+the worker (Claude Code's ``agent_id``: the task's id), which it ties to the call that started
+the helper (:meth:`Helpers.attribute`): :meth:`Helpers.of` is that helper.
 """
 
 from __future__ import annotations
@@ -60,6 +67,14 @@ UNFINISHED: Final = "HelperUnfinished"
 TASK_HEADING: Final = "## Your task\n"
 #: Why a helper an earlier attempt started, and the next did not take up again, ended.
 NOT_CONTINUED: Final = "cut short by a pause or a crash, and not taken up again: the run went on"
+#: Why a helper at work in the background ended, when the attempt ended before its work did.
+CUT_OFF: Final = "its work in the background was cut off: the run's process ended before it did"
+#: Why a helper whose work in the background failed, or was stopped, without a word ended.
+FAILED: Final = "its work in the background failed"
+STOPPED: Final = "its work in the background was stopped"
+#: How long a call waits to learn whose it is (:meth:`Helpers.of`): the framework said who
+#: works for which helper before the call, on a stream the run may not have read that far.
+ATTRIBUTED_SECONDS: Final = 5.0
 
 
 class Kind(StrEnum):
@@ -84,6 +99,11 @@ class Helper:
     context: str | None = None
     #: when it started (``time.monotonic``)
     began: float = field(default_factory=time.monotonic)
+    #: the framework runs it in the background: its end is its work's, not its call's
+    background: bool = False
+    #: how its work in the background ended, once the framework said: whether it failed,
+    #: and what it said (:meth:`Helpers.settled`)
+    ended: tuple[bool, str] | None = None
 
 
 #: The runs of the helpers handed on past their attempt (:meth:`Helpers.detached`), until
@@ -121,6 +141,10 @@ class Helpers:
         self._starting: dict[str, asyncio.Lock] = {}
         #: how many times this attempt started each helper on each task
         self._started: Counter[tuple[str, str]] = Counter()
+        #: the framework's own id of who works for each helper (:meth:`attribute`): its key
+        self._workers: dict[str, str] = {}
+        #: the calls waiting to learn whose a worker is (:meth:`of`)
+        self._learning: dict[str, asyncio.Event] = {}
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
     async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
@@ -204,6 +228,64 @@ class Helpers:
         found = [h for h in self._open.values() if h.name == name]
         return found[-1] if found else None
 
+    def attribute(self, worker: str, key: str | None, *, background: bool = False) -> None:
+        """The framework's own id of who works for the helper ``key`` (Claude Code's task
+        id, the ``agent_id`` of the subagent's hooks; ``None``: for the run itself).
+        ``background``: the framework runs that helper in the background — its call returns
+        at once, and its end is its work's (:meth:`settled`)."""
+        self._workers[worker] = key or ""
+        helper = self._open.get(key or "")
+        if helper is not None and background:
+            helper.background = True
+        learning = self._learning.pop(worker, None)
+        if learning is not None:
+            learning.set()
+
+    async def of(self, worker: str, name: str) -> Helper | None:
+        """The open helper ``worker`` works for (:meth:`attribute`); ``None``: the run
+        itself, or a helper no longer open. A worker not heard of yet, while a helper
+        called ``name`` is open, is waited for (:data:`ATTRIBUTED_SECONDS`: the framework
+        said whose it is before the call, and the run reads that as it goes); never heard
+        of, it is the helper called ``name`` started last (:meth:`named`)."""
+        if worker not in self._workers and self.named(name) is not None:
+            learning = self._learning.setdefault(worker, asyncio.Event())
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(ATTRIBUTED_SECONDS):
+                    await learning.wait()
+        key = self._workers.get(worker)
+        return self.named(name) if key is None else self._open.get(key)
+
+    def waits(self, key: str) -> bool:
+        """Whether the open helper ``key`` works in the background: its call's result is
+        not its end."""
+        helper = self._open.get(key)
+        return helper is not None and helper.background
+
+    async def settled(
+        self, worker: str, *, failed: bool, said: str = "", final: bool = True
+    ) -> None:
+        """The framework said the background work of ``worker``'s helper ended (``failed``:
+        it failed or was stopped; ``said``: its last word, or why). ``final`` false: more
+        may be said of it (Claude Code's ``task_updated`` before its ``task_notification``,
+        which has the summary) — the helper ends with what is said last, or with the
+        attempt (:meth:`closed`)."""
+        key = self._workers.get(worker)
+        helper = self._open.get(key) if key is not None else None
+        if key is None or helper is None or not helper.background:
+            return
+        helper.ended = (failed, said or (helper.ended or (failed, ""))[1])
+        if final:
+            await self._ended(key, helper)
+
+    async def _ended(self, key: str, helper: Helper) -> None:
+        """The background helper ``key`` ended as the framework said (``helper.ended``)."""
+        assert helper.ended is not None
+        failed, said = helper.ended
+        if failed:
+            await self.end(key, error=said or FAILED)
+        else:
+            await self.end(key, output=said or None)
+
     async def end(self, key: str, *, output: str | None = None, error: str | None = None) -> None:
         """The helper ``key`` ended with ``output``, or failed (``error``): its run record
         ended, its turns recorded. A key not open (ended already) is no change, and so is
@@ -257,8 +339,11 @@ class Helpers:
         if paused:
             return
         why = None if error is None else f"the run ended first: {type(error).__name__}"
-        for key in list(self._open):
-            await self.end(key, error=why)
+        for key, helper in list(self._open.items()):
+            if helper.ended is not None:  # its background work ended, as the framework said
+                await self._ended(key, helper)
+            else:  # work still under way in the background ends with the process: cut off
+                await self.end(key, error=CUT_OFF if helper.background and not why else why)
         if self.runtime.attempt > 1:
             await self._left_open()
 
