@@ -371,6 +371,23 @@ async def test_finished_runs_go_after_their_time_with_their_artifacts(
     assert runs._artifact_runs == {} and set(runs._run_artifacts) == set()
 
 
+async def test_by_default_1000_finished_runs_are_kept_for_an_hour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("trellis.harness.runs.time.monotonic", lambda: clock[0])
+    runs = LocalRuns()
+    for n in range(1001):
+        await finished(runs, f"run_{n}")
+    assert await runs.get("run_0") is None and await runs.get("run_1") is not None
+    clock[0] += 3599
+    await finished(runs, "run_late")  # the 1,000 most recent: run_1 goes
+    assert await runs.get("run_1") is None and await runs.get("run_2") is not None  # in the hour
+    clock[0] += 2
+    await finished(runs, "run_later")
+    assert await runs.get("run_3") is None and await runs.get("run_late") is not None  # past it
+
+
 async def test_a_forgotten_scheduled_run_takes_its_tick_along() -> None:
     runs = LocalRuns(keep_finished=0)
     schedule = await runs.schedules.create(
