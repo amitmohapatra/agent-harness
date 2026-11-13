@@ -614,6 +614,37 @@ async def test_the_sessions_the_options_choose_are_claude_codes_to_resume_fork_o
     assert "--continue" in last["argv"] and last["session"] == fork["session"]
 
 
+async def test_a_forked_session_paused_inside_goes_on_in_its_fork(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Options that fork a session (``resume`` with ``fork_session``) and a run that pauses
+    in the fork: the attempt after the answer goes on in the session the query ran in, and
+    the call it paused on runs once."""
+    first = await harness.wrap(options(tmp_path, [{"text": "noted"}]), id="one").run(
+        "the code is 4242", user="u1"
+    )
+    assert first.answer == "noted"
+    began = started_with(tmp_path)["session"]
+    made: list[str] = []
+
+    @tool(side_effects="irreversible")
+    def refund(order: str) -> str:
+        """Refund an order."""
+        made.append(order)
+        return f"refunded {order}"
+
+    script = [{"tool": "refund", "args": {"order": "o1"}}, {"text": "{last}"}]
+    forked = options(tmp_path, script, resume=began, fork_session=True)
+    agent = arm(harness.wrap(forked, id="forked"), [refund])
+    paused = await agent.run("refund o1", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    fork = started_with(tmp_path)["session"]
+    assert fork != began
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "refunded o1"
+    assert made == ["o1"] and started_with(tmp_path)["resume"] == fork
+
+
 # --------------------------------------------------------------------------- errors
 async def test_a_cli_that_cannot_start_fails_the_run_with_the_sdks_own_error(
     harness: Harness, tmp_path: Path
