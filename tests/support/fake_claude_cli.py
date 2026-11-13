@@ -55,8 +55,9 @@ process is sent after its first is its session's next turn, in the same session:
 record is also a line of ``<record>.turns`` with the process's ``pid``, so a test sees which
 process answered and whether it was started with ``--resume``; ``heard`` (``{heard}`` in a
 scripted text) is every prompt the session's "model" has been given, injected ones included.
-A result's cost is the process's running total and its usage the turn's own, as the bundled
-CLI (2.1.283) reports them when driven against a scripted model.
+A result's cost is the process's running total and its usage the turn's own — the main
+thread's: a subagent's steps are in the cost, and in the usage of its own replies only — as
+the bundled CLI (2.1.283) reports them when driven against a scripted model.
 
 Background work, as far as the SDK's message types say its shape (``task_started``,
 ``task_notification``, a turn of the session's own whose result has ``origin: {"kind":
@@ -105,6 +106,8 @@ PAUSED_PROMPT = "This task was paused"
 #: How the harness begins the prompt that asks for one last answer at the turn limit
 #: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
 LIMIT_PROMPT = "This turn has reached its limit"
+#: The slash command that compacts the conversation (its ``PreCompact`` hooks run).
+COMPACT = "/compact"
 #: The tools ``--permission-mode acceptEdits`` lets run without asking.
 EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 #: The input and output tokens each step of a query reports.
@@ -164,8 +167,10 @@ class Cli:
         self.requests = 0
         #: the in-process servers initialized (``initialize``, then its notification)
         self.mcp_ready: set[str] = set()
-        #: the hooks the SDK registered, by event (its ``initialize`` request)
+        #: the hooks the SDK registered, by event (its ``initialize`` request), and the rest
+        #: of that request (``agents``, ``skills``...: what the SDK sends there, not in flags)
         self.hooks: dict[str, Any] = {}
+        self.initialized: dict[str, Any] = {}
         #: the subagent working now (its ``agent_id`` and ``agent_type``), as the real CLI
         #: names it in the hooks of the tool calls it makes
         self.working: dict[str, str] = {}
@@ -186,6 +191,8 @@ class Cli:
         self.steps = 0
         self.began = 0
         self.in_turn = False
+        #: how many of those steps subagents took: a result's usage is the main thread's own
+        self.helped = 0
 
     def aside(self, message: dict[str, Any]) -> None:
         """A message that came while another was waited for: a prompt is queued, a control
@@ -271,6 +278,7 @@ class Cli:
                 finally:
                     self.working = was
                 self.steps += 1
+                self.helped += 1
                 (Path(folder) / f"{task_id}.called").write_text(
                     json.dumps({"result": said, "ok": ok})
                 )
@@ -288,6 +296,7 @@ class Cli:
                 ended.unlink()
                 del self.tasks[task_id]
                 self.steps += 1  # what the task's own model steps spent
+                self.helped += 1
                 status = "completed" if ended is done else "failed"
                 frame = {"type": "system", "task_id": task_id, "session_id": self.session}
                 if task["agent"] != "shell":  # the subagent's last reply
@@ -322,7 +331,7 @@ class Cli:
             os.environ.get("FAKE_CLAUDE_INJECTED") or '[{"text": "Noted: {summary}"}]'
         )
         last = read_ = ""
-        self.began = self.steps
+        self.began = self.steps - self.helped
         self.in_turn = True
         try:
             for n, scripted in enumerate(script):
@@ -407,6 +416,30 @@ class Cli:
                 if context:
                     added.append(context)
         return "\n".join(added)
+
+    def hooked(self, event: str, session: str | None, **fields: Any) -> list[dict[str, Any]]:
+        """The hooks registered for ``event`` called with ``fields`` (``Stop``,
+        ``SubagentStart``, ``SubagentStop``, ``PermissionRequest``, ``PreCompact``: when and
+        with what the bundled CLI was seen calling each): what each answered."""
+        given = {
+            "session_id": session,
+            "transcript_path": "",
+            "cwd": os.getcwd(),
+            "hook_event_name": event,
+            **fields,
+        }
+        return [
+            self.control(
+                {
+                    "subtype": "hook_callback",
+                    "callback_id": callback,
+                    "input": given,
+                    "tool_use_id": None,
+                }
+            )
+            for matcher in self.hooks.get(event) or []
+            for callback in matcher.get("hookCallbackIds") or []
+        ]
 
     def pre_tool_use(self, session: str, name: str, args: dict[str, Any], tool_id: str) -> dict:
         """What the ``PreToolUse`` hooks matching ``name`` decide (the first decision)."""
@@ -551,25 +584,65 @@ class Cli:
             )
         ):
             return {"behavior": "allow"}
-        return self.control(
+        suggested = [
+            {
+                "type": "addRules",
+                "rules": [{"toolName": name, "ruleContent": None}],
+                "behavior": "allow",
+                "destination": "session",
+            }
+        ]
+        self.hooked(
+            "PermissionRequest",
+            self.session,
+            tool_name=name,
+            tool_input=args,
+            permission_suggestions=suggested,
+            **self.working,
+        )
+        answered = self.control(
             {
                 "subtype": "can_use_tool",
                 "tool_name": name,
                 "input": args,
-                "permission_suggestions": None,
+                "permission_suggestions": suggested,
                 "tool_use_id": tool_id,
                 **{k: v for k, v in self.working.items() if k == "agent_id"},
             }
         )
+        record = os.environ.get("FAKE_CLAUDE_RECORD")
+        if record:  # what the SDK answered, as the CLI reads it
+            with open(f"{record}.permissions", "a") as handle:
+                handle.write(json.dumps({"tool": name, "answer": answered}) + "\n")
+        return answered
+
+    def resumes(self) -> str | None:
+        """The session this process was started to go on with: the one ``--resume`` names,
+        or with ``--continue`` the one this machine holds that was written last; with
+        ``--fork-session`` a copy of it under a new id (``--session-id``, else its own)."""
+        found = argument("--resume")
+        if found is None and "--continue" in sys.argv:
+            kept = sorted(SESSIONS.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            found = kept[-1].stem if kept else None
+        if found is None or "--fork-session" not in sys.argv:
+            return found
+        forked = argument("--session-id") or str(uuid.uuid4())
+        if (SESSIONS / f"{found}.json").exists():
+            (SESSIONS / f"{forked}.json").write_text((SESSIONS / f"{found}.json").read_text())
+        return forked
 
     def turn(self, prompt: Any) -> None:
         script = json.loads(os.environ.get("FAKE_CLAUDE_SCRIPT", '[{"text": "ok"}]'))
         # this process's first turn resumes the session it was started with, or begins one;
         # every later prompt is that session's next turn
         first = self.session is None
-        self.began = self.steps
-        resumed = argument("--resume") if first else self.session
-        session = self.session = resumed or str(uuid.uuid4())
+        self.began = self.steps - self.helped
+        resumed = (self.resumes() if first else self.session) or None
+        session = self.session = resumed or argument("--session-id") or str(uuid.uuid4())
+        if str(prompt).strip() == COMPACT:  # a slash command: no prompt hook, no model turn
+            self.hooked("PreCompact", session, trigger="manual", custom_instructions=None)
+            send(self.ended(session, last="", turns=0))
+            return
         if first:
             self.heard = prompts(session)
         earlier = list(self.heard)
@@ -579,6 +652,8 @@ class Cli:
         self.recorded(session, prompt, context, earlier, first=first)
         kept = SESSIONS / f"{session}.json"
         restored = mirrored(session) if resumed is not None and first else None
+        if restored is None and resumed is not None and first and "--fork-session" in sys.argv:
+            restored = mirrored(str(argument("--resume")))  # the transcript it was forked from
         if restored is not None:  # the SDK wrote the session back from its store
             SESSIONS.mkdir(parents=True, exist_ok=True)
             kept.write_text(json.dumps({"done": restored, "turn": mirrored_turn(session)}))
@@ -615,7 +690,7 @@ class Cli:
 
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""
-        own = self.steps - self.began
+        own = self.steps - self.helped - self.began
         return result(session, error, steps=own, total=self.steps, **fields)
 
     def recorded(
@@ -648,6 +723,8 @@ class Cli:
                         "builtins": argument("--tools"),
                         "max_turns": argument("--max-turns"),
                         "plugins": plugins(),
+                        "argv": sys.argv[1:],
+                        "initialize": self.initialized,
                     },
                     handle,
                 )
@@ -681,6 +758,7 @@ class Cli:
                 session, step, item, read, context
             )
             self.steps += inner
+            self.helped += inner
             last = said if said is not None else last
             if self.stopping:
                 raise Interrupted
@@ -690,6 +768,7 @@ class Cli:
                 continue
             kept.write_text(json.dumps({"done": step + 1, "turn": turn}))
             mirror(session, step + 1, turn)
+        self.hooked("Stop", session, stop_hook_active=False)
         send(self.ended(session, last=last, turns=len(script)))
         if any(item.get("quit") for item in script):  # a CLI that ends of itself, cleanly
             sys.exit(0)
@@ -715,7 +794,7 @@ class Cli:
                     send(delta(session, word if n == 0 else f" {word}"))
             send(assistant(session, [{"type": "text", "text": said}]))
             return said, read, True, False, 0
-        if "agent" in item:
+        if "agent" in item or "agents" in item:
             answer, completed, interrupted, inner = self.subagent(session, step, item)
             return None, answer, completed, interrupted, inner
         read, completed, interrupted = self.tool(session, step, item)
@@ -724,56 +803,114 @@ class Cli:
     def subagent(
         self, session: str, step: int, item: dict[str, Any]
     ) -> tuple[str, bool, bool, int]:
-        """One subagent (``{"agent", "prompt", "steps"}``), as the real CLI runs one of
-        ``agents=``: its ``Agent`` tool call (through the hooks and the permission rules, as
-        any call), then its own steps — their messages naming the call
-        (``parent_tool_use_id``) — then the call's result, the subagent's last text. The
-        text of the result, whether it is done, whether a check stopped the turn, and how
-        many of its own steps it took."""
-        tool_id = f"toolu_{step}"
-        args = {
-            "description": item["prompt"],
-            "prompt": item["prompt"],
-            "subagent_type": item["agent"],
-        }
-        send(
-            assistant(
-                session, [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": args}]
-            )
-        )
-        permission = self.allowed(session, "Agent", args, tool_id)
-        if permission.get("behavior", "allow") != "allow":
-            self.result(session, tool_id, [{"type": "text", "text": "denied"}])
-            return "denied", False, False, 0
-        briefs = os.environ.get("FAKE_CLAUDE_BRIEFS")
-        if briefs:  # what the subagent was given, the hooks' updates included
+        """One subagent (``{"agent", "prompt", "steps"}``) — or several at work at once
+        (``{"agents": [...]}``) — as the bundled CLI runs one of ``agents=`` whose call says
+        ``run_in_background: false``: its ``Agent`` tool call (through the hooks and the
+        permission rules, as any call), its task's start (``task_started``, not
+        backgrounded: the task's id is the ``agent_id`` of the subagent's hooks and
+        permission requests) and its ``SubagentStart`` hooks, then its own steps — their
+        messages naming the call (``parent_tool_use_id``), several subagents' steps in turn
+        — then its ``SubagentStop`` hooks, its task's end (``task_updated``,
+        ``task_notification``) and the call's result, the subagent's last text. The text of
+        the (last) result, whether it is done, whether a check stopped the turn, and how
+        many of their own steps the subagents took."""
+        several = "agents" in item
+        subs: list[dict[str, Any]] = []
+        for n, one in enumerate(item["agents"] if several else [item]):
+            tool_id = f"toolu_{step}{'abcdefgh'[n]}" if several else f"toolu_{step}"
+            args = {
+                "description": one["prompt"],
+                "prompt": one["prompt"],
+                "subagent_type": one["agent"],
+                "run_in_background": False,
+            }
+            call = [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": args}]
+            send(assistant(session, call))
+            permission = self.allowed(session, "Agent", args, tool_id)
+            if permission.get("behavior", "allow") != "allow":
+                self.result(session, tool_id, [{"type": "text", "text": "denied"}])
+                continue
             given = permission.get("updatedInput", args)
-            with open(briefs, "a") as log:
-                log.write(json.dumps({"agent": item["agent"], "prompt": given["prompt"]}) + "\n")
-        self.working = {"agent_id": f"agent_{tool_id}", "agent_type": item["agent"]}
+            briefs = os.environ.get("FAKE_CLAUDE_BRIEFS")
+            if briefs:  # what the subagent was given, the hooks' updates included
+                with open(briefs, "a") as log:
+                    log.write(json.dumps({"agent": one["agent"], "prompt": given["prompt"]}) + "\n")
+            who = {"agent_id": f"agent_{tool_id}", "agent_type": one["agent"]}
+            subs.append({"item": one, "tool_id": tool_id, "who": who, "args": given, "last": ""})
+        if not subs:
+            return "denied", False, False, 0
+        for sub in subs:
+            send(
+                {
+                    "type": "system",
+                    "subtype": "task_started",
+                    "task_id": sub["who"]["agent_id"],
+                    "tool_use_id": sub["tool_id"],
+                    "description": sub["item"]["prompt"],
+                    "task_type": "local_agent",
+                    "subagent_type": sub["item"]["agent"],
+                    "is_backgrounded": False,
+                    "uuid": str(uuid.uuid4()),
+                    "session_id": session,
+                }
+            )
+            self.hooked("SubagentStart", session, **sub["who"])
         try:
-            return self._worked(session, step, item, tool_id)
+            interrupted, taken = self._worked(session, step, subs)
         finally:
             self.working = {}
+        if interrupted:
+            return "", False, True, taken
+        for sub in subs:
+            self._finished(session, sub)
+        return subs[-1]["last"], True, False, taken
 
-    def _worked(
-        self, session: str, step: int, item: dict[str, Any], tool_id: str
-    ) -> tuple[str, bool, bool, int]:
-        """The subagent's own steps, then its ``Agent`` call's result."""
-        last, taken = "", 0
-        for n, inner in enumerate(item["steps"]):
-            taken += 1
-            if "text" in inner:
-                last = inner["text"]
-                send(assistant(session, [{"type": "text", "text": last}], parent=tool_id))
-                continue
-            _, _, interrupted = self.tool(
-                session, step, inner, tool_id=f"{tool_id}_{n}", parent=tool_id
-            )
-            if interrupted:
-                return "", False, True, taken
-        self.result(session, tool_id, [{"type": "text", "text": last}])
-        return last, True, False, taken
+    def _worked(self, session: str, step: int, subs: list[dict[str, Any]]) -> tuple[bool, int]:
+        """The subagents' own steps, one of each in turn: whether a check stopped the turn,
+        and how many steps they took."""
+        taken = 0
+        for n in range(max(len(sub["item"]["steps"]) for sub in subs)):
+            for sub in subs:
+                if n >= len(sub["item"]["steps"]):
+                    continue
+                inner, tool_id = sub["item"]["steps"][n], sub["tool_id"]
+                self.working = sub["who"]
+                taken += 1
+                if "text" in inner:
+                    sub["last"] = inner["text"]
+                    said = [{"type": "text", "text": inner["text"]}]
+                    send(assistant(session, said, parent=tool_id))
+                    continue
+                _, _, interrupted = self.tool(
+                    session, step, inner, tool_id=f"{tool_id}_{n}", parent=tool_id
+                )
+                if interrupted:
+                    return True, taken
+        return False, taken
+
+    def _finished(self, session: str, sub: dict[str, Any]) -> None:
+        """A subagent's end: its ``SubagentStop`` hooks, its task's end, its ``Agent``
+        call's ``PostToolUse`` hooks and that call's result."""
+        tool_id, last = sub["tool_id"], sub["last"]
+        self.hooked(
+            "SubagentStop", session, stop_hook_active=False, agent_transcript_path="", **sub["who"]
+        )
+        frame = {"type": "system", "task_id": sub["who"]["agent_id"], "session_id": session}
+        send({**frame, "subtype": "task_updated", "patch": {"status": "completed"}})
+        send(
+            {
+                **frame,
+                "subtype": "task_notification",
+                "tool_use_id": tool_id,
+                "status": "completed",
+                "output_file": "",
+                "summary": last,
+                "uuid": str(uuid.uuid4()),
+            }
+        )
+        content = [{"type": "text", "text": last}]
+        self.post_tool_use(session, "Agent", sub["args"], tool_id, content=content, error=None)
+        self.result(session, tool_id, content)
 
     def allowed(
         self, session: str, name: str, args: dict[str, Any], tool_id: str
@@ -1028,6 +1165,18 @@ def main() -> None:
     if "-v" in sys.argv or "--version" in sys.argv:
         print("9.9.9 (Claude Code)")
         return
+    named, forks = argument("--session-id"), "--fork-session" in sys.argv
+    if named and not forks and (argument("--resume") or "--continue" in sys.argv):
+        # the bundled CLI's own words, and its exit
+        print(
+            "Error: --session-id can only be used with --continue or --resume if "
+            "--fork-session is also specified.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if named and not forks and (SESSIONS / f"{named}.json").exists():
+        print(f"Error: Session ID {named} is already in use.", file=sys.stderr)
+        sys.exit(1)
     cli = Cli()
     if os.environ.get("FAKE_CLAUDE_PID"):  # which process this is, before any turn
         Path(os.environ["FAKE_CLAUDE_PID"]).write_text(str(os.getpid()))
@@ -1049,6 +1198,11 @@ def main() -> None:
         if kind == "control_request":
             if message["request"].get("subtype") == "initialize":
                 cli.hooks = message["request"].get("hooks") or {}
+                cli.initialized = {
+                    k: (sorted(v or {}) if k == "hooks" else v)
+                    for k, v in message["request"].items()
+                    if k != "subtype"
+                }
             cli.asked_to_stop(message)
             acknowledge(message)
         elif kind == "user":
