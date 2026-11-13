@@ -301,9 +301,13 @@ def declare_files(graph: Any) -> None:
         subagent_graphs,
     )
 
-    pending = [graph]  # a sub-agent's graph is compiled before the graph running it: no cycle
+    pending = [graph]
+    seen: set[int] = set()  # a sub-agent that forks its parent's conversation runs its graphs too
     while pending:
         found = pending.pop()
+        if id(found) in seen:
+            continue
+        seen.add(id(found))
         outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
         for tool in bound_tools(found):
             name = getattr(tool, "name", None)
