@@ -983,6 +983,21 @@ async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_sta
         await two.aclose()
 
 
+async def test_a_kept_session_whose_last_turn_the_run_store_no_longer_has_is_served(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The last turn this process served is gone from the run store (pruned): nothing says
+    another worker went past the session kept here, which serves the next turn."""
+    scripts = [[{"text": "noted"}], [{"text": "you told me: {heard}"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="pruned")
+    await agent.run("the code is 4242", user="u1", thread="t1")
+    agent.turned[conversation_key("default", "u1", "t1")] = "run_pruned"
+    again = await agent.run("what is it?", user="u1", thread="t1")
+    assert again.answer == "you told me: the code is 4242 | what is it?"
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"]
+
+
 async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_starts_another(
     harness: Harness, tmp_path: Path
 ) -> None:
