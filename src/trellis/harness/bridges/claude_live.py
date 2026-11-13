@@ -41,6 +41,8 @@ it (``client.query``) instead of into a new process that resumes the session.
   own: a prompt is sent only once the result of the one before came, and no turn of the
   session's own is seen under way (:meth:`LiveSession.settled`).
 * **Spending.** A result's cost is the process's running total; its usage is the turn's own.
+  A turn left before its result is charged that result when it comes at once (interrupted:
+  :meth:`LiveSession.outcome`); never the conversation's next turn.
   What the cost grew by since the last result charged (:meth:`LiveSession.charged`) is
   shared by the tokens each used: the turn the result ends its own usage, each background
   run what its subagent's replies used since (the share of a turn the session injected
@@ -155,6 +157,8 @@ class Turn:
     listening: bool = False
     #: its own result came
     answered: bool = False
+    #: it was left before its result and the CLI's turn interrupted: its result comes at once
+    stopped: bool = False
     calls: set[asyncio.Task[Any]] = dataclasses.field(default_factory=set)
 
     async def within[T](self, work: Coroutine[Any, Any, T]) -> T:
@@ -578,6 +582,9 @@ class LiveSession:
         self.error: BaseException | None = None
         #: the process's running cost as the last charged result carried it
         self.billed = 0.0
+        #: the turn left before its own result (paused, cancelled): the result that comes
+        #: next is its own, what it spent its run's — never the conversation's next turn's
+        self.left: Turn | None = None
         #: where the conversation's session is kept for a turn with no live one
         #: (``Agent.sessions``), once a turn was served
         self.kept_in: LRU[str, Any] | None = None
@@ -784,6 +791,10 @@ class LiveSession:
             turn.answered = result
             charged = self.charged(message, own=own, taken=True) if result else message
             turn.queue.put_nowait(charged)
+        elif result and own and self.left is not None:  # the result of the turn left
+            left, self.left = self.left, None
+            left.answered = True
+            left.queue.put_nowait(self.charged(message, own=own, taken=True))
         else:
             if result:
                 self.charged(message, own=own, taken=False)
@@ -908,8 +919,14 @@ class LiveSession:
             self._detach(turn)
             # an interrupt stops the background work too (the CLI's own rule): with any
             # under way, the turn ends at its next tool call instead (:meth:`_ends`)
-            if left and not self.closed and not self.working:
+            turn.stopped = left and not self.closed and not self.working
+            if turn.stopped:
                 self._aside_run(self._interrupt())
+            # its result, when it comes, is its own (:meth:`outcome`); one that comes after
+            # its run went on with a pause is the resumed attempt's, as a process's that
+            # resumes the session
+            if left and not self.closed and (turn.stopped or turn.runtime.pending is None):
+                self.left = turn
             # the calls it left under way end with it (cancelled above), as a query's own
             # process ends its calls when it is closed: what one says as it ends (a helper's
             # run: ``helper_finished``) is on the run's stream before the run's end
@@ -918,6 +935,7 @@ class LiveSession:
 
     def _attach(self, turn: Turn) -> None:
         self.turn = turn
+        self.left = None  # its result came (:meth:`settled`), or never will
         self.kept_in = turn.runtime.agent.sessions
         if self._timer is not None:
             self._timer.cancel()
@@ -949,6 +967,27 @@ class LiveSession:
         if not self.closed:
             self._rested = asyncio.get_running_loop().time()
             self._rest()
+
+    async def outcome(self, turn: Turn) -> Any:
+        """The result of the CLI's turn ``turn`` left before it, charged to it
+        (:meth:`charged`), when it comes at once: it came already, or the turn was
+        interrupted (:attr:`Turn.stopped`) — waited for :data:`SETTLE_SECONDS` at most.
+        ``None`` otherwise: with background work under way the CLI's turn ends at its next
+        tool call, after the run went on (a pause: its resumed attempt is charged it, as a
+        process's that resumes the session is) or ended (cancelled: no run is charged what
+        it spent past then — the run's record is final — and the next turn is not)."""
+        from claude_agent_sdk import ResultMessage
+
+        if not (turn.answered or turn.stopped):
+            return None
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(SETTLE_SECONDS):
+                while (message := await turn.queue.get()) is not None:
+                    if isinstance(message, ResultMessage):
+                        return message
+        if self.left is turn:
+            self.left = None
+        return None
 
     async def settled(self) -> bool:
         """Whether the session can take a prompt: the result of the one before came, and no
@@ -1041,9 +1080,9 @@ class LiveSession:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        turn = self.turn
-        if turn is not None:
-            turn.queue.put_nowait(None)
+        for turn in (self.turn, self.left):
+            if turn is not None:
+                turn.queue.put_nowait(None)
         runs = list(self.background.values())
         try:  # each ends saying why
             ended = await asyncio.gather(

@@ -24,6 +24,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   a turn for a day): only the harness's own hooks, which may wait for a person's answer
   about a background subagent's call, are; a team's keep what they set (none: Claude Code's
   default), as in a process of their own.
+- **A paused or cancelled turn is charged its own spending.** A turn that paused before its
+  first result and was resumed on another worker was charged the conversation's earlier
+  turns again: the session's cost was kept in the first worker's memory only (it is in the
+  run's journal from the turn's start now). In a live session, the attempt a pause left lost
+  its tokens and model call (its result came after the attempt stopped reading), and what
+  a cancelled turn spent was charged to the conversation's next turn: a left turn's result,
+  which comes at once when it is interrupted, is its own run's now.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

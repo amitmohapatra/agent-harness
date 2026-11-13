@@ -461,6 +461,128 @@ async def test_a_live_session_that_resumes_a_session_charges_its_first_turn_its_
     assert costs == [1.0, 0.5, 0.5]
 
 
+async def _charged_for_a_paused_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, elsewhere: bool
+) -> list[float]:
+    """A conversation's first turn, then a second that pauses for an approval before any
+    result, resumed on the same worker or (``elsewhere``) another sharing the run store:
+    what the second turn's run is charged."""
+    costs: list[tuple[str, float | None]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget,
+        "account",
+        lambda run, **kw: (costs.append((run.run_id, kw["cost"])), account(run, **kw)),
+    )
+    refunds.clear()
+    scripts = [[{"text": "hi"}], [{"tool": "refund", "args": {"order": "o1"}}, {"text": "done"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = arm(one.wrap(target, id="chat"), [refund])
+        second = arm(two.wrap(target, id="chat"), [refund])
+        await first.run("hi", user="u1", thread="t1")
+        paused = await first.run("refund o1", user="u1", thread="t1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        resumer = second if elsewhere else first
+        done = await resumer.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert refunds == ["o1"]
+        return [cost or 0.0 for run_id, cost in costs if run_id == paused.run_id]
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
+async def test_a_turn_resumed_on_another_worker_is_charged_its_own_cost_not_the_earlier_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed session's result carries the session's running cost, the conversation's
+    earlier turns included. A turn that paused before its first result is charged what the
+    cost grew by since then wherever it is resumed: the cost already charged for the
+    session is in its journal from the turn's start, not only in the memory of the worker
+    that served the turn before."""
+    (tmp_path / "same").mkdir()
+    same = await _charged_for_a_paused_turn(tmp_path / "same", monkeypatch, elsewhere=False)
+    (tmp_path / "elsewhere").mkdir()
+    elsewhere = await _charged_for_a_paused_turn(
+        tmp_path / "elsewhere", monkeypatch, elsewhere=True
+    )
+    assert sum(elsewhere) == pytest.approx(sum(same)) == pytest.approx(1.5), (same, elsewhere)
+
+
+async def _spent_by_a_paused_run(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, thread: str | None
+) -> tuple[int, int, float]:
+    """A run that pauses for an approval after a step, then is approved: the tokens, model
+    calls and cost it is charged."""
+    counted: list[tuple[str, int, int, float]] = []
+    account = budget.account
+
+    def count(run: Any, **kw: Any) -> None:
+        tokens = kw["input_tokens"] + kw["output_tokens"]
+        counted.append((run.run_id, tokens, kw.get("calls", 1), kw["cost"] or 0.0))
+        account(run, **kw)
+
+    monkeypatch.setattr(budget, "account", count)
+    refunds.clear()
+    scripts = [[{"tool": "refund", "args": {"order": "o1"}}, {"text": "done"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = arm(harness.wrap(target, id=f"spent-{thread}"), [refund])
+    paused = await agent.run("refund o1", user="u1", thread=thread)
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    mine = [(t, c, cost) for run_id, t, c, cost in counted if run_id == paused.run_id]
+    return sum(t for t, _, _ in mine), sum(c for _, c, _ in mine), sum(c for _, _, c in mine)
+
+
+async def test_a_live_turn_that_paused_is_charged_the_tokens_and_calls_of_its_paused_attempt(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attempt that paused made a model call, whose tokens are the run's: in a live
+    session as in a process of its own (a run with no conversation) — though the result of
+    the CLI's turn it left comes after the attempt stopped reading."""
+    (tmp_path / "alone").mkdir()
+    (tmp_path / "live").mkdir()
+    alone = await _spent_by_a_paused_run(harness, tmp_path / "alone", monkeypatch, thread=None)
+    live = await _spent_by_a_paused_run(harness, tmp_path / "live", monkeypatch, thread="t1")
+    assert live[:2] == alone[:2] and live[2] == pytest.approx(alone[2]), (alone, live)
+
+
+async def test_a_cancelled_live_turn_is_charged_its_own_spending_and_the_next_turn_its_own(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live turn cancelled mid-turn is interrupted: the result of the CLI's turn comes after
+    the run stopped reading, and what it spent until then is the cancelled run's — not the
+    conversation's next turn's, the next result the session charges."""
+    costs: list[tuple[str, float | None]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget,
+        "account",
+        lambda run, **kw: (costs.append((run.run_id, kw["cost"])), account(run, **kw)),
+    )
+    reads = [{"builtin": "Read", "args": {"file_path": name}} for name in ("x", "y")]
+    scripts = [[{"text": "a"}], [*reads, {"stall": 30}, {"text": "never"}], [{"text": "z"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = harness.wrap(target, id="cancelled")
+    await agent.run("one", user="u1", thread="t1")
+    slow = asyncio.create_task(agent.run("two", user="u1", thread="t1"))
+    await until(lambda: len(built_ins(tmp_path)) == 2)  # its two reads ran: it stalls now
+    await agent.cancel(turn_running(agent))
+    cancelled = await slow
+    assert cancelled.status is RunStatus.CANCELLED
+    third = await agent.run("three", user="u1", thread="t1")
+    assert third.answer == "z"
+    _, two, three = served(tmp_path)
+    assert three["pid"] == two["pid"]  # the same live process served it
+    charged = {run_id: sum(c or 0.0 for r, c in costs if r == run_id) for run_id, _ in costs}
+    assert charged[third.run_id] == pytest.approx(0.5), costs  # its one step
+    assert charged[cancelled.run_id] == pytest.approx(1.5), costs  # its steps until it stopped
+
+
 # --------------------------------------------------------------------------- no live session
 async def test_a_run_with_no_conversation_runs_in_a_process_of_its_own_as_before(
     harness: Harness, tmp_path: Path

@@ -613,20 +613,17 @@ class ClaudeAdapter:
         steps.waiting()
         spending = Spending(runtime, options, self.costs, session)
         live: LiveSession | None = None
+        turn = _turn(run, options)
         try:
             if kept:
                 assert key is not None
-                live = await self._live(key, options, run, session, unsent=first)
+                live = await self._live(key, options, run, session, spending, unsent=first)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
                 _said(self.live, runtime)
             # closed as it is left (``aclosing``): a process of its own ends here, in this
             # loop; a live session's turn is interrupted when left before its result
-            source = (
-                _queried(prompt, options)
-                if live is None
-                else live.served(_turn(run, options), prompt)
-            )
+            source = _queried(prompt, options) if live is None else live.served(turn, prompt)
             async with aclosing(source) as messages:
                 async for message in messages:
                     steps.waiting()  # the next message is the next step's
@@ -645,14 +642,17 @@ class ClaudeAdapter:
             steps.closed = True
             runtime.model_ended(STEP)
             skills.removed(written)
-            # it ended with no result (paused, stopped), or its subagents went on after its
-            # last: what the replies no result counted said — in a live session, the
-            # running totals of the next result charged hold it
-            if live is None:
-                spending.left()
+            await spending.closed(live, turn)
 
     async def _live(
-        self, key: str, options: Any, run: Invocation, session: str | None, *, unsent: bool
+        self,
+        key: str,
+        options: Any,
+        run: Invocation,
+        session: str | None,
+        spending: Spending,
+        *,
+        unsent: bool,
     ) -> LiveSession | None:
         """The conversation's live session for this query: the one kept, when it was started
         with these options, holds the session the query continues and owes no earlier turn's
@@ -679,8 +679,9 @@ class ClaudeAdapter:
             found = await self.live.open(key, shape, options, transcripts)
             if found is not None and session is not None:
                 # a process that resumes a session reports the session's cost: what its
-                # first turn is charged counts from what the session cost before
-                found.billed = self.costs.get(session) or 0.0
+                # first turn is charged counts from what the session cost before (the
+                # journal's, on any worker)
+                found.billed = spending.billed
         _said(self.live, runtime)
         if found is not None and unsent:
             await found.asks(runtime)
@@ -904,9 +905,10 @@ class Spending:
     cost grew by since the last one charged: this query's (it gives one for the turn and
     one for every turn the session ran for a background task), an earlier query's of the
     run (the journal's ``session_cost``), or the conversation's last turn's in this process
-    (``ClaudeAdapter.costs``)."""
+    (``ClaudeAdapter.costs``) — journaled as the query starts, so an attempt that resumes
+    the session after a pause before any result is charged its own cost, on any worker."""
 
-    __slots__ = ("billed", "costs", "helped", "journal", "options", "own", "runtime")
+    __slots__ = ("billed", "costs", "helped", "journal", "options", "own", "results", "runtime")
 
     def __init__(
         self, runtime: Runtime, options: Any, costs: LRU[str, float], session: str | None
@@ -917,6 +919,8 @@ class Spending:
         self.journal = runtime.replay.journal
         self.own: dict[str, dict[str, Any]] = {}
         self.helped: dict[str, dict[str, Any]] = {}
+        #: how many of its results were charged
+        self.results = 0
         if session is None:  # a new session: nothing was spent in it
             self.journal.session_cost = None
         known = self.journal.session_cost
@@ -924,6 +928,10 @@ class Spending:
             known = costs.get(session)
         #: the session's running cost, as the last result charged carried it
         self.billed = known or 0.0
+        if session is not None:
+            # in the journal from the start: an attempt that pauses before its first result
+            # leaves it to the one that resumes the session, on any worker
+            self.journal.session_cost = self.billed
 
     def replied(self, message: Any) -> None:
         """An assistant message: its reply's usage (one reply comes as a message a block)."""
@@ -940,6 +948,7 @@ class Spending:
         elif cost is not None:
             cost, self.billed = max(0.0, cost - self.billed), cost
         self.journal.session_cost = self.billed
+        self.results += 1
         if result.session_id:
             self.costs[result.session_id] = self.billed
         # a turn no reply of the model's is in — one the CLI answered itself, a slash
@@ -957,8 +966,19 @@ class Spending:
         self.own.clear()
         self.helped.clear()
 
+    async def closed(self, live: LiveSession | None, turn: Turn) -> None:
+        """The query ended — with no result (paused, stopped), or its subagents went on after
+        its last: what the replies no result counted said; or, a live session's ``turn``
+        left before its result, that result when it comes at once
+        (``LiveSession.outcome``)."""
+        late = None if live is None or self.results else await live.outcome(turn)
+        if late is not None:
+            self.ended(late, live)
+        else:
+            self.left()
+
     def left(self) -> None:
-        """The query ended: what the replies no result counted said."""
+        """What the replies no result counted said."""
         if self.own or self.helped:
             _spent(self.runtime, self.options, None, [*self.own.values(), *self.helped.values()])
 

@@ -296,7 +296,14 @@ turn the session runs by itself (a finished task's notification) is never a user
   work between two turns is charged to its run, and the next turn its own. The turn the
   session runs for a finished task is charged to that task's run, which waits for it (30
   seconds at most) before it ends. The shares are exact when every reply costs the same
-  per token, an estimate otherwise (another model, cached tokens).
+  per token, an estimate otherwise (another model, cached tokens). A turn left before its
+  result — paused, or cancelled — is charged what it spent until it stopped: interrupted
+  (nothing in the background) its result comes at once and is its own; with background
+  work under way the CLI's turn goes on to its next tool call, so the replies' tokens are
+  its own and the cost that result says is its resumed attempt's after a pause, and no
+  run's after a cancel (the run has ended) — never the conversation's next turn's. The
+  session's cost charged so far is in the run's journal from the turn's start, so an
+  attempt resumed on another worker is charged its own cost only.
 * Any other call made between two turns has no run, so nothing can check it (your hooks,
   governance, an approval, the budget) or record it: the main agent's own, in the turn
   the session runs for a finished task, is refused, and the conversation's next run says
