@@ -21,7 +21,7 @@ from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, ReAct, tool
 from trellis.contracts import RunStatus
 from trellis.harness import middleware, react
-from trellis.harness.automatic import LONG_AT, MIN_WINDOW, SCRATCH, TASK, JournalBackend
+from trellis.harness.automatic import LONG_AT, SCRATCH, TASK, JournalBackend, long_task
 from trellis.harness.middleware import SCRATCH_NOTE
 from trellis.harness.runs import LocalRuns
 from trellis.runs import Job
@@ -29,6 +29,8 @@ from trellis.runs import Job
 LONG_TOOLS = {"write_todos", TASK, *SCRATCH}
 #: A window with room for the long-task tools.
 ROOM = 128_000
+#: The least window they are offered in (documented: 32,000 tokens or more).
+MIN_WINDOW = 32_000
 STEPS = "Do this step by step: "
 done: list[str] = []
 
@@ -287,6 +289,39 @@ async def test_a_file_or_a_runs_files_too_large_are_refused() -> None:
     assert "holds at most 10" in said[3]  # the edit would make it 11
     assert "Error" not in said[4]  # what the harness saves itself is not capped
     assert out["files"]["/a.md"]["content"] in ("x" * 10, ["x" * 10])
+
+
+async def test_the_journal_holds_a_file_of_100_000_characters_and_a_run_of_1_000_000() -> None:
+    from deepagents.backends.utils import create_file_data
+
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "/big.md", "content": "x" * 100_001}),
+            ("write_file", {"file_path": "/f10.md", "content": "y"}),
+            ("write_file", {"file_path": "/f0.md", "content": "z" * 100_000}),  # in its place
+            "ok",
+        ]
+    )
+    graph = create_deep_agent(model, backend=JournalBackend())
+    # ten files of 100,000 characters: the run's 1,000,000 exactly
+    files = {f"/f{n}.md": create_file_data("x" * 100_000) for n in range(10)}
+    out = await graph.ainvoke({"messages": [HumanMessage(STEPS + "write")], "files": files})
+    said = [str(m.content) for m in out["messages"] if isinstance(m, ToolMessage)]
+    assert "/big.md would hold 100001 characters; a file holds at most 100000" in said[0]
+    assert "would hold 1000001 characters; a run's files hold at most 1000000" in said[1]
+    assert "Error" not in said[2]  # a file written over is counted once, at its new size
+    assert out["files"]["/f0.md"]["content"] in ("z" * 100_000, ["z" * 100_000])
+
+
+def test_a_task_is_long_once_its_conversation_is_past_half_the_window() -> None:
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    messages = [HumanMessage("stock report line. " * 200)]
+    request = ModelRequest(model=ScriptedChatModel(turns=[]), messages=messages)
+    half = count_tokens_approximately(messages)
+    assert not long_task(request, 2 * half)  # at half: not past it
+    assert long_task(request, 2 * half - 2)
 
 
 async def test_a_thousand_files_list(harness: Harness) -> None:
