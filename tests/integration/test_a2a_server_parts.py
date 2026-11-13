@@ -387,6 +387,51 @@ def test_every_ending_is_the_task_state_a2a_names() -> None:
     assert partial is not None and partial.result == "half"
 
 
+def test_a_pause_says_what_a_caller_renders_and_nothing_else() -> None:
+    told = {
+        "interrupt_id": "i1",
+        "reason": "approval",
+        "ui": "choice",
+        "options": ["a"],
+        "multiple": True,
+        "expects": {"type": "string"},
+        "ui_schema": {"x": 1},
+        "component": "Picker",
+        "props": {"p": 1},
+        "payload": {"amount": 5},
+        "tool_call": {"tool": "pay"},
+    }
+    kept_back = {"question": "Pay?", "run_id": "run_1", "tenant_id": "t", "evidence": ["x"]}
+    update = update_for(
+        event(
+            RunEventType.RUN_FINISHED,
+            outcome=RunOutcome.INTERRUPT,
+            data={"interrupt": {**told, **kept_back}},
+        )
+    )
+    assert update is not None and update.parts[0].text == "Pay?"
+    assert values(update.parts[1:]) == [told]  # the documented fields, all and only them
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        RunEventType.STEP_STARTED,
+        RunEventType.STEP_FINISHED,
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+        RunEventType.CONTEXT_LOADED,
+        RunEventType.CUSTOM,
+    ],
+)
+def test_each_progress_event_keeps_the_task_working_and_says_itself(kind: RunEventType) -> None:
+    update = update_for(event(kind, tool_call_id="c1", data={"n": 1}))
+    assert update is not None and update.state == TaskState.TASK_STATE_WORKING
+    assert values(update.parts) == [{"event": kind.value, "tool_call_id": "c1", "n": 1}]
+
+
 def test_values_and_parts_convert_both_ways() -> None:
     assert value_part(object()).WhichOneof("content") == "text"  # not JSON: its text
     assert value_part({"a": 1}).WhichOneof("content") == "data"
