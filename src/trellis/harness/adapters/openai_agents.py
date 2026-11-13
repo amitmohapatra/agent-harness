@@ -486,8 +486,10 @@ class GovernedServer:
     result the model reads, as before. A call the server could not take (the call itself
     raised) is recorded as the call's failure and is then the SDK's to tell, as without the
     harness: the model reads what the server's — else the agent's — ``failure_error_function``
-    makes of it, and with ``failure_error_function=None`` the run ends with the error. A
-    call that pauses the run raises out of the SDK's run whatever that function is. Made by
+    makes of it, and with ``failure_error_function=None`` the run ends with the error — the
+    model reading the words of the run's ``after_tool`` hooks instead when they reworded the
+    failure, and the result when they made it one (``bridge.hooked``). A call that pauses
+    the run raises out of the SDK's run whatever that function is. Made by
     :meth:`of`, a subclass of the SDK's ``MCPServer`` built when first needed."""
 
     @staticmethod

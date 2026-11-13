@@ -100,7 +100,10 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     the SDK's to tell, as without the harness (:func:`_told`): the model reads what the tool's
     ``failure_error_function`` makes of it (the SDK's default text when it names none), and
     with ``failure_error_function=None``, or a ``FunctionTool`` whose invoke raises, the run
-    ends with the error. A call past the tool's own ``timeout`` is recorded as timed out
+    ends with the error. The run's ``after_tool`` hooks have the last word on what the model
+    reads (``bridge.hooked``): a failure they reword is told in their words, the SDK's policy
+    deciding whether the run goes on; one they make a result is that result. A call past the
+    tool's own ``timeout`` is recorded as timed out
     (:func:`_own_time_is_up`) and is then the SDK's timeout (its text, or its
     ``ToolTimeoutError``). An agent called as a tool is no different: its failure ends its
     child run as failed, and is then told as its own ``failure_error_function`` says (the SDK's
