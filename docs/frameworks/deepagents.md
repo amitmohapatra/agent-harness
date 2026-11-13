@@ -80,6 +80,12 @@ budget, and a sub-agent cut by a crash is ended by the worker that continues the
 `ReAct`'s sub-agent like any agent (`subagents=[agent]`). Runnable:
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
 
+A sub-agent's files and the rest of what `task` returns to the main agent are a `Command`
+updating the graph's state: the journal keeps it with the call, so a run that replays the
+`task` call (a resume without a checkpointer) has the sub-agent's files without the sub-agent
+working twice ([langgraph.md](langgraph.md#a-tool-of-the-graphs-own-what-it-returns-what-it-raises)).
+A sub-agent that forks the main agent's conversation (`mode="fork"`) is a child run like any.
+
 ## The store
 
 A Deep Agent compiled without a `store` gets the memory service as its store, so a `StoreBackend` writes the user's memories
@@ -146,6 +152,10 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   from its journal without one — either way the call runs once.
 * A sub-agent is given the context for its task, not the main agent's tools: give it the
   memory tools (`memory_search`) when it should read memory itself.
+* The harness knows Deep Agents' state tools by name (`write_todos`, the file tools). A tool
+  another of its middleware brings that says nothing of what it does asks a person at each
+  call, as any undeclared tool: `compact_conversation` (`SummarizationToolMiddleware`) does —
+  give it its risk in the tool catalog to have it run unasked.
 * Deep Agents' built-in tools are sent with every model call: `ls`, `read_file`, `write_file`,
   `edit_file`, `delete`, `glob`, `grep` and `task` are 3,854 input tokens a call on Claude
   (`count_tokens`; `grep` 1,107, `glob` 903, `task` 874, `read_file` 858 alone). None of them
@@ -160,6 +170,9 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
 * [`examples/02_way1_deepagents/agent.py`](../../examples/02_way1_deepagents/agent.py) — planning with
   `TodoListMiddleware`, an approval resumed in place.
 * Tests: `tests/integration/test_deepagents.py`, `tests/integration/test_hitl_middleware.py`
-  (`interrupt_on`), and against the real services `tests/live/test_live_matrix.py`
+  (`interrupt_on`), Deep Agents' own features one by one in
+  `tests/integration/test_deepagents_library.py` (sub-agents, backends, permissions, memory
+  files and skills, summarization, a rubric, a profile), and against the real services
+  `tests/live/test_live_matrix.py`
   (`deepagents`: a sub-agent calling a harness tool and pausing for its approval, `write_todos`,
   `interrupt_on`, a catalog rule set after the graph was built).

@@ -5,6 +5,44 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
+
+The LangGraph adapter was checked feature by feature against the installed libraries
+(LangGraph 1.2, LangChain 1.4's `create_agent` and its middleware, Deep Agents 0.7): each
+feature run through the harness with a scripted model, 76 tests in
+`tests/integration/test_langgraph_library.py`, `test_create_agent_library.py`,
+`test_deepagents_library.py`, `test_tool_updates.py` and `test_tool_errors_library.py`. Most
+worked as the library gives them. Five did not:
+
+- **A tool's error reaches the graph's own handling.** The harness records a failed call and
+  handed the graph a failed result in the error's place, so nothing of the graph's that acts
+  on a tool's error ever saw one: LangChain's `ToolRetryMiddleware` never tried again,
+  `ToolErrorMiddleware` never worded the error, the `except` of a `wrap_tool_call` wrapper
+  never ran. The call is recorded as before and the error is raised again as the tool raised
+  it. An error nothing handles is, as before, the failed call's result the model reads (the
+  run goes on). The tries a wrapper makes of one call are not counted as a model repeating a
+  call (the stall guard stopped the third).
+- **A tool's `Command` is the graph's again when its call is replayed.** A call answered
+  from the journal gave the graph the message the model had read and dropped the state
+  update the tool had returned with it: after a resume without a checkpointer, what a Deep
+  Agent's sub-agent had written was gone (`task` returns its files as a `Command`), and so
+  was any state a tool of the graph's own had set. The journal keeps what the tool returned
+  with the call's record.
+- **A list of `Command`s and messages returned by one tool is applied.** The harness gave the
+  graph one message in its place, and no update was made.
+- **A call that asks waits for the calls a `ToolNode` runs beside it.** The node stops at the
+  first call that raises and leaves the others running: a write beside a call waiting for an
+  approval ended after the run's pause was recorded, and the resumed run told the model its
+  effect was unknown ("interrupted by a crash").
+- **A Deep Agent with a `mode="fork"` sub-agent is wrapped.** `h.wrap` never returned: a fork
+  runs the graphs it is one of, and reading the sub-agents' file tools went round.
+
+What stays as it was, pinned by a test named `test_today_...` each: a tool's error nothing
+handles does not fail the graph; a `ToolNode`'s own error text reaches the model after
+`<tool> failed:`; what a node writes to LangGraph's `custom` stream mode is not on the run's
+events; a node its `RetryPolicy` runs a third time has its same harness call refused as a
+stall ([langgraph.md](docs/frameworks/langgraph.md#limits)).
+
 ### Added: a background task of Deep Agents' async sub-agents, found again in later turns
 
 Deep Agents' async sub-agent (an `AsyncSubAgent` in `ReAct(subagents=)`, or its
