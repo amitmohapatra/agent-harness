@@ -5,6 +5,44 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
+
+Driving the bundled CLI (2.1.283) against a scripted model showed what it sends, and where a
+wrapped agent did not get what the SDK gives:
+
+- **Subagents.** Claude Code runs a subagent in the background unless its call says
+  otherwise. In a run with no conversation its child run ended at its launch, `SUCCESS` with
+  the launch text, and its calls were recorded under the run: it now stays open until its
+  task ends (`SUCCESS` with what it said; `ERROR` when it failed, was stopped, or the process
+  ended first), and says so on the run's stream (`helper_finished`; a conversation's
+  background subagent too, while the turn that started it is still answered). Two subagents
+  of one type at work at once each record their own calls (by the task's id, `agent_id`,
+  not the type's name). A subagent's forwarded text is no longer streamed as the run's.
+- **Spending.** A result's cost is its session's running total and its usage the main
+  agent's own. A query whose session ran a turn of its own, the last answer at the turn
+  limit, and a conversation's turn in a process that resumed the session were charged the
+  total again; each is charged what the cost grew by (the journal keeps the session's cost
+  across attempts). A subagent's replies' tokens count toward the run's budget.
+- **`max_budget_usd`** is Claude Code's cap on what one process spends: options with one run
+  each turn in a process of its own again, so the cap stays a query's and a conversation
+  goes on past it.
+- **One call, one question.** A tool that says nothing of what it does asked a person
+  twice for one call: governance's question, then on the resume Claude Code's own. The
+  second is not asked.
+- **Claude's own tools.** Its task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`:
+  `TodoWrite`'s successors), `EnterPlanMode` and `StructuredOutput` (`output_format`) asked
+  a person on every call — a structured answer paused its own run. They run, as `TodoWrite`
+  does.
+- **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
+  takes it with `--resume` only to fork), and options with `continue_conversation` failed at
+  once (the SDK asked the journal's store for the latest session): both work.
+
+Tested through the harness on the query path and in a live session: every hook event of the
+options' own, `can_use_tool` with its suggestions and permission updates, every option's
+flag, the system prompt and thinking forms, structured output, partial messages, the session
+options and the SDK's errors. What stays as it is:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
+
 ### Added: a conversation's Claude Code process stays between its turns, with its background work
 
 A Claude Agent SDK turn ran in a CLI process of its own, and the next turn started another

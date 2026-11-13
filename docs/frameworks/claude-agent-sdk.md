@@ -93,8 +93,13 @@ the user Claude Code would ask:
   by question.
 * **Risk.** `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `TodoWrite` read (they run);
   `Write`, `Edit`, `MultiEdit`, `NotebookEdit` and `Bash` write (announced; Claude Code asks
-  first where it would). Your in-process server's tool is what its annotations say; any other
-  tool the CLI asks about (an MCP server's of yours) is a write.
+  first where it would). The tools Claude keeps its own work with run too: its task list
+  (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`: `TodoWrite`'s successors in the bundled
+  CLI), `EnterPlanMode`, and `StructuredOutput`, which its answer in an `output_format` is
+  handed to. Your in-process server's tool is what its annotations say; any other tool (an
+  MCP server's of yours the CLI reaches itself, a tool of the CLI's the harness has no word
+  on) says nothing of what it does: a person approves each call, until its risk is in the
+  tool catalog.
   The tool catalog's `risk` and `approve_when` override these, as for any tool
   ([governance.md](../governance.md)): a team that wants every shell command approved, even
   one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
@@ -106,13 +111,21 @@ the user Claude Code would ask:
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
   would send.
+* **One call, one question.** A call a person answered about before it ran (governance's
+  question, a hook's `Ask`) is not asked about again when Claude Code asks too: it runs.
 * **Your own `can_use_tool`** answers what Claude Code asks, as without the harness: it is
   asked when Claude Code would ask its user, after your hooks and governance, with the
-  arguments as they were decided (a call a hook rewrote is asked about as rewritten); what it
-  answers stands. A `permission_prompt_tool_name` of your own is refused: give your check as
+  arguments as they were decided (a call a hook rewrote is asked about as rewritten) and
+  what Claude Code gives with them (the call's id, the subagent's, its suggestions); what
+  it answers stands, its `updated_input`, `updated_permissions` and `interrupt` included.
+* **Your own hooks**, for every event the SDK has (`PreToolUse`, `PostToolUse`,
+  `PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStart`, `SubagentStop`,
+  `PreCompact`, `Notification`, `PermissionRequest`), are registered and called as without
+  the harness, before the harness's own, inside the run (`trellis.current()`). A `permission_prompt_tool_name` of your own is refused: give your check as
   `can_use_tool`.
-* **Not recorded.** A built-in call is not journaled or recorded in memory (the CLI keeps its
-  result in its session, below).
+* **Recorded, not journaled.** A built-in call that ran is on the run's stream and in its
+  records, with its result or its error; it is not in the journal (the CLI keeps its result
+  in its session, below).
 
 ## Where sandbox, skills and hooks go
 
@@ -142,7 +155,7 @@ the user Claude Code would ask:
 |---|---|
 | Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
-| Spending | each query's usage and `total_cost_usd`, read from its `ResultMessage` (subagents included), count toward the run's budget |
+| Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn, a resumed attempt and the one last answer at the turn limit are each charged once |
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
@@ -202,8 +215,20 @@ its task (the `PreToolUse` hook's update), its built-in and MCP tool calls are g
 recorded under its own run (by the subagent the CLI names; the harness's own tools it calls are
 recorded under the run), its turns go to memory, its spending is in the query's
 `ResultMessage`, and a subagent cut by a crash is ended by the worker that continues the run
-([subagents.md](../subagents.md#automatic)). A subagent that works in the background of a
-conversation's process keeps its child run open until its task ends
+([subagents.md](../subagents.md#automatic)). Two subagents of one type at work at once each
+have their own calls (Claude Code names the subagent by its task's id, `agent_id`). A
+subagent's text, which Claude Code forwards naming its `Agent` call (`forward_subagent_text`;
+a background subagent's always), is its own run's: not on the run's text stream.
+
+**In the background.** Claude Code runs a subagent in the background unless its call says
+`run_in_background: false` (the bundled CLI): the `Agent` call returns at once, and the
+subagent's end comes as its task's (`task_notification`). Its child run stays open until
+then — `SUCCESS` with what it said, `ERROR` when its task failed or was stopped. In a run
+with no conversation the SDK keeps the query's process while such a task works, so the run
+ends when the task has (and the session ran its turn for it): the run's answer is its own
+turn's result, and a subagent the process ended before (it died, or exited) is an `ERROR`
+saying it was cut off, never a success. A subagent that works in the background of a
+conversation's process keeps its child run open across the turns
 ([below](#conversations)). A wrapped agent called from a tool of yours
 (`await other.run(...)`) is a child run too, and the wrapped options are a `ReAct`'s sub-agent
 like any agent (`subagents=[agent]`). Runnable:
@@ -275,8 +300,10 @@ turn the session runs by itself (a finished task's notification) is never a user
   go on (its `Bash` call was decided when it was made) and has no run; what it and
   injected turns cost with no background run to charge is on the next turn.
 * Not done: a background subagent's own subagents have no run of their own kept open; a
-  child run's end is not delivered to an open chat (Claude's next answer has it); after a
-  server restart a background run stays `RUNNING` in the run store with nothing behind it.
+  child run's end is on the stream of the turn that started it only while that turn is still
+  being answered (`helper_finished`), not delivered to an open chat after it (Claude's next
+  answer has it); after a server restart a background run stays `RUNNING` in the run store
+  with nothing behind it.
 * A turn that is left — its run paused, or cancelled — is stopped with the SDK's `interrupt`
   only when nothing runs in the background: Claude Code's interrupt stops the background work
   too. With work under way the run ends at once and the CLI's turn at its next tool call
@@ -292,8 +319,12 @@ turn the session runs by itself (a finished task's notification) is never a user
   run (`claude_session`), and a background subagent's run ends saying so; a restart loses
   it.
 * Not kept: a run with no `thread`, a sub-agent's run, the last answer at the turn limit, and
-  options with a `ClaudeSkills` plugin or an in-process MCP server of your own
-  (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn).
+  options with a `ClaudeSkills` plugin, an in-process MCP server of your own
+  (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn)
+  or a budget of their own (`max_budget_usd`: Claude Code counts it for a process — in one
+  that serves several turns the turn that passes it ends `error_max_budget_usd` and so does
+  every turn after, and the SDK cannot give a running process its cap back — so each turn
+  gets a process, and the cap you set for a query stays a query's).
   These run in a process of their own, as before.
 * The model calls of a kept process carry the gateway headers (the run's dimensions, its
   `traceparent`) of the turn that started it: the CLI reads them once, as it starts.
@@ -301,9 +332,28 @@ turn the session runs by itself (a finished task's notification) is never a user
 its next tool call (a `PostToolUse` hook's `additionalContext`); a query that calls no tool
 takes none, and the message then runs as its own turn ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
+## The session your options choose
+
+`resume`, `fork_session` and `continue_conversation` on your options choose the session a
+run's first query starts from, as without the harness; `session_id` names the one it starts
+(the attempt that resumes it after a pause names it once, as the one to resume: Claude Code
+takes both only to fork). The session `continue_conversation` continues is the CLI's latest in
+its folder, on its machine: such options keep their session there, not in the run's journal
+(said once), as options with `enable_file_checkpointing` do.
+
 ## Limits
 
-* A built-in that ran is not journaled or recorded (above).
+* A built-in that ran is not journaled (above).
+* `ClaudeSDKClient`'s own controls (`set_permission_mode`, `set_model`, `rewind_files`,
+  `get_mcp_status`, `reconnect_mcp_server`, `toggle_mcp_server`, `get_context_usage`,
+  `get_server_info`) are not reachable: the harness holds a conversation's client and uses
+  its `query`, `interrupt` and `stop_task`. Set the model and the permission mode on the
+  options, or per run with `framework_options`.
+* A prompt that is a slash command runs as Claude Code runs it; one whose result has no text
+  (`/compact`) ends its run as one with no answer.
+* In a run with no conversation, what Claude says in the turn its session runs after a
+  background task ended is on the stream and in the transcript, not the run's answer (its
+  own turn's result is).
 * A model call is the CLI's: its own hooks (`ClaudeAgentOptions(hooks=...)`) have no model-call
   event ([hooks.md](../hooks.md)).
 * A session resumes on the machine whose CLI holds it (or a shared `session_store`);
