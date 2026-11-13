@@ -54,6 +54,7 @@ from opentelemetry.trace import StatusCode
 
 from trellis.contracts import (
     InterruptDecision,
+    InterruptResolution,
     Option,
     RunEventType,
     ToolCall,
@@ -343,7 +344,7 @@ async def _called(
         _events(runtime, ref, tool_call, refused)
         return refused
     decision, tool_call, rejected = await _decided(
-        runtime, tool.spec, tool_call, verdict, tool=tool
+        runtime, tool.spec, tool_call, verdict, tool=tool, deciding=deciding
     )
     # the budget again, then counted at once: the calls of one step are decided together
     rejected = rejected or _over_budget(runtime, tool)
@@ -581,6 +582,7 @@ async def _decided(
     asked: Ask | None,
     *,
     tool: Tool | None = None,
+    deciding: Hashable | None = None,
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
     before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and not
@@ -590,7 +592,11 @@ async def _decided(
     tool is ``confined``), and the person picks one of ``governance.decision.choices`` (Always
     allow kept in the memory service: :func:`_kept_always`); none: a call its framework runs
     under its own permission flow — a write is announced, and an approval reaches the rest of
-    the run only (``remember="run"``)."""
+    the run only (``remember="run"``). ``deciding``: the model decision the call is part of
+    (:func:`_deciding`) — the person's answer about the call covers its framework's own tries
+    of it again (a ``ToolRetryMiddleware`` retrying a failed irreversible call: the same
+    decision, the same arguments), so one call is one question; an edited call, or the same
+    call of a new model step, is asked about anew."""
     governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
@@ -622,8 +628,9 @@ async def _decided(
         runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
         hooked = asked is not None
-        offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
-        resolution = await runtime.approve(call, decision, offered)
+        resolution = await _answered(
+            runtime, call, decision, ours=ours, hooked=hooked, deciding=deciding
+        )
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
         remembered = runtime.replay.journal.remembered
         covered = reach(spec.name, decision.assignee)
@@ -653,6 +660,29 @@ async def _decided(
     elif decision.announces:
         runtime.events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+async def _answered(
+    runtime: Runtime,
+    call: ToolCall,
+    decision: Decision,
+    *,
+    ours: bool,
+    hooked: bool,
+    deciding: Hashable | None,
+) -> InterruptResolution:
+    """A person's answer about a call that asks: asked now (the run's pause; its choices those
+    of a call the harness runs, ``ours``, a hook's question or not, ``hooked``) — or, for a call
+    of a model decision already answered (``deciding``: its framework trying the same call
+    again), that answer."""
+    held = None if deciding is None else (deciding, content_key("approve", call.tool, call.args))
+    if held is not None and held in runtime.decided:
+        return runtime.decided[held]
+    offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
+    resolution = await runtime.approve(call, decision, offered)
+    if held is not None:
+        runtime.decided[held] = resolution
+    return resolution
 
 
 async def _allowed(

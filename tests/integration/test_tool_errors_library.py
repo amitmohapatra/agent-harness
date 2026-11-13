@@ -20,6 +20,7 @@ from langchain.agents.middleware import (
 )
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -396,3 +397,40 @@ async def test_the_graphs_retry_policy_is_the_one_that_tries_the_call(
     )
     result = await harness.wrap(graph, id="shelf").run("a?", user="u")
     assert result.answer == "down" and ran == ["stock a"] * 3
+
+
+# --------------------------------------------------------------------------- one question
+charged: list[str] = []
+
+
+@lc_tool
+def charge(amount: int) -> str:
+    """Charge the card."""
+    if not charged:
+        charged.append(f"charge {amount} failed")
+        raise ValueError("the card network blinked")
+    charged.append(f"charge {amount}")
+    return f"charged {amount}"
+
+
+charge.metadata = {"side_effects": "irreversible"}
+
+
+async def test_a_retry_of_an_approved_call_is_not_asked_about_again(harness: Harness) -> None:
+    """A person approves an irreversible call; it fails and the graph's retry tries it again
+    (the same call of the same model step): the approval covers the retry — one call, one
+    question. The same call made by the model's next step is a call of its own: asked."""
+    charged.clear()
+    model = ScriptedChatModel(
+        turns=[("charge", {"amount": 5}), ("charge", {"amount": 5}), "charged twice"]
+    )
+    graph = create_agent(model, [charge], middleware=[retrying(1)], checkpointer=InMemorySaver())
+    agent = harness.wrap(graph, id="card")
+    paused = await agent.run("charge 5, twice", user="u", thread="t")
+    assert paused.interrupt is not None and charged == []
+    again = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert charged == ["charge 5 failed", "charge 5"]  # retried, unasked
+    assert again.status is RunStatus.PAUSED and again.interrupt is not None  # the next step's
+    done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and done.answer == "charged twice"
+    assert charged == ["charge 5 failed", "charge 5", "charge 5"]

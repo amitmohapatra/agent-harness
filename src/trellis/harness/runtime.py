@@ -208,6 +208,10 @@ class Runtime:
     #: each execution its framework makes of that decision (a LangGraph task, run again by its
     #: ``RetryPolicy``): the call made again by the same decision is no repeat of it
     deciding: Callable[[], Hashable | None] | None = None
+    #: the answers a person gave about this attempt's calls, by the decision each call is part
+    #: of and what was asked (``tools.bridge``): the framework's own tries of that call again
+    #: are answered by them, not asked again — one call, one question
+    decided: dict[Hashable, InterruptResolution] = field(default_factory=dict)
     #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
     #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
