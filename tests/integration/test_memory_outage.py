@@ -79,6 +79,33 @@ async def test_a_known_key_outlives_an_outage_and_is_read_again_later(
         await harness._tenant()
 
 
+async def test_the_memory_tools_are_listed_again_every_10_minutes_the_last_kept_while_down(
+    harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(fresh_module.time, "monotonic", lambda: now[0])
+    offered: list[list[str]] = []
+
+    async def looks(input: str, agent: Runtime) -> str:
+        offered.append(sorted(agent.toolbox))
+        return input
+
+    agent = harness.wrap(looks, id="looks", without={"schedules"})
+    await agent.run("q", user="u")
+    now[0] += 599
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 1  # within 10 minutes: the listing kept
+    now[0] += 2
+    memory_service.failures["agent_tools"] = 503
+    with caplog.at_level(logging.WARNING, logger="trellis.fresh"):
+        await agent.run("q", user="u")
+    assert "agent tools could not be read again" in caplog.text  # asked again: it is down
+    assert offered[2] == offered[0] != []  # the last listing stands
+
+
 async def test_memory_tools_that_cannot_be_listed_leave_the_run_without_them(
     harness: Harness, memory_service: FakeMemoryService
 ) -> None:

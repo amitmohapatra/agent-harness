@@ -39,7 +39,7 @@ from trellis.harness.agent import (
     REMEMBERED,
 )
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
-from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
+from trellis.harness.clients.memory import recorded_output
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.governance.decision import CHOICES, SAID
@@ -634,9 +634,16 @@ async def test_a_large_result_is_recorded_within_the_services_limit(
     await memory_harness.writes.drain()
     [recorded] = memory_service.named("record_tool")
     output = recorded.body["output"]
-    assert len(json.dumps(output).encode()) <= RECORDED_OUTPUT_MAX_BYTES
+    assert len(json.dumps(output).encode()) <= 256 * 1024
     assert isinstance(output, str) and output.startswith('[{"region": "north", "line": 0')
     assert output.endswith("bytes; cut to the service's limit)")
+
+
+def test_an_output_is_recorded_whole_up_to_the_services_256_kib() -> None:
+    exact = "x" * (256 * 1024 - 2)  # its JSON, quotes included: 262,144 bytes
+    assert recorded_output(exact) == exact
+    over = recorded_output(exact + "x")
+    assert isinstance(over, str) and over.endswith("(262145 bytes; cut to the service's limit)")
 
 
 async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
