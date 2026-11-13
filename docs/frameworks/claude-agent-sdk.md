@@ -328,6 +328,14 @@ turn the session runs by itself (a finished task's notification) is never a user
   worker's process still holds the session, and the subagent works on in it, its run open —
   the second worker does not end it as one the earlier attempt left open (the run's journal
   says it was handed on).
+* A process kept for a conversation another worker has since served a turn of (the run
+  store has a later turn than the last one this server served) never answers its next turn:
+  it holds the conversation as it was. It is ended, and the turn starts a new session with
+  the conversation's turns as context, as on a server that kept none.
+* A later turn is served by the process when it brings the same options, hooks and tools
+  with the same schemas — not the same wording: a tool's description may change between
+  turns (`schedule_task` says the hour it is), and the process keeps the wording it listed
+  as it started (so `schedule_task` says the hour that process started in).
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 per agent. It closes

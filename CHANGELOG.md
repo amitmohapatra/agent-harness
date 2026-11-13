@@ -58,6 +58,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   conversation started after the last one this process served (`pipeline._served_elsewhere`):
   the stale process is ended and the turn runs as on a worker that kept none — a new session,
   the conversation's turns given as context.
+- **The hour turning no longer ends a conversation's live session.** `schedule_task`'s
+  description says the hour it is, and a live session served only a turn whose tools were
+  listed in the same words: the first turn after the hour turned closed the process and
+  stopped its background work (a background subagent's run `ERROR`). A later turn must bring
+  the same tools with the same schemas now (`convert.listing`), not the same wording; the
+  process keeps the wording it listed as it started.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

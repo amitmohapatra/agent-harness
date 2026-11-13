@@ -63,11 +63,13 @@ def _server(served: list[Any]) -> McpSdkServerConfig:
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 
 
-def listing(server: McpSdkServerConfig) -> tuple[tuple[str, str, str], ...]:
-    """What ``server`` (one :func:`convert` made) lists: each tool's name, description and
-    input schema (as JSON) — what a CLI process that lists it once has for good."""
+def listing(server: McpSdkServerConfig) -> tuple[tuple[str, str], ...]:
+    """What ``server`` (one :func:`convert` made) offers: each tool's name and input schema
+    (as JSON) — what a CLI process that lists it once must have for good to serve a later
+    turn. Not the descriptions: a tool's wording may change from one turn to the next (the
+    hour ``schedule_task`` says it is), and the process keeps the wording it listed."""
     return tuple(
-        (t.name, t.description, json.dumps(t.input_schema, sort_keys=True, default=str))
+        (t.name, json.dumps(t.input_schema, sort_keys=True, default=str))
         for t in _SERVED[server["instance"]]
     )
 

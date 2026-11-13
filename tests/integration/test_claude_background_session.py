@@ -926,6 +926,32 @@ async def test_a_tool_call_in_the_last_answer_at_the_turn_limit_is_refused(
     assert result.answer == AT_LIMIT
 
 
+async def test_a_turn_after_the_hour_turned_is_served_by_the_same_session(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``schedule_task``'s description says the hour it is: a turn after the hour turned
+    brings the same tools with another description. The session keeps serving the
+    conversation — its process and the background work in it go on: what a later turn must
+    bring the same is its tools and their schemas, not their wording of the moment."""
+    from datetime import UTC, datetime
+
+    from trellis.harness import snapshots
+
+    clock = [datetime(2026, 11, 13, 10, 59, 50, tzinfo=UTC)]
+    monkeypatch.setattr(snapshots, "now", lambda: clock[0])
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "still here"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="hourly")
+    await agent.run("research the market", user="u1", thread="t1")
+    live = live_of(agent)
+    assert live is not None and list(live.working) == ["t1"]
+    clock[0] = datetime(2026, 11, 13, 11, 0, 10, tzinfo=UTC)  # the hour turned
+    second = await agent.run("how is it going?", user="u1", thread="t1")
+    assert second.status is RunStatus.SUCCESS and second.answer == "still here"
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"] and live_of(agent) is live and not live.closed
+    assert list(live.working) == ["t1"]  # the background work goes on
+
+
 async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_stale(
     tmp_path: Path,
 ) -> None:

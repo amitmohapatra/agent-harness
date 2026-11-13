@@ -763,8 +763,8 @@ def _shape(options: Any) -> tuple[Any, ...]:
     """What a process started with ``options`` has for good, and a later turn must bring the
     same to be served by it: the options less what each turn brings of its own (its hooks'
     and its permission check's code, its harness tools' code, its journal, the session it
-    resumes, its run's gateway headers), the hooks' places, and what its ``trellis`` server
-    lists."""
+    resumes, its run's gateway headers), the hooks' places, and the tools its ``trellis``
+    server lists with their schemas (not their wording of the moment: ``convert.listing``)."""
     from trellis.harness.tools.convert import claude as convert
 
     servers = options.mcp_servers
