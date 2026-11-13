@@ -723,7 +723,8 @@ async def placeholder(input: str, agent: Runtime) -> str:
 
 
 async def worker_process(store: Path, ledger: Path, calls: Path, *, die: bool = False) -> int:
-    env = {**os.environ, resume_worker.DIE: "1" if die else ""}
+    # its temporary files in the test's folder: a worker SIGKILLed cannot remove its store's
+    env = {**os.environ, resume_worker.DIE: "1" if die else "", "TMPDIR": str(store.parent)}
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
