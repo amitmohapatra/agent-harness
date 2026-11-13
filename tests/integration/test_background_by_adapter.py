@@ -15,8 +15,10 @@ a user needs, as the evidence of a finding. What they show:
   middleware) the graph checkpoints into its run and the conversation carries the list
   (``adapters.langgraph.CARRIED``): all three turns work. With a checkpointer of its own the
   list is in its thread: all three work, on another server too when the checkpointer is kept
-  outside the process. With neither (no ``middleware()``, no checkpointer) the list ends with
-  each turn: T3 is refused the id ("today"). The five tools say what they do in every shape.
+  outside the process. With neither (no ``middleware()``, no checkpointer) the conversation
+  carries the list too, read from the state each turn ends with: all three work — but a turn
+  cancelled after its start has no end to read it from ("today"). The five tools say what
+  they do in every shape.
 * **An OpenAI Agents SDK agent** — the SDK has no background run, no background sub-agent and
   no ``background`` model setting; what it has is its sandbox's shell (``SandboxAgent`` with
   ``Shell``): ``exec_command`` returns after ``yield_time_ms`` with the id of a process still
@@ -113,8 +115,9 @@ LASTING: Final[dict[str, tuple[Build, bool]]] = {
         False,
     ),
 }
-#: The shapes with no thread of their own and no checkpoint in the run.
-ENDING: Final[dict[str, Build]] = {
+#: The shapes with no thread of their own and no checkpoint in the run: the conversation
+#: carries the list from the state each turn ends with.
+BARE: Final[dict[str, Build]] = {
     "deep agent as Deep Agents builds it": lambda m, s: create_deep_agent(
         m, subagents=[subagent(s)]
     ),
@@ -171,27 +174,65 @@ async def test_a_langgraph_graph_starts_a_task_chats_on_and_gets_its_result(
     await t3_list_and_another_user(agent, server, model)
 
 
-@pytest.mark.parametrize("build", ENDING.values(), ids=ENDING)
-async def test_a_today_a_graph_with_no_middleware_and_no_checkpointer_loses_the_task_list(
+@pytest.mark.parametrize("build", BARE.values(), ids=BARE)
+async def test_a_a_graph_with_no_middleware_and_no_checkpointer_keeps_the_task_list(
     harness: Harness, server: StandIn, build: Build
 ) -> None:
-    """Today: a graph wrapped without the harness's ``middleware()`` and compiled without a
-    checkpointer has no thread and no checkpoint in its run (said when it is wrapped), so its
-    state ends with each turn. T1 and T2 work, and the next turn's history has the id (the
-    first turn's answer) — but the list does not: the id is refused, the server never asked.
-    The five tools still say what they do."""
+    """A graph wrapped without the harness's ``middleware()`` and compiled without a
+    checkpointer has no thread and no checkpoint in its run (said when it is wrapped): its
+    state ends with each turn. The conversation carries the task list all the same, read from
+    the state each turn ends with: all three turns work, another user's thread has no task,
+    and the five tools say what they do."""
     model = Model(turns=[START, reports_the_id, "4"])
     agent = harness.wrap(build(model, server), id="bg")
     assert getattr(agent.target, "checkpointer", None) is None
     assert await risks(agent) == RISKS
     await t1_and_t2(agent, server)
     await server.finished()
-    model.turns += [calls("check_async_task"), says_what_the_tool_said]
-    third = await say(agent, "is the optimization done?")
-    assert third.answer == f"No tracked task found for task_id: {server.task_id!r}"
-    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    await t3_list_and_another_user(agent, server, model)
+
+
+@pytest.mark.parametrize("build", BARE.values(), ids=BARE)
+async def test_a_such_a_graphs_streamed_turn_keeps_the_task_list_too(
+    harness: Harness, server: StandIn, build: Build
+) -> None:
+    """The same graph, its turn streamed (``agent.stream``: the chat's route) on one server
+    and the next turn run on another: the list is read from the state the stream ended with,
+    and found there."""
+    other = Harness(config=Settings())
+    try:
+        model = Model(turns=[START, reports_the_id, ("list_async_tasks", {}), "listed"])
+        here, there = (h.wrap(build(model, server), id="bg") for h in (harness, other))
+        events = [e async for e in here.stream("run the optimization", user=USER, thread=THREAD)]
+        assert events[-1].outcome is RunOutcome.SUCCESS
+        assert (await say(there, "which tasks are there?")).answer == "listed"
+        listed = str(model.seen[-1][-1].content)
+        assert f"task_id: {server.task_id}  agent: optimizer  status: running" in listed
+    finally:
+        await other.aclose()
+
+
+async def test_a_today_such_a_graphs_cancelled_turn_leaves_its_task_out_of_the_list(
+    harness: Harness, server: StandIn
+) -> None:
+    """Today: a graph with no checkpointer has its state read when its turn ends, and a turn
+    cancelled after the start has no end to read it from: the task runs on, and the next
+    turn's list does not have it (a graph with ``middleware()`` checkpoints each step into
+    its run, and keeps it: ``test_react_async_subagent``)."""
+    server.seconds = 60
+    model = Model(turns=[START, "never said"], hold_from=1)
+    agent = harness.wrap(create_deep_agent(model, subagents=[subagent(server)]), id="bg")
+    turn = asyncio.create_task(say(agent, "run the optimization"))
+    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # the start returned; the model's next call hangs
+    [run_id] = agent.running
+    await agent.cancel(run_id, reason="the user stopped the turn")
+    assert (await turn).status is RunStatus.CANCELLED
+    assert server.status(server.task_id) == "running"
+    model.hold_from = None
+    model.turns = [("list_async_tasks", {}), says_what_the_tool_said]
     assert (await say(agent, "which tasks are there?")).answer == NO_TASKS
-    assert len(server.calls) == 2  # no run was read
 
 
 def kept_in(folder: Path) -> InMemorySaver:

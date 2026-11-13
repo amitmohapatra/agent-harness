@@ -147,6 +147,8 @@ from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
+    FRESHNESS,
+    STATIC,
     UNDECLARED,
     SideEffects,
     Sourced,
@@ -259,6 +261,11 @@ ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
     "check_async_task": "read",
     "list_async_tasks": "read",
 }
+#: What a write among them says of its result: the record of what was done (the task's id,
+#: that it was sent or stopped), no value that changes — an earlier one is never marked out of
+#: date with the advice to call the tool again, which would start a second task. A status and
+#: the list are values that change: live, as any tool's by default.
+ASYNC_TASK_DONE: Final[Mapping[str, Any]] = {FRESHNESS: STATIC}
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
 
@@ -285,8 +292,9 @@ def declare_files(graph: Any) -> None:
     ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
     is: those calls only change the state, which its checkpoint keeps. Deep Agents'
     :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
-    (:data:`ASYNC_TASKS`) — a tool that says so itself keeps its word. Only the framework's own
-    (:func:`framework_made`)."""
+    (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
+    :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
+    own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -309,7 +317,9 @@ def declare_files(graph: Any) -> None:
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
             elif name in ASYNC_TASKS and "side_effects" not in said:
-                tool.metadata = {**said, "side_effects": ASYNC_TASKS[name]}
+                done = ASYNC_TASKS[name] == "write" and not data_of(said, strict=False)
+                given = ASYNC_TASK_DONE if done else {}
+                tool.metadata = {**said, **given, "side_effects": ASYNC_TASKS[name]}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set

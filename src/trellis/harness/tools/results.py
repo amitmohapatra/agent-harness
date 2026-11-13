@@ -294,7 +294,7 @@ class Conversations:
     recently used conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another
     worker, or after a restart, finds none: a path read then says so (``query.GONE``), its
     history is each turn's question and answer from the run store, and its graph starts with
-    no state of an earlier turn."""
+    the state the file store keeps of its last turn (``pipeline``: kept there too)."""
 
     def __init__(self, most: int = KEPT_CHARS) -> None:
         self.most = most
@@ -319,11 +319,13 @@ class Conversations:
 
     def left(self, conversation: str, state: Mapping[str, Any]) -> None:
         """The graph state a turn of ``conversation`` ended with (``state``, by channel), kept
-        for its next turn in the place of the turn before's."""
+        for its next turn over what is kept (:func:`merged`): a turn that ended while this
+        one waited for an approval, or still worked, loses nothing of its own."""
         kept = self._kept.setdefault(conversation, _Kept())
         self._kept.move_to_end(conversation)
+        state = merged(kept.state, state)
         self.chars += _held(state) - _held(kept.state)
-        kept.state = dict(state)
+        kept.state = state
         self._bounded()
 
     def add(self, conversation: str, texts: Mapping[str, str], tools: Mapping[str, str]) -> None:
@@ -378,6 +380,18 @@ def _size(transcript: Iterable[Said]) -> int:
 def _held(state: Mapping[str, Any]) -> int:
     """The characters a kept graph state counts for (none kept: none)."""
     return len(repr(state)) if state else 0
+
+
+def merged(kept: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
+    """``kept`` with ``state`` over it, channel by channel: a channel both hold as a mapping
+    (Deep Agents' tasks, by their ids) keeps the entries of both, ``state``'s where both have
+    one; any other is ``state``'s."""
+    out = {**kept, **state}
+    for name, value in state.items():
+        before = kept.get(name)
+        if isinstance(before, Mapping) and isinstance(value, Mapping):
+            out[name] = {**before, **value}
+    return out
 
 
 def read(args: dict[str, Any], *, text: str | None = None) -> str:

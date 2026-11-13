@@ -19,16 +19,20 @@ that is not what a user needs, as the evidence of a finding. What they show:
   graph's state is its run's, so the harness carries that list from a conversation's turn to
   its next one (``adapters.langgraph.CARRIED``): ``check``, ``list``, ``update`` and
   ``cancel`` find the task in a later turn, memory on or off, and another user's thread of
-  the same name does not. It is kept in the process that ran the turn: a turn another worker
-  runs starts with no list ("Today:").
+  the same name does not. It is kept in the process that ran the turn and in the file store
+  (``harness.files``): a turn another server runs, or one after a restart, starts with it;
+  two turns that overlap (one waiting for an approval, a worker's still running) each keep
+  their tasks.
 * Nothing tells the chat when the task ends; cancelling the turn leaves the task running (the
   next turn's list has it); with no ``url`` it cannot start; memory on, the start's result in
-  a later turn's history is marked out of date, with the advice to call it again.
+  a later turn's history is left as it was said, and a status check's is marked out of date.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
 import socket
 import threading
@@ -48,17 +52,23 @@ from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph_sdk._async.runs import RunsClient
 
+from tests.contract.test_runs_wire import RunsService
 from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.journals import journal_of
+from tests.support.openapi import runs_contract
 from trellis import Harness, ReAct, Settings, middleware, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
+from trellis.harness import pipeline
+from trellis.harness.adapters.langgraph import bound_tools
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
 from trellis.harness.agui.sse import decode
 from trellis.harness.agui.threads import Threads
 from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.identity import conversation_key
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.base import max_age
 from trellis.runs import Job
 
 #: How long the background task takes on the server, and what it answers.
@@ -374,29 +384,27 @@ async def test_a_the_task_list_is_carried_whatever_history_the_next_turn_sees(
     assert [method for method, _ in server.calls] == ["POST", "POST", "GET", "GET"]
 
 
-async def test_a_today_with_memory_the_start_in_the_history_is_marked_out_of_date(
+async def test_a_with_memory_the_start_in_the_history_is_not_marked_out_of_date(
     memory_harness: Harness, server: StandIn
 ) -> None:
-    """Today: memory on, the next turn's history holds T1's call and its result (the id in
-    it), marked out of date with the advice to call ``start_async_task`` again — which would
-    start a second task: an earlier result is marked by how long its tool's data stays
-    current, whatever the tool does. The id read there is found all the same (the list the
-    conversation carries), and a status check's earlier result is rightly marked."""
+    """Memory on, the next turn's history holds T1's call and its result (the id in it) as it
+    was said: a start's result records what was done, it is no value to read again, and
+    nothing advises calling ``start_async_task`` again — which would start a second task. A
+    status check's earlier result is a value that changes, and is rightly marked."""
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), "It runs.", "Yes."])
     agent = chat(memory_harness, server, model)
     await say(agent, "run the optimization")
     second = await say(agent, "is the optimization done?")
     assert second.status is RunStatus.SUCCESS, second.error
-    started = (
-        "[out of date: call start_async_task again for the current value]\n"
-        f"Launched async subagent. task_id: {server.task_id}"
-    )
+    started = f"Launched async subagent. task_id: {server.task_id}"
     assert tool_results(model.seen[2]) == [started]  # the second turn's history
     assert '"status": "running"' in tool_results(model.seen[3])[-1]  # the id, found
     await say(agent, "are you sure?")
     kept = tool_results(model.seen[4])
     assert kept[0] == started and len(server.runs) == 1
     assert kept[1].startswith("[out of date: call check_async_task again for the current value]")
+    # and the context's note on out-of-date values names the check alone
+    assert "The values check_async_task returned in earlier turns" in str(model.seen[4])
 
 
 async def test_a_another_users_thread_of_the_same_name_has_no_task(
@@ -468,6 +476,37 @@ async def test_b_the_five_tools_say_what_they_do(harness: Harness, server: Stand
     agent = chat(harness, server, Model(turns=[]))
     own = await agent.adapter.native(agent.target)
     assert {spec.name: spec.side_effects for spec in own if spec.name in TOOLS} == RISKS
+
+
+async def test_b_a_writes_result_is_no_value_to_read_again_and_a_reads_is(
+    harness: Harness, server: StandIn
+) -> None:
+    """Beside what each does, the harness says how long its result stays current: a start, an
+    update and a cancel return the record of what was done (never out of date: no advice to
+    call it again), a status and the list a value that changes (live, as any tool's)."""
+    agent = chat(harness, server, Model(turns=[]))
+    own = {spec.name: spec for spec in await agent.adapter.native(agent.target)}
+    assert {name: max_age(own[name]) for name in TOOLS} == {
+        "start_async_task": None,
+        "update_async_task": None,
+        "cancel_async_task": None,
+        "check_async_task": 0.0,
+        "list_async_tasks": 0.0,
+    }
+
+
+async def test_b_a_task_tool_that_says_how_long_its_result_stays_current_keeps_its_word(
+    harness: Harness, server: StandIn
+) -> None:
+    graph = create_deep_agent(
+        Model(turns=[]), subagents=[subagent(server)], middleware=middleware()
+    )
+    [start] = [t for t in bound_tools(graph) if t.name == "start_async_task"]
+    start.metadata = {"max_age": 60}
+    agent = harness.wrap(graph, id="bg")
+    own = {spec.name: spec for spec in await agent.adapter.native(agent.target)}
+    assert max_age(own["start_async_task"]) == 60
+    assert own["start_async_task"].side_effects == "write"  # and what it does is still said
 
 
 @pytest.mark.parametrize("name", TOOLS)
@@ -687,14 +726,13 @@ async def test_c_a_worker_of_the_process_runs_the_next_turn_with_the_task_list(
     assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.error
 
 
-async def test_c_today_a_worker_of_another_process_runs_the_next_turn_without_the_task_list(
+async def test_c_a_worker_of_another_process_runs_the_next_turn_with_the_task_list(
     workers: tuple[Harness, Harness], server: StandIn
 ) -> None:
-    """Today: the list a turn ended with is kept in the process that ran it, as the session
-    and the saved results of a conversation are (``Agent.results``) — the run store keeps a
-    finished run's question and answer, not its graph's state. A worker of another process
-    that runs the conversation's next turn starts with no list: the id, which the history has
-    (the first turn's answer), is refused, and the server is never asked."""
+    """The list a turn ended with is kept in the file store too (``harness.files``: the folder
+    or bucket the servers share). A worker of another process that runs the conversation's
+    next turn — nothing of the first turn in its memory — starts with it: the id its history
+    has (the first turn's answer) is found, and the server is asked for the result."""
     server.seconds = 0.2
     _, second = workers
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
@@ -704,8 +742,313 @@ async def test_c_today_a_worker_of_another_process_runs_the_next_turn_without_th
     handle = await here.start("is the optimization done?", user=USER, thread=THREAD)
     assert await second.worker([there]).run_once()
     done = await handle.result(wait=5)
-    assert done.answer == f"No tracked task found for task_id: {server.task_id!r}"
-    assert [method for method, _ in server.calls] == ["POST", "POST"]  # no run was read
+    assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.error
+    assert [method for method, _ in server.calls] == ["POST", "POST", "GET", "GET"]
+
+
+# --------------------------------------------------------------------------- servers, restarts
+def kept_files(harness: Harness) -> list[str]:
+    """Every file in the harness's file store, by its path below the store's root."""
+    store = harness.files
+    found = store.fs.find(store.root) if store.fs.exists(store.root) else []
+    return sorted(str(path)[len(store.root) + 1 :] for path in found)
+
+
+async def test_c_after_a_restart_the_next_turn_has_the_task_list(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    """The server that ran the first turn is gone, its agent and what it kept in memory with
+    it; the one started in its place — the same run store, the same file store — runs the
+    conversation's next turns: the task is checked and listed."""
+    server.seconds = 0.2
+    first, second = workers
+    await say(chat(first, server, Model(turns=[START, reports_the_id])), "run the optimization")
+    await first.aclose()
+    await server.finished()
+    listing = [("list_async_tasks", {}), says_what_the_tool_said]
+    model = Model(turns=[calls("check_async_task"), says_what_the_tool_said, *listing])
+    restarted = chat(second, server, model)
+    third = await say(restarted, "is the optimization done?")
+    assert third.status is RunStatus.SUCCESS and RESULT in third.answer, third.answer
+    listed = await say(restarted, "which tasks are there?")
+    assert f"task_id: {server.task_id}  agent: optimizer  status: success" in listed.answer
+
+
+async def test_c_two_servers_taking_turns_each_find_the_tasks_the_other_started(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    """A conversation's turns run where they land. The first server starts a task, the second
+    another; back on the first — whose memory holds the list its own turn ended with, without
+    the second's task — the list has both, as it has on the second."""
+    server.seconds = 60
+    listing = [("list_async_tasks", {}), says_what_the_tool_said]
+    model = Model(turns=[START, reports_the_id, START, reports_the_id, *listing, *listing])
+    here, there = (chat(h, server, model) for h in workers)
+    await say(here, "run the optimization")
+    await say(there, "run another one")
+    assert len(server.runs) == 2
+    for agent in (here, there):
+        listed = await say(agent, "which tasks are there?")
+        for task in server.runs:
+            assert f"task_id: {task}  agent: optimizer  status: running" in listed.answer
+
+
+async def test_c_another_users_thread_and_another_agent_on_another_server_have_no_task(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    """What the file store keeps is the conversation's and the agent's, as what the process
+    keeps is: on another server, another user naming a thread alike is shown no task and
+    refused the first user's task id, and so is another agent in the first user's thread."""
+    _, second = workers
+    model = Model(turns=[START, reports_the_id])
+    here, there = (chat(h, server, model) for h in workers)
+    await say(here, "run the optimization")
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    other = await there.run("which tasks are there?", user="bob", thread=THREAD)
+    assert other.answer == NO_TASKS
+    refused = f"No tracked task found for task_id: {server.task_id!r}"
+    model.turns += [("check_async_task", {"task_id": server.task_id}), says_what_the_tool_said]
+    other = await there.run("how is that task?", user="bob", thread=THREAD)
+    assert other.answer == refused
+    another = second.wrap(ReAct("You help.", model, subagents=[subagent(server)]), id="other")
+    model.turns += [("check_async_task", {"task_id": server.task_id}), says_what_the_tool_said]
+    assert (await say(another, "how is that task?")).answer == refused
+    assert len(server.calls) == 2  # the server was asked nothing for either
+
+
+async def test_c_the_kept_list_is_none_of_the_users_files(
+    harness: Harness, server: StandIn
+) -> None:
+    """Where it is kept: one small file per conversation and agent, under its tenant's and its
+    user's names, in a folder of the store that is no tenant's (none starts with a dot) —
+    none of the files kept for the user, whose listings show nothing. It holds Deep Agents'
+    record of each task (ids, the sub-agent's name, a status, three times) and nothing of
+    the sub-agent's server: no address, no header."""
+    spec = subagent(server, headers={"authorization": "Bearer of-the-app"})
+    model = Model(turns=[START, reports_the_id])
+    agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
+    await say(agent, "run the optimization")
+    folder = f".carried/{LOCAL_TENANT}/{USER}/{conversation_key(LOCAL_TENANT, USER, THREAD)}/bg"
+    assert kept_files(harness) == [f"{folder}/state.json"]
+    written = await harness.files.read(folder, "state.json")
+    assert written is not None and len(written) < 1_000
+    kept = json.loads(written)
+    assert list(kept) == ["async_tasks"] and list(kept["async_tasks"]) == [server.task_id]
+    assert set(kept["async_tasks"][server.task_id]) == {
+        "task_id",
+        "agent_name",
+        "thread_id",
+        "run_id",
+        "status",
+        "created_at",
+        "last_checked_at",
+        "last_updated_at",
+    }
+    assert server.url not in written.decode() and "Bearer" not in written.decode()
+    mine = f"{LOCAL_TENANT}/{USER}"
+    assert await harness.files.files(mine) == [] and await harness.files.folders(mine) == []
+
+
+async def test_c_a_turn_that_started_no_task_keeps_nothing_in_the_file_store(
+    harness: Harness, server: StandIn
+) -> None:
+    agent = chat(harness, server, Model(turns=["4"]))
+    assert (await say(agent, "what is 2+2?")).answer == "4"
+    assert kept_files(harness) == []
+
+
+@pytest.mark.parametrize("failing", ["read", "put"])
+async def test_c_a_file_store_out_of_reach_leaves_the_list_in_the_process(
+    harness: Harness,
+    server: StandIn,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failing: str,
+) -> None:
+    """The file store cannot be read, or written (a bucket's credentials, a full disk): it is
+    said in the log and the turn goes on. The list is kept in the process, as it was before
+    the store kept it too: the next turn there finds the task."""
+
+    async def refused(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("the bucket is out of reach")
+
+    monkeypatch.setattr(harness.files, failing, refused)
+    server.seconds = 0.2
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    agent = chat(harness, server, model)
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        first = await say(agent, "run the optimization")
+        await server.finished()
+        done = await say(agent, "is the optimization done?")
+    assert first.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
+    assert "the bucket is out of reach" in caplog.text
+    assert bool(kept_files(harness)) is (failing == "read")  # written, where it can be
+
+
+async def test_c_a_list_past_the_bound_is_kept_in_the_process_only(
+    harness: Harness,
+    server: StandIn,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """What the file store keeps for a conversation is bounded (``pipeline.CARRIED_BYTES``): a
+    list past it is not written — said in the log — and stays the process's."""
+    monkeypatch.setattr(pipeline, "CARRIED_BYTES", 64)
+    server.seconds = 0.2
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    agent = chat(harness, server, model)
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        await say(agent, "run the optimization")
+    assert kept_files(harness) == [] and "over the 64 bytes" in caplog.text
+    await server.finished()
+    assert RESULT in (await say(agent, "is the optimization done?")).answer
+
+
+@pytest.mark.parametrize("written", [b'{"async_tasks": {"cut off', b'["not", "a", "state"]'])
+async def test_c_a_kept_list_that_cannot_be_read_back_is_left_out_and_said(
+    workers: tuple[Harness, Harness],
+    server: StandIn,
+    caplog: pytest.LogCaptureFixture,
+    written: bytes,
+) -> None:
+    """What the store holds for the conversation is not what a turn kept there (a write cut
+    off, another program's file): another server's turn starts without a list, said in the
+    log — the id is refused, as it was before the store kept the list — and the turn that
+    next ends with tasks writes the file anew."""
+    server.seconds = 60
+    first, second = workers
+    turns = [START, reports_the_id, calls("check_async_task"), says_what_the_tool_said]
+    model = Model(turns=[*turns, START, reports_the_id])
+    here, there = (chat(h, server, model) for h in workers)
+    await say(here, "run the optimization")
+    [path] = kept_files(first)
+    folder, _, name = path.rpartition("/")
+    await first.files.put(folder, name, written, source="test")
+    started = server.task_id
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        done = await say(there, "is the optimization done?")
+    assert done.answer == f"No tracked task found for task_id: {started!r}"
+    assert "what the conversation carries" in caplog.text
+    await say(there, "run another one")
+    again = await second.files.read(folder, name)
+    assert again is not None and len(json.loads(again)["async_tasks"]) == 1
+
+
+async def test_c_with_agent_runs_as_the_run_store_another_server_has_the_task_list(
+    server: StandIn,
+) -> None:
+    """The same with agent-runs as the run store: two servers, each with the client of the
+    one service (a stand-in that checks every exchange against agent-runs' OpenAPI
+    document), sharing the file store. The second server's turn has the list, every exchange
+    is the document's, and nothing of the list is in a run's record."""
+    service = RunsService(runs_contract())
+    server.seconds = 0.2
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    async with (
+        Harness(config=Settings(), runs=service.client()) as first,
+        Harness(config=Settings(), runs=service.client()) as second,
+    ):
+        await say(chat(first, server, model), "run the optimization")
+        await server.finished()
+        done = await say(chat(second, server, model), "is the optimization done?")
+    assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
+    assert service.violations == [], "\n".join(service.violations)
+    records = [r.model_dump_json() for r in service.store._runs.values()]
+    assert len(records) == 2 and not [r for r in records if "async_tasks" in r]
+
+
+# --------------------------------------------------------------------------- turns that overlap
+async def test_g_a_turn_approved_after_another_turn_ended_loses_neither_turns_task(
+    harness: Harness, server: StandIn
+) -> None:
+    """A turn starts a task and waits for a person's approval; the conversation's next turn
+    starts another task and ends; the first, approved, ends after it. What each ended with is
+    merged task by task, not put in the other's place: the list has both."""
+    server.seconds = 60
+    publishing = [START, ("publish", {"text": "started"})]
+    listing = [("list_async_tasks", {}), says_what_the_tool_said]
+    model = Model(turns=[*publishing, START, reports_the_id, "done", *listing])
+    agent = arm(chat(harness, server, model), [publish])
+    paused = await say(agent, "run the optimization and publish that it started")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    second = await say(agent, "run another one")
+    assert second.status is RunStatus.SUCCESS and len(server.runs) == 2, second.error
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer=USER)
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    listed = await say(agent, "which tasks are there?")
+    for task in server.runs:
+        assert f"task_id: {task}  agent: optimizer  status: running" in listed.answer
+
+
+async def test_g_a_turn_waiting_for_an_approval_has_its_task_in_the_next_turns_list(
+    harness: Harness, server: StandIn
+) -> None:
+    """A task started before a turn waits for a person's approval runs on the server whatever
+    the person decides: the list a paused turn holds is kept as an ended turn's is, so the
+    conversation's next turn — while the first still waits — lists the task."""
+    server.seconds = 60
+    listing = [("list_async_tasks", {}), says_what_the_tool_said]
+    model = Model(turns=[START, ("publish", {"text": "started"}), *listing])
+    agent = arm(chat(harness, server, model), [publish])
+    paused = await say(agent, "run the optimization and publish that it started")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    listed = await say(agent, "which tasks are there?")
+    assert f"task_id: {server.task_id}  agent: optimizer  status: running" in listed.answer
+
+
+async def test_g_a_turn_cancelled_at_its_approval_leaves_its_task_for_the_next_turn_to_find(
+    harness: Harness, server: StandIn
+) -> None:
+    """The person cancels the turn at its approval: the turn ends there, no attempt runs, and
+    the task it had started is still running on the server. The next turn lists it and
+    cancels it by the id read there."""
+    server.seconds = 60
+    stopping = [("list_async_tasks", {}), calls("cancel_async_task"), "It is stopped."]
+    model = Model(turns=[START, ("publish", {"text": "started"}), *stopping])
+    agent = arm(chat(harness, server, model), [publish])
+    paused = await say(agent, "run the optimization and publish that it started")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    ended = await agent.resume(paused.interrupt.interrupt_id, "cancel", reviewer=USER)
+    assert ended.status is RunStatus.CANCELLED and server.status(server.task_id) == "running"
+    await say(agent, "is the optimization running? stop it")
+    assert (
+        f"task_id: {server.task_id}  agent: optimizer  status: running"
+        in tool_results(model.seen[-2])[-1]
+    )
+    assert server.status(server.task_id) == "cancelled"
+
+
+async def test_g_a_workers_turn_still_running_while_another_turn_ends_loses_neither_turns_task(
+    harness: Harness, server: StandIn
+) -> None:
+    """A worker's turn is not held behind the conversation's turn in the process: it starts a
+    task and is still working (a slow tool) while a message sent directly starts another and
+    ends; the worker's turn ends after it. The list has both tasks."""
+    server.seconds = 60
+    entered, released = asyncio.Event(), asyncio.Event()
+
+    @lc_tool
+    async def wait() -> str:
+        """Waits until it is let go."""
+        entered.set()
+        await released.wait()
+        return "waited"
+
+    wait.metadata = {"side_effects": "read"}
+    slow = [START, ("wait", {}), START, reports_the_id, "started"]
+    model = Model(turns=[*slow, ("list_async_tasks", {}), says_what_the_tool_said])
+    agent = chat(harness, server, model, tools=[wait])
+    handle = await agent.start("run the optimization, then wait", user=USER, thread=THREAD)
+    working = asyncio.create_task(harness.worker([agent]).run_once())
+    await entered.wait()
+    second = await say(agent, "run another one")
+    assert second.status is RunStatus.SUCCESS and len(server.runs) == 2, second.error
+    released.set()
+    assert await working
+    assert (await handle.result(wait=5)).answer == "started"
+    listed = await say(agent, "which tasks are there?")
+    for task in server.runs:
+        assert f"task_id: {task}  agent: optimizer  status: running" in listed.answer
 
 
 # --------------------------------------------------------------------------- e. cancel

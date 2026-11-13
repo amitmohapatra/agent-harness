@@ -125,11 +125,12 @@ STOPPED_CALL: Final = (
 )
 #: The node of Deep Agents' ``PatchToolCallsMiddleware``: a graph that answers such calls itself.
 PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
-#: The graph state channels a conversation carries from one turn to the next where the graph's
-#: thread is its run (:func:`run_scoped`), as a thread of the graph's own would hold them: Deep
-#: Agents' list of the background tasks its async sub-agents run (``AsyncSubAgentState``),
-#: which its task tools read a task id against. A turn starts with what the conversation's
-#: last turn ended with in this process (``Runtime.carried``; ``pipeline``).
+#: The graph state channels a conversation carries from one turn to the next where the graph
+#: has no thread of its own to hold them (:func:`carries`: its thread is its run, or it has
+#: none), as a thread of the graph's own would: Deep Agents' list of the background tasks its
+#: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against.
+#: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
+#: in the process and in the file store: ``pipeline``).
 CARRIED: Final = ("async_tasks",)
 
 
@@ -205,12 +206,14 @@ class LangGraphAdapter:
         error: BaseException | None = None
         try:
             given = await _continued(target, native_input, run)
-            return await self._graph(target, run.runtime).ainvoke(
+            output = await self._graph(target, run.runtime).ainvoke(
                 given,
                 self._config(target, run),
                 version="v2",
                 **_run_arguments(run.runtime, target),
             )
+            _ended_with(target, run.runtime, output.value)
+            return output
         except BaseException as exc:
             error = exc
             raise
@@ -250,6 +253,7 @@ class LangGraphAdapter:
             raise
         finally:
             await helpers.closed(error)
+        _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -510,6 +514,23 @@ def run_scoped(target: Any) -> bool:
     return isinstance(target.checkpointer, RunCheckpointer)
 
 
+def carries(target: Any) -> bool:
+    """Whether a conversation carries state of ``target`` from turn to turn: a graph with one
+    of the channels :data:`CARRIED` names and no thread of its own that holds it — it
+    checkpoints into its run, or not at all."""
+    channels = getattr(target, "channels", None) or {}
+    own = _checkpointed(target) and not run_scoped(target)
+    return not own and any(name in channels for name in CARRIED)
+
+
+def _ended_with(target: Any, runtime: Any, values: Any) -> None:
+    """What the run's conversation carries to its next turn (:data:`CARRIED`), read from the
+    state a graph compiled without a checkpointer ended its turn with (``values``): it has
+    no checkpoint to read it from (``RunCheckpointer.put``)."""
+    if not _checkpointed(target) and isinstance(values, Mapping):
+        runtime.carried = {name: values[name] for name in CARRIED if name in values}
+
+
 def checkpointing(target: Any) -> Any:
     """``target`` as the harness runs it: a graph built with ``middleware()`` (it takes the
     run's tools per model call) and compiled without a checkpointer, as a copy checkpointing
@@ -535,18 +556,21 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     none of the run's starts from its input."""
     from langgraph.types import Command
 
-    if not _checkpointed(target):
-        return native_input
     runtime = run.runtime
+    # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
+    carried = getattr(runtime, "carried", None)
+    started = (
+        {**carried, **native_input} if carried and isinstance(native_input, dict) else native_input
+    )
+    if not _checkpointed(target):
+        return started
     replay = runtime.replay
     thread = thread_of(target, runtime)
     replay.where = _stepping(thread)
     resumed = isinstance(native_input, Command)
     if run_scoped(target):
         if not replay.journal.graph:
-            # a new turn: its state starts with what its conversation carries (:data:`CARRIED`)
-            carries = isinstance(native_input, dict) and runtime.carried
-            return {**runtime.carried, **native_input} if carries else native_input
+            return started
         replay.resumed = _latest(replay.journal.graph)
         return native_input if resumed else None
     state = await target.aget_state({"configurable": {"thread_id": thread}})

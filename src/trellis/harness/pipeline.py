@@ -59,7 +59,7 @@ from trellis.harness.adapters.base import (
     merged,
     query_of,
 )
-from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
+from trellis.harness.adapters.langgraph import FOREIGN, HITL, carries, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
@@ -74,6 +74,7 @@ from trellis.harness.conversation import (
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
@@ -85,6 +86,7 @@ from trellis.harness.schedules import Fired
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.harness.tools import bridge, stored
 from trellis.harness.tools.base import SOURCES
+from trellis.harness.tools.results import merged as merged_state
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -331,7 +333,7 @@ async def _attempt(
         scheduled=None if parent is not None else Fired.of(record.metadata),
     )
     events.trace_run = runtime.trace_run
-    _earlier_results(agent, runtime)
+    await _earlier_results(agent, runtime)
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -383,7 +385,7 @@ async def _attempt(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
     _kept_session(agent, runtime, journal, result)
-    _kept_results(agent, runtime, journal, result)
+    await _kept_results(agent, runtime, journal, result)
     await schedules.ended(agent, runtime, result)
     await agent.hooks.ended(runtime, result)
     return result
@@ -420,36 +422,92 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 
-def _earlier_results(agent: Agent, runtime: Runtime) -> None:
+async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
     """A conversation's turn reads the large results its earlier turns saved in this process
     (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
     a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
     files in the thread's state — and starts with the graph state its last turn ended with
-    there (``Runtime.carried``: the channels a graph whose thread is its run carries,
-    ``adapters.langgraph.CARRIED``). A run with no conversation of its own, or a child run,
-    has none."""
+    (``Runtime.carried``: the channels a graph with no thread of its own carries,
+    ``adapters.langgraph.CARRIED``): what this process kept of it, and over it what the file
+    store keeps (:func:`_carried`), which has the turns other servers ran. A run with no
+    conversation of its own, or a child run, has none."""
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     runtime.earlier_results, tools = agent.results.of(runtime.conversation)
     for path, tool in tools.items():
         runtime.kept_from.setdefault(path, tool)
     runtime.carried = agent.results.state(runtime.conversation)
+    if carries(agent.target):
+        runtime.carried = merged_state(runtime.carried, await _carried(agent, runtime))
 
 
-def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
     """The large results a conversation's turn saved and the graph state it ended with
-    (``Runtime.carried``), kept for its later turns (:func:`_earlier_results`); a paused turn
-    keeps them in its journal until it ends."""
-    if (
-        runtime.parent is not None
-        or runtime.conversation == runtime.run_id
-        or result.status is RunStatus.PAUSED
-    ):
+    (``Runtime.carried``), kept for its later turns (:func:`_earlier_results`) — the state in
+    the file store too (:func:`_keep_carried`). A paused turn keeps its results in its journal
+    until it ends; its state is kept as it pauses: what it holds of the world outside (a
+    background task it started) is so whether the turn is ever approved or not."""
+    if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
-    if journal.results:
-        agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
     if runtime.carried:
         agent.results.left(runtime.conversation, runtime.carried)
+        await _keep_carried(agent, runtime)
+    if journal.results and result.status is not RunStatus.PAUSED:
+        agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
+
+
+#: Where the file store (``harness.files``) keeps what a conversation carries from turn to
+#: turn (``Runtime.carried``), below its root: a folder that is no tenant's (``files.part``
+#: starts none with a dot), so no listing of a user's files shows it; then the tenant, the
+#: user, the conversation and the agent, and one file. And the most bytes kept there.
+CARRIED_FOLDER: Final = ".carried"
+CARRIED_FILE: Final = "state.json"
+CARRIED_BYTES: Final = 256 * 1024
+
+
+def _carried_at(agent: Agent, runtime: Runtime) -> str:
+    scope = (runtime.tenant, runtime.user, runtime.conversation, agent.id)
+    return "/".join([CARRIED_FOLDER, *map(part, scope)])
+
+
+async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
+    """What the file store keeps of the graph state the conversation's last turn ended with
+    (:func:`_keep_carried`), wherever that turn ran: the list a turn on another server, or
+    before a restart, left. None kept: none; one that cannot be read is said in the log and
+    left out — the turn starts with what this process kept."""
+    try:
+        data = await agent.harness.files.read(_carried_at(agent, runtime), CARRIED_FILE)
+        found = json.loads(data) if data else {}
+        if isinstance(found, dict):
+            return found
+        problem = "it is not a graph state by channel"
+    except Exception as exc:
+        problem = f"{type(exc).__name__}: {exc}"
+    log.warning("run %s: what the conversation carries was not read: %s", runtime.run_id, problem)
+    return {}
+
+
+async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
+    """The graph state the turn ended with, kept in the file store for the conversation's next
+    turn on any server, over what is kept there (``results.merged``: a turn another server
+    ended meanwhile loses nothing) — JSON, at most :data:`CARRIED_BYTES`. A state that cannot
+    be kept there (not JSON, past the bound, the store out of reach) is said in the log: this
+    process keeps it all the same (``Agent.results``)."""
+    kept = await _carried(agent, runtime)
+    state = merged_state(kept, runtime.carried)
+    if state == kept:
+        return
+    try:
+        data = json.dumps(state).encode()
+        if len(data) > CARRIED_BYTES:
+            raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
+        folder = _carried_at(agent, runtime)
+        await agent.harness.files.put(folder, CARRIED_FILE, data, source=CARRIED_FOLDER)
+    except Exception as exc:
+        problem = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "run %s: what the conversation carries was not kept: %s", runtime.run_id, problem
+        )
 
 
 async def _worked(
