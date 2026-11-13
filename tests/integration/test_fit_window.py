@@ -488,12 +488,12 @@ async def test_older_turns_are_left_out_before_the_tools_the_question_needs() ->
     question = HumanMessage("How many outerwear SKUs are priced above 100?")
     tools = [*state, catalog, *others]
     given = request([*older, question], tools)
-    room = request([question], [*state, catalog, *others[: ours.FIT_KEEP]])
+    room = request([question], [*state, catalog, *others[:8]])
     out = await sent(FitWindow(int((_size(room) + 100) / 0.95)), given)
     assert out.messages == [older[0], older[3], question]  # the older turn: its call left out
     names = {ours._named(t) for t in out.tools}
     assert "sku_catalog" in names and names >= ours.STATE_TOOLS
-    assert len(names - ours.STATE_TOOLS) >= ours.FIT_KEEP  # beside the ones it must keep
+    assert len(names - ours.STATE_TOOLS) >= 8  # 8 at least, beside the ones it must keep
 
 
 async def test_a_note_appended_for_the_call_is_not_the_question_the_latest_turn_starts_at() -> None:
@@ -574,7 +574,7 @@ def test_the_readers_of_a_kept_result_stay_offered_when_the_tools_are_narrowed()
     # short of a refusal by the model's server, the tools ranked first stay by their signature
     floor = ours._narrowed(given, 1, None, least=0)
     whole = {ours._named(t) for t in floor.tools if ours._whole(t)}
-    assert whole == {QUERY_RESULT, READ_FILE} and len(floor.tools) == 2 + ours.FIT_KEEP
+    assert whole == {QUERY_RESULT, READ_FILE} and len(floor.tools) == 2 + 8  # the first 8
 
 
 def _calls(message: Any) -> list[Any]:
