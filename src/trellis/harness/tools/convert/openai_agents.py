@@ -155,7 +155,8 @@ def waits_inside(context: ToolContext[Any]) -> bool:
     agent run, ``agents.agent_tool_state``). Never so for any other tool's call."""
     from agents.agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
 
-    call = context.tool_call
+    # as the SDK reads it: a call made with its ``ToolContext``, which names the call
+    call = context.tool_call if isinstance(context, ToolContext) else None
     held = call is not None and peek_agent_tool_run_result(
         call, scope_id=get_agent_tool_state_scope(context)
     )

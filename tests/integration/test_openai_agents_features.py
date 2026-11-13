@@ -1011,3 +1011,58 @@ async def test_today_a_tool_the_sdk_runs_itself_with_no_gate_is_not_governed_or_
     assert recorded(memory_service) == []
     assert not [e for e in events if e.type is RunEventType.TOOL_CALL_START]
     assert events[-1].data["spent"]["tool_calls"] == 0
+
+
+async def test_a_hosted_mcp_tools_approval_request_pauses_or_asks_its_own_callback(
+    harness: Harness,
+) -> None:
+    """A hosted MCP server's approval request (the provider asks before it calls the tool):
+    with no callback the run pauses on the SDK's approval, the person shown the tool and its
+    arguments, and the answer goes back to the provider as the SDK sends it; with the tool's
+    own ``on_approval_request`` the callback answers and nobody is asked."""
+    from agents import HostedMCPTool
+    from openai.types.responses.response_output_item import McpApprovalRequest
+
+    def request() -> Any:
+        return McpApprovalRequest(
+            id="mcpr_1",
+            arguments='{"repo": "trellis"}',
+            name="list_issues",
+            server_label="tracker",
+            type="mcp_approval_request",
+        )
+
+    config: Any = {
+        "type": "mcp",
+        "server_label": "tracker",
+        "server_url": "https://tracker.example/mcp",
+        "require_approval": "always",
+    }
+    model = ScriptedModel([Items(request()), "three open issues"])
+    agent = harness.wrap(
+        Agent(name="desk", model=model, tools=[HostedMCPTool(tool_config=config)]), id="hosted"
+    )
+    paused = await agent.run("what is open?", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    asked = paused.interrupt.tool_call
+    assert asked is not None and (asked.tool, asked.args) == ("list_issues", {"repo": "trellis"})
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and done.answer == "three open issues"
+    [answer] = [
+        item
+        for item in model.inputs[-1]
+        if isinstance(item, dict) and item.get("type") == "mcp_approval_response"
+    ]
+    assert answer["approve"] is True and answer["approval_request_id"] == "mcpr_1"
+    seen: list[str] = []
+
+    def allow(asked_about: Any) -> Any:
+        seen.append(asked_about.data.name)
+        return {"approve": True}
+
+    model = ScriptedModel([Items(request()), "three open issues"])
+    hosted = HostedMCPTool(tool_config=config, on_approval_request=allow)
+    result = await harness.wrap(
+        Agent(name="desk", model=model, tools=[hosted]), id="hosted-callback"
+    ).run("what is open?", user="u")
+    assert result.status is RunStatus.SUCCESS and seen == ["list_issues"]
