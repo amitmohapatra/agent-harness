@@ -39,11 +39,15 @@ from trellis.testing import Decide, Reviewer
 pytestmark = [pytest.mark.live, needs_runs, needs_memory]
 
 wired: list[int] = []
+#: what settle_account wires: two that governance decides (the second allowed for the
+#: conversation by the first's approval), two the hook asks of anyone, one finance's
+WIRES = (5, 7, 50, 60, 900)
 
 
 class WireRule(Hooks):
-    """Up to 10 is governance's (the tool is ``write``: asked); over 500 is finance's, on its own screen;
-    anything between is asked of whoever answers."""
+    """Up to 10 is governance's (the tool is ``write``: asked, and an approval for the
+    conversation covers the next such wire); over 500 is finance's, on its own screen; anything
+    between is asked of whoever answers. A hook's ``Ask`` is asked whatever was allowed."""
 
     async def before_tool(self, call: ToolCall) -> Ask | None:
         if call.tool != "wire" or call.args["amount"] <= 10:
@@ -85,7 +89,7 @@ async def settle_account(input: str, agent: Runtime) -> Any:
         options=[Option(value="basic", label="Basic"), Option(value="pro", label="Pro")],
         multiple=True,
     )
-    wires = [await agent.tools.call("wire", amount=a) for a in (5, 50, 60, 900)]
+    wires = [await agent.tools.call("wire", amount=a) for a in WIRES]
     signed = await agent.tools.call("sign", contract="c-7")
     return {"plans": plans, "wires": wires, "signed": signed}
 
@@ -129,7 +133,16 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
         assert result.interrupt is not None and result.interrupt.question.startswith(
             "Approve wire?"
         )
-        result = await reviewer.answer(agent, result)  # for the conversation: 50, 60 not asked
+        result = await reviewer.answer(agent, result)  # for the conversation: 7 not asked
+        # 50 and 60: the hook asks, whatever the conversation allowed (a hook's Ask beats
+        # every allowance)
+        for amount in (50, 60):
+            hooked = result.interrupt
+            assert hooked is not None and hooked.tool_call is not None, result
+            assert hooked.tool_call.args == {"amount": amount}
+            assert f"Wire {amount}?" in hooked.question
+            result = await agent.resume(hooked.interrupt_id, "approve", reviewer="live-reviewer")
+        assert wired == [5, 7, 50, 60]
         screen = result.interrupt
         assert screen is not None and screen.component == "wire-review"  # 900: finance's
         assert screen.props == {"amount": 900} and screen.assignee == "role:finance"
@@ -148,10 +161,10 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
         assert done.status is RunStatus.SUCCESS, done.error
         assert done.answer == {
             "plans": ["basic", "pro"],
-            "wires": ["wired 5", "wired 50", "wired 60", "wired 900"],
+            "wires": [f"wired {a}" for a in WIRES],
             "signed": "signed by ada",
         }
-        assert wired == [5, 50, 60, 900]
+        assert wired == list(WIRES)
         history = (await h.runs.resolutions(done.run_id, tenant=tenant)).items
         said = [
             (e.resolution.decision.value, e.resolution.comment, e.resolution.remember)
@@ -160,6 +173,8 @@ async def test_approvals_choices_comments_and_results_from_outside_through_agent
         assert said == [
             ("ANSWER", None, "once"),
             ("APPROVE", "this account only", "run"),
+            ("APPROVE", None, "once"),
+            ("APPROVE", None, "once"),
             ("APPROVE", "ok", "once"),
             ("APPROVE", None, "once"),
             ("ANSWER", None, "once"),
