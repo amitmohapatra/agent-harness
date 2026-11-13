@@ -908,10 +908,18 @@ def problem(
 
 
 #: The service's bounds on a caller's metadata object (its ``api/validation.py``), which its
-#: OpenAPI document does not say: keys, nesting (a flat object is 1) and serialised bytes.
+#: OpenAPI document says only in words: keys, nesting (a flat object is 1) and serialised bytes.
 METADATA_MAX_KEYS: Final = 32
 METADATA_MAX_DEPTH: Final = 2
 METADATA_MAX_BYTES: Final = 8 * 1024
+#: Feedback's ``metadata.args`` (the decided call's arguments) is bounded as a recorded call's
+#: arguments are: by serialised bytes, at any depth; its other keys as above, ``args`` counted
+#: among the keys.
+TOOL_JSON_MAX_BYTES: Final = 64 * 1024
+
+
+def _size(value: Any) -> int:
+    return len(json.dumps(value, separators=(",", ":"), default=str).encode())
 
 
 def _depth(value: Any) -> int:
@@ -928,11 +936,15 @@ def _unbounded(body: Any, request: httpx.Request) -> httpx.Response | None:
         value = body.get(key) if isinstance(body, dict) else None
         if not isinstance(value, dict):
             continue
-        size = len(json.dumps(value, separators=(",", ":"), default=str).encode())
+        rest = value
+        if key == "metadata" and "args" in value:  # only feedback's body has ``metadata``
+            rest = {k: v for k, v in value.items() if k != "args"}
+            if _size(value["args"]) > TOOL_JSON_MAX_BYTES:
+                return problem(422, request.url.path, detail="metadata.args out of the bounds")
         if (
             len(value) > METADATA_MAX_KEYS
-            or _depth(value) > METADATA_MAX_DEPTH
-            or size > METADATA_MAX_BYTES
+            or _depth(rest) > METADATA_MAX_DEPTH
+            or _size(rest) > METADATA_MAX_BYTES
         ):
             return problem(422, request.url.path, detail=f"{key} out of the service's bounds")
     return None

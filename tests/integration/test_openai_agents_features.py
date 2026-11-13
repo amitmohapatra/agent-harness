@@ -13,6 +13,7 @@ does without it."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -1143,6 +1144,33 @@ async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
     assert ran == ["rm -rf build"] and shell_said(model) == ["ran rm -rf build"]
     await memory_harness.writes.drain()
     assert recorded(memory_service) == [("shell", "ok")]
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_a_decision_on_a_shell_command_reaches_memory_with_its_nested_arguments(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    decision: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A shell call's arguments nest (``{"action": {"commands": [...]}}``): the decision on it
+    is feedback the memory service takes, its arguments unchanged, nothing failed or logged,
+    as a flat call's is. Memory refused it (custom_metadata's two levels) and it was lost."""
+    model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
+    target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
+    agent = memory_harness.wrap(target, id=f"shell-feedback-{decision}", without={"schedules"})
+    paused = await agent.run("clean up", user="u")
+    assert paused.interrupt is not None
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        await agent.resume(paused.interrupt.interrupt_id, decision, reviewer="r")
+        await memory_harness.writes.drain()
+    [decided] = [
+        f for f in memory_service.stored_feedback.values() if f["target_kind"] == "tool_call"
+    ]
+    assert decided["verdict"] == decision and decided["metadata"]["tool"] == "shell"
+    assert decided["metadata"]["args"] == {"action": {"commands": ["rm -rf build"]}}
+    assert memory_harness.writes.failed == 0
+    assert [r.getMessage() for r in caplog.records if r.name == "trellis.writes"] == []
 
 
 async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
