@@ -537,6 +537,12 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   a task id is refused. A graph with a checkpointer of its own
   (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the list in its
   thread instead.
+* **Your own graph** — the same holds for a graph you build with `middleware()` and no
+  checkpointer: `create_deep_agent(..., subagents=[optimizer], middleware=middleware())`, or
+  LangChain's `create_agent` with `middleware=[*middleware(), AsyncSubAgentMiddleware(...)]`
+  (Deep Agents' `deepagents.middleware.async_subagents`). A graph with neither `middleware()`
+  nor a checkpointer keeps no state between turns: the task starts, and the next turn is
+  refused its id.
 
 ## Where sandbox, skills and hooks go
 
