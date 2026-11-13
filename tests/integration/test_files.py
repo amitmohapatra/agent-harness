@@ -20,7 +20,7 @@ from fsspec.implementations.memory import MemoryFileSystem
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ToolError
 from trellis.harness.agui.sse import decode
-from trellis.harness.files import LINK_SECONDS, FileStore, scope
+from trellis.harness.files import FileStore, scope
 from trellis.harness.journal import Journal
 from trellis.harness.settings import default_files_url, sourced
 
@@ -134,7 +134,7 @@ async def test_a_store_that_signs_links_is_a_short_lived_redirect() -> None:
     await harness.aclose()
     assert served.status_code == 307
     assert served.headers["location"].startswith("https://storage.example/")
-    assert SigningMemory.signed[-1][1] == LINK_SECONDS
+    assert SigningMemory.signed[-1][1] == 300  # a link signed for 5 minutes
 
 
 async def test_the_journal_names_each_file_once_with_what_made_it() -> None:

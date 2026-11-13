@@ -270,7 +270,7 @@ def test_an_answer_read_in_an_earlier_step_is_not_a_later_questions() -> None:
 
 def test_the_trajectory_keeps_a_long_output_as_the_stream_previews_it() -> None:
     from trellis.contracts import ToolCall, ToolOutcome, ToolStatus
-    from trellis.harness.events import PREVIEW_CHARS
+    from trellis.harness.events import preview
 
     journal = Journal()
     replay = Replay(journal)
@@ -279,7 +279,10 @@ def test_the_trajectory_keeps_a_long_output_as_the_stream_previews_it() -> None:
     replay.record_step(call, ToolOutcome(tool="t", status=ToolStatus.OK, output={"n": 1}))
     (kept, long), (_, short) = journal.trajectory
     assert kept.task is None and kept.args == {"a": 1}
-    assert long.output == "x" * PREVIEW_CHARS + "…" and short.output == {"n": 1}
+    assert long.output == "x" * 2000 + "…" and short.output == {"n": 1}  # 2000 characters
+    exact = ["y" * 1996]  # its repr: 2000 characters, kept whole and as it is
+    assert preview("z" * 2000) == "z" * 2000 and preview(exact) == exact
+    assert preview(["y" * 1997]) == repr(["y" * 1997])[:2000] + "…"
 
 
 # --------------------------------------------------------------------------- segments
