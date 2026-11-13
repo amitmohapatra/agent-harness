@@ -14,11 +14,9 @@ machine. No real model was called: what a real model does with them is a live ru
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import signal
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -34,22 +32,19 @@ from claude_agent_sdk import (
 from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk._internal.message_parser import parse_message
 
-from tests.support import background_server
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
-from tests.support.shared_runs import FileRuns
 from trellis import Budget, Deny, Harness, Hooks, Settings, current, tool
 from trellis.contracts import (
     ConfigurationError,
     RunEvent,
     RunEventType,
     RunRecord,
-    RunStart,
     RunStatus,
     ToolCall,
 )
-from trellis.harness import budget
+from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
@@ -65,10 +60,8 @@ from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import conversation_key
 from trellis.harness.subagents import SUBAGENT
-from trellis.runs import DependencyUnavailableError, LeaseLostError
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
-ROOT = Path(__file__).resolve().parents[2]
 #: A subagent started in the background: its ``Agent`` call returns at once, task ``t1`` runs.
 BACKGROUND = {"background": {"id": "t1", "agent": "researcher", "prompt": "research the market"}}
 #: A shell command started in the background (``Bash`` with ``run_in_background``): task ``s1``.
@@ -625,95 +618,38 @@ async def test_a_background_subagents_run_has_its_turns_deadline_for_the_run_sto
 
 
 async def test_a_background_subagents_run_is_held_in_the_run_store_while_its_session_lives(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The session holds its background subagent's run in the run store — a heartbeat every
-    third of :data:`~claude_live.HOLD_SECONDS`, naming this process — for as long as the run
-    goes on, so a server that dies without closing the session stops holding it (below). A
-    store that cannot be reached for one heartbeat is said in the log and tried again, a hold
-    refused (the run waits for a person, as a paused run's is) is tried again in silence; the
-    holds end with the run. The turn's own run is not held: it ends with its turn."""
-    monkeypatch.setattr(claude_live, "HOLD_SECONDS", 1)
-    holds: list[tuple[str, str, int, Any]] = []
-    holding = harness.runs.heartbeat
+    """The session holds its background subagent's run in the run store (``holding``: a
+    heartbeat every third of ``HOLD_SECONDS``, naming this harness) for as long as the run goes
+    on, past the turn that started it — whose own run was held while its attempt ran, and is no
+    more — so a server that dies without closing the session stops holding it
+    (``test_killed_server``). The holds end with the run."""
+    monkeypatch.setattr(holding, "HOLD_SECONDS", 1)
+    beats: list[tuple[str, str, int]] = []
+    beating = harness.runs.heartbeat
 
     async def heartbeat(run_id: str, worker_id: str, **given: Any) -> Any:
-        if len(holds) < 2:
-            holds.append((run_id, worker_id, given["lease_seconds"], None))
-            if len(holds) == 1:
-                raise DependencyUnavailableError("agent-runs is restarting", status=503)
-            raise LeaseLostError("run is PAUSED: no lease to extend", status=409)
-        lease = await holding(run_id, worker_id, **given)
-        holds.append((run_id, worker_id, given["lease_seconds"], lease.expires_at))
-        return lease
+        beats.append((run_id, worker_id, given["lease_seconds"]))
+        return await beating(run_id, worker_id, **given)
 
     monkeypatch.setattr(harness.runs, "heartbeat", heartbeat)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="held")
     first = await agent.run("research the market", user="u1", thread="t1")
     child = await child_of(harness, first.run_id)
-    await until(lambda: len(holds) >= 5)
-    assert {(run_id, holder, seconds) for run_id, holder, seconds, _ in holds} == {
-        (child.run_id, claude_live.holder(), 1)
-    }
-    renewed = [until for *_, until in holds[2:]]
-    assert renewed == sorted(renewed) and renewed[0] < renewed[-1]
-    assert "not held" in caplog.text and "agent-runs is restarting" in caplog.text
-    assert "PAUSED" not in caplog.text
+    assert (first.run_id, harness.holds.name, 1) in beats  # while its attempt ran
+    beats.clear()
+    await until(lambda: len(beats) >= 3)
+    assert set(beats) == {(child.run_id, harness.holds.name, 1)}
+    assert harness.holds.holds(child.run_id) and not harness.holds.holds(first.run_id)
 
     (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
     await when(harness, child.run_id, RunStatus.SUCCESS)
-    await asyncio.sleep(0.1)
-    held = len(holds)
+    await until(lambda: not harness.holds.holds(child.run_id))
+    held = len(beats)
     await asyncio.sleep(0.5)  # past a heartbeat's rhythm: no more
-    assert len(holds) == held
-
-
-async def test_a_background_subagents_run_a_killed_server_left_is_ended_once_its_hold_lapses(
-    tmp_path: Path,
-) -> None:
-    """A server killed (``SIGKILL``: nothing closed) while its session's subagent works in the
-    background leaves the subagent's child run ``RUNNING``, its process and its task gone, and
-    no deadline set. It held that run: its holds stop, and once the last lapses the run store
-    ends the run ``ERROR``, saying its holder stopped — agent-runs' ticker
-    (``end_abandoned``), here the in-process store as it sweeps lapsed leases (at a claim). A
-    run whose holder is alive is not touched. (A foreground subagent's run is never held: it
-    may wait for its parent's person for long.)"""
-    store_path = tmp_path / "runs"
-    server = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "tests.support.background_server",
-        str(store_path),
-        str(tmp_path),
-        cwd=ROOT,
-    )
-    try:
-        await until((tmp_path / "held").exists, seconds=60)
-    finally:
-        server.send_signal(signal.SIGKILL)
-        await server.wait()
-    child_id = (tmp_path / "held").read_text()
-    [cli] = served(tmp_path)
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(cli["pid"], signal.SIGKILL)  # what the killed server started goes with it
-
-    store = FileRuns(store_path)
-    left = await store.get(child_id, tenant="default")
-    assert left is not None and left.status is RunStatus.RUNNING and left.deadline is None
-    alive_one = await store.start(
-        RunStart(tenant_id="default", agent_id=background_server.AGENT_ID, input="still here")
-    )
-    await store.heartbeat(alive_one.run_id, "server-2", lease_seconds=600, tenant="default")
-    await asyncio.sleep(background_server.HOLD_SECONDS + 0.5)
-    assert await store.claim("w1", [background_server.AGENT_ID]) is None  # the sweep
-
-    ended = await store.get(child_id, tenant="default")
-    assert ended is not None and ended.status is RunStatus.ERROR and ended.error is not None
-    assert (ended.error.code, ended.error.retryable) == ("holder_lost", False)
-    assert "its holder stopped" in ended.error.message and "claude-live@" in ended.error.message
-    kept = await store.get(alive_one.run_id, tenant="default")
-    assert kept is not None and kept.status is RunStatus.RUNNING
+    assert len(beats) == held
 
 
 async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_process(

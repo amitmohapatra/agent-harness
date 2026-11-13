@@ -45,6 +45,7 @@ from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.governance.decision import Action, Decision
+from trellis.harness.holding import Holds
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.prompts import Prompts, Rendered, Stored
@@ -167,6 +168,8 @@ class Harness:
         if builds_runs:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
+        #: the runs this process executes, held in the run store while they do (``holding``)
+        self.holds = Holds(lambda: self.runs)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -430,6 +433,7 @@ class Harness:
         the queued writes, export the queued spans and close the clients built here (the blocks
         given are their owner's to close)."""
         await asyncio.gather(*(a.aclose() for a in self.agents.values()))
+        self.holds.aclose()
         await self.writes.aclose()
         await telemetry.flush()
         await asyncio.gather(*(s.aclose() for s in self._mcp_sources()))

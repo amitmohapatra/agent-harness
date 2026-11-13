@@ -263,12 +263,17 @@ turn the session runs by itself (a finished task's notification) is never a user
   unless the call said `run_in_background: false`). It ends `SUCCESS` with what the subagent said last, `ERROR` when the task
   failed, `CANCELLED` when it was stopped in Claude Code (Claude's own `TaskStop`); and
   `ERROR`, saying so, when the session ends first (it closed, its process died). While it
-  goes on the session holds it in the run store (a heartbeat every 20 s holding it for 60,
-  `claude_live.HOLD_SECONDS`, naming the server process): a server killed with the session
-  (nothing closed: a crash, a restart) holds it no more, and agent-runs ends it `ERROR`
-  (`holder_lost`, saying its holder stopped) within a tick of the hold lapsing — about a
-  minute — instead of leaving it `RUNNING`. A run that waits for a person is not held (a
-  pause lets go of the hold) and is taken again once it runs.
+  goes on the session holds it in the run store, as every run the harness executes is held
+  (`holding`: a heartbeat every 20 s holding it for 60, naming the harness): a server killed
+  with the session (nothing closed: a crash, a restart) holds it no more, and agent-runs ends
+  it `ERROR` (`holder_lost`, saying its holder stopped) within a tick of the hold lapsing —
+  about a minute — instead of leaving it `RUNNING`. A run that waits for a person is not held
+  (a pause lets go of the hold) and is taken again once it runs. Its question, if a killed
+  server left it waiting and the conversation's next turn on another server takes the answer,
+  continues nothing (the task went with that server's session): the run records the answer
+  and ends `ERROR`, and the turn says so (`claude_session`). Claude Code's own process, when
+  the server is killed, goes on with the background work to its end (a call it makes then has
+  nobody to decide it and does not run), then ends — as the bundled CLI (2.1.283) does.
 * **Its calls are its run's**, whether or not a turn is being answered: the CLI names the
   subagent in each hook and permission request (`agent_id`: the task's id), and the
   harness decides, runs and records the call for that run — your hooks, governance by
@@ -309,11 +314,8 @@ turn the session runs by itself (a finished task's notification) is never a user
   child run's end is on the stream of the turn that started it only while that turn is still
   being answered (`helper_finished`), not delivered to an open chat after it (Claude's next
   answer has it). A subagent's child run has the deadline of the run that started it, so
-  agent-runs ends one still unended by then. A foreground subagent's run is not held (it may
-  wait long for its parent's person), so one a killed server left `RUNNING` is ended only by
-  its deadline or the service's `RUNS__LIMITS__MAX_RUN_SECONDS`, as is a turn's own run; nor
-  is a background subagent's run that a killed server left `PAUSED` on a question (a person
-  may still answer it, and nothing runs it then).
+  agent-runs ends one still unended by then, and is held while it works (in the foreground
+  too: a pause of the run lets go of it, as it waits with the run).
 * A turn that is left — its run paused, or cancelled — is stopped with the SDK's `interrupt`
   only when nothing runs in the background: Claude Code's interrupt stops the background work
   too. With work under way the run ends at once and the CLI's turn at its next tool call

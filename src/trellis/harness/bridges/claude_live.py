@@ -18,9 +18,9 @@ it (``client.query``) instead of into a new process that resumes the session.
 * **A background subagent's run.** A subagent the CLI runs in the background
   (``task_started`` with ``is_backgrounded``) keeps the child run its ``Agent`` call started
   (``bridges.helpers``) open until its task ends (:class:`Background`), holding it in the run
-  store meanwhile (a heartbeat every third of :data:`HOLD_SECONDS`), so that a server killed
-  with the session (nothing closed) leaves a run the store ends once the hold lapses (agent-runs'
-  ticker: ``ERROR``, ``holder_lost``), not one ``RUNNING`` for ever: that run's attempts
+  store meanwhile (``holding``), so that a server killed with the session (nothing closed)
+  leaves a run the store ends once the hold lapses (agent-runs' ticker: ``ERROR``,
+  ``holder_lost``), not one ``RUNNING`` for ever: that run's attempts
   go through the pipeline as any run's, and the subagent's hooks, permission requests and
   harness tool calls — which the CLI names it in (``agent_id``: the task's id) — are
   relayed to the attempt under way, turn or no turn. A call that asks a person pauses that
@@ -67,9 +67,6 @@ import contextlib
 import contextvars
 import dataclasses
 import logging
-import os
-import secrets
-import socket
 import time
 from collections import Counter, deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
@@ -82,7 +79,7 @@ from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.journal import Journal, content_key
-from trellis.runs import ConflictError, LeaseLostError, RunsError
+from trellis.runs import ConflictError
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -116,11 +113,6 @@ ANSWER_SECONDS: Final = 12 * 3600.0
 HOOK_SECONDS: Final = 2 * ANSWER_SECONDS
 #: How often a background run that waits for a person looks whether it was cancelled there.
 WAITS_SECONDS: Final = 10.0
-#: How long one heartbeat of a session holds its background subagent's run in the run store
-#: (renewed every third of it): a server killed with the session leaves the run ended this long
-#: after (and within one tick of agent-runs' ticker). The store's default lease: long enough
-#: that a slow call or two never lets it lapse while the session lives.
-HOLD_SECONDS: Final = 60
 #: Why a background subagent's run ended with its session, when no person answered it, and
 #: when its task was stopped in Claude Code (by Claude, or with the turn it was started in).
 LOST: Final = (
@@ -129,6 +121,18 @@ LOST: Final = (
 UNANSWERED: Final = "nobody answered the background subagent's question in {hours:g} hours"
 STOPPED: Final = "the background subagent's task was stopped in Claude Code"
 CANCELLED_FIRST: Final = "the background subagent's run was cancelled before it began"
+#: Why a background subagent's run whose question was answered on a server its session is not
+#: on ended (its task went with the server that held the session, or lives on another): its
+#: error's message, and what the turn that took the answer is told.
+GONE: Final = (
+    "the background subagent's Claude session is not on the server the answer reached (it "
+    "ended with the server that held it, or lives on another): the answer cannot continue its "
+    "task, which is gone from here"
+)
+GONE_SAID: Final = (
+    "A background subagent's question was answered, but its Claude session is gone (the "
+    "server that held it stopped): its task cannot go on, and its run ended."
+)
 #: What a background subagent's run answers when its task ended with no word of its own.
 COMPLETED: Final = "The task completed."
 #: Why a background subagent's run whose task failed without saying why ended.
@@ -143,14 +147,33 @@ class Left(Exception):
     """The turn a request was handed to was left before it answered."""
 
 
-#: what tells this import's holder apart from another process's with the same host and pid
-_HOLDER_TOKEN: Final = secrets.token_hex(4)
+async def gone(runtime: Runtime, run_id: str, interrupt_id: str, answer: Any) -> None:
+    """The person's ``answer`` to the question the background subagent's run ``run_id`` is
+    paused on (``interrupt_id``) reached ``runtime``'s turn on a server its session is not on:
+    it ended with the server that held it (a crash, a restart) or lives on another, and the
+    subagent's task with it — nothing here can continue it. The run records the answer and
+    ends ``ERROR`` (``holder_lost``: :data:`GONE`), and the turn is told
+    (``claude_session``: :data:`GONE_SAID`). A run no longer waiting on that question (it
+    ended, or was answered already) is left as it is."""
+    from trellis.contracts import AgentError, ErrorCategory
 
-
-def holder() -> str:
-    """Who holds this process's background runs in the run store (a heartbeat's
-    ``worker_id``): the host and the process, as the run's error names it when it stopped."""
-    return f"claude-live@{socket.gethostname()}:{os.getpid()}:{_HOLDER_TOKEN}"[:200]
+    runs, tenant = runtime.agent.harness.runs, runtime.tenant
+    record = await runs.get(run_id, tenant=tenant)
+    if record is None or record.awaiting is None or record.awaiting.interrupt_id != interrupt_id:
+        return
+    resumed = await runs.resume(
+        answer.model_copy(update={"interrupt_id": interrupt_id, "run_id": run_id}), tenant=tenant
+    )
+    if not resumed.final:  # not a CANCEL, which ended it already
+        error = AgentError(
+            code="holder_lost",
+            category=ErrorCategory.DEPENDENCY,
+            message=GONE,
+            retryable=False,
+            source="claude_agent_sdk",
+        )
+        await runs.finish(run_id, RunStatus.ERROR, error=error, tenant=tenant)
+    runtime.events.warning("claude_session", GONE_SAID)
 
 
 def unattended(session: LiveSession, message: Any) -> None:
@@ -265,9 +288,11 @@ class Background:
         self._waiting: list[asyncio.Future[None]] = []
         self._settled = asyncio.Event()
         self._answer: asyncio.Future[InterruptResolution | None] | None = None
-        loop = asyncio.get_running_loop()
-        self.task = loop.create_task(self._run(), context=contextvars.Context())
-        self._holding = loop.create_task(self._hold(), context=contextvars.Context())
+        # held from here until its run ends (its attempts are held too, as every run's)
+        self.agent.harness.holds.hold(self.run_id, self.tenant)
+        self.task = asyncio.get_running_loop().create_task(
+            self._run(), context=contextvars.Context()
+        )
 
     # ------------------------------------------------------------------ its run
     async def _run(self) -> None:
@@ -291,28 +316,11 @@ class Background:
         except Exception:
             log.exception("background run %s of task %s", self.run_id, self.task_id)
         finally:
-            self._holding.cancel()
+            self.agent.harness.holds.let_go(self.run_id)
             self.over = True
             self._woken()
             self.session._over(self)
             await self._finished()
-
-    async def _hold(self) -> None:
-        """Hold the run in the run store while it goes on: a heartbeat as this process
-        (:func:`holder`) every third of :data:`HOLD_SECONDS`, until :meth:`_run` ends. A run
-        that waits for a person has nothing to hold (the store refuses it) until it runs again;
-        a store that cannot be reached is tried again at the next."""
-        runs = self.agent.harness.runs
-        while True:
-            try:
-                await runs.heartbeat(
-                    self.run_id, holder(), lease_seconds=HOLD_SECONDS, tenant=self.tenant
-                )
-            except LeaseLostError:
-                pass  # paused, or it ended meanwhile
-            except RunsError as exc:
-                log.warning("background run %s not held: %s", self.run_id, exc)
-            await asyncio.sleep(HOLD_SECONDS / 3)
 
     async def _finished(self) -> None:
         """The run's end on the task tree of the run that started it, while that run is

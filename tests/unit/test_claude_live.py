@@ -28,6 +28,7 @@ from trellis.harness.bridges.claude_live import (
     LiveSessions,
     Turn,
 )
+from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 
 REFUSED = {"content": [{"type": "text", "text": UNATTENDED}], "is_error": True}
@@ -169,6 +170,12 @@ class Store:
             raise ConnectionError("the run store cannot be reached")
         return self.records.get(run_id)
 
+    async def heartbeat(self, run_id: str, worker_id: str, **given: Any) -> None:
+        """A hold (``holding``): taken."""
+
+    async def release(self, run_id: str, worker_id: str, **given: Any) -> None:
+        """A hold let go of."""
+
     async def cancel(self, run_id: str, *, reason: str, tenant: str | None = None) -> None:
         self.cancelled.append((run_id, reason))
         if self.on_cancel is not None:
@@ -201,7 +208,7 @@ async def background() -> tuple[LiveSession, Background, Store]:
     turn ``turn``, whose own attempt has not begun (its record is still being read)."""
     store = Store()
     agent = SimpleNamespace(
-        harness=SimpleNamespace(runs=store),
+        harness=SimpleNamespace(runs=store, holds=Holds(lambda: store)),
         running={},
         sessions=LRU(),
         adapter=SimpleNamespace(name="claude"),

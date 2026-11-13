@@ -13,6 +13,7 @@ from langgraph.types import Command
 from trellis.contracts import AgentExecutionContext, RunEvent, RunStart, RunStatus
 from trellis.harness.bridges.helpers import HELPER, NOT_CONTINUED, Helpers, Kind, text_of
 from trellis.harness.events import RunEvents
+from trellis.harness.holding import Holds
 from trellis.harness.identity import Identity
 from trellis.harness.runs import LocalRuns
 
@@ -27,7 +28,9 @@ def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
     seen: list[RunEvent] = []
     events.listen(seen.append)
     return SimpleNamespace(
-        agent=SimpleNamespace(harness=SimpleNamespace(runs=runs, memory=None)),
+        agent=SimpleNamespace(
+            harness=SimpleNamespace(runs=runs, memory=None, holds=Holds(lambda: runs))
+        ),
         events=events,
         seen=seen,
         identity=identity,

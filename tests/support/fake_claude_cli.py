@@ -38,7 +38,9 @@ recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
-does not hold is the real CLI's error result. With ``--session-mirror`` (the SDK has a
+does not hold is the real CLI's error result. Stdin closed (the SDK's process died) with nothing
+in the background, the process ends; with background work it goes on to that work's end (a
+call it makes has nobody to decide it: it does not run), then ends, as the bundled CLI does. With ``--session-mirror`` (the SDK has a
 ``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
 ``transcript_mirror`` frame), and a resume the SDK materialised (``CLAUDE_CONFIG_DIR``) goes on
 from that transcript — whatever this machine's own sessions hold. ``--max-turns`` stops a query after that many
@@ -118,9 +120,27 @@ EDITS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 STEP_TOKENS = (10, 5)
 
 
+#: ``"orphaned"``: the SDK is gone (stdin closed while background work runs) — nothing is
+#: sent, nobody answers.
+_SDK = {"orphaned": False}
+
+
 def send(message: dict[str, Any]) -> None:
+    if _SDK["orphaned"]:
+        return
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
+
+
+def orphaned(cli: Cli) -> None:
+    """Stdin closed (the SDK's process died) while background work runs: as the bundled CLI
+    (2.1.283) does, that work goes on to its end — a call it makes has nobody to decide it
+    and does not run — and then the process ends (its parent ``SIGKILL``-ed, driven against a
+    scripted model on this machine)."""
+    _SDK["orphaned"] = True
+    while cli.tasks:
+        cli.triggers()
+        time.sleep(0.02)
 
 
 #: What :func:`read` answers when nothing came within its ``timeout``.
@@ -269,7 +289,11 @@ class Cli:
             return
         for task_id, task in list(self.tasks.items()):
             call = Path(folder) / f"{task_id}.call"
-            if call.exists():
+            if call.exists() and _SDK["orphaned"]:  # nobody to decide it: it does not run
+                call.unlink()
+                unanswered = {"result": "no answer from the SDK: the call did not run", "ok": False}
+                (Path(folder) / f"{task_id}.called").write_text(json.dumps(unanswered))
+            elif call.exists():
                 item = json.loads(call.read_text())
                 call.unlink()
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
@@ -1246,7 +1270,8 @@ def main() -> None:
             cli.injected(cli.owed.pop(0))
             continue
         message = read(timeout=0.02 if cli.tasks else None)
-        if message is None:
+        if message is None:  # the SDK closed stdin, or its process died
+            orphaned(cli)
             return
         if message is NOTHING:
             cli.triggers()

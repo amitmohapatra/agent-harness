@@ -101,7 +101,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import JournalSessions, session_store, with_context
-from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
+from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn, gone
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -288,6 +288,9 @@ class ClaudeInput:
     #: the run paused before its prompt was sent — on the question of a background
     #: subagent's run of its conversation (``claude_live.LiveSession.asks``): it is sent now
     unsent: bool = False
+    #: that question's answer — the subagent's run, its interrupt, the person's resolution —
+    #: for when its session is not on this server (``claude_live.gone``)
+    background_answer: tuple[str, str, InterruptResolution] | None = None
 
 
 class ClaudeRunError(RuntimeError):
@@ -384,8 +387,10 @@ class ClaudeAdapter:
     ) -> Any:
         from trellis.harness.subagents import asked_by
 
-        if (asked_by(pending.interrupt) or {}).get("background"):
-            return dataclasses.replace(native_input, unsent=True)
+        named = asked_by(pending.interrupt) or {}
+        if named.get("background"):
+            answered = (str(named["run_id"]), str(named["interrupt_id"]), resolution)
+            return dataclasses.replace(native_input, unsent=True, background_answer=answered)
         return dataclasses.replace(
             native_input,
             answered=pending.call,
@@ -607,6 +612,9 @@ class ClaudeAdapter:
         steps.waiting()
         spending = Spending(runtime, options, self.costs, session)
         live: LiveSession | None = None
+        answered = native_input.background_answer
+        if answered is not None and answered[0] not in self.live.attended:
+            await gone(runtime, *answered)  # its session is not here: nothing continues it
         try:
             if kept:
                 assert key is not None

@@ -21,6 +21,9 @@ interchangeable. Both behave the same way:
 * a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
   it for the ``worker_id`` (the process running it) instead: once the hold lapses the run ends
   ``ERROR`` (``holder_lost``), never queued; a hold fences no write, and a pause lets go of it.
+  Answered, a run held when it paused must be held again within :data:`RESUME_GRACE_SECONDS`
+  (whoever continues it does so at once) or it ends so too; a ``release`` by its holder lets go
+  of the hold, the run ``RUNNING``, unheld.
 
 A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
 a re-run needs — and so may a heartbeat (progress: the journal after a side-effecting call, so
@@ -97,6 +100,9 @@ PAGE_LIMIT: Final = 50
 #: runs are always kept. A deployment keeps its runs in agent-runs (``RUNS_URL``).
 KEEP_FINISHED: Final = 1_000
 KEEP_FINISHED_SECONDS: Final = 3600.0
+#: How long an answered run that was held when it paused may run unheld before it is ended
+#: (agent-runs' ``RESUME_GRACE``): whoever continues it holds it at once.
+RESUME_GRACE_SECONDS: Final = 60.0
 
 
 class RunArtifacts(Protocol):
@@ -303,8 +309,11 @@ class LocalRuns:
         #: runs that were ever queued: a resume sends them back to the queue
         self._queued: set[str] = set()
         self._leases: dict[str, tuple[str, datetime]] = {}
-        #: the runs kept in their caller's process that it holds: by whom, until when
-        self._holds: dict[str, tuple[str, datetime]] = {}
+        #: the runs kept in their caller's process that it holds: by whom (``None``: an answered
+        #: run whoever continues it must hold), until when
+        self._holds: dict[str, tuple[str | None, datetime]] = {}
+        #: the paused runs that were held when they paused
+        self._held_before: set[str] = set()
         #: when each running run last started running
         self._running_since: dict[str, datetime] = {}
         #: the running runs a worker holds that were asked to stop, and why
@@ -412,6 +421,17 @@ class LocalRuns:
         checkpoint: dict[str, Any] | None = None,
         tenant: str | None = None,
     ) -> RunRecord:
+        found = self._require(run_id, tenant)
+        if found.status is RunStatus.RUNNING and run_id not in (*self._leases, *self._queued):
+            # kept in its caller's process: its holder lets go of it, and it goes on unheld
+            if self._holds.get(run_id, (None, None))[0] != worker_id:
+                raise LeaseLostError(
+                    f"{worker_id} does not hold {run_id}", code="LEASE_LOST", status=409
+                )
+            del self._holds[run_id]
+            if checkpoint is not None:
+                found = self._move(found, found.status, checkpoint=checkpoint)
+            return found
         record = self._fenced(run_id, worker_id, tenant)
         del self._leases[run_id]
         if checkpoint is not None:
@@ -469,6 +489,10 @@ class LocalRuns:
         )
         if requeue:
             self._enqueue(moved.run_id)
+        elif moved.run_id in self._held_before:  # whoever continues it holds it
+            self._held_before.discard(moved.run_id)
+            grace = timedelta(seconds=RESUME_GRACE_SECONDS)
+            self._holds[moved.run_id] = (None, datetime.now(UTC) + grace)
         return moved
 
     async def finish(
@@ -565,7 +589,7 @@ class LocalRuns:
         holder's hold in force is ``LeaseLostError``."""
         moment = datetime.now(UTC)
         held = self._holds.get(record.run_id)
-        if held is not None and held[0] != holder and held[1] >= moment:
+        if held is not None and held[0] not in (None, holder) and held[1] >= moment:
             raise LeaseLostError(
                 f"{record.run_id} is held by {held[0]}", code="LEASE_LOST", status=409
             )
@@ -617,7 +641,11 @@ class LocalRuns:
             self._cancelling.pop(record.run_id, None)
         moment = datetime.now(UTC)
         if status is not RunStatus.RUNNING:  # a hold is on a running run only
-            self._holds.pop(record.run_id, None)
+            held = self._holds.pop(record.run_id, None)
+            if status is RunStatus.PAUSED and held is not None and held[0] is not None:
+                self._held_before.add(record.run_id)
+            elif status.final:
+                self._held_before.discard(record.run_id)
         since = self._running_since.pop(record.run_id, None)
         if since is not None and status is not RunStatus.RUNNING:  # it stops working
             changes["worked_seconds"] = record.worked_seconds + (moment - since).total_seconds()
@@ -668,11 +696,18 @@ class LocalRuns:
                 self._requeued(self._runs[run_id])
         for run_id, (holder, until) in list(self._holds.items()):
             if until < now:  # its holder stopped: nothing else can run it
+                stopped = (
+                    f"its holder stopped: {holder} kept the run in its own process and "
+                    f"stopped heartbeating (held until {until}), so nothing runs it"
+                    if holder is not None
+                    else "nobody took the run up after its answer: it ran in its caller's "
+                    f"process, and nothing held it by {until} (the process that ran it before "
+                    "it paused stopped while it waited)"
+                )
                 error = AgentError(
                     code="holder_lost",
                     category=ErrorCategory.TIMEOUT,
-                    message=f"its holder stopped: {holder} kept the run in its own process "
-                    f"and stopped heartbeating (held until {until}), so nothing runs it",
+                    message=stopped,
                     retryable=False,
                     source="agent-runs",
                 )

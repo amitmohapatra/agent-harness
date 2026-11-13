@@ -187,9 +187,51 @@ async def attempt(
     A run of a conversation (its thread) waits while another run of the same conversation and
     agent works in this process: a second message to a busy conversation is answered after
     the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's are not held here. ``mode`` says
+    ``concurrency_key``). A sub-agent's run and a worker's do not wait here. ``mode`` says
     what a run sent while another holds the conversation's turn does instead of waiting
-    (``conversation.Mode``: :func:`_arrived`)."""
+    (``conversation.Mode``: :func:`_arrived`).
+
+    A run this process executes without a worker's lease — every run but a claimed one — is
+    held in the run store while its attempt is under way, waiting its turn included
+    (``holding``): a process that dies with it leaves a run the store ends, not one
+    ``RUNNING`` for ever. A claimed run is its lease's (its worker heartbeats it)."""
+    held: contextlib.AbstractAsyncContextManager[Any] = (
+        contextlib.nullcontext()
+        if job is not None
+        else agent.harness.holds.holding(record.run_id, record.tenant_id)
+    )
+    async with held:
+        return await _turned(
+            agent,
+            record,
+            input,
+            journal=journal,
+            resolution=resolution,
+            listener=listener,
+            job=job,
+            remaining=remaining,
+            observe=observe,
+            parent=parent,
+            mode=mode,
+        )
+
+
+async def _turned(
+    agent: Agent,
+    record: RunRecord,
+    input: Any,
+    *,
+    journal: Journal | None,
+    resolution: InterruptResolution | None,
+    listener: Callable[[RunEvent], None] | None,
+    job: Job | None,
+    remaining: float | None,
+    observe: Callable[[PromptContext | None], None] | None,
+    parent: Runtime | None,
+    mode: Mode,
+) -> Result:
+    """The attempt (:func:`attempt`): the conversation's turn taken — or what a run sent
+    while another holds it does instead — then :func:`_attempt`."""
     if job is not None or parent is not None:
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:

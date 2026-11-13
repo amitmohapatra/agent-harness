@@ -144,19 +144,37 @@ flag, the system prompt and thinking forms, structured output, partial messages,
 options and the SDK's errors. What stays as it is:
 [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
 
-### Fixed: a background subagent's run a killed server left is ended, not left `RUNNING`
+### Fixed: the runs a killed server was executing are ended, not left `RUNNING`
 
-A background subagent's child run is started in the server's process, not claimed from the
-queue, so no lease said when nothing worked on it: a server killed with its live session (a
-crash, a restart) left the run `RUNNING` for ever unless it had a deadline or agent-runs a
-maximum working time. The session now holds the run in the run store while it goes on
-(`Background._hold`: agent-runs' heartbeat, which holds a run kept in its caller's process,
-every 20 s for 60, `claude_live.HOLD_SECONDS`, as `claude_live.holder()`), and agent-runs'
-ticker ends a run whose hold lapsed `ERROR` (`holder_lost`), never queueing it. `LocalRuns`
-holds such a run the same way and ends a lapsed one at its next claim, as it requeues a lapsed
-lease. A foreground subagent's run and a turn's own run are not held. Needs the agent-runs
-with holds (an older one answers the heartbeat `409`: the session logs nothing and holds
-nothing, as before).
+A run the harness executes in its own process — a turn of `run`/`stream`/`serve_chat`, a
+resumed one, a sub-agent's child run, a helper a framework spawned (in the foreground or in
+the background, as a Claude subagent working in its session) — is started, not claimed from
+the queue, so no lease said when nothing worked on it: a server killed with it (a crash, a
+restart) left it `RUNNING` for ever unless it had a deadline or agent-runs a maximum working
+time. Every such run is now held in the run store while it executes (`holding.Holds`, one
+place: `pipeline.attempt` for every attempt, `bridges.helpers` for the helpers open in it,
+`claude_live.Background` for a background subagent's run between its attempts): agent-runs'
+heartbeat naming the harness (`Harness.holds.name`), every 20 s for 60
+(`holding.HOLD_SECONDS`), renewed however long the attempt takes. When the server dies the
+holds stop and agent-runs' ticker ends each run `ERROR` (`holder_lost`) once its hold lapses,
+never queueing it. A run that waits for a person is not held (a pause lets go of it, and of
+the helpers open in it, which wait with it); whichever server continues it after the answer
+holds it again. A run a worker claimed keeps its lease, and takes no hold. `LocalRuns` holds
+the same way and ends a lapsed hold at its next claim, as it requeues a lapsed lease.
+
+A background subagent's question a killed server left waiting, answered in the
+conversation's next turn on another server, could continue nothing (its task went with the
+server's Claude session) and its run was left `PAUSED`, the answer lost. The turn now records
+the answer on that run and ends it `ERROR` (`holder_lost`, `claude_live.GONE`), and is told so
+(`claude_session`). An answer reaching such a run through the run store alone is ended by
+agent-runs (an answered run held when it paused that nobody holds again within 60 s).
+
+The stand-in CLI behaves as the bundled one (2.1.283) does when its SDK's process dies (stdin
+closed): with nothing in the background it ends; with a background subagent at work it goes on
+to that work's end — a call it makes has nobody to decide it and does not run — then ends.
+
+Needs the agent-runs with holds (an older one answers these heartbeats `409`: nothing is held,
+as before).
 
 ### Added: a conversation's Claude Code process stays between its turns, with its background work
 
