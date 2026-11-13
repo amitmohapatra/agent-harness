@@ -14,10 +14,17 @@ behind its ``ToolSearch`` (the model is told their names only, and spends a step
 before it can call one). Which tools a run offers is the harness's choice (the tool hints'
 narrowing, memory's ``tool_search``), made before the query: they are the tools to load. A
 team's own servers keep the CLI's deferral.
+
+A CLI process that serves several turns of a conversation (``bridges.claude_live``) lists the
+server once, for all of them, while each turn has its own tools (bound to its run): that
+process is given :func:`relayed`, a server that lists what the first turn's lists and hands
+each call to the turn being served (:func:`handler`: that turn's own tool of the name).
 """
 
 from __future__ import annotations
 
+import json
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, cast
 
@@ -38,10 +45,52 @@ ALWAYS_LOAD: Final = "alwaysLoad"
 WAITING: Final = "Waiting for a person's approval."
 
 
+#: A tool's handler, as the SDK calls it: its arguments in, an MCP tool result out.
+Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+#: The SDK tools each server made here serves, by the server's instance (the config itself
+#: goes to the CLI as JSON, less the instance: it carries nothing else).
+_SERVED: weakref.WeakKeyDictionary[Any, list[Any]] = weakref.WeakKeyDictionary()
+
+
 def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
     readers = [_reader(*r) for r in results.readers()]
-    server = create_sdk_mcp_server(SERVER, tools=[*(_one(t) for t in tools), *readers])
+    return _server([*(_one(t) for t in tools), *readers])
+
+
+def _server(served: list[Any]) -> McpSdkServerConfig:
+    server = create_sdk_mcp_server(SERVER, tools=served)
+    _SERVED[server["instance"]] = served
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
+
+
+def listing(server: McpSdkServerConfig) -> tuple[tuple[str, str, str], ...]:
+    """What ``server`` (one :func:`convert` made) lists: each tool's name, description and
+    input schema (as JSON) — what a CLI process that lists it once has for good."""
+    return tuple(
+        (t.name, t.description, json.dumps(t.input_schema, sort_keys=True, default=str))
+        for t in _SERVED[server["instance"]]
+    )
+
+
+def handler(server: McpSdkServerConfig, name: str) -> Handler:
+    """The handler of ``server``'s tool ``name``."""
+    [found] = [t.handler for t in _SERVED[server["instance"]] if t.name == name]
+    return cast("Handler", found)
+
+
+def relayed(
+    server: McpSdkServerConfig, call: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+) -> McpSdkServerConfig:
+    """A server that lists what ``server`` lists and hands each call to ``call`` (the tool's
+    name, its arguments): the one a CLI process serving several turns is given."""
+
+    def relay(tool: Any) -> Any:
+        async def relayed_call(args: dict[str, Any]) -> dict[str, Any]:
+            return await call(tool.name, args)
+
+        return sdk_tool(tool.name, tool.description, tool.input_schema)(relayed_call)
+
+    return _server([relay(t) for t in _SERVED[server["instance"]]])
 
 
 def _one(tool: Tool) -> Any:

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -394,3 +396,27 @@ def test_retention_is_a_number_from_0() -> None:
 
     with pytest.raises(ConfigurationError, match="from 0"):
         LocalRuns(keep_finished=-1)
+
+
+def kept_under(folder: Path, named: str) -> list[bytes]:
+    """What the files hold under the one folder of ``folder`` named ``named``."""
+    [found] = folder.glob(named)
+    return [kept.read_bytes() for kept in sorted(found.rglob("*")) if kept.is_file()]
+
+
+async def test_today_the_folder_of_a_stores_payloads_outlives_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Today: a store given no ``payload_root`` keeps its payload objects (a checkpoint's
+    segments) in a temporary folder it makes (``trellis-runs-*``) and nothing removes it:
+    ``aclose`` leaves the folder and what the runs wrote in it, in the machine's temporary
+    directory, for good — one more for every harness that starts without ``RUNS_URL`` (one
+    run of this suite leaves about 2,100). "Nothing survives a restart" holds for the runs,
+    not for their payloads on the disk. What a user needs: the folder goes with the store."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    await runs.aclose()
+    # still there, closed, with what the run wrote
+    assert kept_under(tmp_path, "trellis-runs-*") == [b"a checkpoint's segment"]

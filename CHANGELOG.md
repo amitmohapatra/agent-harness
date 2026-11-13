@@ -97,6 +97,93 @@ turn); cancelling a turn does not cancel its task; a graph with neither `middlew
 checkpointer loses the task of a turn cancelled after its start. See
 [docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
 
+### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
+
+Driving the bundled CLI (2.1.283) against a scripted model showed what it sends, and where a
+wrapped agent did not get what the SDK gives:
+
+- **Subagents.** Claude Code runs a subagent in the background unless its call says
+  otherwise. In a run with no conversation its child run ended at its launch, `SUCCESS` with
+  the launch text, and its calls were recorded under the run: it now stays open until its
+  task ends (`SUCCESS` with what it said; `ERROR` when it failed, was stopped, or the process
+  ended first), and says so on the run's stream (`helper_finished`; a conversation's
+  background subagent too, while the turn that started it is still answered). Two subagents
+  of one type at work at once each record their own calls (by the task's id, `agent_id`,
+  not the type's name). A subagent's forwarded text is no longer streamed as the run's.
+- **Spending.** A result's cost is its session's running total and its usage the main
+  agent's own. A query whose session ran a turn of its own, the last answer at the turn
+  limit, and a conversation's turn in a process that resumed the session were charged the
+  total again; each is charged what the cost grew by (the journal keeps the session's cost
+  across attempts). A subagent's replies' tokens count toward the run's budget.
+- **`max_budget_usd`** is Claude Code's cap on what one process spends: options with one run
+  each turn in a process of its own again, so the cap stays a query's and a conversation
+  goes on past it.
+- **One call, one question.** A tool that says nothing of what it does asked a person
+  twice for one call: governance's question, then on the resume Claude Code's own. The
+  second is not asked.
+- **Claude's own tools.** Its task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`:
+  `TodoWrite`'s successors), `EnterPlanMode` and `StructuredOutput` (`output_format`) asked
+  a person on every call — a structured answer paused its own run. They run, as `TodoWrite`
+  does.
+- **Slash commands.** A turn the CLI answered itself (`/compact`: no reply of the model's
+  in it) ended `ERROR` as a run with no answer; it ends `SUCCESS` with an empty answer, as
+  any framework's run no model replied in. A blank reply of the model's still ends
+  `ERROR` (`NO_ANSWER`).
+- **Deadlines.** A native helper's child run (a Claude, Deep Agents or OpenAI Agents
+  subagent) is recorded with the deadline of the run that started it, as a sub-agent's run
+  is: agent-runs ends one a killed server left `RUNNING` by then.
+- **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
+  takes it with `--resume` only to fork), and options with `continue_conversation` failed at
+  once (the SDK asked the journal's store for the latest session): both work.
+
+Tested through the harness on the query path and in a live session: every hook event of the
+options' own, `can_use_tool` with its suggestions and permission updates, every option's
+flag, the system prompt and thinking forms, structured output, partial messages, the session
+options and the SDK's errors. What stays as it is:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
+
+### Added: a conversation's Claude Code process stays between its turns, with its background work
+
+A Claude Agent SDK turn ran in a CLI process of its own, and the next turn started another
+that resumed the session. What Claude started in the background — a subagent with
+`background`, a `Bash` command with `run_in_background` — belongs to its process: a
+background subagent held the turn open until it finished, a background command ended with the
+turn, and an approval ended both. A conversation's turn now leaves its process running
+(`bridges.claude_live`: the SDK's `ClaudeSDKClient`) and the next turn is sent into it, so
+that work goes on between the turns. A turn ends at the result of its own prompt
+(`ResultMessage.origin` none or `human`), never at one the session injected for a finished
+task; a pause ends the turn and keeps the process, and the resumed attempt is sent into it;
+cancelling a turn stops that turn only (Claude Code's own interrupt stops its background work
+too, so with any under way the turn ends at its next tool call instead). Each turn's hooks,
+permission check and harness tools still run for that turn's run. A background subagent
+keeps the child run its `Agent` call started: open until the SDK says its task ended
+(`SUCCESS` with what it said last, `ERROR` for a failed task or a session that ended first,
+`CANCELLED` for one stopped in Claude Code), its calls decided, run and recorded for that
+run — hooks, governance, `can_use_tool`, harness tools — with or without a turn being
+answered. A call of it that asks a person pauses that run and waits in Claude Code; the
+question is asked in the conversation's next turn, before its prompt, and the answer goes
+on to the run (nothing answers a child run directly today). Its limits are the agent's
+`run_timeout` and `budget`; past them, or cancelled (`agent.cancel(child_run_id)`), the task
+is stopped with the SDK's `stop_task`, that subagent only. The process's running cost is
+shared at each result by the tokens each used, so a subagent's work between two turns is
+charged to its run and the next turn its own. Any other call made between two turns (the
+main agent's, in a turn the session injected) has no run and is refused, not run unchecked,
+and the next run says so (`claude_session`). With no live process (a restart, another server, one closed for being idle, a
+run with no `thread`) a turn runs as before, resuming the session from the journal, which
+holds what was mirrored between the turns too. Limits and what is not kept:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#conversations).
+`TaskStop` (a write) and six tools that only list or look up (reads) have a declared risk;
+they asked a person on every call. Claude Code's own schedules (`CronCreate`,
+`ScheduleWakeup`) stay off: a turn they fire has no run.
+
+### Fixed: a Claude subagent is one child run when the run store takes time to answer
+
+Claude Code says a subagent started two ways, its `Agent` call's `PreToolUse` hook and the
+message that carries the call, and each started the helper by the call's id. With a run
+store that takes time (agent-runs, over HTTP) the second came while the first was still
+being recorded and started a second child run of the same subagent, which then ended at
+once. A helper's start now takes its key one at a time (`bridges.helpers.Helpers.start`).
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

@@ -426,8 +426,10 @@ class Harness:
             raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     async def aclose(self) -> None:
-        """Finish the queued writes, export the queued spans and close the clients built here
-        (the blocks given are their owner's to close)."""
+        """End what the agents' frameworks keep running between runs (``Agent.aclose``), finish
+        the queued writes, export the queued spans and close the clients built here (the blocks
+        given are their owner's to close)."""
+        await asyncio.gather(*(a.aclose() for a in self.agents.values()))
         await self.writes.aclose()
         await telemetry.flush()
         await asyncio.gather(*(s.aclose() for s in self._mcp_sources()))

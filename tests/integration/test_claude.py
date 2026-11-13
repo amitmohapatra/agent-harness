@@ -776,6 +776,40 @@ async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
     assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
 
 
+async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost_once(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed session's result carries the session's cost, what it cost before the
+    process that resumed it included (the bundled CLI, driven against a scripted model).
+    A query that paused had no result: the attempt that resumes it is charged both. The
+    one last answer at the turn limit resumes a session whose query was charged already:
+    it is charged what the cost grew by."""
+    from trellis.harness import budget
+
+    costs: list[float | None] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (costs.append(kw["cost"]), account(run, **kw))
+    )
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o3"}}, {"text": "done"}]
+    paid = options(tmp_path, script, model="m")
+    paid.env["FAKE_CLAUDE_COST"] = "0.5"
+    agent = arm(harness.wrap(paid, id="refunds"), [refund])
+    paused = await agent.run("refund o3", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    assert costs == [None, 1.5]  # the step that paused (no result: no cost), then all three
+    costs.clear()
+    steps = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    limited = options(tmp_path, [*steps, {"text": "never"}], model="m", max_turns=2)
+    limited.env["FAKE_CLAUDE_COST"] = "0.5"
+    result = await harness.wrap(limited, id="limited").run("read them", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    assert costs == [1.0, 0.5]  # two steps, then the last answer's one: not 1.0 and 1.5
+
+
 async def test_a_last_query_at_the_limit_that_gives_no_answer_leaves_the_error(
     harness: Harness, tmp_path: Path
 ) -> None:

@@ -233,6 +233,10 @@ class Journal(BaseModel):
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
+    #: that session's running cost, as the last of its results this run was charged carried
+    #: it (a Claude Agent SDK result's cost is its session's, the turns and the attempts
+    #: before it included): its next result is charged what the cost grew by
+    session_cost: float | None = None
     #: the transcripts of the framework's own sessions, by session, as its session store
     #: mirrors them (``bridges.claude.JournalSessions``): a resume on any machine continues them
     transcripts: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
@@ -425,6 +429,11 @@ class Replay:
             self._mark("a", key, index, self._here())
             return InterruptResolution.model_validate(recorded[index])
         return None
+
+    def taken(self, key: str) -> int:
+        """How many recorded answers of ``key`` this attempt has read so far: one more once a
+        person's answer about a call was read for it (:meth:`answer`)."""
+        return self._seen[f"a:{key}"]
 
     def answered(self, key: str) -> bool:
         """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""

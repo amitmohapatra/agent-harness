@@ -137,8 +137,10 @@ def account(
     output_tokens: int,
     cached: int = 0,
     cost: float | None = None,
+    calls: int = 1,
 ) -> None:
-    """One model reply's spending, on the run and every run it works inside."""
+    """One model reply's spending, on the run and every run it works inside (``calls``: 0 for
+    a cost that came apart from its replies)."""
     capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")
@@ -147,7 +149,7 @@ def account(
         spent["tokens"] = spent.get("tokens", 0) + input_tokens + output_tokens
         spent["cached_tokens"] = spent.get("cached_tokens", 0) + cached
         spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
-        spent["model_calls"] = spent.get("model_calls", 0) + 1
+        spent["model_calls"] = spent.get("model_calls", 0) + calls
 
 
 def account_reply(runtime: Runtime, reply: Any) -> None:

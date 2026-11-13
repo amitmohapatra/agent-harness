@@ -103,9 +103,10 @@ async def test_a_follow_up_has_the_conversation(
     second = await agent.run("What is the locker code?", user="ada", thread=THREAD)
     assert second.status is RunStatus.SUCCESS, second.error
     assert "4242" in told(seen)  # the earlier turn reached the model
-    if framework == "claude_agent_sdk":  # the session the first turn ran in, continued
+    if framework == "claude_agent_sdk":  # the session the first turn ran in, continued —
+        # in the process that ran it, kept for the conversation (none started to resume it)
         record = json.loads(seen[-1].read_text())
-        assert record["resume"] and record["earlier"] == ["The locker code is 4242."]
+        assert record["earlier"] == ["The locker code is 4242."] and record["resume"] is None
     forget(seen)
     other = await agent.run("What is the locker code?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS, other.error

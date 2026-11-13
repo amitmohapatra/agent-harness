@@ -6,6 +6,7 @@ record (``bridges.helpers``)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -272,6 +273,32 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
     a_full_child(memory_service, result.run_id, child.run_id, ["Read"])
 
 
+async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI says a subagent started two ways — its ``Agent`` call's ``PreToolUse`` hook, and
+    the message that carries the call — and each starts the helper by the call's id. With a
+    run store that takes time to answer (agent-runs, over HTTP) the second comes while the
+    first is still being recorded: it is the same helper, not a second child run."""
+    async with Harness(config=Settings()) as h:
+        start = h.runs.start
+
+        async def slow(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.05)
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(h.runs, "start", slow)
+        options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+        result = await h.wrap(options, id="desk").run("check o1", user="u")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked"
+        [child] = await children(h, result.run_id)
+        record = await h.runs.get(child.run_id)
+    assert record is not None and (record.status, record.output) == (
+        RunStatus.SUCCESS,
+        "o1 is fine",
+    )
+
+
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -332,6 +359,68 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
         await second.aclose()
     assert result.status is RunStatus.SUCCESS and result.answer == "checked", result.error
     assert child.status is RunStatus.SUCCESS  # the same record, ended by the next worker
+
+
+async def test_two_claude_subagents_of_one_type_at_once_each_record_their_own_calls(
+    tmp_path: Path, memory_service: FakeMemoryService
+) -> None:
+    """Two subagents of one type at work at once: Claude Code names the one a call comes
+    from by its task's id (``agent_id``), which its ``task_started`` ties to the ``Agent``
+    call that started it — each call is recorded under its own subagent's run, not the one
+    started last."""
+    script = [
+        {
+            "agents": [
+                {
+                    "agent": "checker",
+                    "prompt": "check o1",
+                    "steps": [
+                        {"builtin": "Read", "args": {"file_path": "o1"}},
+                        {"text": "o1 is fine"},
+                    ],
+                },
+                {
+                    "agent": "checker",
+                    "prompt": "check o2",
+                    "steps": [
+                        {"builtin": "Grep", "args": {"pattern": "o2"}},
+                        {"text": "o2 is late"},
+                    ],
+                },
+            ]
+        },
+        {"text": "checked both"},
+    ]
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        result = await h.wrap(claude(tmp_path, script), id="desk").run("check both", user="u")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked both"
+        found = {r.input: r for r in await records(h, result.run_id)}
+        await h.writes.drain()
+    one, two = found["check o1"], found["check o2"]
+    assert (one.status, one.output) == (RunStatus.SUCCESS, "o1 is fine")
+    assert (two.status, two.output) == (RunStatus.SUCCESS, "o2 is late")
+    made = {c.body["tool"]: c.scope["agent_run_id"] for c in memory_service.named("record_tool")}
+    assert made["Read"] == one.run_id and made["Grep"] == two.run_id
+    assert made["Agent"] == result.run_id  # the calls that started them are the run's own
+
+
+async def test_a_claude_subagents_text_is_not_the_runs_own_text_on_its_stream(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code forwards a subagent's text as messages naming its ``Agent`` call
+    (``forward_subagent_text``; a background subagent's always): the run's own text on its
+    stream is the main agent's, as its answer and its transcript are."""
+    from trellis.contracts import RunEventType
+
+    options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+    events = [e async for e in harness.wrap(options, id="desk").stream("check o1", user="u")]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert "".join(said) == "checked" == events[-1].data["result"]
+
+
+async def records(h: Harness, run_id: str) -> list[Any]:
+    """The records of ``run_id``'s child runs."""
+    return [await h.runs.get(child.run_id) for child in await children(h, run_id)]
 
 
 # ---------------------------------------------------------------------- OpenAI agent tools

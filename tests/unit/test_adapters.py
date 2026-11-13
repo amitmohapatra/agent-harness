@@ -191,6 +191,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         framework_options={},
         agent_id="a",
         attempt=1,
+        parent=None,  # a run with no conversation of its own: a process of its own
+        run_id="run_1",
+        conversation="run_1",
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
@@ -605,3 +608,30 @@ def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> N
     assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
     assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
     assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
+
+
+def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> None:
+    """A result that gives no cost is charged its usage and no cost; one that names no
+    session is kept for no session."""
+    from types import SimpleNamespace
+
+    from trellis.harness import budget
+    from trellis.harness.adapters.claude import Spending
+    from trellis.harness.bounded import LRU
+    from trellis.harness.journal import Journal
+
+    charged: list[dict[str, Any]] = []
+    journal = Journal()
+    runtime = SimpleNamespace(replay=SimpleNamespace(journal=journal))
+    costs: LRU[str, float] = LRU()
+    spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
+    account = budget.account
+    try:
+        budget.account = lambda run, **kw: charged.append(kw)  # type: ignore[assignment]
+        usage = {"input_tokens": 3, "output_tokens": 2}
+        ended = SimpleNamespace(total_cost_usd=None, session_id="", usage=usage, num_turns=1)
+        spending.ended(ended, None)
+    finally:
+        budget.account = account
+    assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
+    assert journal.session_cost == 0.0 and "" not in costs
