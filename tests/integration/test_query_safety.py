@@ -253,6 +253,14 @@ async def test_loading_past_its_time_or_waiting_past_a_turn_says_so(
 ) -> None:
     monkeypatch.setattr(query, "LOAD_SECONDS", -1.0)
     assert "took too long" in await ask(harness, table(10), "SELECT 1")
+    loads = query.DuckDB.load
+
+    def whole(self: Any, db: Any, texts: Any, own: str, *, until: Any = None) -> None:
+        loads(self, db, texts, own)  # a load that does not look at its time: done, but late
+
+    monkeypatch.setattr(query.DuckDB, "load", whole)
+    assert "took too long" in await ask(harness, table(10), "SELECT 1")  # said all the same
+    monkeypatch.setattr(query.DuckDB, "load", loads)
     monkeypatch.setattr(query, "WAIT_SECONDS", 0.01)
     held = [query._RUNNING.acquire() for _ in range(query.CONCURRENT)]
     try:
