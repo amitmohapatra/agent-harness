@@ -287,12 +287,14 @@ def kept() -> bool:
 class Conversations:
     """What each conversation's turns left for its later turns, kept in this process
     (``Agent.results``) — as a framework's own thread keeps it (Deep Agents' files in its
-    state, a checkpointer's messages): the large results they saved, and, where nothing else
-    keeps the conversation (memory off), each turn's transcript — its question, tool calls,
-    their results and its answer (``conversation.earlier``). The least recently used
-    conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another worker, or
-    after a restart, finds none: a path read then says so (``query.GONE``), and its history is
-    each turn's question and answer from the run store."""
+    state, a checkpointer's messages): the large results they saved, the graph state its last
+    turn ended with where the graph's thread is its run (``adapters.langgraph.CARRIED``), and,
+    where nothing else keeps the conversation (memory off), each turn's transcript — its
+    question, tool calls, their results and its answer (``conversation.earlier``). The least
+    recently used conversation is forgotten past :data:`KEPT_CHARS` in all. A turn on another
+    worker, or after a restart, finds none: a path read then says so (``query.GONE``), its
+    history is each turn's question and answer from the run store, and its graph starts with
+    the state the file store keeps of its last turn (``pipeline``: kept there too)."""
 
     def __init__(self, most: int = KEPT_CHARS) -> None:
         self.most = most
@@ -309,6 +311,22 @@ class Conversations:
         """The transcripts of ``conversation``'s earlier turns kept here, by run."""
         found = self._found(conversation)
         return found.turns if found is not None else {}
+
+    def state(self, conversation: str) -> dict[str, Any]:
+        """The graph state ``conversation``'s last turn ended with, by channel."""
+        found = self._found(conversation)
+        return found.state if found is not None else {}
+
+    def left(self, conversation: str, state: Mapping[str, Any]) -> None:
+        """The graph state a turn of ``conversation`` ended with (``state``, by channel), kept
+        for its next turn over what is kept (:func:`merged`): a turn that ended while this
+        one waited for an approval, or still worked, loses nothing of its own."""
+        kept = self._kept.setdefault(conversation, _Kept())
+        self._kept.move_to_end(conversation)
+        state = merged(kept.state, state)
+        self.chars += _held(state) - _held(kept.state)
+        kept.state = state
+        self._bounded()
 
     def add(self, conversation: str, texts: Mapping[str, str], tools: Mapping[str, str]) -> None:
         """A turn's saved results (``texts``) and their tools, kept for ``conversation``."""
@@ -341,19 +359,39 @@ class Conversations:
         while self.chars > self.most:
             _, gone = self._kept.popitem(last=False)
             self.chars -= sum(map(len, gone.texts.values())) + sum(map(_size, gone.turns.values()))
+            self.chars -= _held(gone.state)
 
 
 @dataclass
 class _Kept:
-    """One conversation's: its saved results, their tools, its turns' transcripts by run."""
+    """One conversation's: its saved results, their tools, its turns' transcripts by run, the
+    graph state its last turn ended with."""
 
     texts: dict[str, str] = field(default_factory=dict)
     tools: dict[str, str] = field(default_factory=dict)
     turns: dict[str, list[Said]] = field(default_factory=dict)
+    state: dict[str, Any] = field(default_factory=dict)
 
 
 def _size(transcript: Iterable[Said]) -> int:
     return sum(len(s.content) for s in transcript)
+
+
+def _held(state: Mapping[str, Any]) -> int:
+    """The characters a kept graph state counts for (none kept: none)."""
+    return len(repr(state)) if state else 0
+
+
+def merged(kept: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
+    """``kept`` with ``state`` over it, channel by channel: a channel both hold as a mapping
+    (Deep Agents' tasks, by their ids) keeps the entries of both, ``state``'s where both have
+    one; any other is ``state``'s."""
+    out = {**kept, **state}
+    for name, value in state.items():
+        before = kept.get(name)
+        if isinstance(before, Mapping) and isinstance(value, Mapping):
+            out[name] = {**before, **value}
+    return out
 
 
 def read(args: dict[str, Any], *, text: str | None = None) -> str:

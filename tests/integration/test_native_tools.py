@@ -423,6 +423,28 @@ def test_a_graphs_tools_are_read_to_a_depth_and_past_an_empty_cell() -> None:
     assert subagent_graphs(task) == []
 
 
+@pytest.mark.timeout(20)
+async def test_a_deep_agent_whose_sub_agent_runs_the_graphs_that_hold_it_is_wrapped(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A sub-agent that forks its parent's conversation (Deep Agents' ``mode="fork"``) has the
+    ``task`` tool too, over the graphs it is one of: reading a Deep Agent's sub-agents' graphs
+    ends all the same — each graph's file tools declared once — and the agent's tool set names
+    each tool once."""
+    from deepagents import create_deep_agent
+    from deepagents.backends import FilesystemBackend
+
+    fork = SubAgent(name="fork", description="Goes on from here.", mode="fork")  # pyright: ignore[reportCallIssue]
+    graph = create_deep_agent(
+        model=ScriptedChatModel(turns=[]),
+        subagents=[fork],
+        backend=FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True),
+    )
+    agent = harness.wrap(graph, id="deep-fork")
+    names = [spec.name for spec in await agent.adapter.native(graph)]
+    assert len(names) == len(set(names)) and {"task", "write_file"} <= set(names)
+
+
 async def test_an_mcp_servers_error_and_a_rejected_call_reach_the_model_as_errors(
     harness: Harness,
 ) -> None:

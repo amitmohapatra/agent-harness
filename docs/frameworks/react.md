@@ -100,7 +100,8 @@ The names are Deep Agents' where both have one. In four tiers:
   `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`,
   `permissions`, `response_format`) or a `CompiledSubAgent` `{"name", "description",
   "runnable"}` (another `ReAct` among them) — and wrapped agents (`h.wrap(...)`) and `a2a(url)`,
-  each a tool of its own.
+  each a tool of its own. Deep Agents' `AsyncSubAgent` (`graph_id`, `url`) runs a task on a
+  server of yours instead ([a task in the background](#a-task-in-the-background)).
 * `skills`, `memory_files`, `permissions` — Deep Agents' skill sources, its `memory`
   (`AGENTS.md`-style files loaded into the instructions; named so it is not taken for the memory
   service) and its file permission rules, as they are; skills and memory files are read through
@@ -500,6 +501,66 @@ lead = ReAct(
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+### A task in the background
+
+Deep Agents' async sub-agent runs a task on a server of yours while the chat goes on. Declare it
+as Deep Agents does, an `AsyncSubAgent` dict with a `graph_id`:
+
+```python
+optimizer = {
+    "name": "optimizer",
+    "description": "Runs the slow optimization, in the background.",
+    "graph_id": "optimizer",
+    "url": "https://agents.example",  # and "headers": {...} for its authentication
+}
+agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="chat")
+```
+
+* **What you host** — an Agent Protocol server (a LangGraph server) at `url` that serves the
+  graph `graph_id`: Deep Agents' tools create a thread and a run there, read them and cancel
+  the run. Give the `url`: without one Deep Agents looks for a LangGraph server in its own
+  process, which a harness process is not, and the task cannot start. The spec reaches Deep
+  Agents as you wrote it; the server is sent the task's text and your `headers`, nothing of
+  the run's user or thread.
+* **In the chat** — the model starts a task with `start_async_task` and the turn ends at once
+  with the task's id; the next messages are answered while it runs. Nothing is pushed when it
+  ends: the result is fetched when the model checks (`check_async_task`, `list_async_tasks`)
+  in a later turn, and `update_async_task` and `cancel_async_task` reach it by its id.
+* **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
+  Deep Agents' own tools, announced on the stream and not asked about. To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Across turns** — Deep Agents keeps its list of tasks in the graph's state, and a `ReAct`
+  graph's state is its run's, so the harness carries that list from a conversation's turn to
+  its next one: per user, thread and agent, a cancelled turn's too, and that of a turn that
+  waits for an approval (the task it started is listed meanwhile, and still is when the turn
+  is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
+  running while another ends) each keep the tasks they started. A graph with a checkpointer
+  of its own (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the
+  list in its thread instead, and it lasts as that checkpointer does.
+* **Across servers and restarts** — the list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`, [configuration.md](../configuration.md)), where the
+  next turn reads it wherever it runs: after a restart, and on another server when the
+  servers share that store (a bucket, or a folder they all mount). Unset, the store is a
+  folder on the server's own disk: it survives a restart there, another server does not see
+  it, and a container loses it with its filesystem. What is kept is Deep Agents' record of
+  each task (its ids, the sub-agent's name, a status, three times), at most 256 KiB for a
+  conversation, in a folder that is none of the user's files. A store that cannot be read or
+  written is said in the log, and the list stays in the process as before.
+* **Earlier results** — with memory on, a later turn's history holds the earlier calls and
+  their results. A start's, an update's and a cancel's are left as they were said (the record
+  of what was done: nothing advises starting again); a status and the list are values that
+  change, and an earlier one is marked out of date.
+* **Your own graph** — the same holds for a graph you build with `middleware()` and no
+  checkpointer: `create_deep_agent(..., subagents=[optimizer], middleware=middleware())`, or
+  LangChain's `create_agent` with `middleware=[*middleware(), AsyncSubAgentMiddleware(...)]`
+  (Deep Agents' `deepagents.middleware.async_subagents`). A graph with neither `middleware()`
+  nor a checkpointer keeps no state between turns; its list is carried too, read from the
+  state each turn ends with — so a turn cancelled or failed after a start leaves that task
+  out of the list (with `middleware()` each step is kept, and it is in).
+* **What still does not hold** — nothing tells the chat when a task ends; cancelling a turn
+  does not cancel its task (the next turn can); and when two overlapping turns both change
+  the same task, the record of the turn that ends last is the one kept.
 
 ## Where sandbox, skills and hooks go
 

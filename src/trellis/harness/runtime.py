@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Hashable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -200,10 +200,14 @@ class Runtime:
     #: the model's latest reply was cut at its output limit (its ``max_tokens``) before it gave
     #: an answer — what a run that ends with no answer says it ended for (``pipeline``)
     cut_off: bool = False
-    #: the latest harness tool call (its key) and how many times in a row it was made
+    #: the latest harness tool call (its key), how many times in a row it was made
     #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
-    #: not run again)
-    repeating: tuple[str, int] = ("", 0)
+    #: not run again) and the decision that made it last (:attr:`deciding`)
+    repeating: tuple[str, int, Hashable | None] = ("", 0, None)
+    #: set by an adapter whose framework says which decision a call comes from, the same for
+    #: each execution its framework makes of that decision (a LangGraph task, run again by its
+    #: ``RetryPolicy``): the call made again by the same decision is no repeat of it
+    deciding: Callable[[], Hashable | None] | None = None
     #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
     #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
@@ -235,6 +239,11 @@ class Runtime:
     #: the results the conversation's earlier turns saved in this process, by path
     #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
     earlier_results: dict[str, str] = field(default_factory=dict)
+    #: the graph state the run's conversation carries from turn to turn
+    #: (``adapters.langgraph.CARRIED``): what its last turn ended with (``Agent.results`` in
+    #: this process, the file store anywhere: ``pipeline``), then what the attempt's graph
+    #: holds of it (its latest checkpoint; with no checkpointer, the state its turn ended with)
+    carried: dict[str, Any] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,

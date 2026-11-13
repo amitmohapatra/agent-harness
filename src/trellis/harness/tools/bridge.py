@@ -297,7 +297,7 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    refused = _refused(runtime, tool, args, key)
+    refused = _refused(runtime, tool, args, key, call_id)
     if refused is not None:
         _events(runtime, ref, tool_call, refused)
         return refused
@@ -417,19 +417,27 @@ def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
     )
 
 
-def _repeated(runtime: Runtime, tool: Tool, key: str) -> ToolOutcome | None:
+def _repeated(runtime: Runtime, tool: Tool, key: str, call_id: str | None) -> ToolOutcome | None:
     """The call, refused when it is the same call (the same tool, the same arguments) the run
     made the :data:`MAX_REPEATS` - 1 calls before it: a model looping on one call is told to
     answer with what it has (:data:`STALLED`), whatever its framework — the harness's tools
     are where every adapter's calls meet, so a graph without the harness's middleware, a Deep
     Agent, OpenAI Agents and the Claude CLI are stopped as ``ReAct``'s ``StallGuard`` stops its
-    own loop (which acts before its step's calls reach here). Said once on the run's stream."""
-    last, times = runtime.repeating
-    times = times + 1 if key == last else 1
-    runtime.repeating = (key, times)
+    own loop (which acts before its step's calls reach here). Said once on the run's stream.
+
+    A repeat is a decision made again: the call made once more by the decision that made it
+    last — its framework running that decision again (``Runtime.deciding``: a LangGraph task
+    its ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id
+    in the same task) — is not counted."""
+    deciding = runtime.deciding() if runtime.deciding is not None else None
+    decision = None if deciding is None else (deciding, call_id)
+    last, times, made_by = runtime.repeating
+    again = key == last and decision is not None and decision == made_by
+    times = times if again else times + 1 if key == last else 1
+    runtime.repeating = (key, times, decision)
     if times < MAX_REPEATS:
         return None
-    if times == MAX_REPEATS:
+    if times == MAX_REPEATS and not again:
         said = f"stopped {tool.name}: the same call {times} times in a row (a stall)"
         log.warning("run %s %s", runtime.run_id, said)
         runtime.events.warning("stalled", said)
@@ -449,12 +457,14 @@ def stalled(runtime: Runtime) -> bool:
     return runtime.repeating[1] >= MAX_REPEATS
 
 
-def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any], key: str) -> ToolOutcome | None:
+def _refused(
+    runtime: Runtime, tool: Tool, args: dict[str, Any], key: str, call_id: str | None
+) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
     feature this run is without, or arguments that do not fit its schema (nothing runs,
     nothing is journaled: the model corrects them)."""
-    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key)
+    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, call_id)
     if over is not None:
         return over
     if tool.feature is not None and not runtime.uses(tool.feature):

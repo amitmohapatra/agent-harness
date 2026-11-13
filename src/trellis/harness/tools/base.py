@@ -279,6 +279,11 @@ def retries_of(spec: ToolSpec, *, reads: bool) -> int:
     return READ_RETRIES if reads or spec.idempotent else 0
 
 
+def failed_output(tool: str, exc: BaseException) -> str:
+    """What the model reads of a call of ``tool`` that raised ``exc``."""
+    return f"{tool} failed: {exc}"
+
+
 async def execute(
     tool: Tool,
     args: dict[str, Any],
@@ -312,7 +317,7 @@ async def execute(
             failed = ToolOutcome(
                 tool=tool.name,
                 status=ToolStatus.ERROR,
-                output=f"{tool.name} failed: {exc}",
+                output=failed_output(tool.name, exc),
                 error_class=type(exc).__name__,
                 attempts=attempts,
             )

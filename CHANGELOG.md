@@ -5,6 +5,98 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
+
+The LangGraph adapter was checked feature by feature against the installed libraries
+(LangGraph 1.2, LangChain 1.4's `create_agent` and its middleware, Deep Agents 0.7): each
+feature run through the harness with a scripted model, 76 tests in
+`tests/integration/test_langgraph_library.py`, `test_create_agent_library.py`,
+`test_deepagents_library.py`, `test_tool_updates.py` and `test_tool_errors_library.py`. Most
+worked as the library gives them. Five did not:
+
+- **A tool's error reaches the graph's own handling.** The harness records a failed call and
+  handed the graph a failed result in the error's place, so nothing of the graph's that acts
+  on a tool's error ever saw one: LangChain's `ToolRetryMiddleware` never tried again,
+  `ToolErrorMiddleware` never worded the error, the `except` of a `wrap_tool_call` wrapper
+  never ran. The call is recorded as before and the error is raised again as the tool raised
+  it. An error nothing handles is, as before, the failed call's result the model reads (the
+  run goes on). The tries a wrapper makes of one call are not counted as a model repeating a
+  call (the stall guard stopped the third).
+- **A tool's `Command` is the graph's again when its call is replayed.** A call answered
+  from the journal gave the graph the message the model had read and dropped the state
+  update the tool had returned with it: after a resume without a checkpointer, what a Deep
+  Agent's sub-agent had written was gone (`task` returns its files as a `Command`), and so
+  was any state a tool of the graph's own had set. The journal keeps what the tool returned
+  with the call's record.
+- **A list of `Command`s and messages returned by one tool is applied.** The harness gave the
+  graph one message in its place, and no update was made.
+- **A call that asks waits for the calls a `ToolNode` runs beside it.** The node stops at the
+  first call that raises and leaves the others running: a write beside a call waiting for an
+  approval ended after the run's pause was recorded, and the resumed run told the model its
+  effect was unknown ("interrupted by a crash").
+- **A Deep Agent with a `mode="fork"` sub-agent is wrapped.** `h.wrap` never returned: a fork
+  runs the graphs it is one of, and reading the sub-agents' file tools went round.
+
+Four more where the harness restricted what the library does:
+
+- **An error nothing of the graph handles fails the run**, as it fails the graph without the
+  harness (`ToolNode(handle_tool_errors=False)`, `create_agent`'s default,
+  `ToolRetryMiddleware(on_failure="error")`, a wrapper that raises it again): the run ends
+  `ERROR` with the tool's error, as any graph's error ends a run, and the call is recorded as
+  failed. It was turned into a failed result the model read. A graph with the harness's
+  middleware (`ReAct`, `middleware()`: `GovernTools`) keeps the harness's documented rule:
+  the model reads the failure and the run goes on.
+- **The graph's own text for a failed call is what the model reads**: a `ToolNode`'s
+  `handle_tool_errors` text reached the model as `"<tool> failed: <text>"`. The run's
+  `after_tool` hooks still have the last word.
+- **What a node writes to LangGraph's `custom` stream mode is on the run's events**:
+  `get_stream_writer()` (and a middleware's `runtime.stream_writer`) writes are `CUSTOM` events
+  named `custom`, the write in `value` (AG-UI's `CUSTOM` event), from `agent.stream` and
+  `agent.run` alike. `agent.run` reads the graph with `astream` (the `values` and `custom`
+  modes), as `ainvoke` does.
+- **A decision the graph makes again is not a model repeating itself**: the stall guard counts
+  the same call made again only when it comes from another decision — for LangGraph, another
+  task or another call id (`Runtime.deciding`). A node its `RetryPolicy` ran a third time had
+  its harness call refused as a stall.
+
+### Added: a background task of Deep Agents' async sub-agents, found again in later turns
+
+Deep Agents' async sub-agent (an `AsyncSubAgent` in `ReAct(subagents=)`, or its
+`AsyncSubAgentMiddleware` in a graph of your own) runs a task on a server of yours while the
+chat goes on. Deep Agents keeps its list of tasks in the graph's state, and a graph the
+harness runs on its run's thread starts each turn with a new state: the task started, and
+the next turn's `check_async_task` was refused its id.
+
+- **The list goes from a conversation's turn to its next one** (`adapters.langgraph.CARRIED`:
+  the one place that names the channel), per user, thread and agent, a cancelled turn's too —
+  for `ReAct`, for a graph built with `middleware()`, and for one with neither `middleware()`
+  nor a checkpointer, whose list is read from the state each turn ends with. A graph with a
+  checkpointer of its own keeps it in its thread, as before.
+- **Across servers and restarts.** The list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`), under `.carried/<tenant>/<user>/<conversation>/<agent>/`,
+  which no listing of a user's files shows: the next turn has it after a restart, and on
+  another server when the servers share the store (unset, it is a folder on the server's own
+  disk). Deep Agents' record of each task and nothing else, at most 256 KiB for a
+  conversation; a store that cannot be read or written is said in the log and the list stays
+  in the process. Nothing is added to a run's record, to agent-runs or to the memory service.
+- **Turns that overlap lose no task.** What a turn ends with is merged into what is kept,
+  task by task, instead of replacing it: a turn approved after the conversation's next turn
+  ended, or a worker's turn still running while another ends, each keep their tasks. A turn
+  that waits for an approval has its list kept as it pauses: the task it started is listed
+  by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
+- **The five task tools say what they do** where the harness says it of Deep Agents' own
+  tools: a status check and the list are reads; a start, an update and a cancel are writes,
+  announced and not asked about (the tool catalog still comes first). A write's result is
+  declared the record of what was done, not a value that changes: with memory on, an earlier
+  start in a later turn's history was marked "out of date: call start_async_task again",
+  which invited a second task; it is left as it was said, and a status check's is still
+  marked.
+
+Not in this release: nothing tells the chat when a task ends (the model checks in a later
+turn); cancelling a turn does not cancel its task; a graph with neither `middleware()` nor a
+checkpointer loses the task of a turn cancelled after its start. See
+[docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

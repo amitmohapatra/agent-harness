@@ -257,7 +257,7 @@ def test_the_answer_is_the_structured_response_or_the_last_ai_text() -> None:
     assert adapter.extract(None, GraphOutput(value=None)).answer is None
 
 
-async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
+async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -> None:
     class Graph:
         checkpointer = None
 
@@ -267,6 +267,7 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
             yield {"type": "custom", "data": "progress"}
             yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
 
+    written: list[tuple[str, dict[str, Any]]] = []
     runtime = SimpleNamespace(
         conversation="run_1",
         run_id="run_1",
@@ -275,11 +276,32 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
         attempt=1,
         pending=None,
         worker_id=None,
+        events=SimpleNamespace(custom=lambda name, **data: written.append((name, data))),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
     items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
     assert items[0] == "hel" and len(items) == 2
+    assert written == [("custom", {"value": "progress"})]
     assert items[1].value == GraphOutput(value={"messages": []}, interrupts=())
+
+
+async def test_a_call_comes_from_the_graph_task_it_is_made_in_and_none_outside_one() -> None:
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from trellis.harness.adapters.langgraph import _task
+
+    seen: list[str | None] = []
+
+    def node(state: MessagesState) -> dict[str, Any]:
+        seen.append(_task())
+        return {}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("node", node)
+    graph.add_edge(START, "node")
+    graph.add_edge("node", END)
+    await graph.compile().ainvoke({"messages": []})
+    assert _task() is None and len(seen) == 1 and isinstance(seen[0], str)
 
 
 def test_a_graph_without_tool_nodes_binds_no_tools() -> None:

@@ -36,7 +36,8 @@
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
-  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns)
+  but the state its conversation carries from turn to turn (:data:`CARRIED`).
   A graph built with ``middleware()`` and compiled without a checkpointer is run as a copy
   that has one (:func:`checkpointing`); one compiled with a checkpointer of its own keeps it,
   its checkpoints marked with the run (:data:`RUN_METADATA`), and the attempt after a crash
@@ -87,6 +88,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.events import STREAMED
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
@@ -114,6 +116,9 @@ RUN_METADATA: Final = "trellis_run_id"
 #: The ``configurable`` key under which LangGraph hands a task, by namespace, the checkpoint
 #: its step started from (``CONFIG_KEY_CHECKPOINT_MAP``; the root graph's under ``""``).
 CHECKPOINT_MAP: Final = "checkpoint_map"
+#: The ``configurable`` key under which LangGraph hands a task its id (``CONFIG_KEY_TASK_ID``):
+#: the same for each run of the task its ``RetryPolicy`` makes.
+TASK_ID: Final = "__pregel_task_id"
 #: The result a new turn gives a call its thread's last message holds with none: the run that
 #: made it was stopped (a newer message interrupted it, its time ran out) or left waiting for
 #: a person's approval, and a provider refuses a call with no result — the thread could not go
@@ -124,6 +129,13 @@ STOPPED_CALL: Final = (
 )
 #: The node of Deep Agents' ``PatchToolCallsMiddleware``: a graph that answers such calls itself.
 PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
+#: The graph state channels a conversation carries from one turn to the next where the graph
+#: has no thread of its own to hold them (:func:`carries`: its thread is its run, or it has
+#: none), as a thread of the graph's own would: Deep Agents' list of the background tasks its
+#: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against.
+#: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
+#: in the process and in the file store: ``pipeline``).
+CARRIED: Final = ("async_tasks",)
 
 
 class LangGraphAdapter:
@@ -194,16 +206,30 @@ class LangGraphAdapter:
         return input
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
+        from langgraph.types import GraphOutput
+
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        values: Any = None
+        interrupts: list[Any] = []
         try:
             given = await _continued(target, native_input, run)
-            return await self._graph(target, run.runtime).ainvoke(
+            # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the graph's
+            # nodes write to the stream is the run's (:func:`_written`)
+            async for part in self._graph(target, run.runtime).astream(
                 given,
                 self._config(target, run),
+                stream_mode=["values", "custom"],
                 version="v2",
                 **_run_arguments(run.runtime, target),
-            )
+            ):
+                if part["type"] == "custom":
+                    _written(run.runtime, part["data"])
+                else:
+                    values = part["data"]
+                    interrupts.extend(part["interrupts"])
+            _ended_with(target, run.runtime, values)
+            return GraphOutput(value=values, interrupts=tuple(interrupts))
         except BaseException as exc:
             error = exc
             raise
@@ -223,11 +249,13 @@ class LangGraphAdapter:
             async for part in self._graph(target, run.runtime).astream(
                 given,
                 self._config(target, run),
-                stream_mode=["messages", "values"],
+                stream_mode=["messages", "values", "custom"],
                 version="v2",
                 **_run_arguments(run.runtime, target),
             ):
-                if part["type"] == "messages":
+                if part["type"] == "custom":
+                    _written(run.runtime, part["data"])
+                elif part["type"] == "messages":
                     chunk = part["data"][0]
                     if (
                         isinstance(chunk, AIMessage)
@@ -235,7 +263,7 @@ class LangGraphAdapter:
                         and chunk.content
                     ):
                         yield chunk.content
-                elif part["type"] == "values":
+                else:  # "values"
                     values = part["data"]
                     interrupts = part["interrupts"] or interrupts
         except BaseException as exc:
@@ -243,6 +271,7 @@ class LangGraphAdapter:
             raise
         finally:
             await helpers.closed(error)
+        _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -366,6 +395,7 @@ class LangGraphAdapter:
         """The run's config: its framework options (less its run arguments) and the harness's
         thread id (theirs names none: ``check_options``)."""
         runtime = run.runtime
+        runtime.deciding = _task
         if _checkpointed(target):
             from langgraph.types import interrupt
 
@@ -379,6 +409,15 @@ class LangGraphAdapter:
         if _checkpointed(target) and not run_scoped(target):  # its checkpoints: the run's
             config["metadata"] = {**options.get("metadata", {}), RUN_METADATA: runtime.run_id}
         return config
+
+
+def _written(runtime: Runtime, value: Any) -> None:
+    """What a node of the graph wrote to LangGraph's ``custom`` stream mode
+    (``get_stream_writer()``, a middleware's ``runtime.stream_writer``): a ``CUSTOM`` event of
+    the run (:data:`~trellis.harness.events.STREAMED`), its ``value`` the write as JSON."""
+    from pydantic_core import to_jsonable_python
+
+    runtime.events.custom(STREAMED, value=to_jsonable_python(value, fallback=str))
 
 
 def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:
@@ -503,6 +542,23 @@ def run_scoped(target: Any) -> bool:
     return isinstance(target.checkpointer, RunCheckpointer)
 
 
+def carries(target: Any) -> bool:
+    """Whether a conversation carries state of ``target`` from turn to turn: a graph with one
+    of the channels :data:`CARRIED` names and no thread of its own that holds it — it
+    checkpoints into its run, or not at all."""
+    channels = getattr(target, "channels", None) or {}
+    own = _checkpointed(target) and not run_scoped(target)
+    return not own and any(name in channels for name in CARRIED)
+
+
+def _ended_with(target: Any, runtime: Any, values: Any) -> None:
+    """What the run's conversation carries to its next turn (:data:`CARRIED`), read from the
+    state a graph compiled without a checkpointer ended its turn with (``values``): it has
+    no checkpoint to read it from (``RunCheckpointer.put``)."""
+    if not _checkpointed(target) and isinstance(values, Mapping):
+        runtime.carried = {name: values[name] for name in CARRIED if name in values}
+
+
 def checkpointing(target: Any) -> Any:
     """``target`` as the harness runs it: a graph built with ``middleware()`` (it takes the
     run's tools per model call) and compiled without a checkpointer, as a copy checkpointing
@@ -528,16 +584,21 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     none of the run's starts from its input."""
     from langgraph.types import Command
 
-    if not _checkpointed(target):
-        return native_input
     runtime = run.runtime
+    # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
+    carried = getattr(runtime, "carried", None)
+    started = (
+        {**carried, **native_input} if carried and isinstance(native_input, dict) else native_input
+    )
+    if not _checkpointed(target):
+        return started
     replay = runtime.replay
     thread = thread_of(target, runtime)
     replay.where = _stepping(thread)
     resumed = isinstance(native_input, Command)
     if run_scoped(target):
         if not replay.journal.graph:
-            return native_input
+            return started
         replay.resumed = _latest(replay.journal.graph)
         return native_input if resumed else None
     state = await target.aget_state({"configurable": {"thread_id": thread}})
@@ -607,6 +668,19 @@ def _stepping(thread: str) -> Callable[[], str | None]:
         return step if isinstance(step, str) else None
 
     return where
+
+
+def _task() -> str | None:
+    """The LangGraph task a call is made in (its id, the same for each run of the task its
+    ``RetryPolicy`` makes; a tool node's call is one of its task's): the decision a harness
+    call comes from (``Runtime.deciding``); ``None`` outside a task of a graph."""
+    from langgraph.config import get_config
+
+    try:
+        task = (get_config().get("configurable") or {}).get(TASK_ID)
+    except RuntimeError:  # not inside a step of a graph
+        return None
+    return task if isinstance(task, str) else None
 
 
 def is_hitl(value: Any) -> bool:

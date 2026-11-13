@@ -68,7 +68,7 @@ from collections.abc import (
 )
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, Final, NotRequired, TypeGuard, cast, get_args
+from typing import Annotated, Any, Final, NoReturn, NotRequired, TypeGuard, cast, get_args
 
 from bifrost_sdk import RETRYABLE
 from langchain.agents.factory import _chain_async_model_call_handlers
@@ -110,6 +110,7 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.types import Command
@@ -129,7 +130,7 @@ from trellis.harness import (
     snapshots,
 )
 from trellis.harness.adapters.base import FIT_SHARE
-from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
+from trellis.harness.adapters.langgraph import CARRIED, CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.clients.memory import TOOL_SEARCH
@@ -137,7 +138,7 @@ from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
-from trellis.harness.journal import content_key
+from trellis.harness.journal import OUTCOME, content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
@@ -147,6 +148,8 @@ from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
+    FRESHNESS,
+    STATIC,
     UNDECLARED,
     SideEffects,
     Sourced,
@@ -155,6 +158,7 @@ from trellis.harness.tools.base import (
     citations,
     cut_short,
     data_of,
+    failed_output,
     max_age,
     not_run,
 )
@@ -249,6 +253,21 @@ FILES_CHANNEL: Final = "files"
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
+#: Deep Agents' tools for the background tasks of its async sub-agents
+#: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
+#: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
+ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
+    "start_async_task": "write",
+    "update_async_task": "write",
+    "cancel_async_task": "write",
+    "check_async_task": "read",
+    "list_async_tasks": "read",
+}
+#: What a write among them says of its result: the record of what was done (the task's id,
+#: that it was sent or stopped), no value that changes — an earlier one is never marked out of
+#: date with the advice to call the tool again, which would start a second task. A status and
+#: the list are values that change: live, as any tool's by default.
+ASYNC_TASK_DONE: Final[Mapping[str, Any]] = {FRESHNESS: STATIC}
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
 
@@ -274,16 +293,23 @@ def declare_files(graph: Any) -> None:
     :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
     ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
     is: those calls only change the state, which its checkpoint keeps. Deep Agents'
-    :data:`EXECUTE` is declared a write. Only the framework's own (:func:`framework_made`)."""
+    :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
+    (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
+    :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
+    own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
         subagent_graphs,
     )
 
-    pending = [graph]  # a sub-agent's graph is compiled before the graph running it: no cycle
+    pending = [graph]
+    seen: set[int] = set()  # a sub-agent that forks its parent's conversation runs its graphs too
     while pending:
         found = pending.pop()
+        if id(found) in seen:
+            continue
+        seen.add(id(found))
         outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
         for tool in bound_tools(found):
             name = getattr(tool, "name", None)
@@ -296,6 +322,10 @@ def declare_files(graph: Any) -> None:
                 tool.metadata = {**said, **outside_state(name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
+            elif name in ASYNC_TASKS and "side_effects" not in said:
+                done = ASYNC_TASKS[name] == "write" and not data_of(said, strict=False)
+                given = ASYNC_TASK_DONE if done else {}
+                tool.metadata = {**said, **given, "side_effects": ASYNC_TASKS[name]}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
@@ -320,6 +350,9 @@ class GovernTools(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
+        # the harness's rule for the call's error: nothing of the graph's handles it, the model
+        # reads it (:func:`govern_tool_nodes`)
+        _under_way().owned = True
         return await governed_call(request, handler)
 
 
@@ -375,10 +408,18 @@ async def governed_call(
     ``metadata["side_effects"]``, else its MCP-style annotations, else none: it asks), a
     person approves when it asks, and it is journaled (a resume does not run it again), timed,
     traced and recorded (``tools.bridge``). What the tool returned is returned as it is — a
-    ``Command`` (a Deep Agent's ``task`` updating the graph's state) included — and, replayed
-    from the journal, as the message the model read. The harness's tools, the graph's state
-    tools (:data:`STATE_TOOLS`, the framework's: :func:`framework_made`), a call already
-    governed and any call outside a run are let
+    ``Command`` (a Deep Agent's ``task`` updating the graph's state), or the list of them and
+    messages a tool may return, included — and, replayed from the journal, the same: the
+    message the model read, or the ``Command`` as the tool made it (:func:`_kept_update`), so
+    the state update of a call that ran before a pause is not lost with the step run again.
+    An error the tool raised is recorded as the call's failure and raised again as it was
+    (:func:`_failed`): the graph's own handling of it — LangChain's ``ToolRetryMiddleware`` and
+    ``ToolErrorMiddleware``, a wrapper of the builder's, the tool node's ``handle_tool_errors``
+    — sees what the library gives it, and the failed message the graph made of it (the tool
+    node's, a wrapper's) is the one the model reads, as the graph worded it, unless the run's
+    ``after_tool`` hooks changed what the call says.
+    The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
+    :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
     (:data:`OUTSIDE_STATE`) is governed. A call repeating an earlier one of its model step
     (the same tool, the same arguments) does not run — the harness's tools' included — and
@@ -401,7 +442,10 @@ async def governed_call(
     if converted.made(own) or call["name"] in runtime.toolbox:
         # the harness's own: its call goes through the bridge
         return _kept_own(runtime, request, await handler(request))
-    produced: list[ToolMessage | Command[Any]] = []
+    produced: list[Any] = []
+    raised: list[Exception] = []
+    #: the failed message the graph made of the tool's error, and what the call raised for it
+    reported: list[tuple[ToolMessage, ToolError]] = []
 
     async def run(args: dict[str, Any]) -> Any:
         token = _GOVERNING.set((call["name"], str(call["id"])))
@@ -410,21 +454,171 @@ async def governed_call(
         finally:
             _GOVERNING.reset(token)
         if isinstance(done, ToolMessage) and done.status == "error":
-            raise ToolError(text_of(done.content), source="tools")
+            failure = ToolError(text_of(done.content), source="tools")
+            reported[:] = [(done, failure)]
+            raise failure
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))
         return Sourced(text_of(_told(done)), cited) if cited else text_of(_told(done))
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
-        return await handler(request.override(tool_call={**call, "args": args}))
+        raised.clear()
+        reported.clear()
+        try:
+            return await handler(request.override(tool_call={**call, "args": args}))
+        except Exception as exc:
+            raised.append(exc)
+            raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
     made = Tool(spec, run, confined=framework_made(own))  # Deep Agents' files: its own
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
-    if produced and outcome.ok and isinstance(produced[-1], Command):
-        return produced[-1]  # the graph's state update, as the tool made it
-    return _message(outcome, request, kept=_paged(runtime, request))
+    update = await _update(runtime, call, outcome, produced)
+    if update is not None:
+        return update  # the graph's state update, as the tool made it
+    return _answered(runtime, request, outcome, reported, raised)
+
+
+def _answered(
+    runtime: Runtime,
+    request: ToolCallRequest,
+    outcome: ToolOutcome,
+    reported: Sequence[tuple[ToolMessage, ToolError]],
+    raised: Sequence[Exception],
+) -> ToolMessage:
+    """The message a governed call that gave the graph no update ends with: the failed message
+    the graph made of the tool's error (``reported``: the tool node's, a wrapper's), as the
+    graph worded it — unless the run's ``after_tool`` hooks changed what the call says — else
+    the harness's of the call's outcome; an error the tool raised (``raised``) is raised again
+    (:func:`_failed`)."""
+    if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
+        return reported[0][0]
+    message = _message(outcome, request, kept=_paged(runtime, request))
+    if raised and not outcome.ok:
+        _failed(raised[-1], message)
+    return message
+
+
+#: The journal's mark, in a call's record, of what a framework's own tool returned in a
+#: message's place (:func:`_kept_update`): a ``Command``, or a list of them and messages.
+UPDATE: Final = "trellis_update"
+#: LangGraph's own serializer, as its checkpointers keep a step's writes.
+_SERDE: Final = JsonPlusSerializer()
+
+
+async def _update(
+    runtime: Runtime, call: Mapping[str, Any], outcome: ToolOutcome, produced: Sequence[Any]
+) -> Any | None:
+    """What a governed call that ended well gives the graph in a message's place: what its
+    tool returned now (``produced``: its last try's result) when that is no message — kept for
+    a replay (:func:`_kept_update`) — or, the call replayed from the journal, what was kept of
+    it (:func:`_update_of`); ``None``: its message."""
+    if not outcome.ok:
+        return None
+    if produced and not isinstance(produced[-1], ToolMessage):
+        await _kept_update(runtime, call, outcome, produced[-1])
+        return produced[-1]
+    if outcome.cached and UPDATE in outcome.metadata:
+        return _update_of(outcome.metadata[UPDATE], str(call["id"]))
+    return None
+
+
+async def _kept_update(
+    runtime: Runtime, call: Mapping[str, Any], outcome: ToolOutcome, made: Any
+) -> None:
+    """What a framework's own tool returned in a message's place (``made``: a ``Command``
+    updating the graph's state, a list of them and messages), kept in the journal with the
+    record of its call (``Journal.calls``, the bridge's: the call as the model made it): a
+    later attempt that replays the call gives the graph the same update, where the bridge's
+    record alone gives the message the model read. Serialized as LangGraph serializes a step's
+    writes; an update that cannot be (a value its serializer does not take) is left out, said
+    in the log — the call's replay is then its message."""
+    recorded = runtime.replay.journal.calls.get(content_key("call", call["name"], call["args"]))
+    if not recorded or recorded[-1] != outcome.output:
+        return  # not journaled as this call's (the paused call made again in other words)
+    try:
+        kind, data = _SERDE.dumps_typed(made)
+    except Exception as exc:
+        log.warning(
+            "run %s: what %s returned in a message's place cannot be kept for a replay (%s: %s)",
+            runtime.run_id,
+            call["name"],
+            type(exc).__name__,
+            exc,
+        )
+        return
+    kept = [kind, base64.b64encode(data).decode(), str(call["id"])]
+    record = outcome.model_dump(mode="json", include={"status", "output"})
+    recorded[-1] = {OUTCOME: {**record, "metadata": {UPDATE: kept}}}
+    await runtime.progress(now=True)  # saved with the call it is the result of
+
+
+def _update_of(kept: Sequence[str], call_id: str) -> Any:
+    """What :func:`_kept_update` kept, for the call ``call_id`` now: the messages answering
+    the call it was made for answer this one (a model asked again gives its call another id)."""
+    kind, data, was = kept
+    made = _SERDE.loads_typed((kind, base64.b64decode(data)))
+
+    def answering(found: Any) -> None:
+        for message in found if isinstance(found, list) else ():
+            if isinstance(message, ToolMessage) and message.tool_call_id == was:
+                message.tool_call_id = call_id
+
+    for item in made if isinstance(made, list) else [made]:
+        answering([item])
+        update = getattr(item, "update", None)
+        answering(update.get("messages") if isinstance(update, dict) else update)
+    return made
+
+
+@dataclass(slots=True, eq=False)
+class _Calling:
+    """One call of a tool node, from its first wrapper to its tool: the latest governed try
+    of it that failed — the error its tool raised, and the message the model reads for it
+    where the harness's rule holds; whether the harness's middleware governs it (``owned``:
+    ``GovernTools``, which ``ReAct`` and ``middleware()`` have); whether it is ``waiting`` (it
+    paused, and waits for the node's other calls) or has ``ended``."""
+
+    failed: tuple[BaseException, ToolMessage] | None = None
+    owned: bool = False
+    waiting: bool = False
+    ended: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+#: The tool node's call under way (:func:`govern_tool_nodes`), where its tries meet.
+_CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
+#: The calls under way of each tool node's step, by the state object the node handed them.
+_BESIDE: Final[dict[int, set[_Calling]]] = {}
+
+
+async def _others_ended(calling: _Calling, beside: Collection[_Calling]) -> None:
+    """A tool node's call paused (it asks a person): it leaves the node once the node's other
+    calls under way have ended, or wait as it does. A ``ToolNode`` runs its step's calls
+    together and stops at the first that raises, leaving the others running behind the pause:
+    a write among them would end after the run's pause was recorded, and the resumed run,
+    finding it started and never ended, could only tell the model its effect is unknown.
+    LangGraph itself waits so for the other tasks of a step in which one interrupts."""
+    calling.waiting = True
+    for other in [c for c in beside if c is not calling and not c.waiting]:
+        await other.ended.wait()
+
+
+def _under_way() -> _Calling:
+    """The tool node's call under way — or, where a wrapper of the graph's ran the call
+    outside the node's context (a thread, a context of its own), one nothing else reads."""
+    return _CALLING.get() or _Calling()
+
+
+def _failed(error: Exception, message: ToolMessage) -> NoReturn:
+    """A governed call's tool raised ``error`` (recorded: the call failed): raised again as it
+    was, so what the graph does with a tool's error is the library's — a wrapper that retries,
+    rewords or answers in its place gets the error, the tool node's ``handle_tool_errors``
+    decides, as without the harness. An error nothing of the graph handles fails the graph, as
+    LangGraph has it — unless the harness's middleware governs the call: it ends as
+    ``message``, which the model reads (:func:`govern_tool_nodes`)."""
+    _under_way().failed = (error, message)
+    raise error
 
 
 def _message(outcome: ToolOutcome, request: ToolCallRequest, *, kept: bool = False) -> ToolMessage:
@@ -791,8 +985,11 @@ TASK_ARGUMENTS: Final = frozenset({"description", "subagent_type"})
 
 
 def _told(done: Any) -> Any:
-    """What a tool's result says to the model: a message's content, or a ``Command``'s last
-    message's (its state update's)."""
+    """What a tool's result says to the model: a message's content, a ``Command``'s last
+    message's (its state update's), or — a list of them — the last that says anything."""
+    if isinstance(done, list):
+        said = [told for told in map(_told, done) if told != ""]
+        return said[-1] if said else ""
     if isinstance(done, Command):
         update = done.update if isinstance(done.update, Mapping) else {}
         messages = update.get("messages") or []
@@ -808,7 +1005,14 @@ def govern_tool_nodes() -> None:
     readers among them where the graph was not built with them: ``ToolNode`` defers checking
     a call's tool to this execution so that a wrapper may answer a tool it lacks. Installed
     once per process, on the tool node's one execution of a call (after its own wrappers);
-    outside a harness run it changes nothing."""
+    outside a harness run it changes nothing.
+
+    The node's one call (before its wrappers) is installed on too: the error of a governed
+    call's tool that nothing of the graph handled — the node's own ``handle_tool_errors``, a
+    wrapper — fails the graph there as LangGraph has it, or, where the harness's middleware
+    governs the call (``GovernTools``: ``ReAct``, ``middleware()``), ends as the failed result
+    the model reads (:func:`_failed`); and a call that pauses (it asks a person) leaves the
+    node once the node's other calls have ended (:func:`_others_ended`)."""
     execute = ToolNode._execute_tool_async
     if getattr(execute, _INSTALLED, False):
         return
@@ -830,8 +1034,34 @@ def govern_tool_nodes() -> None:
 
         return await governed_call(request, handler)
 
+    run_one = ToolNode._arun_one
+
+    async def called(self: ToolNode, call: Any, input_type: Any, tool_runtime: Any) -> Any:
+        if current() is None:
+            return await run_one(self, call, input_type, tool_runtime)
+        calling = _Calling()
+        token = _CALLING.set(calling)
+        # the node's calls made at once (it gathers them) are handed the one state object
+        beside = _BESIDE.setdefault(id(tool_runtime.state), set())
+        beside.add(calling)
+        try:
+            return await run_one(self, call, input_type, tool_runtime)
+        except Exception as exc:
+            if is_pause_signal(exc):
+                await _others_ended(calling, beside)
+            if not calling.owned or calling.failed is None or calling.failed[0] is not exc:
+                raise
+            return calling.failed[1]
+        finally:
+            _CALLING.reset(token)
+            calling.ended.set()
+            beside.discard(calling)
+            if not beside:
+                _BESIDE.pop(id(tool_runtime.state), None)
+
     setattr(governed, _INSTALLED, True)
     ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
+    ToolNode._arun_one = called  # type: ignore[method-assign]
 
 
 #: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
@@ -2782,7 +3012,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     As the root graph's checkpoint moves past a step, the journal's records of that step's
     calls go (``Replay.passed``): the graph never makes them again, so a long run's journal is
     its latest checkpoint and the records of the step under way. A checkpoint that cannot be
-    read back fails the run (:class:`CheckpointUnreadable`)."""
+    read back fails the run (:class:`CheckpointUnreadable`). The thread ends with the run; what
+    its conversation carries to its next turn (``adapters.langgraph.CARRIED``) is read from
+    each checkpoint as it is kept (``Runtime.carried``)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -2884,6 +3116,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         runtime = current()
         if not ns and runtime is not None and runtime.run_id == thread_id:
             runtime.replay.passed(parent)  # the steps it follows are done: not made again
+            # what the run's conversation carries to its next turn, as the graph now holds it
+            values = checkpoint["channel_values"]
+            runtime.carried = {name: values[name] for name in CARRIED if name in values}
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(
