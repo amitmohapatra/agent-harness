@@ -46,6 +46,7 @@ from trellis.contracts import (
 )
 from trellis.harness import budget
 from trellis.harness.adapters.claude import (
+    AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
@@ -883,24 +884,45 @@ async def test_a_session_the_options_keep_themselves_is_served_live_too(
     assert two["pid"] == one["pid"] and open_sessions(agent) == 1
 
 
-async def test_at_its_turn_limit_a_conversations_turn_gets_its_last_answer_from_a_new_process(
+async def test_at_its_turn_limit_a_conversations_turn_gets_its_last_answer_from_its_session(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The one last answer at the turn limit is a query of other options (no tool, one
-    turn): it runs in a process of its own, the live session closed first — two processes do
-    not hold one session."""
-    script = [
-        {"builtin": "Read", "args": {"file_path": "a.txt"}},
-        {"builtin": "Read", "args": {"file_path": "b.txt"}},
-        {"text": "both read"},
-    ]
-    agent = harness.wrap(options(tmp_path, [script], max_turns=1), id="limited")
-    result = await agent.run("read both", user="u1", thread="t1")
-    assert result.status is RunStatus.SUCCESS and result.answer == "What I found before the limit."
+    """The one last answer at the turn limit is asked in the conversation's live session, as
+    its next turn — the session and the background work the turn started there go on (a
+    process of its own would be a second process on the session, and closing the live one
+    first would stop that work): told the limit is reached, its tool calls are refused, and
+    its answer is the run's."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    target = options(tmp_path, [[BACKGROUND, *reads, {"text": "never"}]], max_turns=3)
+    agent = harness.wrap(target, id="limited")
+    result = await agent.run("research, then read", user="u1", thread="t1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "What I found before the limit."
     one, two = served(tmp_path)
-    assert two["pid"] != one["pid"] and two["resume"] == one["session"]
-    await until(lambda: not alive(one["pid"]) and not alive(two["pid"]))
-    assert open_sessions(agent) == 0
+    assert two["pid"] == one["pid"] and alive(one["pid"])  # the live session's own process
+    child = await child_of(harness, result.run_id)
+    live = live_of(agent)
+    assert child.status is RunStatus.RUNNING, (child.status, child.error)
+    assert live is not None and not live.closed and list(live.working) == ["t1"]
+    assert open_sessions(agent) == 1
+
+
+async def test_a_tool_call_in_the_last_answer_at_the_turn_limit_is_refused(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The last answer's turn in a live session has the process's tools (a live process keeps
+    the ones it started with): a call the model makes in it anyway is refused, not run, and
+    the answer it gives then is the run's."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    target = options(tmp_path, [[*reads, {"text": "never"}]], max_turns=2)
+    target.env["FAKE_CLAUDE_AT_LIMIT_CALLS"] = json.dumps(
+        {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "x"}}
+    )
+    agent = harness.wrap(target, id="limited-calls")
+    result = await agent.run("read both", user="u1", thread="t1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert [c["tool"] for c in built_ins(tmp_path)] == ["Read", "Read"]  # the Write did not run
+    assert result.answer == AT_LIMIT
 
 
 async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_starts_another(

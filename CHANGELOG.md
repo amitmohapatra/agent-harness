@@ -31,6 +31,12 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   its tokens and model call (its result came after the attempt stopped reading), and what
   a cancelled turn spent was charged to the conversation's next turn: a left turn's result,
   which comes at once when it is interrupted, is its own run's now.
+- **The turn limit no longer ends a conversation's background work.** The one last answer
+  at `max_turns` ran in a process of its own and closed the conversation's live session
+  first, stopping the background subagent the same turn had started (its run `ERROR`). It
+  is the session's next turn now, told the limit is reached and its tool calls refused
+  (Claude Code's process answers the next prompt after its `error_max_turns` result, seen
+  driving the bundled CLI); a turn in a process of its own answers as before.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

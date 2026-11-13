@@ -105,7 +105,8 @@ SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir())
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
 #: How the harness begins the prompt that asks for one last answer at the turn limit
-#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
+#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool
+#: — unless ``FAKE_CLAUDE_AT_LIMIT_CALLS`` is a step it makes first (its answer: that call's result).
 LIMIT_PROMPT = "This turn has reached its limit"
 #: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
 #: without asking, and the turn's result carries what it was given (``structured_output``).
@@ -197,6 +198,8 @@ class Cli:
         self.in_turn = False
         #: how many of those steps subagents took: a result's usage is the main thread's own
         self.helped = 0
+        #: what the process exits with when its input ends: 1 once a turn ended at a limit
+        self.status = 0
         #: the structured answer the turn under way gave (:data:`STRUCTURED`)
         self.structured: dict[str, Any] | None = None
         #: the steps the session took before this process resumed it: a result's cost is
@@ -679,10 +682,7 @@ class Cli:
         state = json.loads(kept.read_text())
         done, turn = state["done"], state.get("turn", 0)
         if str(prompt).startswith(LIMIT_PROMPT):  # one last answer, no tool
-            said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
-            self.steps += 1
-            send(assistant(session, [{"type": "text", "text": said}]))
-            send(self.ended(session, last=said, turns=1))
+            self.at_limit(session, turn, context)
             return
         if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
             done, turn = 0, turn + 1  # the conversation's next turn, in the same session
@@ -699,6 +699,19 @@ class Cli:
             send(self.ended(session, "Request interrupted by user"))
         finally:
             self.in_turn = self.stopping = False
+
+    def at_limit(self, session: str, turn: int, context: str) -> None:
+        """The one last answer at the turn limit: ``FAKE_CLAUDE_AT_LIMIT``, no tool — or a
+        "model" that calls ``FAKE_CLAUDE_AT_LIMIT_CALLS`` all the same, then says what it
+        was told."""
+        called = os.environ.get("FAKE_CLAUDE_AT_LIMIT_CALLS")
+        if called:
+            self.played(session, [json.loads(called), {"text": "{last}"}], 0, turn, context)
+            return
+        said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
+        self.steps += 1
+        send(assistant(session, [{"type": "text", "text": said}]))
+        send(self.ended(session, last=said, turns=1))
 
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""
@@ -773,11 +786,10 @@ class Cli:
             ended = stopped(turns, self.steps, limit, cap)
             if ended is not None:  # what the real CLI ends with
                 send(self.ended(session, ended[0], subtype=ended[1]))
-                if ended[1] in (
-                    "error_max_turns",
-                    "error_max_budget_usd",
-                ):  # and exits 1, as it does
-                    sys.exit(1)
+                # and exits 1 once its input ends, as it does; a process kept for more turns
+                # (the SDK's client: its input stays open) goes on, its next prompt answered (the
+                # bundled CLI, driven against a scripted model)
+                self.status = 1
                 return
             self.steps += 1
             if "cut" in item:
@@ -1247,7 +1259,7 @@ def main() -> None:
             continue
         message = read(timeout=0.02 if cli.tasks else None)
         if message is None:
-            return
+            sys.exit(cli.status)
         if message is NOTHING:
             cli.triggers()
             continue

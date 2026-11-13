@@ -246,6 +246,11 @@ OWNED: Final[dict[str, str]] = {
 #: Why a conversation's live session is closed before a query that runs in a process of its
 #: own (two processes do not hold one session).
 OWN_PROCESS: Final = "this query runs in a process of its own"
+#: What a tool call in the one last answer at the turn limit is refused with, in a live
+#: session (whose process keeps the tools it started with).
+AT_LIMIT: Final = (
+    "No tool runs now: this turn has reached its limit. Answer with what you found so far."
+)
 #: What a resumed session is told: the run goes on, and the call it paused on is made again.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
@@ -594,17 +599,19 @@ class ClaudeAdapter:
         if written:
             target = dataclasses.replace(target, plugins=plugins)
         steps = Steps(runtime, self)
-        # a conversation's turn is served by its live session (``bridges.claude_live``); a run
-        # with no conversation of its own, a sub-agent's, the one last answer, and options
-        # whose parts are a process's alone (a plugin written for the run; an in-process MCP
-        # server of the team's, whose tools run in the context of the process's first turn;
-        # a budget of the options' own, which the CLI counts for a process)
-        # run in a process of their own, as ever
+        # a conversation's turn is served by its live session (``bridges.claude_live``) — its
+        # one last answer too, a turn of that session whose tool calls are refused (the live
+        # process and its background work go on); a run with no conversation of its own, a
+        # sub-agent's, and options whose parts are a process's alone (a plugin written for
+        # the run; an in-process MCP server of the team's, whose tools run in the context of
+        # the process's first turn; a budget of the options' own, which the CLI counts for a
+        # process) run in a process of their own, as ever
         key = runtime.conversation if _converses(runtime) else None
-        kept = key is not None and not last and not written and not _own_process(target)
+        kept = key is not None and not written and not _own_process(target)
         context = None if last else native_input.context
+        steps.last = last
         options = _options(target, context, run, session, steps, kept=kept)
-        if last:
+        if last and not kept:
             options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
@@ -617,7 +624,8 @@ class ClaudeAdapter:
         try:
             if kept:
                 assert key is not None
-                live = await self._live(key, options, run, session, spending, unsent=first)
+                unsent = first and not last  # the last answer's turn: asked already
+                live = await self._live(key, options, run, session, spending, unsent=unsent)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
                 _said(self.live, runtime)
@@ -1043,7 +1051,7 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime")
+    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "last", "runtime")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1055,6 +1063,8 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
+        #: the one last answer at the turn limit: its tool calls are refused (:data:`AT_LIMIT`)
+        self.last = False
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
@@ -1243,6 +1253,11 @@ def _governance(steps: Steps) -> Any:
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
+        if steps.last:  # the one last answer, in a live session that has its tools
+            return _decided("deny", AT_LIMIT)
+        return await decide(given, tool_use_id)
+
+    async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
         runtime = current()
         assert runtime is not None  # the CLI asks inside the run it works for
         await runtime.progress(now=True)
