@@ -51,6 +51,13 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   answered then. And a tool the process lists that the subagent's run was not offered (the
   hints narrow each run by its own task) failed in the relay ("not enough values to
   unpack"): the subagent is offered what the process lists, so it runs, in its run.
+- **A conversation's turn is never served by a stale process.** A worker that served a
+  turn kept its session (and its live process) for the conversation's next turn, even when
+  another worker had served a later turn meanwhile: that turn was then answered by a process
+  that never saw it. A kept session is dropped now when the run store has a turn of the
+  conversation started after the last one this process served (`pipeline._served_elsewhere`):
+  the stale process is ended and the turn runs as on a worker that kept none — a new session,
+  the conversation's turns given as context.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

@@ -926,6 +926,37 @@ async def test_a_tool_call_in_the_last_answer_at_the_turn_limit_is_refused(
     assert result.answer == AT_LIMIT
 
 
+async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_stale(
+    tmp_path: Path,
+) -> None:
+    """Worker 2 served turn 1 and keeps its process; worker 1 served turn 2 (worker 2's
+    process never saw it). Turn 3 on worker 2 is not answered by that stale process, which
+    holds the conversation as it was after turn 1: the process is ended and the turn runs as
+    any turn another worker served the last of — a new session, the conversation's turns
+    given as context (the run store's)."""
+    scripts = [[{"text": "turn {heard}"}]]
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = one.wrap(options(tmp_path, scripts), id="chat")
+        second = two.wrap(options(tmp_path, scripts), id="chat")
+        await second.run("the code is 4242", user="u1", thread="t1")
+        stale = live_of(second)
+        assert stale is not None
+        await first.run("the code is now 9999", user="u1", thread="t1")
+        third = await second.run("what is the code?", user="u1", thread="t1")
+        assert third.status is RunStatus.SUCCESS, third.error
+        held, _, fresh = served(tmp_path)
+        assert fresh["pid"] != held["pid"] and fresh["resume"] is None  # not the stale one
+        assert fresh["session"] != held["session"]
+        await until(lambda: not alive(held["pid"]))
+        assert stale.closed and live_of(second) is not stale
+        assert "the code is now 9999" in fresh["context"]  # turn 2, from the run store
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
 async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_starts_another(
     harness: Harness, tmp_path: Path
 ) -> None:

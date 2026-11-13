@@ -392,6 +392,9 @@ class Agent:
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
         self.sessions: LRU[str, tuple[str, dict[str, list[dict[str, Any]]]]] = LRU(SESSIONS_KEPT)
+        #: the latest turn of each conversation this process served: a session kept here is
+        #: stale once another worker started a later one (``pipeline._served_elsewhere``)
+        self.turned: LRU[str, str] = LRU(SESSIONS_KEPT)
         #: the large results each conversation's turns saved in this process (``tools.results``):
         #: its later turns read and query them where its history names them (``pipeline``)
         self.results = Conversations()
