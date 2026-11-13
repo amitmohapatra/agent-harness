@@ -110,10 +110,18 @@ async def test_the_identity_header_names_the_user_of_the_keys_tenant() -> None:
     await harness.aclose()
 
 
+def test_an_identity_header_of_4096_characters_is_read() -> None:
+    from trellis.harness.identity import trusted_user
+
+    raw = '{"user_id": "' + "u" * (4096 - len('{"user_id": ""}')) + '"}'
+    assert len(raw) == 4096
+    assert trusted_user(raw, "acme") == "u" * (4096 - 15)
+
+
 @pytest.mark.parametrize(
     ("raw", "reason"),
     [
-        ("x" * 5000, "too long"),
+        ("x" * 4097, "too long"),
         ("{not json", "not JSON"),
         ('["a list"]', "must be a JSON object"),
         ('{"tenant_id": "other", "user_id": "u"}', "tenant 'other' is not served here"),
