@@ -120,7 +120,9 @@ wrapped agent did not get what the SDK gives:
   goes on past it.
 - **One call, one question.** A tool that says nothing of what it does asked a person
   twice for one call: governance's question, then on the resume Claude Code's own. The
-  second is not asked.
+  second is not asked — whatever made governance ask (the tool's risk, a catalog rule, a
+  hook's `Ask`, a rule about the arguments a hook rewrote), the main agent's call or a
+  subagent's.
 - **Claude's own tools.** Its task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`:
   `TodoWrite`'s successors), `EnterPlanMode` and `StructuredOutput` (`output_format`) asked
   a person on every call — a structured answer paused its own run. They run, as `TodoWrite`
