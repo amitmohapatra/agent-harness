@@ -607,7 +607,8 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
     try:
         budget.account = lambda run, **kw: charged.append(kw)  # type: ignore[assignment]
         usage = {"input_tokens": 3, "output_tokens": 2}
-        spending.ended(SimpleNamespace(total_cost_usd=None, session_id="", usage=usage), None)
+        ended = SimpleNamespace(total_cost_usd=None, session_id="", usage=usage, num_turns=1)
+        spending.ended(ended, None)
     finally:
         budget.account = account
     assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]

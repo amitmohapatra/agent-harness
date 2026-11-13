@@ -302,8 +302,11 @@ turn the session runs by itself (a finished task's notification) is never a user
 * Not done: a background subagent's own subagents have no run of their own kept open; a
   child run's end is on the stream of the turn that started it only while that turn is still
   being answered (`helper_finished`), not delivered to an open chat after it (Claude's next
-  answer has it); after a server restart a background run stays `RUNNING` in the run store
-  with nothing behind it.
+  answer has it). A subagent's child run has the deadline of the run that started it, so
+  agent-runs ends one a killed server left `RUNNING` by then (and, with the service's
+  `RUNS__LIMITS__MAX_RUN_SECONDS`, once it has run that long); with neither it stays
+  `RUNNING` with nothing behind it: it is started, not claimed from the queue, so no lease
+  says it was abandoned.
 * A turn that is left — its run paused, or cancelled — is stopped with the SDK's `interrupt`
   only when nothing runs in the background: Claude Code's interrupt stops the background work
   too. With work under way the run ends at once and the CLI's turn at its next tool call
@@ -349,8 +352,10 @@ its folder, on its machine: such options keep their session there, not in the ru
   `get_server_info`) are not reachable: the harness holds a conversation's client and uses
   its `query`, `interrupt` and `stop_task`. Set the model and the permission mode on the
   options, or per run with `framework_options`.
-* A prompt that is a slash command runs as Claude Code runs it; one whose result has no text
-  (`/compact`) ends its run as one with no answer.
+* A prompt that is a slash command runs as Claude Code runs it. One the CLI answers itself,
+  with no reply of the model's in its turn (`/compact`), ends `SUCCESS` with an empty answer,
+  as a run of any framework in which no model replied does; a turn whose model did reply,
+  its last reply blank, ends `ERROR` (`NO_ANSWER`), as on every framework.
 * In a run with no conversation, what Claude says in the turn its session runs after a
   background task ended is on the stream and in the transcript, not the run's answer (its
   own turn's result is).

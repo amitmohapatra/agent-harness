@@ -38,6 +38,7 @@ def runtime(runs: LocalRuns, attempt: int = 1) -> Any:
         attempt=attempt,
         run_memory=None,
         pending=None,
+        deadline=None,
     )
 
 

@@ -4,8 +4,8 @@ sub-agents, an OpenAI agent called as a tool (``Agent.as_tool``), Claude's
 hooks (the spawning stays the framework's):
 
 * **lineage** — a run record of its own in the run store, its parent the run
-  (``parent_run_id``), its metadata naming it (:data:`HELPER`) and the run's agent group
-  (:data:`~trellis.harness.identity.AGENT_GROUP`): started when the framework
+  (``parent_run_id``), the run's deadline, its metadata naming it (:data:`HELPER`) and the
+  run's agent group (:data:`~trellis.harness.identity.AGENT_GROUP`): started when the framework
   starts it, ended with its answer or its error. Its id is derived from the run, the helper and
   its task (and how many times the attempt started that one), so the attempt after a pause or a
   crash finds the same record again and ends it;
@@ -175,6 +175,10 @@ class Helpers:
                 user_id=parent.user,
                 workspace_id=parent.identity.workspace,
                 input=task,
+                # the run's deadline is its helper's too, as a sub-agent's run inherits it:
+                # the run store ends one still unended then (a helper left RUNNING by a
+                # process that died, its work gone with it)
+                deadline=parent.deadline,
                 metadata={
                     HELPER: {"framework": self.framework, "kind": kind, "name": name},
                     AGENT_GROUP: parent.identity.own_group,

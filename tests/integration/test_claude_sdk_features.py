@@ -335,14 +335,14 @@ async def test_every_hook_event_of_the_teams_own_runs_inside_the_run(
 
 
 @pytest.mark.parametrize("path", PATHS)
-async def test_today_a_slash_command_that_says_nothing_ends_its_run_with_no_answer(
+async def test_a_slash_command_no_model_replied_in_is_a_turn_done_with_an_empty_answer(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:
-    """Today: a prompt that is one of Claude Code's slash commands runs as with the SDK
-    alone (``/compact``: the options' ``PreCompact`` hook is called, inside the run; no
-    prompt hook, so no memory context is added), but one that says nothing — ``/compact``'s
-    result has no text — is a run with no answer, which the harness ends as an error, as it
-    does any answerless run. What a user needs: a command that worked reads as done."""
+    """A prompt that is one of Claude Code's slash commands runs as with the SDK alone
+    (``/compact``: the options' ``PreCompact`` hook is called, inside the run; no prompt
+    hook). The CLI answers it itself — its result says ``success`` with no text, and no
+    reply of the model's is in its turn — so the run ends ``SUCCESS`` with an empty answer,
+    as a run of any framework in which no model replied does. The conversation goes on."""
     called: list[tuple[str, str | None]] = []
 
     async def own(given: Any, tool_use_id: str | None, context: Any) -> Any:
@@ -354,8 +354,23 @@ async def test_today_a_slash_command_that_says_nothing_ends_its_run_with_no_answ
     agent = harness.wrap(options(tmp_path, [{"text": "ok"}], hooks=hooks), id="compact")
     compacted = await agent.run("/compact", user="u1", thread=conversation(path))
     assert called == [("PreCompact", compacted.run_id)]
-    assert compacted.status is RunStatus.ERROR and compacted.error is not None
-    assert "no answer" in compacted.error.message
+    assert compacted.status is RunStatus.SUCCESS and compacted.answer == "", compacted.error
+    after = await agent.run("hello", user="u1", thread=conversation(path))
+    assert after.status is RunStatus.SUCCESS and after.answer == "ok"
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_turn_whose_model_replied_with_no_text_ends_saying_so(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """A turn the model did reply in, its last reply blank, is a run with no answer, as on
+    every framework: ``ERROR``, saying its reply had no text — never a silent success."""
+    from trellis.harness.budget import NO_ANSWER
+
+    agent = harness.wrap(options(tmp_path, [{"text": "  "}]), id="blank")
+    result = await agent.run("margin?", user="u1", thread=conversation(path))
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.code == NO_ANSWER and "had no text" in result.error.message
 
 
 @pytest.mark.parametrize("path", PATHS)

@@ -936,7 +936,18 @@ class Spending:
         self.journal.session_cost = self.billed
         if result.session_id:
             self.costs[result.session_id] = self.billed
-        _spent(self.runtime, self.options, result, self.helped.values(), cost=cost)
+        # a turn no reply of the model's is in — one the CLI answered itself, a slash
+        # command (``/compact``: ``num_turns`` 0) — is no model call: the run, its answer
+        # empty, is one no model replied in (``pipeline._unanswered``)
+        replied = bool(self.own or self.helped or result.num_turns)
+        _spent(
+            self.runtime,
+            self.options,
+            result,
+            self.helped.values(),
+            cost=cost,
+            calls=int(replied),
+        )
         self.own.clear()
         self.helped.clear()
 
@@ -953,8 +964,10 @@ def _spent(
     replies: Iterable[dict[str, Any]] = (),
     *,
     cost: float | None = None,
+    calls: int = 1,
 ) -> None:
-    """What a query spent, on the run's budget: its result's usage (the main agent's), the
+    """What a query spent, on the run's budget (``calls``: the model calls it counts as):
+    its result's usage (the main agent's), the
     usage of its subagents' ``replies`` since the result before, and ``cost`` (what the
     result's ``total_cost_usd`` — the subagents' included — is charged for). With no result
     (a query that paused or was stopped), the usage its ``replies`` carried, which the CLI
@@ -972,6 +985,7 @@ def _spent(
         output_tokens=total("output_tokens"),
         cached=cached,
         cost=cost,
+        **({} if calls == 1 else {"calls": calls}),
     )
 
 

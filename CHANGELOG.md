@@ -33,6 +33,13 @@ wrapped agent did not get what the SDK gives:
   `TodoWrite`'s successors), `EnterPlanMode` and `StructuredOutput` (`output_format`) asked
   a person on every call — a structured answer paused its own run. They run, as `TodoWrite`
   does.
+- **Slash commands.** A turn the CLI answered itself (`/compact`: no reply of the model's
+  in it) ended `ERROR` as a run with no answer; it ends `SUCCESS` with an empty answer, as
+  any framework's run no model replied in. A blank reply of the model's still ends
+  `ERROR` (`NO_ANSWER`).
+- **Deadlines.** A native helper's child run (a Claude, Deep Agents or OpenAI Agents
+  subagent) is recorded with the deadline of the run that started it, as a sub-agent's run
+  is: agent-runs ends one a killed server left `RUNNING` by then.
 - **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
   takes it with `--resume` only to fork), and options with `continue_conversation` failed at
   once (the SDK asked the journal's store for the latest session): both work.

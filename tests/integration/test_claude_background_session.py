@@ -600,14 +600,38 @@ async def test_today_what_claude_says_once_a_querys_background_task_ended_is_not
     assert events[-1].data["result"] == "started it"
 
 
+async def test_a_background_subagents_run_has_its_turns_deadline_for_the_run_store_to_end_it(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A subagent's child run is recorded with the deadline of the run that started it, as
+    a sub-agent's run is: agent-runs ends a run that is not done by its deadline, running or
+    not (its ticker's ``time_out_past_deadline``), so a background run a killed server left
+    ``RUNNING`` is ended there, saying why, by then."""
+    from datetime import UTC, datetime, timedelta
+
+    by = datetime.now(UTC) + timedelta(hours=2)
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="due")
+    first = await agent.run("research the market", user="u1", thread="t1", deadline=by)
+    child = await child_of(harness, first.run_id)
+    assert child.status is RunStatus.RUNNING and child.deadline == by
+
+
 async def test_today_a_background_subagents_run_a_restart_left_open_stays_running(
     tmp_path: Path,
 ) -> None:
     """Today: a server that stops without closing its harness (it was killed) leaves a
     background subagent's child run ``RUNNING`` in the run store, its process and its task
-    gone. Nothing ends it afterwards: the conversation's next turn, on a new server, runs in
-    a new process and says nothing of it. What a user needs: a run nothing works on is ended
-    saying so (it needs to know who held it: a lease, as a queued run has)."""
+    gone. With a deadline, agent-runs ends it then (above), and with the service's own
+    limit (``RUNS__LIMITS__MAX_RUN_SECONDS``) once it has run that long; with neither,
+    nothing ends it: agent-runs ends a run whose worker stopped only for a run a worker
+    claimed from the queue (``requeue_lapsed``: a lease), and a child run is started, not
+    claimed; its time limit can be set only as it starts, before Claude Code says the
+    subagent works in the background, and a foreground subagent's run, ``RUNNING`` while
+    the run that started it waits for a person, must not be timed out by it; and the
+    conversation's next turn may be served by another server while the one that holds the
+    session still runs, so it cannot end the run either. What a user needs: a run nothing
+    works on is ended saying so — the run store would need to know who holds it."""
     from trellis.contracts import RunStart
     from trellis.harness.runs import LocalRuns
 
