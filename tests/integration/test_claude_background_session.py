@@ -571,7 +571,8 @@ async def test_a_cancelled_live_turn_is_charged_its_own_spending_and_the_next_tu
     agent = harness.wrap(target, id="cancelled")
     await agent.run("one", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("two", user="u1", thread="t1"))
-    await until(lambda: len(built_ins(tmp_path)) == 2)  # its two reads ran: it stalls now
+    await until(lambda: len(built_ins(tmp_path)) == 2)  # its two reads ran
+    await asyncio.sleep(0.5)  # and its third step began: it stalls now
     await agent.cancel(turn_running(agent))
     cancelled = await slow
     assert cancelled.status is RunStatus.CANCELLED
@@ -581,7 +582,7 @@ async def test_a_cancelled_live_turn_is_charged_its_own_spending_and_the_next_tu
     assert three["pid"] == two["pid"]  # the same live process served it
     charged = {run_id: sum(c or 0.0 for r, c in costs if r == run_id) for run_id, _ in costs}
     assert charged[third.run_id] == pytest.approx(0.5), costs  # its one step
-    assert charged[cancelled.run_id] == pytest.approx(1.5), costs  # its steps until it stopped
+    assert charged[cancelled.run_id] == pytest.approx(1.5), costs  # its three steps
 
 
 # --------------------------------------------------------------------------- no live session
@@ -1547,6 +1548,50 @@ async def test_a_turn_resumed_after_its_own_pause_leaves_its_background_run_open
     assert (await when(harness, child.run_id, RunStatus.SUCCESS)).output == (
         "the market is growing"
     )
+
+
+async def test_a_turn_resumed_on_another_worker_leaves_the_first_its_background_subagent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn that started a background subagent (kept going by worker 1's live session)
+    paused, and is resumed on worker 2, which shares the run store: the turn's own work goes
+    on there, in a process of its own that forks the session (``fork_session``) — never a
+    second process on the session worker 1's still holds — and the subagent stays with worker
+    1, its run open: worker 2 does not end it as one the earlier attempt left open, whatever
+    its own process knows (the run's journal says it was handed on)."""
+    from trellis.harness.bridges import helpers
+
+    refunds.clear()
+    script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    target = options(tmp_path, [script])
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = arm(one.wrap(target, id="bg"), [refund])
+        second = arm(two.wrap(target, id="bg"), [refund])
+        paused = await first.run("research, then refund o9", user="u1", thread="t1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        live = live_of(first)
+        assert live is not None and list(live.working) == ["t1"]  # at work on worker 1
+        # worker 2 is another process: nothing worker 1 keeps in memory is known there
+        monkeypatch.setattr(helpers, "_DETACHED", set(), raising=False)
+        done = await second.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+        assert refunds == ["o9"]
+        held, resumed = served(tmp_path)
+        assert resumed["pid"] != held["pid"] and alive(held["pid"])
+        assert (
+            resumed["started_resuming"] == held["session"] and "--fork-session" in resumed["argv"]
+        )
+        assert resumed["session"] != held["session"]  # a fork: worker 1's session is its own
+        assert list(live.working) == ["t1"] and not live.closed  # still at work on worker 1
+        child = await child_of(one, paused.run_id)
+        assert child.status is RunStatus.RUNNING, (child.status, child.error)
+        (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+        assert (await when(one, child.run_id, RunStatus.SUCCESS)).output == "the market is growing"
+    finally:
+        await one.aclose()
+        await two.aclose()
 
 
 async def test_the_main_agents_own_call_with_no_turn_is_still_refused(

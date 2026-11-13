@@ -75,7 +75,6 @@ from trellis.contracts import Interrupt, InterruptResolution, RunStatus
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges import helpers
 from trellis.harness.bridges.claude import JournalSessions, ours
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
@@ -851,7 +850,6 @@ class LiveSession:
         (an interrupt would stop every task of the session), and what it asks until it ends
         is refused."""
         self.sessions.attended.pop(found.run_id, None)
-        helpers.released(found.run_id)
         if found.ended is not None:
             self.background.pop(found.task_id, None)
         elif not self.closed:

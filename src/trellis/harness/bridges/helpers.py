@@ -108,16 +108,6 @@ class Helper:
     ended: tuple[bool, str] | None = None
 
 
-#: The runs of the helpers handed on past their attempt (:meth:`Helpers.detached`), until
-#: whoever keeps each going ends it (:func:`released`).
-_DETACHED: set[str] = set()
-
-
-def released(run_id: str) -> None:
-    """The detached helper's run ``run_id`` was ended by whoever kept it going."""
-    _DETACHED.discard(run_id)
-
-
 #: The helper whose work is running in this task (:meth:`Helpers.working`).
 _INSIDE: ContextVar[Helper | None] = ContextVar("trellis_helper", default=None)
 
@@ -250,12 +240,13 @@ class Helpers:
         """The open helper ``key`` handed on to whoever keeps it going past this attempt (a
         Claude subagent that works in the background of its conversation's session:
         ``bridges.claude_live``), which ends its run: it is no longer this attempt's to end
-        (:meth:`end`, :meth:`closed`), nor a later attempt's to end as left open, until it is
-        :func:`released`. ``None``: no such helper is open."""
+        (:meth:`end`, :meth:`closed`), nor a later attempt's to end as left open, on any
+        worker (the run's journal says so: ``Journal.handed_on``). ``None``: no such helper
+        is open."""
         helper = self._open.pop(key, None)
         if helper is not None:
             self._detached[key] = helper
-            _DETACHED.add(helper.run_id)
+            self.runtime.replay.journal.handed_on.append(helper.run_id)
         return helper
 
     def named(self, name: str) -> Helper | None:
@@ -384,13 +375,19 @@ class Helpers:
             await self._left_open()
 
     async def _left_open(self) -> None:
+        """The helpers an earlier attempt left open that this one did not take up again,
+        ended — not one handed on past the attempt that started it (:meth:`detached`, in the
+        run's journal): its keeper ends it, from another worker's process too; a keeper that
+        stopped leaves it to the run store (its deadline; a store that holds such runs for
+        their keeper ends one whose hold lapsed)."""
         parent, runs = self.runtime, self.runtime.agent.harness.runs
+        handed_on = set(parent.replay.journal.handed_on)
         left = [
             child.run_id
             async for child in runs.iterate(
                 parent_run_id=parent.run_id, status=RunStatus.RUNNING, tenant=parent.tenant
             )
-            if child.run_id not in _DETACHED  # kept going past the attempt that started it
+            if child.run_id not in handed_on
         ]
         for run_id in left:
             record = await runs.get(run_id, tenant=parent.tenant)

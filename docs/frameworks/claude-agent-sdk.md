@@ -323,6 +323,11 @@ turn the session runs by itself (a finished task's notification) is never a user
   too. With work under way the run ends at once and the CLI's turn at its next tool call
   (refused with the hook's `continue: false`, which leaves the work). The next message waits
   for that turn's result, 30 seconds at most; past that the process is replaced.
+* A turn that started a background subagent, paused, and is resumed on another worker goes
+  on there in a process of its own that forks the session (`fork_session`): the first
+  worker's process still holds the session, and the subagent works on in it, its run open —
+  the second worker does not end it as one the earlier attempt left open (the run's journal
+  says it was handed on).
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 per agent. It closes

@@ -37,6 +37,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   is the session's next turn now, told the limit is reached and its tool calls refused
   (Claude Code's process answers the next prompt after its `error_max_turns` result, seen
   driving the bundled CLI); a turn in a process of its own answers as before.
+- **A resume on another worker leaves a background subagent at work.** A turn that started
+  a background subagent (kept going by worker 1's live session) and paused was resumed on
+  worker 2, which ended the subagent's run `ERROR` ("not taken up again") while it was still
+  at work, and started a second CLI process resuming the session worker 1's still held. What
+  was handed on is in the run's journal now (`Journal.handed_on`, replacing a set in one
+  process's memory): no later attempt ends it on any worker, and a session another worker's
+  live session holds is forked (`fork_session`) — the turn goes on on worker 2, the subagent
+  on worker 1.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 

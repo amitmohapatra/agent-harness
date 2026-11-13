@@ -261,6 +261,11 @@ class Journal(BaseModel):
     started: dict[str, int] = Field(default_factory=dict)
     #: the journals of the sub-agents' runs working inside the run's tool calls now, by run id
     children: dict[str, Journal] = Field(default_factory=dict)
+    #: the runs of the helpers handed on past the attempt that started them (a Claude subagent
+    #: its conversation's live session keeps at work in the background:
+    #: ``bridges.helpers.Helpers.detached``): whoever keeps each going ends it, never a later
+    #: attempt — on any worker
+    handed_on: list[str] = Field(default_factory=list)
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None

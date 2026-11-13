@@ -607,10 +607,14 @@ class ClaudeAdapter:
         # the process's first turn; a budget of the options' own, which the CLI counts for a
         # process) run in a process of their own, as ever
         key = runtime.conversation if _converses(runtime) else None
-        kept = key is not None and not written and not _own_process(target)
+        # a session another worker's live session still holds (a background subagent of the
+        # run at work there) is forked: the turn goes on here, in a process of its own
+        held = session is not None and await self._held_elsewhere(runtime)
+        kept = key is not None and not written and not _own_process(target) and not held
         context = None if last else native_input.context
         steps.last = last
         options = _options(target, context, run, session, steps, kept=kept)
+        options = dataclasses.replace(options, fork_session=options.fork_session or held)
         if last and not kept:
             options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
@@ -618,7 +622,7 @@ class ClaudeAdapter:
         first = last or session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
-        spending = Spending(runtime, options, self.costs, session)
+        spending = Spending(runtime, options, self.costs, None if held else session)
         live: LiveSession | None = None
         turn = _turn(run, options)
         try:
@@ -651,6 +655,23 @@ class ClaudeAdapter:
             runtime.model_ended(STEP)
             skills.removed(written)
             await spending.closed(live, turn)
+
+    async def _held_elsewhere(self, runtime: Runtime) -> bool:
+        """Whether the run's session is held by another process's live session: a background
+        subagent's run it handed on there (``Journal.handed_on``) is not one this process
+        keeps, and has not ended (its keeper ends it; a keeper that stopped leaves it to the
+        run store — its deadline, and a run store that ends a run whose holder stopped
+        heartbeating ends it then: the seam where that hold is read). Two processes do not
+        hold one session: a query that resumes it forks it (``fork_session``), and the
+        subagent works on in the session it has."""
+        runs = runtime.agent.harness.runs
+        for run_id in runtime.replay.journal.handed_on:
+            if run_id in self.live.attended:
+                continue
+            record = await runs.get(run_id, tenant=runtime.tenant)
+            if record is not None and not record.status.final:
+                return True
+        return False
 
     async def _live(
         self,
