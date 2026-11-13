@@ -574,6 +574,68 @@ async def test_a_background_subagent_of_a_run_with_no_conversation_that_did_not_
     assert (ended["run_id"], ended["status"]) == (child.run_id, "error")
 
 
+async def test_today_what_claude_says_once_a_querys_background_task_ended_is_not_its_answer(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Today: a run with no conversation is held until its background subagent's task ended
+    and the session ran its turn for it (the SDK's ``query`` goes on that long). What Claude
+    says in that turn — usually what the subagent found — is on the run's text stream, and
+    the run's answer is still its own turn's result, said before the task ended. What a user
+    needs: the answer of a run that waited for the task to hold what came of it."""
+    scripts = [[BACKGROUND, {"text": "started it"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="alone")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("research the market", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    await launched(agent, seen)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await running
+    await following
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert said == ["started it", "Noted: the market is growing"]
+    assert events[-1].data["result"] == "started it"
+
+
+async def test_today_a_background_subagents_run_a_restart_left_open_stays_running(
+    tmp_path: Path,
+) -> None:
+    """Today: a server that stops without closing its harness (it was killed) leaves a
+    background subagent's child run ``RUNNING`` in the run store, its process and its task
+    gone. Nothing ends it afterwards: the conversation's next turn, on a new server, runs in
+    a new process and says nothing of it. What a user needs: a run nothing works on is ended
+    saying so (it needs to know who held it: a lease, as a queued run has)."""
+    from trellis.contracts import RunStart
+    from trellis.harness.runs import LocalRuns
+
+    store = LocalRuns()
+    async with Harness(config=Settings(), runs=store) as before:
+        first = await before.wrap(options(tmp_path, [[{"text": "ok"}]]), id="chat").run(
+            "research the market", user="u1", thread="t1"
+        )
+    # what the killed server left of the subagent turn 1 started in the background
+    left = RunStart(
+        run_id="run_left_open",
+        tenant_id="default",
+        agent_id="chat",
+        parent_run_id=first.run_id,
+        thread_id="run_left_open",
+        user_id="u1",
+        input="research the market",
+        metadata={HELPER: {"framework": "claude_agent_sdk", "kind": "subagent", "name": "r"}},
+    )
+    await store.start(left)
+    async with Harness(config=Settings(), runs=store) as after:
+        agent = after.wrap(options(tmp_path, [[{"text": "back"}]]), id="chat")
+        events = [e async for e in agent.stream("and now?", user="u1", thread="t1")]
+        assert events[-1].data["result"] == "back" and warned(events) == []
+        child = await child_of(after, first.run_id)
+    assert child.status is RunStatus.RUNNING
+
+
 async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_process(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
