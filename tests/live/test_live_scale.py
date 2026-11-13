@@ -43,9 +43,12 @@ async def test_a_workers_run_is_streamed_by_another_replica_from_agent_runs() ->
         assert isinstance(worker_side.runs, RunsClient)
         working = arm(worker_side.wrap(billing, id=agent_id), [charge])
         reading = arm(reader_side.wrap(billing, id=agent_id), [charge])  # another replica
-        handle = await working.start("o-1", user="live-user", thread=f"chat-{agent_id}", priority=7)
+        thread = f"chat-{agent_id}"
+        handle = await working.start("o-1", user="live-user", thread=thread, priority=7)
         record = await handle.status()
-        assert (record.priority, record.concurrency_key) == (7, f"thread:chat-{agent_id}")
+        # one run of the user's conversation at a time: keyed by the conversation's own key
+        conversation = await worker_side.conversation(user="live-user", thread=thread)
+        assert (record.priority, record.concurrency_key) == (7, f"thread:{conversation}")
         worker = worker_side.worker([working], concurrency=1)
         assert await worker.run_once()
         paused = await handle.result(wait=30)

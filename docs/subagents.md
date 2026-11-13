@@ -174,7 +174,10 @@ tool (`Agent.as_tool`) and Claude's `agents=` subagents are child runs too
 they are given (the context, then `## Your task`), their tool calls governed as the run's and
 recorded under their own run (Claude's built-ins and its MCP servers' tools by the subagent the
 CLI names; the harness's own tools that a Claude subagent calls are recorded under the run),
-their turns and their outcome in memory, their tokens on the run's budget.
+their turns and their outcome in memory, their tokens on the run's budget. A call of theirs
+that asks pauses the run, and the approval's `payload["native_helper"]` names the helper
+(`run_id`, `name`): the person's decision is fed back on the helper's run, where the call was
+recorded, so the memory service counts it.
 
 ## On failure
 

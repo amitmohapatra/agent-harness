@@ -10,7 +10,9 @@
 * :func:`with_governance` makes ``governance`` the harness's for every tenant (a catalog in process,
   instead of the memory service's);
 * :func:`declaring` gives a harness a catalog that says what tools nobody could declare in code
-  do (an OpenAI Agents ``FunctionTool``): without it each of their calls asks a person.
+  do (an OpenAI Agents ``FunctionTool``): without it each of their calls asks a person;
+* :func:`writes_unasked_here` is the ``writes_unasked`` fixture in a process a test starts (a
+  worker): the fixture names it to its subprocesses (:data:`WRITES_UNASKED`).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from trellis import Harness
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.features import features
-from trellis.harness.governance import Governance
+from trellis.harness.governance import Governance, decision
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.tools.sources import as_source
@@ -79,3 +81,15 @@ async def native_tools(
     if "schedules" not in off:
         tools.extend(schedule_tools())
     return convert(FORMATS[framework], tools)  # type: ignore[arg-type]
+
+
+#: The variable the ``writes_unasked`` fixture sets, so a process the test starts (a worker
+#: serving its agents) runs a ``write`` announced, unasked, as the test's own process does.
+WRITES_UNASKED: Final = "TRELLIS_TEST_WRITES_UNASKED"
+
+
+def writes_unasked_here(environ: Any) -> None:
+    """In a process a test started: a ``write`` runs announced, unasked, when the test that
+    started it has the ``writes_unasked`` fixture (``environ`` names it: :data:`WRITES_UNASKED`)."""
+    if environ.get(WRITES_UNASKED):
+        decision.ACTIONS["write"] = decision.Action.ANNOUNCE

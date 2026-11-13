@@ -54,7 +54,9 @@ from trellis.harness.history import Said, Speaker, recorded
 from trellis.harness.identity import AGENT_GROUP
 
 if TYPE_CHECKING:
+    from trellis.contracts import Interrupt
     from trellis.harness.clients.memory import RunMemory
+    from trellis.harness.identity import Identity
     from trellis.harness.runtime import Runtime
 
 log = logging.getLogger("trellis.harness")
@@ -125,6 +127,36 @@ def inside(runtime: Runtime) -> Helper | None:
     does is recorded under its run (a nested run's code is its own run's, not the helper's)."""
     helper = _INSIDE.get()
     return helper if helper is not None and helper.parent_run_id == runtime.run_id else None
+
+
+def helper_identity(parent: Identity, run_id: str) -> Identity:
+    """The scope of the helper whose run is ``run_id``, in the run ``parent``: a sub-agent's —
+    its own run and conversation, its parent the run, its group the run's tree."""
+    return parent.model_copy(
+        update={
+            "run_id": run_id,
+            "thread": run_id,
+            "parent_run": parent.run_id,
+            "group": parent.own_group,
+        }
+    )
+
+
+def asked_inside(interrupt: Interrupt) -> str | None:
+    """The run of the helper whose call ``interrupt`` asks about (its payload names it,
+    :func:`named`), if a helper's call is what it asks about."""
+    named = (interrupt.payload or {}).get(HELPER)
+    return str(named["run_id"]) if isinstance(named, dict) and named.get("run_id") else None
+
+
+def named(runtime: Runtime) -> dict[str, Any] | None:
+    """What an approval asked while a helper of ``runtime``'s run works carries in its
+    payload: the helper (``{HELPER: {"run_id", "name"}}``) — the run its call is recorded
+    under, which the person's decision is feedback on (:func:`asked_inside`)."""
+    helper = inside(runtime)
+    if helper is None:
+        return None
+    return {HELPER: {"run_id": helper.run_id, "name": helper.name}}
 
 
 class Helpers:
@@ -383,15 +415,7 @@ class Helpers:
         memory = parent.agent.harness.memory
         if memory is None or parent.run_memory is None:
             return None
-        identity = parent.identity.model_copy(
-            update={
-                "run_id": run_id,
-                "thread": run_id,
-                "parent_run": parent.run_id,
-                "group": parent.identity.own_group,
-            }
-        )
-        return memory.bind(identity)
+        return memory.bind(helper_identity(parent.identity, run_id))
 
     async def _pushed(self, helper: Helper, task: str) -> str | None:
         """The memory context for the helper's task, in its scope, as the run's is pushed (the

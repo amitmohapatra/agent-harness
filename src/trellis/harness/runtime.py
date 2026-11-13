@@ -708,12 +708,16 @@ class Runtime:
         (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
         (else anyone's, the approval control). ``choices``: what the person picks from
         (``governance.decision.choices``), offered as the interrupt's options and said after
-        the question, for plain chat."""
+        the question, for plain chat. A call a helper the framework spawned makes names the
+        helper in the payload (``bridges.helpers.named``)."""
+        from trellis.harness.bridges.helpers import named  # noqa: PLC0415 - a cycle
         from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
 
         said = SAID.get(tuple(choices))
         return await self.interrupt(
             content_key("approve", call.tool, call.args),
+            # a helper's call: the payload names the helper, whose run recorded it
+            payload=named(self),
             reason=InterruptReason.APPROVAL,
             question=decision.question if said is None else f"{decision.question} {said}",
             ui="approve",

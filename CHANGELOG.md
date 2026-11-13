@@ -228,6 +228,28 @@ Then, closing what was left:
 - **A `session_input_callback`** that put the earlier turns after the new input got the memory
   context marked into an earlier question: it goes into this run's.
 
+### Fixed: a paused attempt's last words no longer stand for the run's answer in memory
+
+A graph that paused with its own `interrupt()` after the model wrote a draft sent the draft
+under the run's answer id (`conversation.answer_id`). The memory service keeps the first
+message of an id it has seen, so the answer the resumed attempt gave was dropped and the
+draft stood for it in the thread; the draft itself was stored a second time, named by the
+resumed attempt's place. A paused attempt now names its last message by what it said
+(`conversation.said_id`: who said what, and which time), like every other message that names
+nothing else, so a message said again on a later attempt keeps its id and is stored once,
+and the answer takes the answer id.
+
+### Fixed: a person's approval of a helper's call counts in the memory service
+
+A call a helper the framework spawned makes (a Deep Agents `task` sub-agent, ReAct's
+helpers, an OpenAI agent called as a tool, a Claude subagent) is recorded under the helper's
+run, but the decision on it was sent as feedback on the paused run, and the memory service
+counts an approval only where the call it approves was recorded: those approvals reached
+neither the tool's statistics nor its learned approval rule. The approval's interrupt now
+names the helper in its payload (`{"native_helper": {"run_id", "name"}}`, beside a
+sub-agent's), and the resume sends the decision on the helper's run
+(`Feedback.agent_run_id`, the run the feedback is about).
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

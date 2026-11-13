@@ -38,6 +38,7 @@ from trellis.harness.conversation import (
     question_id,
     rendered,
     result_id,
+    said_id,
 )
 from trellis.harness.history import Called, Said, Speaker, recorded, said_of
 from trellis.harness.identity import conversation_key
@@ -676,10 +677,19 @@ def test_ids_are_the_conversations_and_survive_a_cleared_result() -> None:
         question_id("conv_a", "run_1"),
         message_id("conv_a", "call:c1"),
         result_id("conv_a", "c1"),
-        message_id("conv_a", "run_1:2:3"),
+        said_id("conv_a", "run_1", said[3], 0),
         "msg_given",
         answer_id("conv_a", "run_1"),
     ]
+    # what the run said on the way is named by what it said, not by the attempt: a resumed
+    # attempt that says it again names it the same, and another time it is said is another
+    later = SimpleNamespace(conversation="conv_a", run_id="run_1", attempt=3)
+    again = identified([*said[:4], said[3], *said[4:]], later)  # type: ignore[arg-type]
+    assert again[3].id == ids[3] and again[4].id == said_id("conv_a", "run_1", said[3], 1)
+    assert len({s.id for s in again}) == len(again)
+    # a paused attempt has not answered: its last words are not the run's answer
+    paused = identified(said, runtime, answered=False)  # type: ignore[arg-type]
+    assert paused[-1].id == said_id("conv_a", "run_1", said[-1], 0) != ids[-1]
     cleared = [*said[:2], Said(Speaker.TOOL, "[cleared]", tool_call_id="c1"), *said[3:]]
     assert [s.id for s in identified(cleared, runtime)] == ids  # type: ignore[arg-type]
     other = SimpleNamespace(conversation="conv_b", run_id="run_1", attempt=2)

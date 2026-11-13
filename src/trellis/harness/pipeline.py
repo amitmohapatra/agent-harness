@@ -1133,7 +1133,10 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
         for s in runtime.steers
         if question_id(runtime.conversation, s.run_id) not in reported
     ]
-    return _with_facts(identified([*asked, *steered, *said], runtime), runtime, status)
+    messages = identified(
+        [*asked, *steered, *said], runtime, answered=status is not RunStatus.PAUSED
+    )
+    return _with_facts(messages, runtime, status)
 
 
 #: What a person's decision on a tool call is, in the run record's words.

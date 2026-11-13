@@ -830,7 +830,9 @@ class Agent:
     ) -> tuple[Journal, RunRecord]:
         """The paused run answered in the run store, with the journal its next attempt reads;
         a decision about a tool call becomes feedback (a sub-agent's question is fed back
-        where it was asked: on the sub-agent's run)."""
+        where it was asked: on the sub-agent's run; a decision on a call a helper the
+        framework spawned made, on the helper's run, which recorded the call: the memory
+        service counts an approval only where the call it approves was recorded)."""
         runs = self.harness.runs
         assert record.awaiting is not None
         identity = Identity.of(record)
@@ -839,6 +841,11 @@ class Agent:
             if asked_by(record.awaiting) is not None
             else resolution.to_feedback(record.awaiting, identity.context())
         )
+        helper_run = helpers.asked_inside(record.awaiting)
+        if feedback is not None and helper_run is not None:
+            # the run the decision is about (``Feedback.agent_run_id``): the helper's
+            feedback = feedback.model_copy(update={"agent_run_id": helper_run})
+            identity = helpers.helper_identity(identity, helper_run)
         # read before the resume: a journal that cannot be read leaves the run waiting
         journal = await Journal.read(record.checkpoint, runs.artifacts, tenant=record.tenant_id)
         # The run store first: a decision is feedback only once it took effect. A resume
