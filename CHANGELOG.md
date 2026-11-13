@@ -144,6 +144,18 @@ flag, the system prompt and thinking forms, structured output, partial messages,
 options and the SDK's errors. What stays as it is:
 [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
 
+### Fixed: a run's open children end with it when it runs out of time or is cancelled
+
+A run that ended `TIMEOUT` left a helper a framework had spawned in the foreground (a Claude
+subagent, a Deep Agents `task`, an OpenAI agent tool) `RUNNING` for ever, and a sub-agent's
+child run working inside one of its calls ended `CANCELLED`, as if its caller had gone away;
+a run its worker was asked to stop, or whose caller went away, left its helpers `RUNNING` too.
+Where the pipeline ends the run out of time or cancelled, its children still open end as it
+did (`pipeline._children_ended`): `TIMEOUT` with the run's error, or `CANCELLED` with its
+reason, and their children with them. A sub-agent's run its parent's clock cut off leaves its
+ending to its parent. A Claude subagent working in the background of its session, handed on
+past the turn that started it, is not ended with that turn (`helpers.kept`).
+
 ### Fixed: the runs a killed server was executing are ended, not left `RUNNING`
 
 A run the harness executes in its own process — a turn of `run`/`stream`/`serve_chat`, a

@@ -122,6 +122,12 @@ def released(run_id: str) -> None:
     _DETACHED.discard(run_id)
 
 
+def kept(run_id: str) -> bool:
+    """Whether ``run_id`` is a helper's run handed on past its attempt (:meth:`Helpers.detached`):
+    whoever keeps it going ends it, not the end of the run that started it."""
+    return run_id in _DETACHED
+
+
 #: The helper whose work is running in this task (:meth:`Helpers.working`).
 _INSIDE: ContextVar[Helper | None] = ContextVar("trellis_helper", default=None)
 

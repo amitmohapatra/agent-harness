@@ -13,7 +13,9 @@ worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``
 is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
 agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the time it already
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
-``CANCELLED`` with the reason.
+``CANCELLED`` with the reason. Either way the children it still has open — a sub-agent's run
+inside one of its calls, a helper a framework spawned in the foreground — end with it, as it
+ended (:func:`_children_ended`).
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.adapters.langgraph import FOREIGN, HITL, carries, holds, is_hitl
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.bridges import helpers
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
@@ -613,7 +616,11 @@ async def _cancelled(
     stalled = STALLED in exc.args and runtime.stalled is not None
     stopped = not stalled and _out_of_time(job, exc)
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
-        settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
+        # a sub-agent's run its parent's clock cut off ends with its parent, as it ends
+        # (``_children_ended``): out of time
+        settles = (job is None and not _parent_out_of_time(runtime)) or (
+            job is not None and job.cancel_requested and RELEASED not in exc.args
+        )
         identity, events = runtime.identity, runtime.events
         ended = settles and await _settle_cancelled(
             agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
@@ -622,6 +629,39 @@ async def _cancelled(
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
+
+
+def _parent_out_of_time(runtime: Runtime) -> bool:
+    """Whether the run whose call this one works in (a sub-agent's parent) is past its time:
+    its clock is what cut this attempt off."""
+    parent = runtime.parent
+    return parent is not None and parent.ends_at is not None and time.monotonic() >= parent.ends_at
+
+
+async def _children_ended(
+    agent: Agent,
+    run_id: str,
+    tenant: str,
+    status: RunStatus,
+    *,
+    error: AgentError | None = None,
+    reason: str | None = None,
+) -> None:
+    """The run ended out of time (``TIMEOUT``, its ``error``) or cancelled (``CANCELLED``, its
+    ``reason``) with children still open — a sub-agent's run its call was working on, a helper
+    a framework spawned in the foreground — that nothing else will end: each ends as the run
+    did, and so do theirs. A helper handed on past its attempt (a Claude subagent working in
+    the background of its session: ``helpers.kept``) is its keeper's to end, and goes on."""
+    runs = agent.harness.runs
+    async for child in runs.iterate(parent_run_id=run_id, status=RunStatus.RUNNING, tenant=tenant):
+        if helpers.kept(child.run_id):
+            continue
+        with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
+            if status is RunStatus.TIMEOUT:
+                await runs.finish(child.run_id, status, error=error, tenant=tenant)
+            else:
+                await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
 
 
 def _stalled(runtime: Runtime) -> Exception | None:
@@ -714,6 +754,9 @@ async def _concluded(
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
         await agent.hooks.failed("run", TimeoutError(timed_out.message))
         result = await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
+        await _children_ended(
+            agent, runtime.run_id, runtime.tenant, RunStatus.TIMEOUT, error=timed_out
+        )
     elif error is not None:
         failure = AgentError.of(error, source=agent.adapter.name)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
@@ -1281,6 +1324,10 @@ async def _settle_cancelled(
         said["reason"] = reason
     ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
+    if ended:
+        await _children_ended(
+            agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, reason=reason
+        )
     return ended
 
 
