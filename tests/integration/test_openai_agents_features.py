@@ -924,7 +924,7 @@ async def test_a_question_asked_inside_a_tool_counts_its_call_once(harness: Harn
         return str(await runtime.ask(f"Ship {order}?", options=["yes", "no"]))
 
     # the run is run again from its input: its model makes the call again
-    model = ScriptedModel([("confirm", {"order": "o1"})] * 2 + ["confirmed"])
+    model = ScriptedModel([("confirm", {"order": "o1"}), ("confirm", {"order": "o1"}), "confirmed"])
     agent = declaring(harness, confirm="read").wrap(
         Agent(name="desk", model=model, tools=[confirm]), id="asked-once"
     )
@@ -1054,6 +1054,33 @@ async def test_the_runs_session_settings_and_callback_shape_what_memorys_thread_
         await agent.run(question, user="u", thread="t2")
     earlier = [(i["role"], i["content"]) for i in model.inputs[-1][:-1]]
     assert earlier == [("assistant", "one"), ("assistant", "two")]
+
+
+@pytest.mark.parametrize("order", ["history_after", "history_before"])
+async def test_the_memory_context_is_marked_in_the_question_wherever_the_callback_puts_it(
+    memory_harness: Harness, memory_service: FakeMemoryService, order: str
+) -> None:
+    """``session_input_callback`` may put the earlier turns after the new input: the memory
+    context is still marked off in this run's question, never in an earlier turn's, and the
+    earlier turns reach the model as they were said."""
+
+    def callback(history: list[Any], new: list[Any]) -> list[Any]:
+        return [*new, *history] if order == "history_after" else [*history, *new]
+
+    model = ScriptedModel(["one", "two", "three"])
+    agent = memory_harness.wrap(
+        Agent(name="desk", model=model),
+        id=f"marked-{order}",
+        framework_options={"run_config": RunConfig(session_input_callback=callback)},
+    )
+    for question in ("q1", "q2", "q3"):
+        await agent.run(question, user="u", thread=f"t-{order}")
+    users = [i for i in model.inputs[-1] if isinstance(i, dict) and i.get("role") == "user"]
+    marked = [i for i in users if isinstance(i["content"], list)]
+    assert len(marked) == 1 and marked[0]["content"][-1]["text"] == "q3"
+    assert memory_service.context_text in marked[0]["content"][0]["text"]
+    assert sorted(i["content"] for i in users if isinstance(i["content"], str)) == ["q1", "q2"]
+    assert not any(i.get("role") == "system" for i in model.inputs[-1] if isinstance(i, dict))
 
 
 # --------------------------------------------------------------------------- the SDK's own tools

@@ -583,3 +583,26 @@ def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> N
     assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
     assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
     assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
+
+
+def test_the_question_is_the_last_user_message_the_harness_put_after_the_context() -> None:
+    """``_question``: what this run asked, from the input the harness made, the input a run
+    resumed from its input runs again, or a resumed run's saved state; ``None`` when there is
+    none to read."""
+    from trellis.harness.adapters.openai_agents import _Again, _Continue, _question
+
+    made = [
+        {"role": "user", "content": "earlier"},
+        {"role": "system", "content": "ctx"},
+        {"role": "user", "content": "first part"},
+        {"role": "assistant", "content": "said"},
+        {"role": "user", "content": "the question"},
+    ]
+    assert _question(made, "ctx") == "the question"
+    assert _question(_Again(made, told="again"), "ctx") == "the question"
+    state = {"original_input": made}
+    assert _question(_Continue(state, "call_1", approve=True), "ctx") == "the question"
+    assert _question(_Continue({}, "call_1", approve=True), "ctx") is None
+    assert _question("a question as text", "ctx") is None
+    assert _question([{"role": "system", "content": "ctx"}], "ctx") is None
+    assert _question([{"role": "user", "content": "q"}], None) == "q"  # no context: from the top

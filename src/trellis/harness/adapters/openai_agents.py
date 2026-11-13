@@ -764,7 +764,8 @@ def _options(runtime: Runtime, target: Any, native_input: Any) -> dict[str, Any]
     if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
     told = _told_unknown_tools(options)
-    asked = _dated(runtime, _asked_with(runtime, told))
+    question = _question(native_input, runtime.pushed_context)
+    asked = _dated(runtime, _asked_with(runtime, told, question))
     again = native_input.told if isinstance(native_input, _Again) else None
     return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked, again)))
 
@@ -843,13 +844,39 @@ def _filtered(options: dict[str, Any], change: Callable[[Any], Any]) -> dict[str
     return {**options, "run_config": dataclasses.replace(config, call_model_input_filter=changed)}
 
 
-def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
+def _question(native_input: Any, context: str | None) -> Any:
+    """What this run asked — the content of the last user message of the input the harness
+    made (``prepare_input``: after the memory context's system message), as a resumed run's
+    saved state holds it too — or ``None`` when it cannot be read."""
+    if isinstance(native_input, _Again):
+        native_input = native_input.input
+    elif isinstance(native_input, _Continue):
+        native_input = native_input.state.get("original_input")
+    if not isinstance(native_input, list):
+        return None
+    items = [i for i in native_input if isinstance(i, dict)]
+    start = next(
+        (
+            n
+            for n, i in enumerate(items)
+            if i.get("role") == "system" and i.get("content") == context
+        ),
+        0,
+    )
+    asked = [i for i in items[start:] if i.get("role") == "user"]
+    return asked[-1].get("content") if asked else None
+
+
+def _asked_with(runtime: Runtime, options: dict[str, Any], question: Any = None) -> dict[str, Any]:
     """The options with the pushed memory context sent as the first part of the user's turn,
     marked off (``history.ASKED_WITH``), as ``ReAct``'s and ``create_agent``'s
     (``middleware.with_question``), and not as a system message of its own (:func:`_filtered`).
     Haiku, a question 14 products match: given the context as its own system message it
     answered for one of them 9 times in 10, given it in the user's turn it asked which one was
-    meant."""
+    meant. The turn is this run's question (``question``: its content, :func:`_question`) —
+    the first user message after the context that says it, wherever the run's
+    ``session_input_callback`` put the earlier turns —, else the last user message after the
+    context."""
     from agents.run_config import ModelInputData
 
     context = runtime.pushed_context
@@ -866,20 +893,16 @@ def _asked_with(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
             ),
             None,
         )
-        question = next(
-            (
-                n
-                for n in range(len(items) - 1, at if at is not None else len(items), -1)
-                if isinstance(items[n], dict) and items[n].get("role") == "user"
-            ),
-            None,
-        )
-        if at is None or question is None:
+        after = range(at + 1, len(items)) if at is not None else range(0)
+        users = [n for n in after if isinstance(items[n], dict) and items[n].get("role") == "user"]
+        said_it = [n for n in users if question is not None and items[n].get("content") == question]
+        found = said_it[0] if said_it else users[-1] if users else None
+        if at is None or found is None:
             return given
-        said = items[question].get("content")
+        said = items[found].get("content")
         parts = said if isinstance(said, list) else [{"type": "input_text", "text": str(said)}]
         marked = {"type": "input_text", "text": ASKED_WITH.format(context=context)}
-        items[question] = {**items[question], "content": [marked, *parts]}
+        items[found] = {**items[found], "content": [marked, *parts]}
         del items[at]
         return ModelInputData(input=items, instructions=given.instructions)
 
