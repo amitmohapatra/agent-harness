@@ -1009,8 +1009,10 @@ def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> d
     input of each model call where they were taken, as the user's (:func:`_filtered`): the SDK
     keeps a filter's input for that call only, so each call is given them again, in place.
     ``again``: what a run resumed from its input is told first, the same way (no session keeps
-    it)."""
+    it); and so is why a computer action did not run (``openai_local.unsaid``)."""
     from agents.run_config import ModelInputData
+
+    from trellis.harness.tools.convert.openai_local import unsaid
 
     kept: list[tuple[int, dict[str, Any]]] = []
     said = [again] if again else []
@@ -1018,6 +1020,7 @@ def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> d
     def steered(given: Any) -> Any:
         items: list[Any] = list(given.input)
         said.extend(s.text for s in runtime.steered())
+        said.extend(unsaid(runtime))  # computer actions not run since: why (the bridge's words)
         kept.extend((len(items), {"role": "user", "content": text}) for text in said)
         said.clear()
         for offset, (at, item) in enumerate(kept):

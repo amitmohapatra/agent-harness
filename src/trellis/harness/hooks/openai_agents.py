@@ -19,7 +19,7 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from agents import Agent, RunContextWrapper, RunHooks
+from agents import Agent, ComputerTool, RunContextWrapper, RunHooks
 from agents.items import ModelResponse
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -52,6 +52,11 @@ class ModelHooks(RunHooks[Any]):
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         _stopped()
+        runtime = current()
+        if runtime is not None and isinstance(tool, ComputerTool):
+            from trellis.harness.tools.convert.openai_local import computer_started  # noqa: PLC0415
+
+            computer_started(runtime)  # its actions: one decision
         await self._theirs.on_tool_start(context, agent, tool)
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
@@ -82,6 +87,9 @@ class ModelHooks(RunHooks[Any]):
         if runtime is not None:  # what the run spent (``budget.py``)
             runtime.model_ended(_step(agent))
             runtime.repeats = _repeats(response.output)
+            from trellis.harness.tools.convert.openai_local import computer_replied  # noqa: PLC0415
+
+            computer_replied(runtime, response.output)
             from trellis.harness.adapters.openai_agents import hosted_calls  # noqa: PLC0415
 
             await hosted_calls(runtime, response.output, started=started)

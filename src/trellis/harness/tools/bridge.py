@@ -46,7 +46,7 @@ import asyncio
 import logging
 import time
 import weakref
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -133,11 +133,17 @@ _HOOKED: weakref.WeakValueDictionary[int, ToolOutcome] = weakref.WeakValueDictio
 
 
 async def call(
-    tool: Tool, args: dict[str, Any], *, call_id: str | None = None, step: int | None = None
+    tool: Tool,
+    args: dict[str, Any],
+    *,
+    call_id: str | None = None,
+    step: int | None = None,
+    decision: Hashable | None = None,
 ) -> ToolOutcome:
     """Run ``tool`` for the current run (``step``: the call's number, when the caller numbered
-    the calls it makes at once). Pauses propagate; every other failure is an outcome the
-    framework shows its model (``ERROR``, or ``TIMEOUT``)."""
+    the calls it makes at once; ``decision``: the model decision the call is part of, when the
+    caller knows it — :func:`_deciding`). Pauses propagate; every other failure is an outcome
+    the framework shows its model (``ERROR``, or ``TIMEOUT``)."""
     runtime = current()
     if runtime is None:
         raise ToolError(
@@ -148,7 +154,9 @@ async def call(
     key = content_key("call", tool.name, made.args)
     step = runtime.next_step() if step is None else step
     async with runtime.replay.exclusive(key):
-        outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
+        outcome = await _called(
+            runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+        )
     runtime.replay.ended(made)
     return outcome
 
@@ -304,8 +312,10 @@ async def _called(
     key: str,
     step: int,
     call_id: str | None,
+    decision: Hashable | None = None,
 ) -> ToolOutcome:
     args = made.args
+    deciding = _deciding(runtime, call_id, decision)
     # what the tool hands its service: this run's n-th such call, in every attempt (the
     # call's own key, the same for the same call anywhere, is what feedback is filed under)
     idempotency_key = f"{runtime.run_id}:{key}:{runtime.replay.occurrence(key)}"
@@ -318,7 +328,7 @@ async def _called(
         outcome = _replayed(tool.name, output)
         _events(runtime, ref, tool_call, outcome)
         return outcome
-    refused = _refused(runtime, tool, args, key, call_id)
+    refused = _refused(runtime, tool, args, key, deciding)
     if refused is not None:
         _events(runtime, ref, tool_call, refused)
         return refused
@@ -443,7 +453,21 @@ def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
     )
 
 
-def _repeated(runtime: Runtime, tool: Tool, key: str, call_id: str | None) -> ToolOutcome | None:
+def _deciding(runtime: Runtime, call_id: str | None, given: Hashable | None) -> Hashable | None:
+    """The model decision a call is part of — the same each time its framework makes that call
+    again, and for each call that one decision makes —: ``given`` by the caller (an OpenAI
+    computer call's id, for each of its actions), else the framework's own (``Runtime.deciding``:
+    a LangGraph task, the same for each run its ``RetryPolicy`` makes) with the call's id;
+    ``None`` when neither says."""
+    if given is not None:
+        return given
+    deciding = runtime.deciding() if runtime.deciding is not None else None
+    return None if deciding is None else (deciding, call_id)
+
+
+def _repeated(
+    runtime: Runtime, tool: Tool, key: str, decision: Hashable | None
+) -> ToolOutcome | None:
     """The call, refused when it is the same call (the same tool, the same arguments) the run
     made the :data:`MAX_REPEATS` - 1 calls before it: a model looping on one call is told to
     answer with what it has (:data:`STALLED`), whatever its framework — the harness's tools
@@ -451,14 +475,16 @@ def _repeated(runtime: Runtime, tool: Tool, key: str, call_id: str | None) -> To
     Agent, OpenAI Agents and the Claude CLI are stopped as ``ReAct``'s ``StallGuard`` stops its
     own loop (which acts before its step's calls reach here). Said once on the run's stream.
 
-    A repeat is a decision made again: the call made once more by the decision that made it
-    last — its framework running that decision again (``Runtime.deciding``: a LangGraph task
-    its ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id
-    in the same task) — is not counted."""
-    deciding = runtime.deciding() if runtime.deciding is not None else None
-    decision = None if deciding is None else (deciding, call_id)
+    A repeat is a decision made again: a call of the decision that made the call before it
+    (:func:`_deciding`) — its framework running that decision again (a LangGraph task its
+    ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id in
+    the same task), or another action of the same OpenAI computer call (a batch of three
+    ``Down`` presses, and the screenshot after them) — is part of it: neither counted nor
+    starting a count of its own, and refused when that decision was."""
     last, times, made_by = runtime.repeating
-    again = key == last and decision is not None and decision == made_by
+    again = decision is not None and decision == made_by
+    if again:
+        key = last  # the decision is counted by the call it began with
     times = times if again else times + 1 if key == last else 1
     runtime.repeating = (key, times, decision)
     if times < MAX_REPEATS:
@@ -484,13 +510,13 @@ def stalled(runtime: Runtime) -> bool:
 
 
 def _refused(
-    runtime: Runtime, tool: Tool, args: dict[str, Any], key: str, call_id: str | None
+    runtime: Runtime, tool: Tool, args: dict[str, Any], key: str, decision: Hashable | None
 ) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
     feature this run is without, or arguments that do not fit its schema (nothing runs,
     nothing is journaled: the model corrects them)."""
-    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, call_id)
+    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, decision)
     if over is not None:
         return over
     if tool.feature is not None and not runtime.uses(tool.feature):
