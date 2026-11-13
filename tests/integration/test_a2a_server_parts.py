@@ -173,8 +173,10 @@ async def test_the_card_describes_what_the_target_says_about_itself() -> None:
 def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
     assert validate_url(" https://hooks.example.com ") == "https://hooks.example.com/"
     assert validate_url("https://[::ffff:93.184.216.34]/h") == "https://[::ffff:93.184.216.34]/h"
+    longest = "https://example.com/" + "a" * (2048 - len("https://example.com/"))
+    assert validate_url(longest) == longest  # 2,048 characters: the most a url may have
     for refused, reason in (
-        ("https://example.com/" + "a" * 2048, "too long"),
+        ("https://example.com/" + "a" * (2049 - len("https://example.com/")), "too long"),
         ("https://[::1]/hook", "private address"),
         ("https://[::ffff:10.0.0.1]/hook", "private address"),
         ("https://printer.local/", "local host"),
@@ -254,7 +256,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
 
     def refuse(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
-        return httpx.Response(410)
+        return httpx.Response(300 if len(attempts) == 1 else 410)  # a redirect is not taken
 
     notifier = PushNotifier(
         configs=None,  # type: ignore[arg-type]
@@ -263,7 +265,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
     with caplog.at_level(logging.WARNING, logger="trellis.a2a.push"):
         assert not await notifier.deliver("https://93.184.216.34/hook", "tok", "run-1", b"{}")
         assert not await notifier.deliver("https://10.1.1.1/hook", "tok", "run-2", b"{}")
-    assert len(attempts) == push.ATTEMPTS
+    assert len(attempts) == 3
     assert "A2A push attempt 3 for run-1 failed: HTTP 410" in caplog.text
     assert "A2A push target refused for run-2" in caplog.text
 
