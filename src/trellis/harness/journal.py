@@ -144,22 +144,33 @@ class Save(BaseModel):
     dumped: dict[str, Any]
 
 
-#: The keys of the recorded answers read in this context, while :func:`answers_read` watches.
-_READ: ContextVar[list[str] | None] = ContextVar("trellis_answers_read", default=None)
+#: The tool calls whose approval a person answered, read in this context while
+#: :func:`approvals_read` watches.
+_APPROVED: ContextVar[list[ToolCall] | None] = ContextVar("trellis_approvals_read", default=None)
 
 
 @contextlib.contextmanager
-def answers_read() -> Iterator[list[str]]:
-    """The keys of the recorded answers (:meth:`Replay.answer`) the code it holds reads,
-    tasks it starts included: whether a person was answered about what that code decided —
-    whatever asked them (a catalog rule, a hook's ``Ask``, a rule about the arguments a hook
-    rewrote), however the question's key was made."""
-    read: list[str] = []
-    token = _READ.set(read)
+def approvals_read() -> Iterator[list[ToolCall]]:
+    """The tool calls whose approval (``Runtime.approve``: governance's question about a call)
+    the code it holds read a person's recorded answer to, tasks it starts included: whether a
+    person approved — or denied — the call that code decided, whatever made governance ask (a
+    catalog rule, a hook's ``Ask``, a rule about the arguments a hook rewrote), the call as
+    asked about. Any other question answered meanwhile (a hook's own ``ask``, ``ask_user``, a
+    form) is no answer about a call, and is not among them."""
+    read: list[ToolCall] = []
+    token = _APPROVED.set(read)
     try:
         yield read
     finally:
-        _READ.reset(token)
+        _APPROVED.reset(token)
+
+
+def approval_read(call: ToolCall) -> None:
+    """A person's recorded answer to the approval of ``call`` was read: for
+    :func:`approvals_read`."""
+    watching = _APPROVED.get()
+    if watching is not None:
+        watching.append(call)
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -447,9 +458,6 @@ class Replay:
         if index < len(recorded):
             self._seen[f"a:{key}"] = index + 1
             self._mark("a", key, index, self._here())
-            watching = _READ.get()
-            if watching is not None:  # :func:`answers_read`
-                watching.append(key)
             return InterruptResolution.model_validate(recorded[index])
         return None
 

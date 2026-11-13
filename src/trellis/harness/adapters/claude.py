@@ -15,9 +15,10 @@
   and the tool catalog's rules — and leaves the rest to Claude Code: its permission mode, its
   rules (``allowed_tools``, its settings), and when it would ask its user, ``can_use_tool``.
   That callback answers as the harness's: the team's own ``can_use_tool`` when it has one;
-  else a call a person already answered about in the hook runs (one call, one question),
-  a call that only reads (a read tool, or a shell command ``governance.shell.read_only``
-  reads as read-only) runs, and any other asks a person (``bridge.asked``);
+  else a call whose approval a person already answered in the hook runs (one call, one
+  question), a call that only reads (a read tool, or a shell command
+  ``governance.shell.read_only`` reads as read-only) runs, and any other asks a person
+  (``bridge.asked``);
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
   it took — through the SDK's own ``PostToolUse`` / ``PostToolUseFailure`` hooks
@@ -106,7 +107,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, answers_read
+from trellis.harness.journal import Pending, approvals_read
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -1021,9 +1022,10 @@ class Steps:
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
-        #: the calls a person answered about before they ran (governance's question, a
-        #: hook's ``Ask``: ``PreToolUse``), by Claude's id: Claude Code's own question about
-        #: one (``can_use_tool``) is not asked too — one call, one question
+        #: the calls whose approval a person answered before they ran (governance's question,
+        #: whatever made it ask: ``PreToolUse``), by Claude's id: Claude Code's own question
+        #: about one (``can_use_tool``) is not asked too — one call, one question. Another
+        #: question answered meanwhile (a hook's own ``ask``) is no approval of the call
         self.answered: set[str] = set()
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
@@ -1231,7 +1233,7 @@ def _governance(steps: Steps) -> Any:
         helper = await steps.helper_of(call_id, given)
         try:
             # a subagent's call is decided as its helper's work: an approval names the helper
-            with answers_read() as read, runtime.helpers.working(helper):
+            with approvals_read() as approved, runtime.helpers.working(helper):
                 decided = await bridge.permitted(_spec(runtime, name), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             steps.helped.pop(call_id, None)
@@ -1239,7 +1241,9 @@ def _governance(steps: Steps) -> Any:
         if isinstance(decided, ToolOutcome):
             steps.helped.pop(call_id, None)
             return _decided("deny", str(decided.output))
-        if read:  # a person answered about this call, whatever made governance ask
+        if any(c.tool == name for c in approved):
+            # a person answered the approval of this call, whatever made governance ask (a
+            # hook's own question, answered meanwhile, approves nothing)
             steps.answered.add(call_id)
         if name in SUBAGENT_TOOLS:
             ran = await _briefed(runtime, call_id, name, decided.args)

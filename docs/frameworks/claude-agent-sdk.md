@@ -111,8 +111,11 @@ the user Claude Code would ask:
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
   would send.
-* **One call, one question.** A call a person answered about before it ran (governance's
-  question, a hook's `Ask`) is not asked about again when Claude Code asks too: it runs.
+* **One call, one question.** A call whose approval a person answered before it ran
+  (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
+  about again when Claude Code asks too: it runs. Another question answered while the call
+  was decided (a hook's own `trellis.current().ask(...)`, `ask_user`, a form) approves
+  nothing: Claude Code's own question about the call is still asked.
 * **Your own `can_use_tool`** answers what Claude Code asks, as without the harness: it is
   asked when Claude Code would ask its user, after your hooks and governance, with the
   arguments as they were decided (a call a hook rewrote is asked about as rewritten) and

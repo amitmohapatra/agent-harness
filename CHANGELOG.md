@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: Claude Agent SDK approvals, spending and live sessions
+
+- **A question a run hook asks is no approval.** A call Claude Code asks about was let
+  through without its question when any recorded answer was read while the call was
+  decided: a `before_tool` hook that asked a person something else
+  (`trellis.current().ask(...)`: a ticket number) let a shell write run unapproved. Only the
+  answer to the approval of that call (governance's question, whatever made it ask) spares
+  it Claude Code's own question now (`journal.approvals_read`).
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries
