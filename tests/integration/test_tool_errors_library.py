@@ -1,8 +1,10 @@
 """A tool of the graph's own that raises: the harness records the failed call, and what the
 graph does with the error is the library's — LangChain's ``ToolRetryMiddleware`` tries the
 call again, ``ToolErrorMiddleware`` words what the model reads, a wrapper of the builder's
-answers in the tool's place, a ``ToolNode``'s ``handle_tool_errors`` gives its text. An error
-nothing of the graph handles is, in a harness run, the failed call's result the model reads."""
+answers in the tool's place, a ``ToolNode``'s ``handle_tool_errors`` gives its text, exactly
+as the graph words it. An error nothing of the graph handles fails the run, as it fails the
+graph without the harness — unless the graph runs the harness's own middleware (``ReAct``,
+``middleware()``: ``GovernTools``), whose rule is the harness's: the model reads the failure."""
 
 from __future__ import annotations
 
@@ -196,43 +198,101 @@ def by_hand(model: Any, node: ToolNode) -> Any:
     return graph.compile()
 
 
-async def test_today_a_tool_nodes_own_error_text_reaches_the_model_after_the_tools_name(
-    harness: Harness,
+async def test_a_tool_nodes_own_error_text_is_what_the_model_reads(
+    memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     """``ToolNode(handle_tool_errors="...")``: the node's text for a tool that failed is what
-    the model reads — after ``<tool> failed:``, as the harness words every failed call, where
-    LangGraph alone gives the text as it is."""
+    the model reads, as the node wrote it; the call is the run's failed call all the same."""
     fails.append(ValueError("no shelf"))
     model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "it is down"])
     node = ToolNode([stock], handle_tool_errors="Shelf lookups are down: say so.")
-    events = [
-        e async for e in harness.wrap(by_hand(model, node), id="shelf").stream("a?", user="u")
-    ]
+    agent = memory_harness.wrap(by_hand(model, node), id="shelf")
+    events = [e async for e in agent.stream("a?", user="u")]
     assert results(events) == [("stock", "error")]
-    assert told(model).status == "error"
-    assert told(model).content == "stock failed: Shelf lookups are down: say so."
+    assert (told(model).status, told(model).content) == (
+        "error",
+        "Shelf lookups are down: say so.",
+    )
+    await memory_harness.writes.drain()
+    assert [c.body["status"] for c in memory_service.named("record_tool")] == ["error"]
 
 
-@pytest.mark.parametrize("how", ["node", "agent", "retry"])
-async def test_today_an_error_nothing_handles_is_what_the_model_reads_not_the_graphs_failure(
-    harness: Harness, how: str
+async def test_an_after_tool_hook_still_has_the_last_word_on_a_handled_error(
+    harness: Harness,
+) -> None:
+    """The run's ``after_tool`` hooks change what the model reads of a call: a hook that
+    rewrites a failed call's result is read, not the node's text."""
+    from trellis.contracts import ToolOutcome
+    from trellis.harness.hooks import Hooks
+
+    class Kinder(Hooks):
+        async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+            return outcome.model_copy(update={"output": "the shelf will be back at noon"})
+
+    fails.append(ValueError("no shelf"))
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "noon"])
+    node = ToolNode([stock], handle_tool_errors="Shelf lookups are down: say so.")
+    agent = harness.wrap(by_hand(model, node), id="shelf", hooks=[Kinder()])
+    assert (await agent.run("a?", user="u")).answer == "noon"
+    assert told(model).content == "the shelf will be back at noon"
+
+
+def wrapper_reraising() -> Any:
+    @wrap_tool_call
+    async def watching(request: Any, handler: Any) -> Any:
+        try:
+            return await handler(request)
+        except ValueError:
+            ran.append("seen by the wrapper")
+            raise
+
+    return watching
+
+
+@pytest.mark.parametrize("how", ["node", "agent", "retry", "wrapper"])
+async def test_an_error_nothing_of_the_graph_handles_fails_the_run_as_langgraph_does(
+    memory_harness: Harness, memory_service: FakeMemoryService, how: str
 ) -> None:
     """LangGraph raises a tool's error that nothing handles, and the graph fails with it: a
     ``ToolNode(handle_tool_errors=False)``, ``create_agent``'s tool node (it handles a call's
-    invalid arguments only), ``ToolRetryMiddleware(on_failure="error")`` out of tries. In a
-    harness run the failed call is a result the model reads and the run goes on: the
-    harness's rule for every framework's tools, kept here."""
+    invalid arguments only), ``ToolRetryMiddleware(on_failure="error")`` out of tries, a wrapper
+    that raises it again. The run fails with that error, as any graph's error ends a run; the
+    call is recorded as the run's failed call."""
     fails.extend([ValueError("no shelf")] * 2)
-    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "it failed"])
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "unreached"])
     if how == "node":
         graph = by_hand(model, ToolNode([stock], handle_tool_errors=False))
     elif how == "agent":
         graph = create_agent(model, tools=[stock])
-    else:
+    elif how == "retry":
         gives_up = ToolRetryMiddleware(
             max_retries=1, initial_delay=0.0, jitter=False, on_failure="error"
         )
         graph = create_agent(model, tools=[stock], middleware=[gives_up])
-    result = await harness.wrap(graph, id=f"unhandled-{how}").run("a?", user="u")
+    else:
+        graph = create_agent(model, tools=[stock], middleware=[wrapper_reraising()])
+    agent = memory_harness.wrap(graph, id=f"unhandled-{how}")
+    events = [e async for e in agent.stream("a?", user="u")]
+    finished = events[-1]
+    assert finished.type is RunEventType.RUN_FINISHED and finished.error is not None
+    assert (finished.error.code, finished.error.message) == ("ValueError", "no shelf")
+    assert len(model.seen) == 1
+    record = await memory_harness.runs.get(finished.run_id)
+    assert record is not None and record.status is RunStatus.ERROR
+    assert ("stock", "error") in results(events)
+    await memory_harness.writes.drain()
+    assert "error" in [c.body["status"] for c in memory_service.named("record_tool")]
+
+
+async def test_under_the_harness_middleware_an_error_nothing_handles_is_read_by_the_model(
+    harness: Harness,
+) -> None:
+    """``ReAct`` (and a graph built with ``middleware()``: ``GovernTools``) runs the graph's
+    own tools under the harness's rule, as its docs say: a tool that raises becomes an error
+    result the model reads, and the run goes on."""
+    fails.append(ValueError("no shelf"))
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "it failed"])
+    agent = harness.wrap(ReAct(system_prompt="Count.", model=model, tools=[stock]), id="react")
+    result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     assert (told(model).status, told(model).content) == ("error", "stock failed: no shelf")

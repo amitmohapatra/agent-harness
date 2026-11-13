@@ -158,6 +158,7 @@ from trellis.harness.tools.base import (
     citations,
     cut_short,
     data_of,
+    failed_output,
     max_age,
     not_run,
 )
@@ -349,6 +350,9 @@ class GovernTools(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
+        # the harness's rule for the call's error: nothing of the graph's handles it, the model
+        # reads it (:func:`govern_tool_nodes`)
+        _under_way().owned = True
         return await governed_call(request, handler)
 
 
@@ -410,7 +414,10 @@ async def governed_call(
     the state update of a call that ran before a pause is not lost with the step run again.
     An error the tool raised is recorded as the call's failure and raised again as it was
     (:func:`_failed`): the graph's own handling of it — LangChain's ``ToolRetryMiddleware`` and
-    ``ToolErrorMiddleware``, a wrapper of the builder's — sees what the library gives it.
+    ``ToolErrorMiddleware``, a wrapper of the builder's, the tool node's ``handle_tool_errors``
+    — sees what the library gives it, and the failed message the graph made of it (the tool
+    node's, a wrapper's) is the one the model reads, as the graph worded it, unless the run's
+    ``after_tool`` hooks changed what the call says.
     The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
     :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
@@ -437,6 +444,8 @@ async def governed_call(
         return _kept_own(runtime, request, await handler(request))
     produced: list[Any] = []
     raised: list[Exception] = []
+    #: the failed message the graph made of the tool's error, and what the call raised for it
+    reported: list[tuple[ToolMessage, ToolError]] = []
 
     async def run(args: dict[str, Any]) -> Any:
         token = _GOVERNING.set((call["name"], str(call["id"])))
@@ -445,7 +454,9 @@ async def governed_call(
         finally:
             _GOVERNING.reset(token)
         if isinstance(done, ToolMessage) and done.status == "error":
-            raise ToolError(text_of(done.content), source="tools")
+            failure = ToolError(text_of(done.content), source="tools")
+            reported[:] = [(done, failure)]
+            raise failure
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))
@@ -453,6 +464,7 @@ async def governed_call(
 
     async def ran(args: dict[str, Any]) -> ToolMessage | Command[Any]:
         raised.clear()
+        reported.clear()
         try:
             return await handler(request.override(tool_call={**call, "args": args}))
         except Exception as exc:
@@ -465,6 +477,23 @@ async def governed_call(
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
         return update  # the graph's state update, as the tool made it
+    return _answered(runtime, request, outcome, reported, raised)
+
+
+def _answered(
+    runtime: Runtime,
+    request: ToolCallRequest,
+    outcome: ToolOutcome,
+    reported: Sequence[tuple[ToolMessage, ToolError]],
+    raised: Sequence[Exception],
+) -> ToolMessage:
+    """The message a governed call that gave the graph no update ends with: the failed message
+    the graph made of the tool's error (``reported``: the tool node's, a wrapper's), as the
+    graph worded it — unless the run's ``after_tool`` hooks changed what the call says — else
+    the harness's of the call's outcome; an error the tool raised (``raised``) is raised again
+    (:func:`_failed`)."""
+    if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
+        return reported[0][0]
     message = _message(outcome, request, kept=_paged(runtime, request))
     if raised and not outcome.ok:
         _failed(raised[-1], message)
@@ -545,18 +574,19 @@ def _update_of(kept: Sequence[str], call_id: str) -> Any:
 
 @dataclass(slots=True, eq=False)
 class _Calling:
-    """One call of a tool node, from its first wrapper to its tool: the governed tries made of
-    it so far, and the latest one that failed — the error its tool raised, and the message
-    the model reads for it when nothing of the graph's handles the error; whether it is
-    ``waiting`` (it paused, and waits for the node's other calls) or has ``ended``."""
+    """One call of a tool node, from its first wrapper to its tool: the latest governed try
+    of it that failed — the error its tool raised, and the message the model reads for it
+    where the harness's rule holds; whether the harness's middleware governs it (``owned``:
+    ``GovernTools``, which ``ReAct`` and ``middleware()`` have); whether it is ``waiting`` (it
+    paused, and waits for the node's other calls) or has ``ended``."""
 
-    tries: int = 0
     failed: tuple[BaseException, ToolMessage] | None = None
+    owned: bool = False
     waiting: bool = False
     ended: asyncio.Event = field(default_factory=asyncio.Event)
 
 
-#: The tool node's call under way (:func:`govern_tool_nodes`), where the tries of it meet.
+#: The tool node's call under way (:func:`govern_tool_nodes`), where its tries meet.
 _CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
 #: The calls under way of each tool node's step, by the state object the node handed them.
 _BESIDE: Final[dict[int, set[_Calling]]] = {}
@@ -581,12 +611,12 @@ def _under_way() -> _Calling:
 
 
 def _failed(error: Exception, message: ToolMessage) -> NoReturn:
-    """A governed call's tool raised ``error`` (recorded: the call failed, ``message`` what
-    the model reads for it): raised again as it was, so what the graph does with a tool's
-    error is the library's — a wrapper that retries, rewords or answers in its place gets the
-    error, as without the harness. An error nothing of the graph handles ends as ``message``
-    at the tool node's call (:func:`govern_tool_nodes`): the model reads it, and the run goes
-    on."""
+    """A governed call's tool raised ``error`` (recorded: the call failed): raised again as it
+    was, so what the graph does with a tool's error is the library's — a wrapper that retries,
+    rewords or answers in its place gets the error, the tool node's ``handle_tool_errors``
+    decides, as without the harness. An error nothing of the graph handles fails the graph, as
+    LangGraph has it — unless the harness's middleware governs the call: it ends as
+    ``message``, which the model reads (:func:`govern_tool_nodes`)."""
     _under_way().failed = (error, message)
     raise error
 
@@ -979,9 +1009,10 @@ def govern_tool_nodes() -> None:
 
     The node's one call (before its wrappers) is installed on too: the error of a governed
     call's tool that nothing of the graph handled — the node's own ``handle_tool_errors``, a
-    wrapper — ends there as the message the model reads (:func:`_failed`), not as the graph's
-    failure; and a call that pauses (it asks a person) leaves the node once the node's other
-    calls have ended (:func:`_others_ended`)."""
+    wrapper — fails the graph there as LangGraph has it, or, where the harness's middleware
+    governs the call (``GovernTools``: ``ReAct``, ``middleware()``), ends as the failed result
+    the model reads (:func:`_failed`); and a call that pauses (it asks a person) leaves the
+    node once the node's other calls have ended (:func:`_others_ended`)."""
     execute = ToolNode._execute_tool_async
     if getattr(execute, _INSTALLED, False):
         return
@@ -1018,7 +1049,7 @@ def govern_tool_nodes() -> None:
         except Exception as exc:
             if is_pause_signal(exc):
                 await _others_ended(calling, beside)
-            if calling.failed is None or calling.failed[0] is not exc:
+            if not calling.owned or calling.failed is None or calling.failed[0] is not exc:
                 raise
             return calling.failed[1]
         finally:
