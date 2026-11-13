@@ -5,6 +5,44 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a background task of Deep Agents' async sub-agents, found again in later turns
+
+Deep Agents' async sub-agent (an `AsyncSubAgent` in `ReAct(subagents=)`, or its
+`AsyncSubAgentMiddleware` in a graph of your own) runs a task on a server of yours while the
+chat goes on. Deep Agents keeps its list of tasks in the graph's state, and a graph the
+harness runs on its run's thread starts each turn with a new state: the task started, and
+the next turn's `check_async_task` was refused its id.
+
+- **The list goes from a conversation's turn to its next one** (`adapters.langgraph.CARRIED`:
+  the one place that names the channel), per user, thread and agent, a cancelled turn's too —
+  for `ReAct`, for a graph built with `middleware()`, and for one with neither `middleware()`
+  nor a checkpointer, whose list is read from the state each turn ends with. A graph with a
+  checkpointer of its own keeps it in its thread, as before.
+- **Across servers and restarts.** The list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`), under `.carried/<tenant>/<user>/<conversation>/<agent>/`,
+  which no listing of a user's files shows: the next turn has it after a restart, and on
+  another server when the servers share the store (unset, it is a folder on the server's own
+  disk). Deep Agents' record of each task and nothing else, at most 256 KiB for a
+  conversation; a store that cannot be read or written is said in the log and the list stays
+  in the process. Nothing is added to a run's record, to agent-runs or to the memory service.
+- **Turns that overlap lose no task.** What a turn ends with is merged into what is kept,
+  task by task, instead of replacing it: a turn approved after the conversation's next turn
+  ended, or a worker's turn still running while another ends, each keep their tasks. A turn
+  that waits for an approval has its list kept as it pauses: the task it started is listed
+  by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
+- **The five task tools say what they do** where the harness says it of Deep Agents' own
+  tools: a status check and the list are reads; a start, an update and a cancel are writes,
+  announced and not asked about (the tool catalog still comes first). A write's result is
+  declared the record of what was done, not a value that changes: with memory on, an earlier
+  start in a later turn's history was marked "out of date: call start_async_task again",
+  which invited a second task; it is left as it was said, and a status check's is still
+  marked.
+
+Not in this release: nothing tells the chat when a task ends (the model checks in a later
+turn); cancelling a turn does not cancel its task; a graph with neither `middleware()` nor a
+checkpointer loses the task of a turn cancelled after its start. See
+[docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

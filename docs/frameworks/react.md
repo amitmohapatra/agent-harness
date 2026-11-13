@@ -532,17 +532,35 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
 * **Across turns** — Deep Agents keeps its list of tasks in the graph's state, and a `ReAct`
   graph's state is its run's, so the harness carries that list from a conversation's turn to
-  its next one (per user and thread, a cancelled turn's too). It is kept in the process that
-  ran the turn: after a restart, or on another worker, the next turn starts with no list and
-  a task id is refused. A graph with a checkpointer of its own
-  (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the list in its
-  thread instead.
+  its next one: per user, thread and agent, a cancelled turn's too, and that of a turn that
+  waits for an approval (the task it started is listed meanwhile, and still is when the turn
+  is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
+  running while another ends) each keep the tasks they started. A graph with a checkpointer
+  of its own (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the
+  list in its thread instead, and it lasts as that checkpointer does.
+* **Across servers and restarts** — the list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`, [configuration.md](../configuration.md)), where the
+  next turn reads it wherever it runs: after a restart, and on another server when the
+  servers share that store (a bucket, or a folder they all mount). Unset, the store is a
+  folder on the server's own disk: it survives a restart there, another server does not see
+  it, and a container loses it with its filesystem. What is kept is Deep Agents' record of
+  each task (its ids, the sub-agent's name, a status, three times), at most 256 KiB for a
+  conversation, in a folder that is none of the user's files. A store that cannot be read or
+  written is said in the log, and the list stays in the process as before.
+* **Earlier results** — with memory on, a later turn's history holds the earlier calls and
+  their results. A start's, an update's and a cancel's are left as they were said (the record
+  of what was done: nothing advises starting again); a status and the list are values that
+  change, and an earlier one is marked out of date.
 * **Your own graph** — the same holds for a graph you build with `middleware()` and no
   checkpointer: `create_deep_agent(..., subagents=[optimizer], middleware=middleware())`, or
   LangChain's `create_agent` with `middleware=[*middleware(), AsyncSubAgentMiddleware(...)]`
   (Deep Agents' `deepagents.middleware.async_subagents`). A graph with neither `middleware()`
-  nor a checkpointer keeps no state between turns: the task starts, and the next turn is
-  refused its id.
+  nor a checkpointer keeps no state between turns; its list is carried too, read from the
+  state each turn ends with — so a turn cancelled or failed after a start leaves that task
+  out of the list (with `middleware()` each step is kept, and it is in).
+* **What still does not hold** — nothing tells the chat when a task ends; cancelling a turn
+  does not cancel its task (the next turn can); and when two overlapping turns both change
+  the same task, the record of the turn that ends last is the one kept.
 
 ## Where sandbox, skills and hooks go
 
