@@ -144,6 +144,20 @@ flag, the system prompt and thinking forms, structured output, partial messages,
 options and the SDK's errors. What stays as it is:
 [docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
 
+### Fixed: a background subagent's run a killed server left is ended, not left `RUNNING`
+
+A background subagent's child run is started in the server's process, not claimed from the
+queue, so no lease said when nothing worked on it: a server killed with its live session (a
+crash, a restart) left the run `RUNNING` for ever unless it had a deadline or agent-runs a
+maximum working time. The session now holds the run in the run store while it goes on
+(`Background._hold`: agent-runs' heartbeat, which holds a run kept in its caller's process,
+every 20 s for 60, `claude_live.HOLD_SECONDS`, as `claude_live.holder()`), and agent-runs'
+ticker ends a run whose hold lapsed `ERROR` (`holder_lost`), never queueing it. `LocalRuns`
+holds such a run the same way and ends a lapsed one at its next claim, as it requeues a lapsed
+lease. A foreground subagent's run and a turn's own run are not held. Needs the agent-runs
+with holds (an older one answers the heartbeat `409`: the session logs nothing and holds
+nothing, as before).
+
 ### Added: a conversation's Claude Code process stays between its turns, with its background work
 
 A Claude Agent SDK turn ran in a CLI process of its own, and the next turn started another

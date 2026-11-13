@@ -17,7 +17,10 @@ it (``client.query``) instead of into a new process that resumes the session.
   turn's context — ``trellis.current()``, the trace and the tool's own run are that turn's.
 * **A background subagent's run.** A subagent the CLI runs in the background
   (``task_started`` with ``is_backgrounded``) keeps the child run its ``Agent`` call started
-  (``bridges.helpers``) open until its task ends (:class:`Background`): that run's attempts
+  (``bridges.helpers``) open until its task ends (:class:`Background`), holding it in the run
+  store meanwhile (a heartbeat every third of :data:`HOLD_SECONDS`), so that a server killed
+  with the session (nothing closed) leaves a run the store ends once the hold lapses (agent-runs'
+  ticker: ``ERROR``, ``holder_lost``), not one ``RUNNING`` for ever: that run's attempts
   go through the pipeline as any run's, and the subagent's hooks, permission requests and
   harness tool calls — which the CLI names it in (``agent_id``: the task's id) — are
   relayed to the attempt under way, turn or no turn. A call that asks a person pauses that
@@ -64,6 +67,9 @@ import contextlib
 import contextvars
 import dataclasses
 import logging
+import os
+import secrets
+import socket
 import time
 from collections import Counter, deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
@@ -76,7 +82,7 @@ from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.bridges.claude import JournalSessions
 from trellis.harness.journal import Journal, content_key
-from trellis.runs import ConflictError
+from trellis.runs import ConflictError, LeaseLostError, RunsError
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -110,6 +116,11 @@ ANSWER_SECONDS: Final = 12 * 3600.0
 HOOK_SECONDS: Final = 2 * ANSWER_SECONDS
 #: How often a background run that waits for a person looks whether it was cancelled there.
 WAITS_SECONDS: Final = 10.0
+#: How long one heartbeat of a session holds its background subagent's run in the run store
+#: (renewed every third of it): a server killed with the session leaves the run ended this long
+#: after (and within one tick of agent-runs' ticker). The store's default lease: long enough
+#: that a slow call or two never lets it lapse while the session lives.
+HOLD_SECONDS: Final = 60
 #: Why a background subagent's run ended with its session, when no person answered it, and
 #: when its task was stopped in Claude Code (by Claude, or with the turn it was started in).
 LOST: Final = (
@@ -130,6 +141,16 @@ _OVER: Final = object()
 
 class Left(Exception):
     """The turn a request was handed to was left before it answered."""
+
+
+#: what tells this import's holder apart from another process's with the same host and pid
+_HOLDER_TOKEN: Final = secrets.token_hex(4)
+
+
+def holder() -> str:
+    """Who holds this process's background runs in the run store (a heartbeat's
+    ``worker_id``): the host and the process, as the run's error names it when it stopped."""
+    return f"claude-live@{socket.gethostname()}:{os.getpid()}:{_HOLDER_TOKEN}"[:200]
 
 
 def unattended(session: LiveSession, message: Any) -> None:
@@ -244,9 +265,9 @@ class Background:
         self._waiting: list[asyncio.Future[None]] = []
         self._settled = asyncio.Event()
         self._answer: asyncio.Future[InterruptResolution | None] | None = None
-        self.task = asyncio.get_running_loop().create_task(
-            self._run(), context=contextvars.Context()
-        )
+        loop = asyncio.get_running_loop()
+        self.task = loop.create_task(self._run(), context=contextvars.Context())
+        self._holding = loop.create_task(self._hold(), context=contextvars.Context())
 
     # ------------------------------------------------------------------ its run
     async def _run(self) -> None:
@@ -270,10 +291,28 @@ class Background:
         except Exception:
             log.exception("background run %s of task %s", self.run_id, self.task_id)
         finally:
+            self._holding.cancel()
             self.over = True
             self._woken()
             self.session._over(self)
             await self._finished()
+
+    async def _hold(self) -> None:
+        """Hold the run in the run store while it goes on: a heartbeat as this process
+        (:func:`holder`) every third of :data:`HOLD_SECONDS`, until :meth:`_run` ends. A run
+        that waits for a person has nothing to hold (the store refuses it) until it runs again;
+        a store that cannot be reached is tried again at the next."""
+        runs = self.agent.harness.runs
+        while True:
+            try:
+                await runs.heartbeat(
+                    self.run_id, holder(), lease_seconds=HOLD_SECONDS, tenant=self.tenant
+                )
+            except LeaseLostError:
+                pass  # paused, or it ended meanwhile
+            except RunsError as exc:
+                log.warning("background run %s not held: %s", self.run_id, exc)
+            await asyncio.sleep(HOLD_SECONDS / 3)
 
     async def _finished(self) -> None:
         """The run's end on the task tree of the run that started it, while that run is
