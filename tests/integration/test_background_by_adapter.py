@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from agents import Agent as OpenAIAgent
 from agents import RunConfig
 from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
@@ -51,6 +52,14 @@ from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver, PersistentDict
 
 from tests.integration.test_acp import fake, recorded
+from tests.integration.test_claude_background_session import (
+    BACKGROUND,
+    alive,
+    live_of,
+    open_sessions,
+    served,
+)
+from tests.integration.test_claude_background_session import options as claude_options
 from tests.integration.test_react_async_subagent import (
     AT_ONCE,
     NO_TASKS,
@@ -64,18 +73,22 @@ from tests.integration.test_react_async_subagent import (
     Model,
     StandIn,
     calls,
+    chat,
     reports_the_id,
     say,
     says_what_the_tool_said,
     subagent,
     timed,
 )
+from tests.support.arm import arm
 from tests.support.openai_model import ScriptedModel
-from trellis import Harness, Runtime, Settings, middleware
+from trellis import Harness, Runtime, Settings, current, middleware, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness.adapters.acp import KIMI_ENV
 from trellis.harness.adapters.langgraph import run_scoped
 from trellis.harness.agent import Agent
+from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.identity import conversation_key
 
 
 @pytest.fixture
@@ -441,3 +454,105 @@ async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session
     new, resumed = record["sessions"]
     assert (new["how"], resumed["how"]) == ("new", "resume") and new["id"] == resumed["id"]
     assert agent.adapter.steers(agent.target) is False  # and no message reaches a turn under way
+
+
+# --------------------------------------------------------------------------- E. side by side
+#: The conversation every agent below is asked in: the same user's thread of the same name.
+KEY: Final = conversation_key(LOCAL_TENANT, USER, THREAD)
+LISTED: Final = "task_id: {}  agent: optimizer  status: running"
+
+
+async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapter(
+    harness: Harness, server: StandIn, tmp_path: Path
+) -> None:
+    """The list is kept by the agent whose graph left it (``Agent.results``), under the
+    conversation's key — which names no agent. A Claude Agent SDK agent, an OpenAI Agents SDK
+    agent and a function on the same harness, asked by the same user in a thread of the same
+    name, start their turns with no carried state (``Runtime.carried``), keep none, and
+    answer; the Deep Agents graph's own next turn still finds its task."""
+    server.seconds = 60
+    model = Model(turns=[START, reports_the_id])
+    deep = chat(harness, server, model)
+    await say(deep, "run the optimization")
+    assert list(deep.results.state(KEY)) == ["async_tasks"]  # what its conversation carries
+    started: dict[str, list[dict[str, Any]]] = {"claude": [], "openai": [], "function": []}
+
+    def carried_by(name: str) -> Any:
+        @tool(side_effects="read")
+        def carried() -> str:
+            """What this run's conversation carried into it."""
+            runtime = current()
+            assert runtime is not None
+            started[name].append(dict(runtime.carried))
+            return "looked"
+
+        return carried
+
+    async def function(input: str, agent: Runtime) -> str:
+        started["function"].append(dict(agent.carried))
+        return "looked"
+
+    turn = [{"tool": "carried"}, {"text": "{last}"}]
+    asked = ScriptedModel([("carried", {}), "looked", ("carried", {}), "looked"])
+    others = {
+        "claude": arm(
+            harness.wrap(claude_options(tmp_path, [turn, turn]), id="claude"),
+            [carried_by("claude")],
+        ),
+        "openai": arm(
+            harness.wrap(OpenAIAgent(name="w", instructions="Work.", model=asked), id="openai"),
+            [carried_by("openai")],
+        ),
+        "function": harness.wrap(function, id="function"),
+    }
+    for name, other in others.items():
+        for question in ("is the optimization done?", "and now?"):  # a first turn, a later one
+            done = await say(other, question)
+            assert done.status is RunStatus.SUCCESS and done.answer == "looked", (name, done.error)
+        assert other.results.state(KEY) == {}, name  # and it kept none for its next turn
+    assert started == {"claude": [{}, {}], "openai": [{}, {}], "function": [{}, {}]}
+    assert len({turn["pid"] for turn in served(tmp_path)}) == 1  # Claude's turns: one session
+    assert len(server.calls) == 2  # none of them reached the sub-agent's server
+
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    mine = await say(deep, "which tasks are there?")
+    assert LISTED.format(server.task_id) in mine.answer  # the graph's own list, as it left it
+
+
+async def test_e_an_async_sub_agent_and_a_live_claude_session_side_by_side_on_one_harness(
+    server: StandIn, tmp_path: Path
+) -> None:
+    """Both of a day's features in one process: a ``ReAct`` agent whose async sub-agent works
+    on its server and a Claude Agent SDK agent whose live session runs a background subagent,
+    asked in turn by the same user in threads of the same name. Each keeps its own: the graph
+    its task list (and no CLI process), Claude's session its background task and its own
+    prompts (and no task list). Closing the harness ends Claude's process; the sub-agent's
+    task is its server's, and goes on."""
+    server.seconds = 60
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
+    async with Harness(config=Settings()) as harness:
+        model = Model(turns=[START, reports_the_id])
+        deep = chat(harness, server, model)
+        claude = harness.wrap(claude_options(tmp_path, scripts), id="claude")
+        first = await say(deep, "run the optimization")
+        began = await say(claude, "research the market")
+        assert first.status is RunStatus.SUCCESS and server.task_id in first.answer, first.error
+        assert began.status is RunStatus.SUCCESS and began.answer == "started it", began.error
+        live = live_of(claude, USER, THREAD)
+        assert live is not None and live.working == {"t1": "research the market"}
+        assert list(deep.results.state(KEY)) == ["async_tasks"] and not claude.results.state(KEY)
+        assert getattr(deep.adapter, "live", None) is None  # a graph keeps no CLI process
+
+        model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+        listed = await say(deep, "which tasks are there?")
+        again = await say(claude, "and now?")
+        assert LISTED.format(server.task_id) in listed.answer
+        # Claude's session heard its own two prompts, none of the graph's turns
+        assert again.answer == "you asked: research the market | and now?", again.error
+        one, two = served(tmp_path)
+        assert two["pid"] == one["pid"] and alive(one["pid"]) and open_sessions(claude) == 1
+        assert live_of(claude, USER, THREAD) is live and list(live.working) == ["t1"]
+        assert not claude.results.state(KEY) and len(server.runs) == 1
+    assert open_sessions(claude) == 0 and live.closed
+    assert not alive(one["pid"])  # no process is left behind
+    assert server.status(server.task_id) == "running"  # the remote task is not the harness's

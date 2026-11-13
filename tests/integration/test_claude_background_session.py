@@ -33,6 +33,7 @@ from claude_agent_sdk import tool as sdk_tool
 from claude_agent_sdk._internal.message_parser import parse_message
 
 from tests.support.arm import arm
+from tests.support.memory import FakeMemoryService
 from trellis import Deny, Harness, Hooks, Settings, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall
 from trellis.harness import budget
@@ -709,6 +710,142 @@ async def test_cancelling_a_turn_with_nothing_in_the_background_interrupts_it(
     assert after.status is RunStatus.SUCCESS and after.answer == "after"
     one, *_ = served(tmp_path)
     assert [turn["pid"] for turn in served(tmp_path)] == [one["pid"]] * 3
+
+
+# --------------------------------------------------------------------------- a busy conversation
+@pytest.mark.parametrize("mode", ["queue", "interrupt", "steer"])
+async def test_a_message_to_a_busy_conversation_whose_session_is_live(
+    harness: Harness, tmp_path: Path, mode: str
+) -> None:
+    """What a message does when its conversation's turn is under way (``mode``, as
+    ``docs/runs.md`` says it), in a conversation whose live session has background work: it
+    waits its turn (``queue``), takes the turn from the working run (``interrupt``) or is
+    given to it after its tool call (``steer``) — and in each case the session, its process
+    and its background task stay."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    @tool(side_effects="read")
+    async def hold() -> str:
+        """Wait for the record to come in."""
+        started.set()
+        await release.wait()
+        return "held"
+
+    scripts = [
+        [BACKGROUND, {"text": "started it"}],
+        [{"tool": "hold"}, {"text": "looked it up"}],
+        [{"text": "you asked: {heard}"}],
+    ]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id=f"busy-{mode}"), [hold])
+    await agent.run("research the market", user="u1", thread="t1")
+    live = live_of(agent)
+    assert live is not None and list(live.working) == ["t1"]
+    first = asyncio.create_task(agent.run("Look it up.", user="u1", thread="t1"))
+    await asyncio.wait_for(started.wait(), 10)
+    second = asyncio.create_task(agent.run("Also say hello.", user="u1", thread="t1", mode=mode))
+    await asyncio.sleep(0.3)  # it arrives while the first works
+    heard = "you asked: research the market | Look it up. | Also say hello."
+    if mode == "interrupt":
+        a = await asyncio.wait_for(first, 10)
+        assert a.status is RunStatus.CANCELLED  # the newer message took over
+        release.set()
+        b = await asyncio.wait_for(second, 10)
+        # the session went on from the cancelled turn: its "model" heard that question
+        assert b.status is RunStatus.SUCCESS and b.answer == heard, b.error
+    else:
+        assert not second.done()  # it waits, or the first run took it
+        release.set()
+        a, b = await asyncio.wait_for(asyncio.gather(first, second), 10)
+        assert a.status is RunStatus.SUCCESS and a.answer == "looked it up", a.error
+        assert b.status is RunStatus.SUCCESS and b.run_id != a.run_id, b.error
+        if mode == "queue":
+            assert b.answer == heard  # its own turn, after the first
+        else:
+            # given to the working turn after its tool call (the ``PostToolUse`` hook of the
+            # turn being served, through the session's relay): that turn's answer is its own
+            assert b.answer == a.answer and len(served(tmp_path)) == 2
+            added = (tmp_path / "cli.json.added").read_text()
+            assert "Also say hello." in added
+    turns = served(tmp_path)
+    assert len(turns) == (2 if mode == "steer" else 3)
+    assert len({turn["pid"] for turn in turns}) == 1 and alive(turns[0]["pid"])  # one process
+    assert live_of(agent) is live and not live.closed and list(live.working) == ["t1"]
+
+
+# --------------------------------------------------------------------------- memory
+#: What the memory service answers each turn of the chat below (``FakeMemoryService.context_text``).
+CONTEXTS = ("FIRST: the user is Ada.", "SECOND: the user prefers email.", "THIRD: the user moved.")
+
+
+def given(turn: dict[str, Any]) -> list[str]:
+    """Which of :data:`CONTEXTS` the CLI recorded its ``UserPromptSubmit`` hooks adding."""
+    return [text for text in CONTEXTS if text in turn["context"]]
+
+
+async def test_each_turn_of_a_live_session_is_given_its_own_memory_context(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """The process registers its ``UserPromptSubmit`` hook once, in the first turn, whose
+    context that hook closed over: the relay hands each prompt to the hook of the turn being
+    served, so the second turn's prompt carries the second turn's context — not the first's —
+    and the third's, after the session closed and a new process resumed it, its own."""
+    scripts = [[{"text": "one: {context}"}], [{"text": "two: {context}"}], [{"text": "three"}]]
+    agent = memory_harness.wrap(options(tmp_path, scripts), id="context")
+    memory_service.context_text = CONTEXTS[0]
+    first = await agent.run("who am I?", user="u1", thread="t1")
+    memory_service.context_text = CONTEXTS[1]
+    second = await agent.run("reach me how?", user="u1", thread="t1")
+    assert first.status is RunStatus.SUCCESS and second.status is RunStatus.SUCCESS, second.error
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"] and two["resume"] is None  # served by the live session
+    assert (given(one), given(two)) == ([CONTEXTS[0]], [CONTEXTS[1]])
+    assert CONTEXTS[1] in second.answer and CONTEXTS[0] not in second.answer  # what it read
+
+    adapter = agent.adapter
+    assert isinstance(adapter, ClaudeAdapter)
+    # the conversation's key carries the tenant the memory service's key says
+    key = conversation_key(str(memory_service.tenant), "u1", "t1")
+    assert adapter.live.get(key) is not None
+    await adapter.live.close(key, "it was idle")
+    await until(lambda: not alive(one["pid"]))
+    memory_service.context_text = CONTEXTS[2]
+    third = await agent.run("where do I live?", user="u1", thread="t1")
+    assert third.status is RunStatus.SUCCESS and third.answer == "three", third.error
+    *_, three = served(tmp_path)
+    assert three["pid"] != one["pid"] and three["resume"] == one["session"]  # the fallback
+    assert given(three) == [CONTEXTS[2]]
+
+
+async def test_with_memory_on_each_live_turn_asks_memory_first_and_is_saved_after(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Memory on, end to end: every turn of the conversation — the one that starts the
+    process and the ones it serves live — asks the memory service for its context before it
+    runs, with its own question, and its transcript is saved once it ended."""
+    scripts = [[{"text": "noted"}], [{"text": "4"}], [{"text": "yes"}]]
+    agent = memory_harness.wrap(options(tmp_path, scripts), id="remembered")
+    questions = ["the code is 4242", "what is 2+2?", "are you sure?"]
+    for number, question in enumerate(questions, start=1):
+        done = await agent.run(question, user="u1", thread="t1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        await memory_harness.writes.drain()
+        # asked once more, before this turn's prompt reached the CLI; saved once more, after
+        assert len(memory_service.named("context")) == number
+        assert len(memory_service.named("messages")) == number
+    assert len({turn["pid"] for turn in served(tmp_path)}) == 1 and open_sessions(agent) == 1
+    asked = [call.body["query"] for call in memory_service.named("context")]
+    assert asked == questions
+    saved = [
+        [(m["role"], m["content"]) for m in call.body["messages"]]
+        for call in memory_service.named("messages")
+    ]
+    assert saved == [
+        [("USER", "the code is 4242"), ("ASSISTANT", "noted")],
+        [("USER", "what is 2+2?"), ("ASSISTANT", "4")],
+        [("USER", "are you sure?"), ("ASSISTANT", "yes")],
+    ]
+    names = [call.name for call in memory_service.calls if call.name in ("context", "messages")]
+    assert names == ["context", "messages"] * 3  # each turn: asked, then saved
 
 
 # --------------------------------------------------------------------------- the tools
