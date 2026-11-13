@@ -658,7 +658,8 @@ async def test_workers_claim_pause_resume_and_survive_a_crash(tmp_path: Path) ->
 
         await h.writes.drain()
         assert await stats(scope, charge.spec.name, calls=1)
-        thread = await memory_scope(h, user=case.user, agent_id=agent.id, thread=handle.id)
+        # started with no thread: its transcript is kept in its own (the run's) thread
+        thread = await memory_scope(h, user=case.user, agent_id=agent.id, run=record)
         assert [m.content for m in await thread.history()][-1] == done.answer
 
 
@@ -727,7 +728,8 @@ async def test_a_schedule_fires_through_the_ticker_to_a_worker(tmp_path: Path) -
             async with _runs_client(h) as client:
                 await client.delete(f"/v1/schedules/{schedule.schedule_id}")
         await h.writes.drain()
-        thread = await memory_scope(h, user=case.user, agent_id=agent.id, thread=run.run_id)
+        # a fired run has no thread: its transcript is kept in its own (the run's) thread
+        thread = await memory_scope(h, user=case.user, agent_id=agent.id, run=run)
         assert [m.content for m in await thread.history()] == ["briefing", run.output]
 
 
