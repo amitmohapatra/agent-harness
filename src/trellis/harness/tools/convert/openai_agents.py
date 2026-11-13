@@ -27,7 +27,7 @@ from typing import Any, Final
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
-from trellis.contracts import ToolOutcome, ToolSpec
+from trellis.contracts import AgentPaused, ToolOutcome, ToolSpec
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
@@ -36,7 +36,16 @@ from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
-__all__ = ["FIX_ARGUMENTS", "arguments_of", "asked_again", "convert", "governed", "held"]
+__all__ = [
+    "FIX_ARGUMENTS",
+    "WaitsInside",
+    "arguments_of",
+    "asked_again",
+    "convert",
+    "governed",
+    "held",
+    "waits_inside",
+]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
@@ -47,6 +56,18 @@ AGENT_TOOL: Final = "_is_agent_tool"
 AGENT_OF_TOOL: Final = "_agent_instance"
 #: The attribute marking a ``needs_approval`` policy :func:`held` made (governance's gate).
 HELD: Final = "_trellis_held"
+
+
+class WaitsInside(AgentPaused):
+    """An agent tool's call whose own run the SDK holds paused on an approval of its own (a
+    ``needs_approval`` tool of the agent it runs): the call is not over — the SDK pauses the
+    calling run on that approval and, approved or rejected, makes the call again to continue
+    the run inside. To the bridge it is a pause (nothing journaled, nothing recorded: the
+    call made again runs); to the SDK, ``answer`` is what the call returned."""
+
+    def __init__(self, tool: str, answer: Any) -> None:
+        super().__init__(f"{tool} waits on an approval inside the agent it runs")
+        self.answer = answer
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -81,7 +102,10 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             return results.readable(repeat.output, tool.name)
 
         async def run(given: dict[str, Any]) -> Any:
-            return await original(context, json.dumps(given))
+            answer = await original(context, json.dumps(given))
+            if waits_inside(context):
+                raise WaitsInside(tool.name, answer)
+            return answer
 
         # as the run's tool set has it (an agent tool: a helper, read), else undeclared
         spec = runtime.native.get(tool.name) or ToolSpec(
@@ -89,7 +113,10 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             description=tool.description or tool.name,
             input_schema=tool.params_json_schema,
         )
-        outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
+        try:
+            outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
+        except WaitsInside as waiting:
+            return waiting.answer
         return results.readable(outcome.output, tool.name)
 
     setattr(invoke, MADE, True)
@@ -119,6 +146,20 @@ def held(tool: Any, spec: ToolSpec) -> Any:
 
     setattr(asks, HELD, True)
     return dataclasses.replace(tool, needs_approval=asks)
+
+
+def waits_inside(context: ToolContext[Any]) -> bool:
+    """Whether the SDK holds the run of the agent tool this call made (``Agent.as_tool``)
+    paused on an approval of its own — a ``needs_approval`` tool inside it: what the SDK
+    itself reads after the call to pause the calling run (its record of the call's pending
+    agent run, ``agents.agent_tool_state``). Never so for any other tool's call."""
+    from agents.agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
+
+    call = context.tool_call
+    held = call is not None and peek_agent_tool_run_result(
+        call, scope_id=get_agent_tool_state_scope(context)
+    )
+    return bool(getattr(held, "interruptions", None))
 
 
 async def asked_again(item: Any, context: Any) -> bool | None:
@@ -160,7 +201,8 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
     run while it works, ended with the agent's answer or its error, and what its own run spent
     — the SDK adds it to the calling run's usage — counted toward the run's budget. A pause
     inside leaves it to the next attempt, and stops the calling agent too (the SDK hands the
-    agent tool's pause back as an error text)."""
+    agent tool's pause back as an error text); so does an approval of the SDK's own inside it
+    (:func:`waits_inside`): the helper stays open, and the call made again ends it."""
     inner = getattr(tool, AGENT_OF_TOOL, None)
     model = getattr(inner, "model", None)
 
@@ -193,7 +235,8 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
             )
         if helpers.runtime.pending is not None:  # paused inside: the SDK told it as an error text
             raise Paused(helpers.runtime.pending.interrupt)
-        await helpers.end(key, output=text_of(answer))
+        if not waits_inside(context):
+            await helpers.end(key, output=text_of(answer))
         return answer
 
     return helped

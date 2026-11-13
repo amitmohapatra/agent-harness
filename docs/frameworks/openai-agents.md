@@ -68,9 +68,9 @@ them as written (`{"arguments": "<the text>"}`).
 Outside a harness run, a harness tool refuses to run (`ToolError`: "runs inside a Harness run"),
 which the SDK hands the model as the tool's error. `Runner.run`'s own arguments are
 `framework_options=`: on `h.wrap` for every run, on `run`/`stream`/`start` for one (over the
-agent's) — `max_turns`, `run_config`, `context`, `session`... The harness gives `Runner.run` the
-agent, its input and its hooks itself: `starting_agent`, `input` and `hooks` are refused, and so
-is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
+agent's) — `max_turns`, `run_config`, `context`, `session`, `hooks` (the SDK's `RunHooks`)... The
+harness gives `Runner.run` the agent and its input itself: `starting_agent` and `input` are
+refused, and so is a name `Runner.run` does not take ([configuration.md](../configuration.md#the-frameworks-own-run-options)).
 A call to a tool the model made up is an error the model reads (`Tool '<name>' not found.`) and
 the run goes on, as on every other adapter: the harness sets the SDK's own
 `RunConfig.tool_not_found_behavior="return_error_to_model"` on every run.
@@ -84,7 +84,7 @@ await agent.run(question, user="ada", framework_options={"max_turns": 25})
 
 A queued run's own (`start`, `schedule`) are JSON (`max_turns`, a `run_config` given as a dict);
 a `RunConfig` object goes on `h.wrap`, which every process builds again from code. The harness
-sets no `RunConfig` field of its own (its hooks are `Runner.run`'s `hooks=`), so yours is passed
+sets no `RunConfig` field of its own (its hooks are `Runner.run`'s `hooks=`, which call yours), so yours is passed
 as it is.
 
 A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(sandbox=...)`
@@ -112,13 +112,13 @@ agent = h.wrap(
 | Pauses | the SDK's saved `RunState` (a `needs_approval` tool) is kept with the run in agent-runs, so any worker resumes it |
 | Agent tools | an `Agent.as_tool` call is governed by the catalog by its tool name and is a child run (its record names the run, its turns go to memory); what its run spends counts toward the run's budget. The tool runs a governed copy of its agent: that agent's own tools and MCP servers are governed as the run's (an agent tool of a shape this SDK release does not build runs its agent as it is, said once) |
 | Repeated calls | a function call a model reply repeats (the same tool, the same arguments) runs once — the harness's tools and the agent's own `FunctionTool`s alike: each repeat reads that its result is the first one's ([reliability.md](../reliability.md#calls-made-at-once)); an MCP server's tool, which the SDK calls without the reply's call id, runs each time |
-| MCP servers | the agent's own `mcp_servers` (and its handed-off agents'): their tools are of the run's tool set as each server lists them, and each call goes through governance (the tool's annotations for its risk, the catalog's word over them), the journal and the record, on a copy of the server; a call that pauses the run stops the SDK's run |
+| MCP servers | the agent's own `mcp_servers` (and its handed-off agents'): their tools are of the run's tool set as each server lists them (its own `tool_filter` applied), and each call goes through governance (the tool's annotations for its risk, the catalog's word over them), the journal and the record, on a copy of the server; a call that pauses the run stops the SDK's run |
 | Hosted tools | file search, web search, the code interpreter, image generation, a hosted MCP server's tools: recorded as the run's tool calls with what they were asked, what they found and the step's duration; of the tool set and the catalog; run by the provider inside the model's step, so not approvable |
 | Records | the transcript (the question and every assistant message), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
 | Tool hints | from 30 tools of the run's own, the model is offered the hinted tools per turn (`FunctionTool.is_enabled`) — the memory tools, the hinted ones, every tool already used — your own function tools as the harness's (their own `is_enabled` asked first); handoffs and agent tools are never narrowed away |
 | Large results | a harness tool's result over 80,000 characters is kept in the run, the model reads a head-and-tail preview naming `/large_tool_results/<id>` and pages it with `read_file`, enabled once there is something to read ([tools.md](../tools.md#large-results)) |
 | Grounding, judges, tracing | as for every target ([evaluation.md](../evaluation.md), [observability.md](../observability.md)) |
-| Hooks | the tool and run hooks as for every target; a model call is the SDK's own: the agent's `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`), which run under `h.wrap` as they do without it ([hooks.md](../hooks.md)) |
+| Hooks | the tool and run hooks as for every target; a model call is the SDK's own: the agent's `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`) and the run's `RunHooks` (`framework_options={"hooks": ...}`), which run under `h.wrap` as they do without it ([hooks.md](../hooks.md)) |
 
 The answer is the run's `final_output` (a pydantic `output_type` is kept as JSON in the run
 record).
@@ -129,7 +129,7 @@ record).
 |---|---|
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
 | Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[Shell(), src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`; the default capabilities' `apply_patch` is a hosted tool a chat completions model refuses: [skills.md](../skills.md#the-openai-agents-sdks-sandboxagent)). A plain `Agent` has no skills slot (openai-agents 0.22): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
-| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`) |
+| Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`), or the run's `RunHooks` (`framework_options={"hooks": ...}`: every event the SDK reports, beside the harness's own) |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends with one last answer — the last agent called once more, told the limit is reached and given no tool, as `ReAct` at `max_steps` (the SDK's own `max_turns` error handler; your `error_handlers=` replaces it); a model looping on one call is told to answer (`bridge.STALLED`) and offered no tool on the turn after, so its reply ends the run before that limit |
 
 ## Native or ours: skills, prompts, sandbox
@@ -155,7 +155,7 @@ record).
 |---|---|
 | governance asks about a call (a `write`, an `irreversible` tool, one that declares nothing, a catalog `approve_when`) — a harness tool's or the agent's own `FunctionTool`'s | held at the SDK's own gate: each such tool gets a `needs_approval` policy that asks governance (only the tools the catalog may ask about at the run's start, `Governance.may_ask`; your own `needs_approval` is kept), so the SDK pauses before the call with governance's question and keeps its `RunState`; `approve` continues that state (the call runs, the model is not asked again; `remember="run"` covers the tool's later calls, the other calls of the same reply included), `reject` and `answer` are the SDK's rejection the model reads, `edit` as below |
 | `trellis.current().ask` in a tool, a hook's `Ask`, or a call governance starts asking about after the run began | the run re-runs from its input as the next attempt; the journal returns the calls already made and the answer given (the model is asked again) |
-| the SDK's own `function_tool(needs_approval=...)` | the SDK's `RunState` is kept as the run's checkpoint and continued: `approve` runs the call; `reject` (with `answer="why"`) and `answer` are the SDK's rejection with that message, which the model reads; `edit` rejects with a message telling the model to call again with the edited arguments — that call, with exactly those arguments, then runs approved in the same attempt ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
+| the SDK's own `function_tool(needs_approval=...)` (an MCP server's `require_approval`, a hosted MCP tool's approval request and a `ShellTool`'s `needs_approval` too; inside an agent called as a tool, the agent tool's child run waits with the run and is continued) | the SDK's `RunState` is kept as the run's checkpoint and continued: `approve` runs the call; `reject` (with `answer="why"`) and `answer` are the SDK's rejection with that message, which the model reads; `edit` rejects with a message telling the model to call again with the edited arguments — that call, with exactly those arguments, then runs approved in the same attempt ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)) |
 
 The SDK's `RunState` is JSON in the run's checkpoint, so a `needs_approval` pause can be answered
 from any process or worker. Several approvals in one turn are asked one at a time: the SDK keeps
@@ -206,7 +206,9 @@ after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
 * The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`), as are `conversation_id`, `previous_response_id` and `auto_previous_response_id` (OpenAI's servers keep the thread): with a durable one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. A `SQLiteSession(":memory:")` is kept in RAM only and lost on a restart: memory's window stays on, and a warning says so once (`trellis.harness.history`). Long-term memory stays the memory service's.
-* Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent has hooks.
+* Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent or the run has hooks of its own.
+* A tool's failure policy: a `function_tool` that raises is told to the model as the SDK formats it (its default text, or the tool's `failure_error_function`), and that call is recorded `ok` with the text as its output (the SDK formats it inside the tool's own invoke). `failure_error_function=None` does not end a harness run: every failure of a governed call is an error its model reads, recorded as one. A tool's own `timeout=` is the SDK's (its text to the model, or `ToolTimeoutError` with `timeout_behavior="raise_exception"`).
+* The tools the SDK runs itself on this machine (`ShellTool` with a local executor, `LocalShellTool`, `ApplyPatchTool`, `ComputerTool`, `CustomTool`) are not harness calls: nobody is asked unless the tool has its own `needs_approval` (which pauses the run as the SDK's approval, the person shown the call), and they are not recorded.
 * A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
   a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).
 

@@ -38,7 +38,7 @@ that still defines `before_model` or `after_model` is refused where it is given
 | plain function | the bridge | the pipeline | none: your code calls its model |
 | LangGraph, `create_agent` | the bridge | the pipeline | LangChain middleware: `create_agent(model, tools=..., middleware=[yours, ModelHooks()])`; a hand-built `StateGraph` calls its model itself |
 | Deep Agents | the bridge | the pipeline | the same: `create_deep_agent(..., middleware=[yours])` |
-| OpenAI Agents SDK | the bridge | the pipeline | the agent's own `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`), reported, not rewritten |
+| OpenAI Agents SDK | the bridge | the pipeline | the agent's own `AgentHooks` (`Agent(hooks=...)`: `on_llm_start`, `on_llm_end`) or the run's `RunHooks` (`framework_options={"hooks": ...}`), reported, not rewritten |
 | Claude Agent SDK | the bridge (its harness tools); a built-in tool (`Bash`, `Write`...): `before_tool` with governance, in the SDK's `PreToolUse` hook, before Claude Code's own permission check ([frameworks/claude-agent-sdk.md](frameworks/claude-agent-sdk.md)) | the pipeline | the CLI makes the model calls: its own hooks (`ClaudeAgentOptions(hooks=...)`), which have no model-call event |
 | Kimi Code | the bridge (its harness tools); a call of Kimi's own it asks permission for (`Bash`, `Write`...): `before_tool` with governance, in ACP's `session/request_permission` (a `Rewrite` ends the turn and Kimi calls again with the new arguments: [frameworks/kimi.md](frameworks/kimi.md#approvals-and-pauses)) | the pipeline | Kimi makes the model calls: its own hooks (`hooks` in its `config.toml`); ACP shows no model call |
 

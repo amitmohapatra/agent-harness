@@ -7,8 +7,9 @@
 * run: ``Runner.run``/``Runner.run_streamed`` on a clone of the agent carrying the harness
   tools next to its own (the caller's agent is never changed) — and every agent it can hand off
   to cloned too, recursively, each one's own tools governed (:func:`governed_agents`) — with
-  the harness's ``RunHooks`` always (``hooks.openai_agents``): the run's hooks around its model
-  calls, and every reply's usage counted toward the run's budget;
+  the harness's ``RunHooks`` always (``hooks.openai_agents``): every reply's usage counted
+  toward the run's budget, and the run's own ``RunHooks`` (``hooks=``, a framework option)
+  called as the SDK calls them;
 * history: a ``session``, ``conversation_id``, ``previous_response_id`` or
   ``auto_previous_response_id`` given as a run option is the framework keeping the thread
   (``history``): memory's window is left out, unless the session is kept in RAM only. Given
@@ -35,7 +36,7 @@
   with the edited arguments — and that call, when the model makes it with exactly those
   arguments, is approved in the same attempt instead of asking again;
 * framework options: keyword arguments of ``Runner.run``/``run_streamed`` (``max_turns``,
-  ``run_config``, ``context``...), except the ones the harness gives itself
+  ``run_config``, ``context``, ``hooks``...), except the ones the harness gives itself
   (:data:`OWN_ARGUMENTS`), which are refused; a call to a tool the model made up is an error
   the model reads (``RunConfig.tool_not_found_behavior``), as on every other adapter.
 """
@@ -93,8 +94,8 @@ from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 log = logging.getLogger("trellis.harness")
 
 #: ``Runner.run``'s arguments the harness gives itself: the agent (a clone carrying the harness
-#: tools), its input (with the memory context, or the resumed state) and the run's hooks.
-OWN_ARGUMENTS: Final = ("starting_agent", "input", "hooks")
+#: tools) and its input (with the memory context, or the resumed state).
+OWN_ARGUMENTS: Final = ("starting_agent", "input")
 #: ``Runner.run``'s arguments that keep the conversation on OpenAI's servers: the framework's
 #: thread, durable (``history``).
 SERVER_THREAD: Final = ("conversation_id", "previous_response_id", "auto_previous_response_id")
@@ -210,9 +211,9 @@ class OpenAIAgentsAdapter:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
+        agent = self._agent(target, run, helpers, await _gated(run))
         options = _options(run.runtime, target, native_input)
-        error: BaseException | None = None
+        hooks = _hooks(options.pop("hooks", None))
         try:
             given = await self._input(agent, native_input)
             result = await Runner.run(agent, given, hooks=hooks, **options)
@@ -221,18 +222,18 @@ class OpenAIAgentsAdapter:
                 resumed = None  # an edited call is approved once
                 result = await Runner.run(agent, state, hooks=hooks, **options)
         except BaseException as exc:
-            error = exc
+            await helpers.closed(exc)
             raise
-        finally:
-            await helpers.closed(error)
+        await _closed(helpers, result)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
 
         helpers = Helpers(run.runtime, self.name)
-        agent, hooks = self._agent(target, run, helpers, await _gated(run)), _hooks()
+        agent = self._agent(target, run, helpers, await _gated(run))
         options = _options(run.runtime, target, native_input)
+        hooks = _hooks(options.pop("hooks", None))
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         error: BaseException | None = None
@@ -253,7 +254,9 @@ class OpenAIAgentsAdapter:
             # it: its tool calls end (on the run's stream too) before the run does
             assert result.run_loop_task is not None  # set by run_streamed
             await asyncio.wait({result.run_loop_task})
-            await helpers.closed(error)
+            if error is not None:
+                await helpers.closed(error)
+        await _closed(helpers, result)
         yield Output(result)
 
     def extract(self, target: Any, output: Any) -> Extracted:
@@ -261,15 +264,12 @@ class OpenAIAgentsAdapter:
         pause = None
         if output.interruptions:
             item = output.interruptions[0]
-            # the SDK pauses on a call before reading its arguments: ones that are not a JSON
-            # object reach the person as the model wrote them
-            args = _arguments(item)
             pause = NativePause(
                 value=None,
                 native_id=item.call_id,
                 state=output.to_state().to_json(),
                 tool=item.name,
-                args=args if isinstance(args, dict) else {"arguments": item.arguments},
+                args=_asked_about(item),
             )
         return Extracted(answer=output.final_output, transcript=transcript, pause=pause)  # type: ignore[arg-type]
 
@@ -322,12 +322,19 @@ class OpenAIAgentsAdapter:
 
     def check_options(self, options: Mapping[str, Any]) -> None:
         from agents import Runner
+        from agents.lifecycle import RunHooksBase
 
         own = [key for key in options if key in OWN_ARGUMENTS]
         if own:
             raise ConfigurationError(
                 f"framework_options {', '.join(map(repr, own))}: the harness gives Runner.run "
-                "its agent, its input and its hooks itself (hooks go on h.wrap(hooks=))"
+                "its agent and its input itself"
+            )
+        hooks = options.get("hooks")
+        if hooks is not None and not isinstance(hooks, RunHooksBase):
+            raise ConfigurationError(
+                f"framework_options 'hooks': Runner.run's hooks are the SDK's RunHooks, not "
+                f"{type(hooks).__name__} (the harness's own hooks go on h.wrap(hooks=))"
             )
         taken = inspect.signature(Runner.run).parameters
         unknown = [key for key in options if key not in taken]
@@ -372,6 +379,15 @@ class OpenAIAgentsAdapter:
             else:
                 state.reject(item, rejection_message=native_input.message)
         return state
+
+
+async def _closed(helpers: Helpers, result: Any) -> None:
+    """The attempt's helpers ended with the SDK's run (``Helpers.closed``) — unless the run
+    paused on an approval of the SDK's own (its ``interruptions``): an agent tool waiting on
+    one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
+    which makes its call again, ends it."""
+    if not result.interruptions:
+        await helpers.closed(None)
 
 
 def governed_agents(
@@ -462,11 +478,11 @@ class GovernedServer:
     """An OpenAI agent's MCP server as the harness runs it: every call of its tools inside a
     run goes through the bridge (``tools.bridge.call``: hooks, the catalog's rules — its tools'
     annotations as they were listed for their risk —, a person when governance asks, the
-    journal, the record), the server itself as it was (connected, listed, cleaned up by its
-    owner). A call that pauses the run raises out of the SDK's run (``_failure_error_function``
-    ``None``: the SDK raises instead of telling the model), and a tool's own error is the
-    result the model reads, as before. Made by :meth:`of`, a subclass of the SDK's
-    ``MCPServer`` built when first needed."""
+    journal, the record), the server itself as it was (connected, listed, its prompts and
+    resources read, cleaned up by its owner). A call that pauses the run raises out of the
+    SDK's run (``_failure_error_function`` ``None``: the SDK raises instead of telling the
+    model), and a tool's own error is the result the model reads, as before. Made by
+    :meth:`of`, a subclass of the SDK's ``MCPServer`` built when first needed."""
 
     @staticmethod
     def of(server: Any) -> Any:
@@ -511,6 +527,21 @@ def _governed_server() -> type:
 
         async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
             return await self._inner.get_prompt(name, arguments)
+
+        # what the SDK's base class answers itself (no tools cached, no resources): the
+        # inner server's own
+        @property
+        def cached_tools(self) -> Any:
+            return self._inner.cached_tools
+
+        async def list_resources(self, cursor: str | None = None) -> Any:
+            return await self._inner.list_resources(cursor)
+
+        async def list_resource_templates(self, cursor: str | None = None) -> Any:
+            return await self._inner.list_resource_templates(cursor)
+
+        async def read_resource(self, uri: str) -> Any:
+            return await self._inner.read_resource(uri)
 
         async def call_tool(
             self, tool_name: str, arguments: dict[str, Any] | None, meta: Any = None
@@ -737,7 +768,7 @@ def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
                 bare,
                 [*given.run_data.history, told],
                 max_turns=1,
-                hooks=_hooks(),
+                hooks=_hooks(options.get("hooks")),
                 run_config=options.get("run_config"),
                 context=given.context.context,
             )
@@ -953,12 +984,14 @@ def _thread_store(options: Mapping[str, Any]) -> Any:
     return ServerThread(server) if server is not None else MEMORY_THREAD
 
 
-def _hooks() -> Any:
+def _hooks(theirs: Any = None) -> Any:
     """The harness's ``RunHooks``, always: every model call watched for a stall, its hosted
-    tool calls recorded, and its usage counted toward the run's budget (``budget.py``)."""
+    tool calls recorded, and its usage counted toward the run's budget (``budget.py``) — and
+    the run's own ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with
+    everything the SDK reports."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
-    return ModelHooks()
+    return ModelHooks(theirs)
 
 
 async def _deltas(result: Any) -> AsyncIterator[str]:
@@ -1055,6 +1088,21 @@ def _function_output(raw: Any) -> str | None:
 
 def _output(output: Any) -> str:
     return output if isinstance(output, str) else json.dumps(output, default=str)
+
+
+def _asked_about(item: Any) -> dict[str, Any]:
+    """What a person is shown of the call the SDK waits on (its ``ToolApprovalItem``): its
+    arguments — the SDK pauses on a call before reading them, so ones that are not a JSON
+    object reach the person as the model wrote them — and, for a call that has none of that
+    name (a shell tool's commands, a patch's operation: the SDK's own tools), the call itself
+    as the model made it."""
+    if item.arguments is None:
+        raw = item.raw_item
+        return (
+            dict(raw) if isinstance(raw, dict) else raw.model_dump(mode="json", exclude_none=True)
+        )
+    args = _arguments(item)
+    return args if isinstance(args, dict) else {"arguments": item.arguments}
 
 
 def _arguments(item: Any) -> Any:
