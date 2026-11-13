@@ -64,6 +64,7 @@ import contextlib
 import contextvars
 import dataclasses
 import logging
+import time
 from collections import Counter, deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, Final
@@ -214,6 +215,8 @@ class Background:
         self.run_id: str = helper.run_id
         self.parent_run_id: str = helper.parent_run_id
         self.name: str = helper.name
+        #: when its ``Agent`` call started it (``time.monotonic``)
+        self.began: float = helper.began
         self.agent = turn.runtime.agent
         self.tenant = turn.runtime.tenant
         #: the framework options of the turn that started it: what the process has
@@ -270,6 +273,24 @@ class Background:
             self.over = True
             self._woken()
             self.session._over(self)
+            await self._finished()
+
+    async def _finished(self) -> None:
+        """The run's end on the task tree of the run that started it, while that run is
+        still under way (``helper_finished``, as a subagent that ends with its call says
+        it); once it has ended there is no stream of it to say so on."""
+        parent = self.agent.running.get(self.parent_run_id)
+        record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
+        if parent is None or record is None or not record.status.final:
+            return
+        parent.events.helper(
+            "finished",
+            run_id=self.run_id,
+            agent_id=self.name,
+            framework=self.agent.adapter.name,
+            status=record.status.value.lower(),
+            seconds=round(time.monotonic() - self.began, 3),
+        )
 
     async def _answered(self) -> InterruptResolution | None:
         """The person's answer to the question the run is paused on (``None``: the run ended

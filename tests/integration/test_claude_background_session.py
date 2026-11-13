@@ -403,34 +403,61 @@ async def test_what_a_background_run_spent_between_turns_is_on_it_and_not_on_the
     }
 
 
-async def test_today_the_options_own_budget_is_spent_by_the_turns_of_a_live_session_together(
-    harness: Harness, tmp_path: Path
+async def test_the_options_own_budget_stays_a_querys_each_turn_in_a_process_of_its_own(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Today: ``ClaudeAgentOptions(max_budget_usd=)`` is the CLI's own cap on what a process
-    spends. A turn's own process started from nothing, so every turn had the cap to itself; a
-    conversation's live process goes on counting, and the turns reach the cap together. The
-    turn that passes it is answered "Reached maximum budget"; the harness reads that as a
-    session that could not be continued and asks again in a new session, which holds nothing
-    of the conversation (and what worked in the old one's background is gone with it). What
-    a user needs: the cap a team set for a query stays a query's. The stand-in counts as the
-    bundled CLI reports cost (the process's running total): whether the real CLI's cap
-    counts so is a live run's to show."""
+    """``ClaudeAgentOptions(max_budget_usd=)`` is the CLI's cap on what one process spends
+    (the bundled CLI, driven against a scripted model: in a process that serves several
+    turns the turn that passes the cap ends ``error_max_budget_usd``, and so does every
+    turn after it; a process that resumes a session starts counting anew). The SDK has no
+    way to give a running process its cap back, so options with one are not kept between
+    turns: each turn runs in a process of its own that resumes the session, as before — the
+    cap a team set for a query stays a query's, and the conversation goes on. Each turn is
+    charged its own cost, though a resumed session's result carries the session's."""
+    costs: list[float] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (costs.append(kw["cost"]), account(run, **kw))
+    )
     scripts = [[{"text": "you asked: {heard}"}]]
     target = options(
         tmp_path, scripts, model="m", max_budget_usd=1.2, env={"FAKE_CLAUDE_COST": "0.5"}
     )
     agent = harness.wrap(target, id="capped")
-    for number in (1, 2, 3):  # a step each, at 0.5: 1.5 in all, none above 1.2 by itself
+    for number in (1, 2, 3, 4):  # a step each, at 0.5: 2.0 in all, none above 1.2 by itself
         done = await agent.run(f"turn {number}", user="u1", thread="t1")
         assert done.status is RunStatus.SUCCESS, done.error
-    assert done.answer == "you asked: turn 1 | turn 2 | turn 3"
-    events = [e async for e in agent.stream("turn 4", user="u1", thread="t1")]
-    [said] = warned(events)
-    assert "was not resumed (Reached maximum budget" in said
-    one, *_, capped, again = served(tmp_path)
-    assert capped["pid"] == one["pid"] and again["pid"] != one["pid"]
-    assert again["resume"] is None and again["session"] != one["session"]  # a new session
-    assert events[-1].data["result"] == "you asked: turn 4"  # with none of the conversation
+    assert done.answer == "you asked: turn 1 | turn 2 | turn 3 | turn 4"
+    one, *later = served(tmp_path)
+    assert len({turn["pid"] for turn in (one, *later)}) == 4 and open_sessions(agent) == 0
+    assert [turn["resume"] for turn in later] == [one["session"]] * 3
+    assert costs == [0.5, 0.5, 0.5, 0.5]
+
+
+async def test_a_live_session_that_resumes_a_session_charges_its_first_turn_its_own_cost(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A process that resumes a session reports the session's cost, the turns before it
+    included: the turn it serves first is charged what the cost grew by since the
+    conversation's last turn, in the process before."""
+    costs: list[float] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (costs.append(kw["cost"]), account(run, **kw))
+    )
+    scripts = [[{"text": "ok"}, {"text": "ok"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = harness.wrap(target, id="resumed")
+    await agent.run("one", user="u1", thread="t1")
+    adapter = agent.adapter
+    assert isinstance(adapter, ClaudeAdapter)
+    await adapter.live.close(conversation_key("default", "u1", "t1"), "a test closed it")
+    await agent.run("two", user="u1", thread="t1")
+    await agent.run("three", user="u1", thread="t1")
+    one, two, three = served(tmp_path)
+    assert two["pid"] != one["pid"] and two["resume"] == one["session"]
+    assert three["pid"] == two["pid"]
+    assert costs == [1.0, 0.5, 0.5]
 
 
 # --------------------------------------------------------------------------- no live session
@@ -866,6 +893,37 @@ async def test_a_background_subagents_run_stays_open_across_turns_and_ends_with_
     await until(lambda: child.run_id not in agent.running)
     live = live_of(agent)
     assert live is not None and not live.background and not live.closed
+
+
+async def test_a_background_subagent_that_ends_while_its_turn_still_runs_says_so_on_its_stream(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn that started a background subagent is still being answered when its task
+    ends: the child run's end is on that turn's task tree (``helper_finished``), as a
+    subagent that ends with its call says it. Once the turn has ended there is no stream
+    of it left to say so on (the child run's own stream has its end)."""
+    # the task's run waits this long for the session's next result (what it cost) at most
+    monkeypatch.setattr(claude_live, "SETTLE_SECONDS", 0.2)
+    scripts = [[BACKGROUND, {"stall": 30}, {"text": "never said"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="told")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("research", user="u1", thread="t1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    run_id = await launched(agent, seen)
+    child = await child_of(harness, run_id)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    await until(lambda: any(e.data.get("name") == "helper_finished" for e in seen))
+    await agent.cancel(run_id)
+    await running
+    await following
+    [ended] = [e.data for e in events if e.data.get("name") == "helper_finished"]
+    assert (ended["run_id"], ended["agent_id"]) == (child.run_id, "researcher")
+    assert (ended["status"], ended["framework"]) == ("success", "claude_agent_sdk")
 
 
 @pytest.mark.parametrize(

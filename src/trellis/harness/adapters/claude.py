@@ -15,7 +15,8 @@
   and the tool catalog's rules — and leaves the rest to Claude Code: its permission mode, its
   rules (``allowed_tools``, its settings), and when it would ask its user, ``can_use_tool``.
   That callback answers as the harness's: the team's own ``can_use_tool`` when it has one;
-  else a call that only reads (a read tool, or a shell command ``governance.shell.read_only``
+  else a call a person already answered about in the hook runs (one call, one question),
+  a call that only reads (a read tool, or a shell command ``governance.shell.read_only``
   reads as read-only) runs, and any other asks a person (``bridge.asked``);
 * records: every call Claude runs itself (its built-ins, its own MCP servers' tools, a subagent's
   calls) is recorded as the run's tool calls once it ran — its result or its error, and how long
@@ -98,14 +99,14 @@ from trellis.harness.adapters.base import (
     helper,
     unique,
 )
-from trellis.harness.bounded import SAID_ONCE, LRUSet
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import JournalSessions, session_store, with_context
 from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
 from trellis.harness.bridges.helpers import STOPPED, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending
+from trellis.harness.journal import Pending, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -128,7 +129,12 @@ if TYPE_CHECKING:
 #: may do anything its command does: a write. Stopping a background task (``TaskStop``, named
 #: ``KillShell`` before) is a write. Tools that only list or look up (``ListAgents``,
 #: ``ListConnectors``, ``ReadNotifications``, ``ReportFindings``, ``SearchMcpRegistry``,
-#: ``SuggestConnectors``: each read-only by the bundled CLI's own word) are reads. Any other
+#: ``SuggestConnectors``: each read-only by the bundled CLI's own word) are reads. So are the
+#: tools Claude keeps its own work with, which change nothing outside its session and which
+#: the bundled CLI runs without asking its user: its task list (``TaskCreate``, ``TaskGet``,
+#: ``TaskList``, ``TaskUpdate``: ``TodoWrite``'s successors), entering plan mode
+#: (``EnterPlanMode``), and the tool it hands a structured answer to (``StructuredOutput``,
+#: with ``output_format``: asked about, a run would pause on its own answer). Any other
 #: tool the CLI asks about has said nothing of what it does: a person approves each call (its
 #: risk in the catalog says more).
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
@@ -143,6 +149,12 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "Task": "read",
     "Skill": "read",
     "ExitPlanMode": "read",
+    "EnterPlanMode": "read",
+    "TaskCreate": "read",
+    "TaskGet": "read",
+    "TaskList": "read",
+    "TaskUpdate": "read",
+    "StructuredOutput": "read",
     "AskUserQuestion": "read",
     "BashOutput": "read",
     "ListMcpResourcesTool": "read",
@@ -301,6 +313,9 @@ class ClaudeAdapter:
         self.seen: LRUSet[str] = LRUSet(maxsize=SEEN_KEPT)
         #: each conversation's CLI process, kept between its turns (``bridges.claude_live``)
         self.live = LiveSessions()
+        #: what each session cost so far, as its last result charged here carried it (the
+        #: most recent): a process that resumes one reports the session's cost, not its own
+        self.costs: LRU[str, float] = LRU()
 
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
@@ -576,10 +591,11 @@ class ClaudeAdapter:
         # a conversation's turn is served by its live session (``bridges.claude_live``); a run
         # with no conversation of its own, a sub-agent's, the one last answer, and options
         # whose parts are a process's alone (a plugin written for the run; an in-process MCP
-        # server of the team's, whose tools run in the context of the process's first turn)
+        # server of the team's, whose tools run in the context of the process's first turn;
+        # a budget of the options' own, which the CLI counts for a process)
         # run in a process of their own, as ever
         key = runtime.conversation if _converses(runtime) else None
-        kept = key is not None and not last and not written and not _serves(target)
+        kept = key is not None and not last and not written and not _own_process(target)
         context = None if last else native_input.context
         options = _options(target, context, run, session, steps, kept=kept)
         if last:
@@ -589,7 +605,7 @@ class ClaudeAdapter:
         first = last or session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
-        spending = Spending(runtime, options)
+        spending = Spending(runtime, options, self.costs, session)
         live: LiveSession | None = None
         try:
             if kept:
@@ -612,7 +628,7 @@ class ClaudeAdapter:
                     if isinstance(found, str):
                         runtime.replay.journal.session = found
                     if isinstance(message, ResultMessage):
-                        spending.ended(message, shared=live is not None)
+                        spending.ended(message, live)
                     elif isinstance(message, AssistantMessage):
                         spending.replied(message)
                     yield message
@@ -655,6 +671,10 @@ class ClaudeAdapter:
         if found is None:
             transcripts = runtime.replay.journal.transcripts
             found = await self.live.open(key, shape, options, transcripts)
+            if found is not None and session is not None:
+                # a process that resumes a session reports the session's cost: what its
+                # first turn is charged counts from what the session cost before
+                found.billed = self.costs.get(session) or 0.0
         _said(self.live, runtime)
         if found is not None and unsent:
             await found.asks(runtime)
@@ -667,11 +687,14 @@ def _converses(runtime: Runtime) -> bool:
     return runtime.parent is None and runtime.conversation != runtime.run_id
 
 
-def _serves(options: Any) -> bool:
-    """Whether the options carry an in-process MCP server of the team's own."""
+def _own_process(options: Any) -> bool:
+    """Whether the options need a process for every query: they carry an in-process MCP
+    server of the team's own (its tools run in the context of the process's first turn), or
+    a budget of their own (``max_budget_usd`` caps what a process spends, and the SDK cannot
+    give a running one its cap back: the cap a team set for a query stays a query's)."""
     from trellis.harness.tools.convert.claude import SERVER
 
-    return any(
+    return options.max_budget_usd is not None or any(
         name != SERVER and isinstance(config, Mapping) and config.get("type") == "sdk"
         for name, config in configured_servers(options.mcp_servers).items()
     )
@@ -867,22 +890,34 @@ def _result_text(content: Any) -> str:
 
 class Spending:
     """What one query spends, charged to its run as its results come. A result's usage is
-    the main agent's own for that turn, and its cost the process's running total, the
-    subagents' included (the bundled CLI's results, driven against a scripted model): so each
-    reply's usage is kept by its message id until a result counts it — the main agent's are
-    in the result's usage, its subagents' are counted with it — and a process of the query's
-    own, which gives a result for the turn and one for every turn the session ran for a
-    background task, is charged what its cost grew by each time."""
+    the main agent's own for that turn, and its cost its session's running total — the
+    subagents' included, and what the session cost before the process that resumed it (the
+    bundled CLI's results, driven against a scripted model). So each reply's usage is kept
+    by its message id until a result counts it — the main agent's are in the result's
+    usage, its subagents' are counted with it — and a result is charged what the session's
+    cost grew by since the last one charged: this query's (it gives one for the turn and
+    one for every turn the session ran for a background task), an earlier query's of the
+    run (the journal's ``session_cost``), or the conversation's last turn's in this process
+    (``ClaudeAdapter.costs``)."""
 
-    __slots__ = ("billed", "helped", "options", "own", "runtime")
+    __slots__ = ("billed", "costs", "helped", "journal", "options", "own", "runtime")
 
-    def __init__(self, runtime: Runtime, options: Any) -> None:
+    def __init__(
+        self, runtime: Runtime, options: Any, costs: LRU[str, float], session: str | None
+    ) -> None:
         self.runtime = runtime
         self.options = options
+        self.costs = costs
+        self.journal = runtime.replay.journal
         self.own: dict[str, dict[str, Any]] = {}
         self.helped: dict[str, dict[str, Any]] = {}
-        #: the process's running cost, as its last result carried it
-        self.billed = 0.0
+        if session is None:  # a new session: nothing was spent in it
+            self.journal.session_cost = None
+        known = self.journal.session_cost
+        if known is None and session is not None:
+            known = costs.get(session)
+        #: the session's running cost, as the last result charged carried it
+        self.billed = known or 0.0
 
     def replied(self, message: Any) -> None:
         """An assistant message: its reply's usage (one reply comes as a message a block)."""
@@ -890,12 +925,17 @@ class Spending:
             whose = self.own if message.parent_tool_use_id is None else self.helped
             whose[message.message_id] = message.usage
 
-    def ended(self, result: Any, *, shared: bool) -> None:
-        """A turn's result. ``shared``: a live session's, which comes with what its turn is
-        charged (``claude_live.LiveSession.charged``)."""
+    def ended(self, result: Any, live: LiveSession | None) -> None:
+        """A turn's result. One of a ``live`` session comes with what its turn is charged
+        (``claude_live.LiveSession.charged``, which keeps the running cost)."""
         cost = result.total_cost_usd
-        if not shared and cost is not None:
+        if live is not None:
+            self.billed = live.billed
+        elif cost is not None:
             cost, self.billed = max(0.0, cost - self.billed), cost
+        self.journal.session_cost = self.billed
+        if result.session_id:
+            self.costs[result.session_id] = self.billed
         _spent(self.runtime, self.options, result, self.helped.values(), cost=cost)
         self.own.clear()
         self.helped.clear()
@@ -962,10 +1002,14 @@ class Steps:
     ``PreToolUse`` to its ``PostToolUse``: a tool's own time is not a stalled model); and the
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records)."""
 
-    __slots__ = ("adapter", "calls", "closed", "runtime")
+    __slots__ = ("adapter", "answered", "calls", "closed", "runtime")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
+        #: the calls a person answered about before they ran (governance's question, a
+        #: hook's ``Ask``: ``PreToolUse``), by Claude's id: Claude Code's own question about
+        #: one (``can_use_tool``) is not asked too — one call, one question
+        self.answered: set[str] = set()
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
@@ -1034,6 +1078,10 @@ def _options(
     changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
+        if not options.fork_session:
+            # the session the options named to start (``session_id``) is the one resumed:
+            # Claude Code takes both only to fork
+            changes["session_id"] = None
     return dataclasses.replace(options, **changes)
 
 
@@ -1145,12 +1193,16 @@ def _governance(steps: Steps) -> Any:
         if name.startswith(f"mcp__{SERVER}__"):
             steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
+        approval = content_key("approve", name, args)
+        read = runtime.replay.taken(approval)
         try:
             decided = await bridge.permitted(_spec(runtime, name), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
         if isinstance(decided, ToolOutcome):
             return _decided("deny", str(decided.output))
+        if runtime.replay.taken(approval) > read:  # a person answered about this call
+            steps.answered.add(call_id)
         if name in SUBAGENT_TOOLS:
             ran = await _briefed(runtime, call_id, name, decided.args)
             steps.started(call_id, name, ran)
@@ -1209,7 +1261,11 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
                 verdict = PermissionResultAllow(updated_input=await _answered(runtime, args))
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
-        elif spec.side_effects == "read" or shell.read_only(name, args, moving=moving()):
+        elif (
+            this in steps.answered
+            or spec.side_effects == "read"
+            or shell.read_only(name, args, moving=moving())
+        ):  # a person approved this call (``PreToolUse``)
             verdict = PermissionResultAllow()
         else:
             try:

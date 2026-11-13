@@ -86,6 +86,7 @@ were seen from the bundled CLI driven against a scripted model; no real model wa
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -106,6 +107,9 @@ PAUSED_PROMPT = "This task was paused"
 #: How the harness begins the prompt that asks for one last answer at the turn limit
 #: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
 LIMIT_PROMPT = "This turn has reached its limit"
+#: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
+#: without asking, and the turn's result carries what it was given (``structured_output``).
+STRUCTURED = "StructuredOutput"
 #: The slash command that compacts the conversation (its ``PreCompact`` hooks run).
 COMPACT = "/compact"
 #: The tools ``--permission-mode acceptEdits`` lets run without asking.
@@ -193,6 +197,12 @@ class Cli:
         self.in_turn = False
         #: how many of those steps subagents took: a result's usage is the main thread's own
         self.helped = 0
+        #: the structured answer the turn under way gave (:data:`STRUCTURED`)
+        self.structured: dict[str, Any] | None = None
+        #: the steps the session took before this process resumed it: a result's cost is
+        #: the session's (the bundled CLI's resumed query reports the cost of the turns
+        #: before it too), while ``--max-budget-usd`` caps what this process spends
+        self.before = 0
 
     def aside(self, message: dict[str, Any]) -> None:
         """A message that came while another was waited for: a prompt is queued, a control
@@ -579,6 +589,7 @@ class Cli:
             not ask
             and (
                 name in allowed
+                or name == STRUCTURED
                 or mode == "bypassPermissions"
                 or (mode == "acceptEdits" and name in EDITS)
             )
@@ -645,6 +656,7 @@ class Cli:
             return
         if first:
             self.heard = prompts(session)
+            self.before = spent_before(session) if resumed is not None else 0
         earlier = list(self.heard)
         if not str(prompt).startswith((PAUSED_PROMPT, LIMIT_PROMPT)):
             self.heard.append(str(prompt))
@@ -691,7 +703,22 @@ class Cli:
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""
         own = self.steps - self.helped - self.began
-        return result(session, error, steps=own, total=self.steps, **fields)
+        self.kept()
+        if "--session-mirror" in sys.argv:  # the transcript holds what the session cost
+            entry = {"type": "progress", "uuid": f"{session}-spent-{self.before + self.steps}"}
+            path = projects() / "fake-project" / f"{session}.jsonl"
+            mirrored_ = {**entry, "spent": self.before + self.steps}
+            send({"type": "transcript_mirror", "filePath": str(path), "entries": [mirrored_]})
+        structured, self.structured = self.structured, None
+        if structured is not None and error is None:
+            fields = {**fields, "last": json.dumps(structured), "structured": structured}
+        return result(session, error, steps=own, total=self.before + self.steps, **fields)
+
+    def kept(self) -> None:
+        """What the session cost so far, kept with it (also as the process ends: a query
+        that paused has no result)."""
+        if self.session is not None:
+            spent_file(self.session).write_text(str(self.before + self.steps))
 
     def recorded(
         self, session: str, prompt: Any, context: str, earlier: list[str], *, first: bool
@@ -724,6 +751,8 @@ class Cli:
                         "max_turns": argument("--max-turns"),
                         "plugins": plugins(),
                         "argv": sys.argv[1:],
+                        "cwd": os.getcwd(),
+                        "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
                         "initialize": self.initialized,
                     },
                     handle,
@@ -974,6 +1003,8 @@ class Cli:
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
         ran = permission.get("updatedInput", args)
+        if allowed and builtin == STRUCTURED:
+            self.structured = ran
         if allowed and builtin:
             with open(os.environ["FAKE_CLAUDE_BUILTINS"], "a") as log:
                 log.write(json.dumps({"tool": builtin, "args": ran}) + "\n")
@@ -1006,6 +1037,21 @@ def made_again(script: list[dict[str, Any]], done: int) -> list[dict[str, Any]]:
         {**item, "args": item["again"]} for item in script[done : done + 1] if "again" in item
     ]
     return [*script[:done], *worded, *script[done + len(worded) :]]
+
+
+def spent_file(session: str) -> Path:
+    """Where the steps a session took so far are kept (with the session, on this machine)."""
+    SESSIONS.mkdir(parents=True, exist_ok=True)
+    return SESSIONS / f"{session}.spent"
+
+
+def spent_before(session: str) -> int:
+    """The steps the session took before this process: as this machine keeps them, else as
+    the transcript the SDK materialised says."""
+    kept = spent_file(session)
+    if kept.exists():
+        return int(kept.read_text())
+    return max((int(e.get("spent", 0)) for e in materialised(session) or ()), default=0)
 
 
 def projects() -> Path:
@@ -1125,6 +1171,7 @@ def result(
     steps: int = 0,
     stop_reason: str = "end_turn",
     total: int | None = None,
+    structured: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The query's end: its answer, or — ``error`` — what the real CLI says when it cannot run
     it (``num_turns`` 0), or stops it (``subtype``: ``error_max_turns`` past ``--max-turns``)."""
@@ -1143,6 +1190,8 @@ def result(
     }
     if error is not None:
         ended["errors"] = [error]
+    if structured is not None:
+        ended["structured_output"] = structured
     return ended
 
 
@@ -1161,10 +1210,8 @@ def acknowledge(message: dict[str, Any]) -> None:
     )
 
 
-def main() -> None:
-    if "-v" in sys.argv or "--version" in sys.argv:
-        print("9.9.9 (Claude Code)")
-        return
+def refused() -> None:
+    """The flags the bundled CLI refuses to start with, in its own words (and its exit)."""
     named, forks = argument("--session-id"), "--fork-session" in sys.argv
     if named and not forks and (argument("--resume") or "--continue" in sys.argv):
         # the bundled CLI's own words, and its exit
@@ -1177,7 +1224,17 @@ def main() -> None:
     if named and not forks and (SESSIONS / f"{named}.json").exists():
         print(f"Error: Session ID {named} is already in use.", file=sys.stderr)
         sys.exit(1)
+
+
+def main() -> None:
+    if "-v" in sys.argv or "--version" in sys.argv:
+        print("9.9.9 (Claude Code)")
+        return
+    refused()
+    if os.environ.get("FAKE_CLAUDE_STDERR"):  # what the options' ``stderr`` callback reads
+        print(os.environ["FAKE_CLAUDE_STDERR"], file=sys.stderr, flush=True)
     cli = Cli()
+    atexit.register(cli.kept)
     if os.environ.get("FAKE_CLAUDE_PID"):  # which process this is, before any turn
         Path(os.environ["FAKE_CLAUDE_PID"]).write_text(str(os.getpid()))
     time.sleep(float(os.environ.get("FAKE_CLAUDE_STARTS_AFTER") or 0))  # a slow start
