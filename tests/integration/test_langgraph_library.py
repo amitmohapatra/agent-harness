@@ -357,18 +357,38 @@ async def test_a_nodes_retry_policy_runs_it_again_with_the_calls_it_makes(harnes
     assert (await state_of(harness, graph, "t"))["out"] == "1 after 2 tries"
 
 
-async def test_today_a_node_run_a_third_time_has_its_same_call_refused_as_a_stall(
+async def test_a_node_its_retry_policy_runs_again_and_again_is_no_model_repeating_itself(
     harness: Harness,
 ) -> None:
-    """The harness stops a call made ``MAX_REPEATS`` times in a row with the same arguments (a
-    model looping). A node its ``RetryPolicy`` runs that many times makes its call that many
-    times too: the last is refused, and the node is handed the refusal as the call's result."""
+    """The harness stops a call made ``MAX_REPEATS`` times in a row with the same arguments: a
+    model looping. A node its ``RetryPolicy`` runs that many times makes its call each time —
+    the graph's own retry of one decision, not the model repeating itself: each call is made."""
     tries: list[Any] = []
-    graph = retried(MAX_REPEATS, tries)
+    graph = retried(MAX_REPEATS + 1, tries)
     result = await harness.wrap(graph, id="flaky").run({}, user="u", thread="t")
     assert result.status is RunStatus.SUCCESS
-    assert ran == ["count a"] * (MAX_REPEATS - 1)
-    assert tries[-1] == STALLED.format(tool="count", times=MAX_REPEATS)
+    assert tries == [1] * (MAX_REPEATS + 1)
+    assert ran == ["count a"] * (MAX_REPEATS + 1)
+
+
+async def test_a_model_calling_the_same_tool_step_after_step_is_still_stopped(
+    harness: Harness,
+) -> None:
+    """Each model step's call is a decision of its own: the same call step after step is the
+    model looping, refused from the ``MAX_REPEATS``-th, and the model is told to answer."""
+
+    @lc_tool
+    def look(sku: str) -> str:
+        """Look a SKU up."""
+        ran.append(f"look {sku}")
+        return "not found"
+
+    look.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(turns=[("look", {"sku": "a"})] * MAX_REPEATS + ["stopped"])
+    result = await harness.wrap(by_hand(model, [look]), id="loop").run("look a up", user="u")
+    assert result.answer == "stopped"
+    assert ran == ["look a"] * (MAX_REPEATS - 1)
+    assert STALLED.format(tool="look", times=MAX_REPEATS) in str(model.seen[-1][-1].content)
 
 
 async def test_a_nodes_cache_policy_answers_the_same_input_from_the_cache(harness: Harness) -> None:

@@ -461,7 +461,6 @@ async def governed_call(
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
     made = Tool(spec, run, confined=framework_made(own))  # Deep Agents' files: its own
-    _tried_again(runtime, call)
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
@@ -579,18 +578,6 @@ def _under_way() -> _Calling:
     """The tool node's call under way — or, where a wrapper of the graph's ran the call
     outside the node's context (a thread, a context of its own), one nothing else reads."""
     return _CALLING.get() or _Calling()
-
-
-def _tried_again(runtime: Runtime, call: Mapping[str, Any]) -> None:
-    """A try of the tool node's call under way: a second one — a wrapper of the graph's making
-    the call again after its error (LangChain's ``ToolRetryMiddleware``) — is the same call
-    tried again, not a model repeating itself, so it does not count toward the run's stall
-    (``bridge.MAX_REPEATS``, counted by the bridge at each call it is given)."""
-    calling = _under_way()
-    calling.tries += 1
-    key, times = runtime.repeating
-    if calling.tries > 1 and key == content_key("call", call["name"], call["args"]):
-        runtime.repeating = (key, max(times - 1, 0))
 
 
 def _failed(error: Exception, message: ToolMessage) -> NoReturn:

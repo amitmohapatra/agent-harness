@@ -115,6 +115,9 @@ RUN_METADATA: Final = "trellis_run_id"
 #: The ``configurable`` key under which LangGraph hands a task, by namespace, the checkpoint
 #: its step started from (``CONFIG_KEY_CHECKPOINT_MAP``; the root graph's under ``""``).
 CHECKPOINT_MAP: Final = "checkpoint_map"
+#: The ``configurable`` key under which LangGraph hands a task its id (``CONFIG_KEY_TASK_ID``):
+#: the same for each run of the task its ``RetryPolicy`` makes.
+TASK_ID: Final = "__pregel_task_id"
 #: The result a new turn gives a call its thread's last message holds with none: the run that
 #: made it was stopped (a newer message interrupted it, its time ran out) or left waiting for
 #: a person's approval, and a provider refuses a call with no result — the thread could not go
@@ -377,6 +380,7 @@ class LangGraphAdapter:
         """The run's config: its framework options (less its run arguments) and the harness's
         thread id (theirs names none: ``check_options``)."""
         runtime = run.runtime
+        runtime.deciding = _task
         if _checkpointed(target):
             from langgraph.types import interrupt
 
@@ -640,6 +644,19 @@ def _stepping(thread: str) -> Callable[[], str | None]:
         return step if isinstance(step, str) else None
 
     return where
+
+
+def _task() -> str | None:
+    """The LangGraph task a call is made in (its id, the same for each run of the task its
+    ``RetryPolicy`` makes; a tool node's call is one of its task's): the decision a harness
+    call comes from (``Runtime.deciding``); ``None`` outside a task of a graph."""
+    from langgraph.config import get_config
+
+    try:
+        task = (get_config().get("configurable") or {}).get(TASK_ID)
+    except RuntimeError:  # not inside a step of a graph
+        return None
+    return task if isinstance(task, str) else None
 
 
 def is_hitl(value: Any) -> bool:
