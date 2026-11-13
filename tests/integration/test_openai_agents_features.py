@@ -44,8 +44,16 @@ from tests.support.arm import declaring
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
 from trellis import Budget, Harness, Settings
-from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus
+from trellis.contracts import (
+    InterruptReason,
+    RunEventType,
+    RunOutcome,
+    RunStatus,
+    ToolOutcome,
+    ToolStatus,
+)
 from trellis.harness import budget
+from trellis.harness.hooks import Hooks
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools import bridge
 
@@ -185,6 +193,89 @@ async def test_a_failure_the_sdk_tells_the_model_is_recorded_as_a_failed_call(
         "An error occurred while running the tool. Please try again. Error: it broke"
     ]
     assert events[-1].outcome is RunOutcome.SUCCESS and events[-1].data["spent"]["tool_calls"] == 1
+
+
+class Redact(Hooks):
+    """The run's ``after_tool`` hook: a failed call's words withheld (``ok``: made a result)."""
+
+    def __init__(self, *, ok: bool = False) -> None:
+        self.ok = ok
+
+    async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+        if outcome.ok:
+            return outcome
+        said: dict[str, Any] = {"output": "lookup failed (details withheld)"}
+        if self.ok:
+            said = {"output": "o1: shipped (from the cache)", "status": ToolStatus.OK}
+        return outcome.model_copy(update=said)
+
+
+@pytest.mark.parametrize("policy", ["default", "custom"])
+async def test_an_after_tool_hook_words_what_the_model_reads_of_a_failed_tool(
+    memory_harness: Harness, memory_service: FakeMemoryService, policy: str
+) -> None:
+    """A tool that raises, its failure reworded by the run's ``after_tool`` hook (a secret
+    withheld): the SDK's failure policy still decides — the run goes on — and what the model
+    reads of the call is the hook's words, not the SDK's text (its default, or the tool's own
+    ``failure_error_function``'s) around the tool's error."""
+
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("db password=hunter2 rejected")
+
+    tool_ = (
+        function_tool(lookup)
+        if policy == "default"
+        else function_tool(lookup, failure_error_function=lambda _c, e: f"custom: {e}")
+    )
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "sorry"])
+    h = declaring(memory_harness, lookup="read")
+    agent = h.wrap(Agent(name="desk", model=model, tools=[tool_]), id="desk", hooks=[Redact()])
+    assert (await agent.run("look o1 up", user="u")).answer == "sorry"
+    assert outputs(model) == ["lookup failed (details withheld)"]
+    await h.writes.drain()
+    assert recorded(memory_service) == [("lookup", "error")]
+
+
+async def test_an_after_tool_hook_that_makes_a_failed_tool_a_result_is_read_as_one(
+    harness: Harness,
+) -> None:
+    """A hook that turns the failed call into a result: the model reads the result — even of
+    a tool whose failure would end the run (``failure_error_function=None``)."""
+
+    @function_tool(failure_error_function=None)
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("the order service is down")
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "shipped"])
+    agent = declaring(harness, lookup="read").wrap(
+        Agent(name="desk", model=model, tools=[lookup]), id="desk", hooks=[Redact(ok=True)]
+    )
+    result = await agent.run("look o1 up", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "shipped"
+    assert outputs(model) == ["o1: shipped (from the cache)"]
+
+
+async def test_a_tool_whose_failure_ends_the_run_still_ends_it_when_a_hook_rewords_it(
+    harness: Harness,
+) -> None:
+    """``failure_error_function=None``: the SDK raises the tool's error and the run ends, a
+    hook's rewording of the failure or not — the SDK's policy decides whether the run goes
+    on; the model is not asked again."""
+
+    @function_tool(failure_error_function=None)
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("the order service is down")
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "never"])
+    agent = declaring(harness, lookup="read").wrap(
+        Agent(name="desk", model=model, tools=[lookup]), id="desk", hooks=[Redact()]
+    )
+    result = await agent.run("look o1 up", user="u")
+    assert result.status is RunStatus.ERROR and len(model.inputs) == 1
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])

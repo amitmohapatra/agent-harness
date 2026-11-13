@@ -20,6 +20,7 @@ run is skipped (the SDK tells the model of a computer call by the screenshot aft
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import inspect
@@ -28,7 +29,7 @@ import weakref
 from collections.abc import Callable
 from typing import Any, Final
 
-from trellis.contracts import ToolSpec
+from trellis.contracts import ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
@@ -117,6 +118,10 @@ async def through(
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
             _PAUSED[runtime] = error
         raise
+    if bridge.hooked(outcome):  # the run's after_tool hooks have the last word on the call
+        if outcome.ok:
+            return outcome.output  # as the journal keeps it, as a resume replays it
+        raise reworded(raised[-1] if raised else None, str(outcome.output))
     if live:
         return live[-1]
     if raised:
@@ -124,6 +129,22 @@ async def through(
     if outcome.ok:
         return outcome.output  # the journal's: run before a resume
     return on_refusal(str(outcome.output))
+
+
+def reworded(error: Exception | None, said: str) -> Exception:
+    """``error`` saying ``said`` in place of its own message: a copy of it — its class kept,
+    not its cause or traceback, so the words it had are not carried along — or, when it
+    cannot be copied to say exactly that (no error; one whose class words itself), a
+    ``ToolError`` saying it."""
+    if error is not None:
+        try:
+            copied = copy.copy(error)
+            copied.args = (said,)
+        except Exception:  # an error its class cannot rebuild from its arguments
+            copied = None
+        if copied is not None and str(copied) == said:
+            return copied
+    return ToolError(said, source="tools")
 
 
 async def _awaited(value: Any) -> Any:

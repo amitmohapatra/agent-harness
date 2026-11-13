@@ -24,8 +24,9 @@ from tests.support.memory import MEMORY_TOOLS, FakeMemoryService
 from tests.support.openai_model import ScriptedModel
 from tests.support.planned import PlannedModel
 from trellis import Harness
-from trellis.contracts import RunStatus
+from trellis.contracts import RunStatus, ToolOutcome, ToolStatus
 from trellis.harness.adapters.openai_agents import GovernedServer
+from trellis.harness.hooks import Hooks
 
 SERVER = Path(__file__).resolve().parents[1] / "support" / "mcp_server.py"
 
@@ -331,3 +332,63 @@ async def test_a_call_the_server_could_not_take_is_told_as_its_failure_function_
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     [told] = results(model)
     assert (told == "the CRM is down") if policy == "custom" else ("the server hung up" in told)
+
+
+class Withheld(Hooks):
+    """The run's ``after_tool`` hook: a failed call's words withheld (``ok``: made a result)."""
+
+    def __init__(self, *, ok: bool = False) -> None:
+        self.ok = ok
+
+    async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+        if outcome.ok:
+            return outcome
+        if self.ok:
+            return outcome.model_copy(update={"output": "o1: open", "status": ToolStatus.OK})
+        return outcome.model_copy(update={"output": "find failed (details withheld)"})
+
+
+@pytest.mark.parametrize("policy", ["default", "custom", "none"])
+async def test_a_failed_call_a_hook_rewords_is_told_in_its_words_as_the_sdk_tells_it(
+    harness: Harness, policy: str
+) -> None:
+    """A call the server could not take, its failure reworded by the run's ``after_tool``
+    hook: the SDK's policy still decides — the run goes on, or with
+    ``failure_error_function=None`` ends with the error — and the model reads the hook's
+    words, not the SDK's text or the server's own function's."""
+    settings: dict[str, Any] = {
+        "default": {},
+        "custom": {"failure_error_function": lambda _context, error: "the CRM is down"},
+        "none": {"failure_error_function": None},
+    }[policy]
+    model = ScriptedModel([("find", {"order": "o1"}), "it failed"])
+    agent = harness.wrap(
+        Agent(name="desk", model=model, mcp_servers=[unreachable(**settings)]),
+        id=f"withheld-{policy}",
+        without={"schedules"},
+        hooks=[Withheld()],
+    )
+    result = await agent.run("find o1", user="u")
+    if policy == "none":
+        assert result.status is RunStatus.ERROR and len(model.inputs) == 1
+        return
+    assert result.answer == "it failed" and results(model) == ["find failed (details withheld)"]
+
+
+async def test_a_failed_call_a_hook_makes_a_result_is_read_as_one(harness: Harness) -> None:
+    """A hook that turns the call the server could not take into a result: the model reads
+    that result, even where the failure would end the run (``failure_error_function=None``)."""
+    model = ScriptedModel([("find", {"order": "o1"}), "it is open"])
+    agent = harness.wrap(
+        Agent(
+            name="desk",
+            model=model,
+            mcp_servers=[unreachable(failure_error_function=None)],
+        ),
+        id="withheld-ok",
+        without={"schedules"},
+        hooks=[Withheld(ok=True)],
+    )
+    result = await agent.run("find o1", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "it is open"
+    assert results(model) == ["o1: open"]

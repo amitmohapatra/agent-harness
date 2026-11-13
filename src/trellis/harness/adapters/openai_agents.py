@@ -497,6 +497,23 @@ class GovernedServer:
         return server if isinstance(server, cls) else cls(server)
 
 
+#: The attribute of the error a failed MCP call raised holding what the run's ``after_tool``
+#: hooks made the call say (``bridge.hooked``): the SDK tells the model of that error in these
+#: words (:func:`_worded`).
+WORDED: Final = "_trellis_worded"
+
+
+def _worded(error: BaseException) -> str | None:
+    """What the run's hooks made an MCP call's failure say, for ``error`` as the SDK hands it to
+    a ``failure_error_function``: the error the call raised, or the SDK's own error raised from
+    it (``AgentsException(...) from``); ``None`` when they said nothing of it."""
+    for held in (error, error.__cause__):
+        said = getattr(held, WORDED, None)
+        if isinstance(said, str):
+            return said
+    return None
+
+
 @functools.cache
 def _governed_server() -> type:
     from agents.mcp import MCPServer
@@ -519,7 +536,9 @@ def _governed_server() -> type:
                 runtime = current()
                 if runtime is not None and runtime.pending is not None:
                     raise error
-                return theirs(context, error)
+                text = theirs(context, error)  # the server's own way, which still runs
+                worded = _worded(error)
+                return text if worded is None else worded
 
             return told
 
@@ -592,10 +611,17 @@ def _governed_server() -> type:
             outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
             if outcome.ok and isinstance(outcome.output, dict):
                 return CallToolResult.model_validate(outcome.output)
-            if raised and not is_pause_signal(raised[-1]):
-                raise raised[-1]  # the call itself failed: the SDK's to tell, or to raise
             text = outcome.output if isinstance(outcome.output, str) else json.dumps(outcome.output)
-            return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+            hooked = bridge.hooked(outcome)
+            if raised and not is_pause_signal(raised[-1]) and not (hooked and outcome.ok):
+                # the call itself failed: the SDK's to tell, or to raise — in the words of the
+                # run's after_tool hooks when they worded it (:func:`_worded`)
+                if hooked:
+                    setattr(raised[-1], WORDED, text)
+                raise raised[-1]
+            return CallToolResult(
+                content=[TextContent(type="text", text=text)], is_error=not outcome.ok
+            )
 
     return Governed
 

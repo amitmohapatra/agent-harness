@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 from agents import (
     Agent,
@@ -29,11 +30,13 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
 from tests.integration.test_openai_agents_features import shell_call, shell_said, twice
+from tests.support.arm import declaring
 from tests.support.computer import Screen
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
 from trellis import Harness, Runtime
-from trellis.contracts import RunStatus
+from trellis.contracts import RunStatus, ToolError, ToolOutcome, ToolStatus
+from trellis.harness.hooks import Hooks
 from trellis.harness.tools import bridge
 from trellis.harness.tools.convert import openai_local
 from trellis.harness.tools.convert.openai_local import call_args, through
@@ -253,7 +256,6 @@ async def test_a_pause_inside_a_call_and_an_error_of_the_bridge_are_raised(
         return said
 
     agent = harness.wrap(asks, id="asks")
-    from tests.support.arm import declaring
 
     declaring(harness, pick="read")
     paused = await agent.run("go", user="u")
@@ -280,3 +282,81 @@ def test_what_a_call_does_leaves_out_which_call_it_is() -> None:
         "action": {"commands": ["ls"]}
     }
     assert call_args(shell_call("ls")) == {"action": {"commands": ["ls"]}}
+
+
+# --------------------------------------------------------------------------- the hooks' word
+class Reworded(Hooks):
+    """The run's ``after_tool`` hook: a failure's words withheld, or (``ok``) made a result;
+    a result's words changed (``results``)."""
+
+    def __init__(self, *, ok: bool = False, results: bool = False) -> None:
+        self.ok, self.results = ok, results
+
+    async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+        if outcome.ok:
+            return (
+                outcome.model_copy(update={"output": "rows withheld"}) if self.results else outcome
+            )
+        if self.ok:
+            return outcome.model_copy(update={"output": "0 rows", "status": ToolStatus.OK})
+        return outcome.model_copy(update={"output": "the query failed (details withheld)"})
+
+
+def custom_said(model: ScriptedModel) -> list[str]:
+    """What the model's latest call read of each custom tool call."""
+    return [
+        str(item["output"])
+        for item in model.inputs[-1]
+        if isinstance(item, dict) and item.get("type") == "custom_tool_call_output"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fails", "hook", "said"),
+    [
+        (True, Reworded(), "the query failed (details withheld)"),
+        (True, Reworded(ok=True), "0 rows"),
+        (False, Reworded(results=True), "rows withheld"),
+        (True, Hooks(), "password=hunter2 rejected"),
+        (False, Hooks(), "3 rows"),
+    ],
+    ids=["failure reworded", "failure made a result", "result reworded", "failure", "result"],
+)
+async def test_the_after_tool_hooks_decide_what_the_model_reads_of_a_local_call(
+    harness: Harness, fails: bool, hook: Hooks, said: str
+) -> None:
+    """A tool the SDK runs here (a ``CustomTool``): what the model reads of its call is what
+    the run's ``after_tool`` hooks leave — a failure they reword raised to the SDK in their
+    words, which the SDK tells the model as it tells a failed call; a failure they make a
+    result, or a result they change, is theirs — and without a change, the SDK's own."""
+
+    def invoke(context: Any, given: str) -> str:
+        if fails:
+            raise RuntimeError("password=hunter2 rejected")
+        return "3 rows"
+
+    call = ResponseCustomToolCall(
+        id="ct_1", call_id="call_ct", type="custom_tool_call", name="sql", input="SELECT 1"
+    )
+    model = ScriptedModel([Items(call), "done"])
+    tool = CustomTool(name="sql", description="Run SQL.", on_invoke_tool=invoke)
+    agent = declaring(harness, sql="read").wrap(
+        Agent(name="dba", model=model, tools=[tool]), id="hooked", hooks=[hook]
+    )
+    assert (await agent.run("select", user="u")).status is RunStatus.SUCCESS
+    assert custom_said(model) == [said]
+
+
+def test_an_error_reworded_keeps_its_class_and_drops_its_words() -> None:
+    """A failure the hooks reworded is raised as the error it was, saying only their words —
+    or, an error its class cannot rebuild so (or none), a ``ToolError`` saying them."""
+    reworded = openai_local.reworded(ConnectionResetError("password=x"), "withheld")
+    assert type(reworded) is ConnectionResetError and str(reworded) == "withheld"
+    assert reworded.__cause__ is None and reworded.__traceback__ is None
+    key = openai_local.reworded(KeyError("password=x"), "withheld")  # words itself: repr
+    assert type(key) is ToolError and str(key) == "withheld"
+    request = httpx.Request("GET", "https://example.com")
+    response = httpx.Response(500, request=request)
+    status = httpx.HTTPStatusError("password=x", request=request, response=response)
+    assert type(openai_local.reworded(status, "withheld")) is ToolError  # not rebuilt from args
+    assert str(openai_local.reworded(None, "withheld")) == "withheld"

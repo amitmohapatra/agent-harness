@@ -417,7 +417,8 @@ async def governed_call(
     ``ToolErrorMiddleware``, a wrapper of the builder's, the tool node's ``handle_tool_errors``
     — sees what the library gives it, and the failed message the graph made of it (the tool
     node's, a wrapper's) is the one the model reads, as the graph worded it, unless the run's
-    ``after_tool`` hooks changed what the call says.
+    ``after_tool`` hooks changed what the call says: then the model reads theirs (a result, or
+    their words in place of the graph's).
     The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
     :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
@@ -491,11 +492,18 @@ def _answered(
     the graph made of the tool's error (``reported``: the tool node's, a wrapper's), as the
     graph worded it — unless the run's ``after_tool`` hooks changed what the call says — else
     the harness's of the call's outcome; an error the tool raised (``raised``) is raised again
-    (:func:`_failed`)."""
+    (:func:`_failed`), for the graph to handle as it does — unless the hooks made the call a
+    result: then it is that result. A failure the hooks worded otherwise is raised all the same
+    (the graph's retry, its wrappers and its tool node act on it as ever), and the failed
+    message the graph makes of it is the hooks' (``_Calling.said``)."""
     if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
         return reported[0][0]
     message = _message(outcome, request, kept=_paged(runtime, request))
-    if raised and not outcome.ok:
+    failed = bool(raised) and not outcome.ok
+    # a failure the run's after_tool hooks worded: the graph's own handling of the error still
+    # runs, and the failed message it makes of it says the hooks' words (:func:`govern_tool_nodes`)
+    _under_way().said = message if failed and bridge.hooked(outcome) else None
+    if failed:
         _failed(raised[-1], message)
     return message
 
@@ -581,6 +589,9 @@ class _Calling:
     paused, and waits for the node's other calls) or has ``ended``."""
 
     failed: tuple[BaseException, ToolMessage] | None = None
+    #: the message the run's after_tool hooks made of its latest governed try, which failed:
+    #: the failed message the graph makes of that error is this one (:func:`govern_tool_nodes`)
+    said: ToolMessage | None = None
     owned: bool = False
     waiting: bool = False
     ended: asyncio.Event = field(default_factory=asyncio.Event)
@@ -1045,13 +1056,18 @@ def govern_tool_nodes() -> None:
         beside = _BESIDE.setdefault(id(tool_runtime.state), set())
         beside.add(calling)
         try:
-            return await run_one(self, call, input_type, tool_runtime)
+            done = await run_one(self, call, input_type, tool_runtime)
         except Exception as exc:
             if is_pause_signal(exc):
                 await _others_ended(calling, beside)
             if not calling.owned or calling.failed is None or calling.failed[0] is not exc:
                 raise
             return calling.failed[1]
+        else:
+            # the failed message the graph made of an error the run's hooks worded: theirs
+            said = calling.said
+            failed = isinstance(done, ToolMessage) and done.status == "error"
+            return said if said is not None and failed else done
         finally:
             _CALLING.reset(token)
             calling.ended.set()

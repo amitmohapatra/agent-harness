@@ -161,7 +161,8 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         except WaitsInside as waiting:
             return waiting.answer
         if raised and not outcome.ok:
-            return await _told(original, raised[-1], context, arguments)
+            said = results.readable(outcome.output, tool.name) if bridge.hooked(outcome) else None
+            return await _told(original, raised[-1], context, arguments, said=said)
         return results.readable(outcome.output, tool.name)
 
     setattr(invoke, MADE, True)
@@ -190,12 +191,17 @@ def _own_time_is_up(tool: FunctionTool, runtime: Runtime, began: float) -> bool:
     )
 
 
-async def _told(invoker: Any, error: BaseException, context: Any, arguments: str) -> Any:
+async def _told(
+    invoker: Any, error: BaseException, context: Any, arguments: str, *, said: str | None = None
+) -> Any:
     """What the SDK makes of ``error``, which a tool's own function raised (the harness has
     recorded the call as failed): raised as it is when the SDK is to act on it itself — a call
     it cut at the tool's time limit, or a tool whose invoke has no failure policy of the SDK's
     (the run ends) — else given to the tool's own invoke in place of its function, which tells
-    the model what its ``failure_error_function`` says, or raises."""
+    the model what its ``failure_error_function`` says, or raises. ``said``: what the run's
+    ``after_tool`` hooks made the failure say (``bridge.hooked``) — the SDK's policy still
+    decides whether the run goes on (it raises, or it tells the model), and what it tells the
+    model is the hooks' words in place of its own."""
     if not isinstance(error, Exception) or not callable(getattr(invoker, FUNCTION, None)):
         raise error
 
@@ -204,7 +210,8 @@ async def _told(invoker: Any, error: BaseException, context: Any, arguments: str
 
     failing = copy.copy(invoker)
     setattr(failing, FUNCTION, failed)
-    return await failing(context, arguments)
+    told = await failing(context, arguments)
+    return told if said is None else said
 
 
 def held(tool: Any, spec: ToolSpec) -> Any:

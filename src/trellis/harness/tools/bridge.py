@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -127,6 +128,8 @@ MAX_REPEATS: Final = 3
 REPEATED: Final = "Repeated"
 #: The error class of a call not run because its start could not be saved (:func:`_unsaved`).
 UNSAVED: Final = "StartUnsaved"
+#: The outcomes the run's ``after_tool`` hooks changed (:func:`hooked`), by id, while they live.
+_HOOKED: weakref.WeakValueDictionary[int, ToolOutcome] = weakref.WeakValueDictionary()
 
 
 async def call(
@@ -148,6 +151,15 @@ async def call(
         outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
     runtime.replay.ended(made)
     return outcome
+
+
+def hooked(outcome: ToolOutcome) -> bool:
+    """Whether the run's ``after_tool`` hooks changed this outcome of :func:`call` (what the
+    call says, or how it ended). The model then reads the hooks' outcome, whatever its framework
+    makes of the call otherwise: a failure a hook turned into a result is that result, and a
+    failure it worded otherwise says the hook's words — still delivered as its framework
+    delivers a failed call (``middleware.governed_call``, ``tools.convert``)."""
+    return _HOOKED.get(id(outcome)) is outcome
 
 
 def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
@@ -392,7 +404,10 @@ async def _ran(
     hooks = runtime.agent.hooks
     if error is not None:
         await hooks.failed("tool", error)
+    before = outcome.model_dump() if hooks else None
     outcome = await hooks.done(tool_call, outcome)
+    if before is not None and outcome.model_dump() != before:
+        _HOOKED[id(outcome)] = outcome  # the hooks' word on the call (:func:`hooked`)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
     return outcome
 

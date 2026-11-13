@@ -25,7 +25,8 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, ReAct
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import RunEventType, RunStatus, ToolOutcome, ToolStatus
+from trellis.harness.hooks import Hooks
 from trellis.harness.tools.bridge import MAX_REPEATS
 
 ran: list[str] = []
@@ -222,8 +223,6 @@ async def test_an_after_tool_hook_still_has_the_last_word_on_a_handled_error(
 ) -> None:
     """The run's ``after_tool`` hooks change what the model reads of a call: a hook that
     rewrites a failed call's result is read, not the node's text."""
-    from trellis.contracts import ToolOutcome
-    from trellis.harness.hooks import Hooks
 
     class Kinder(Hooks):
         async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
@@ -296,3 +295,83 @@ async def test_under_the_harness_middleware_an_error_nothing_handles_is_read_by_
     result = await agent.run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     assert (told(model).status, told(model).content) == ("error", "stock failed: no shelf")
+
+
+# --------------------------------------------------------------------------- the hooks' word
+class Kinder(Hooks):
+    """The run's ``after_tool`` hook rewording a failed call (``ok``: making it a result)."""
+
+    def __init__(self, *, ok: bool = False) -> None:
+        self.ok = ok
+
+    async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+        if outcome.ok:
+            return outcome
+        changed: dict[str, Any] = {"output": "the shelf will be back at noon"}
+        ended = {**changed, "status": ToolStatus.OK} if self.ok else changed
+        return outcome.model_copy(update=ended)
+
+
+def answering() -> Any:
+    @wrap_tool_call
+    async def answer(request: Any, handler: Any) -> Any:
+        try:
+            return await handler(request)
+        except ValueError as exc:
+            ran.append("answered by the wrapper")
+            return ToolMessage(
+                f"wrapper: {exc}", tool_call_id=request.tool_call["id"], status="error"
+            )
+
+    return answer
+
+
+@pytest.mark.parametrize("how", ["wrapper", "retry"])
+async def test_an_after_tool_hook_has_the_last_word_on_an_error_the_graph_answers(
+    harness: Harness, how: str
+) -> None:
+    """The tool raises and the run's ``after_tool`` hook rewords the failure: the error is
+    raised into the graph all the same — a wrapper of yours gets it and answers in its place,
+    ``ToolRetryMiddleware`` gives up and words its message — and the failed message the graph
+    makes of it says the hook's words, as the hooks decide what the model reads."""
+    fails.append(ValueError("no shelf"))
+    middleware = (
+        [answering()]
+        if how == "wrapper"
+        else [ToolRetryMiddleware(max_retries=0, on_failure="continue")]
+    )
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "noon"])
+    graph = create_agent(model, [stock], middleware=middleware)
+    result = await harness.wrap(graph, id="shelf", hooks=[Kinder()]).run("a?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "noon"
+    assert (told(model).status, told(model).content) == ("error", "the shelf will be back at noon")
+    assert ran == ["stock a", *(["answered by the wrapper"] if how == "wrapper" else [])]
+
+
+async def test_an_after_tool_hook_that_makes_a_failure_a_result_gives_the_graph_that_result(
+    harness: Harness,
+) -> None:
+    """A hook that turns the failed call into a result: the graph gets the result — no error
+    for its retry to try again, its wrapper to answer — and the model reads it."""
+    fails.append(ValueError("no shelf"))
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "noon"])
+    graph = create_agent(model, [stock], middleware=[retrying(2), answering()])
+    result = await harness.wrap(graph, id="shelf", hooks=[Kinder(ok=True)]).run("a?", user="u")
+    assert result.answer == "noon" and ran == ["stock a"]
+    assert (told(model).status, told(model).content) == (
+        "success",
+        "the shelf will be back at noon",
+    )
+
+
+async def test_under_the_harness_middleware_the_hooks_word_on_an_error_is_read_too(
+    harness: Harness,
+) -> None:
+    """``ReAct``'s rule for an error nothing of the graph handles: the model reads the failed
+    result — the hook's words when it reworded it."""
+    fails.append(ValueError("no shelf"))
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "noon"])
+    react = ReAct(system_prompt="Count.", model=model, tools=[stock])
+    result = await harness.wrap(react, id="react", hooks=[Kinder()]).run("a?", user="u")
+    assert result.answer == "noon"
+    assert (told(model).status, told(model).content) == ("error", "the shelf will be back at noon")
