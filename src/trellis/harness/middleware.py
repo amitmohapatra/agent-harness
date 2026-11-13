@@ -62,6 +62,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Collection,
+    Hashable,
     Iterator,
     Mapping,
     Sequence,
@@ -599,17 +600,34 @@ class _Calling:
 
 #: The tool node's call under way (:func:`govern_tool_nodes`), where its tries meet.
 _CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
-#: The calls under way of each tool node's step, by the state object the node handed them.
-_BESIDE: Final[dict[int, set[_Calling]]] = {}
+#: The calls under way of each model step's tool calls (:func:`_step_key`), however LangGraph
+#: runs them: a ``ToolNode`` gathering them, or ``create_agent`` sending each to its own task.
+_BESIDE: Final[dict[Hashable, set[_Calling]]] = {}
+
+
+def _step_key(state: Any, call_id: str) -> Hashable:
+    """The model step a tool call is of, as the calls made beside it share it — the model
+    message that made it (its id, else its calls' ids), in the run — whichever task LangGraph
+    runs each call in and whatever state object each is handed; the state object itself where
+    its messages do not hold the call."""
+    runtime = current()
+    messages = state.get("messages", []) if isinstance(state, dict) else []
+    found = _calling(messages, call_id)
+    if runtime is None or found is None:
+        return ("state", id(state))
+    made = found[1]
+    return (runtime.run_id, made.id or tuple(str(c["id"]) for c in made.tool_calls))
 
 
 async def _others_ended(calling: _Calling, beside: Collection[_Calling]) -> None:
-    """A tool node's call paused (it asks a person): it leaves the node once the node's other
-    calls under way have ended, or wait as it does. A ``ToolNode`` runs its step's calls
-    together and stops at the first that raises, leaving the others running behind the pause:
-    a write among them would end after the run's pause was recorded, and the resumed run,
-    finding it started and never ended, could only tell the model its effect is unknown.
-    LangGraph itself waits so for the other tasks of a step in which one interrupts."""
+    """A tool node's call paused (it asks a person): it leaves the node once the other calls
+    under way of its model step have ended (``beside``: :func:`_step_key`), or wait as it does.
+    A ``ToolNode`` runs its step's calls together and stops at the first that raises, and
+    ``create_agent`` runs each call as a task of its own (a ``Send``), which LangGraph cancels
+    when another task of the step raises: either way a write beside the call would end after
+    the run's pause was recorded, or never, and the resumed run, finding it started and never
+    ended, could only tell the model its effect is unknown. LangGraph itself waits so for the
+    other tasks of a step in which one interrupts."""
     calling.waiting = True
     for other in [c for c in beside if c is not calling and not c.waiting]:
         await other.ended.wait()
@@ -1052,8 +1070,9 @@ def govern_tool_nodes() -> None:
             return await run_one(self, call, input_type, tool_runtime)
         calling = _Calling()
         token = _CALLING.set(calling)
-        # the node's calls made at once (it gathers them) are handed the one state object
-        beside = _BESIDE.setdefault(id(tool_runtime.state), set())
+        # the calls of one model step, gathered by one tool node or each a task of its own
+        step = _step_key(tool_runtime.state, str(call["id"]))
+        beside = _BESIDE.setdefault(step, set())
         beside.add(calling)
         try:
             done = await run_one(self, call, input_type, tool_runtime)
@@ -1073,7 +1092,7 @@ def govern_tool_nodes() -> None:
             calling.ended.set()
             beside.discard(calling)
             if not beside:
-                _BESIDE.pop(id(tool_runtime.state), None)
+                _BESIDE.pop(step, None)
 
     setattr(governed, _INSTALLED, True)
     ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
