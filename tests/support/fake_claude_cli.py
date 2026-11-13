@@ -36,7 +36,8 @@ recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
 (``stream_event``) before its message.
 
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
-the temporary directory): the steps done so far — a tool call that failed or paused is not done.
+the temporary directory): the steps done so far — a tool call that failed or paused is not done
+(a call denied is: the "model" read why).
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
 does not hold is the real CLI's error result. With ``--session-mirror`` (the SDK has a
 ``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
@@ -180,6 +181,8 @@ class Cli:
         self.working: dict[str, str] = {}
         #: the session this process runs (one for all its turns), once its first turn began
         self.session: str | None = None
+        #: whether the last tool call was denied (not paused): done all the same
+        self.denied = False
         #: every prompt the session's "model" was given: the user's and the injected ones
         self.heard: list[str] = []
         #: the prompts sent while a turn was under way, and the turns the session owes itself
@@ -780,6 +783,7 @@ class Cli:
                     sys.exit(1)
                 return
             self.steps += 1
+            self.denied = False
             if "cut" in item:
                 send(self.ended(session, turns=turns + 1, stop_reason="max_tokens"))
                 return
@@ -794,7 +798,8 @@ class Cli:
             if not completed:
                 if interrupted:
                     break
-                continue
+                if not self.denied:
+                    continue
             kept.write_text(json.dumps({"done": step + 1, "turn": turn}))
             mirror(session, step + 1, turn)
         self.hooked("Stop", session, stop_hook_active=False)
@@ -1027,7 +1032,11 @@ class Cli:
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
         self.result(session, tool_id, content, parent)
-        return read, not error, waits or bool(permission.get("interrupt"))
+        stops = waits or bool(permission.get("interrupt"))
+        # a call denied is done: the "model" read why, as the real CLI's transcript keeps it,
+        # and a resumed session goes on after it (``played``)
+        self.denied = not allowed and not stops
+        return read, not error, stops
 
 
 def made_again(script: list[dict[str, Any]], done: int) -> list[dict[str, Any]]:
