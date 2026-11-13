@@ -37,11 +37,27 @@ worked as the library gives them. Five did not:
 - **A Deep Agent with a `mode="fork"` sub-agent is wrapped.** `h.wrap` never returned: a fork
   runs the graphs it is one of, and reading the sub-agents' file tools went round.
 
-What stays as it was, pinned by a test named `test_today_...` each: a tool's error nothing
-handles does not fail the graph; a `ToolNode`'s own error text reaches the model after
-`<tool> failed:`; what a node writes to LangGraph's `custom` stream mode is not on the run's
-events; a node its `RetryPolicy` runs a third time has its same harness call refused as a
-stall ([langgraph.md](docs/frameworks/langgraph.md#limits)).
+Four more where the harness restricted what the library does:
+
+- **An error nothing of the graph handles fails the run**, as it fails the graph without the
+  harness (`ToolNode(handle_tool_errors=False)`, `create_agent`'s default,
+  `ToolRetryMiddleware(on_failure="error")`, a wrapper that raises it again): the run ends
+  `ERROR` with the tool's error, as any graph's error ends a run, and the call is recorded as
+  failed. It was turned into a failed result the model read. A graph with the harness's
+  middleware (`ReAct`, `middleware()`: `GovernTools`) keeps the harness's documented rule:
+  the model reads the failure and the run goes on.
+- **The graph's own text for a failed call is what the model reads**: a `ToolNode`'s
+  `handle_tool_errors` text reached the model as `"<tool> failed: <text>"`. The run's
+  `after_tool` hooks still have the last word.
+- **What a node writes to LangGraph's `custom` stream mode is on the run's events**:
+  `get_stream_writer()` (and a middleware's `runtime.stream_writer`) writes are `CUSTOM` events
+  named `custom`, the write in `value` (AG-UI's `CUSTOM` event), from `agent.stream` and
+  `agent.run` alike. `agent.run` reads the graph with `astream` (the `values` and `custom`
+  modes), as `ainvoke` does.
+- **A decision the graph makes again is not a model repeating itself**: the stall guard counts
+  the same call made again only when it comes from another decision — for LangGraph, another
+  task or another call id (`Runtime.deciding`). A node its `RetryPolicy` ran a third time had
+  its harness call refused as a stall.
 
 ### Added: a background task of Deep Agents' async sub-agents, found again in later turns
 

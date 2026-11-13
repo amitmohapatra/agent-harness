@@ -178,8 +178,8 @@ and its error to the graph, as LangGraph has them:
 |---|---|
 | A tool that returns a `Command` (a state update, a `goto`), or a list of `Command`s and messages | the graph is given what the tool made. The journal keeps it with the call's record, serialized as LangGraph serializes a step's writes: when a later attempt replays the call (a resume without a checkpointer runs the graph again from its input; a resume in place runs a `ToolNode`'s step again), the state update is the graph's again and the tool does not run twice. An update the serializer does not take is said in the log, and that call's replay is its message |
 | `InjectedState`, `InjectedStore`, `ToolRuntime` | handed to the tool by its tool node as ever; the arguments the harness governs, journals and records are the model's, nothing injected |
-| A tool that raises | the call is recorded as failed, and the error is raised again as the tool raised it: LangChain's `ToolRetryMiddleware` tries the call again (each try a call on the run's events; the tries of one call do not count as a model repeating it), `ToolErrorMiddleware` words what the model reads, a `wrap_tool_call` wrapper of yours gets the exception, a `ToolNode`'s `handle_tool_errors` gives its text |
-| An error nothing of the graph handles | the failed call's result, which the model reads (`<tool> failed: <error>`), and the run goes on — where LangGraph alone raises it and the graph fails (`ToolNode(handle_tool_errors=False)`, `create_agent`'s default, `ToolRetryMiddleware(on_failure="error")`) |
+| A tool that raises | the call is recorded as failed, and the error is raised again as the tool raised it: LangChain's `ToolRetryMiddleware` tries the call again (each try a call on the run's events; the tries of one call do not count as a model repeating it), `ToolErrorMiddleware` words what the model reads, a `wrap_tool_call` wrapper of yours gets the exception, a `ToolNode`'s `handle_tool_errors` gives its text — the model reads the graph's text exactly as the graph made it (unless the run's `after_tool` hooks change it) |
+| An error nothing of the graph handles | the graph fails with it, as without the harness, and so does the run: it ends `ERROR` with that error (`ToolNode(handle_tool_errors=False)`, `create_agent`'s default, `ToolRetryMiddleware(on_failure="error")`, a wrapper that raises it again); the call is recorded as failed. A graph that runs the harness's middleware (`ReAct`, `middleware()`: `GovernTools`) has the harness's rule instead: the model reads the failed result (`<tool> failed: <error>`) and the run goes on |
 | Calls a `ToolNode` runs together, one of which asks a person | the call that asks leaves the node once the others have ended, so a write beside it is journaled before the run pauses, and the resume runs only what was approved (a `create_agent` graph runs each call as a task of its own, and LangGraph waits so itself) |
 
 ## The graph's own run options
@@ -209,7 +209,10 @@ history with `graph.aget_state_history` on the conversation's key, fork with
 
 `agent.stream(...)` yields contracts `RunEvent`s: `RUN_STARTED`, `CONTEXT_LOADED`, text deltas
 (`TEXT_MESSAGE_*`, from the graph's `messages` stream: AI message chunks with text), the
-harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes, and
+harness tool calls (`TOOL_CALL_START/ARGS/END/RESULT`), `tool_notice` for writes, what the
+graph's nodes write to LangGraph's `custom` stream mode (`get_stream_writer()`, a
+middleware's `runtime.stream_writer`) as `CUSTOM` events named `custom` with the write as
+their `value` (AG-UI's `CUSTOM` event; `agent.run`'s events and log have them too), and
 `RUN_FINISHED` (its `data.result`, or the interrupt). Closing the stream early cancels the run.
 
 ## Durable runs, workers, schedules
@@ -297,13 +300,14 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
 * A custom state without `messages` gets no context message: read `trellis.current().context`.
 * An `InMemorySaver` pause resumes in place only in the process that paused; elsewhere a
   harness pause is a re-run from the journal and a graph's own pause fails (above).
-* The run's stream is the harness's events, read from the graph's `messages` and `values`
-  stream modes (a sub-graph's model text included): what a node writes with
-  `get_stream_writer()` (the `custom` mode), and the `updates`, `debug`, `tasks` and
-  `checkpoints` modes, are on none of them — say progress with `trellis.current().events`.
+* The run's stream is the harness's events, read from the graph's `messages`, `values` and
+  `custom` stream modes as `graph.astream` gives them (a sub-graph's model text included; a
+  sub-graph's `custom` writes, as LangGraph has them without `subgraphs=True`, are not): the
+  `updates`, `debug`, `tasks` and `checkpoints` modes are not on it.
 * A harness call made `MAX_REPEATS` (3) times in a row with the same arguments is refused as a
-  stall, whoever makes it: a node its `RetryPolicy` runs a third time is handed the refusal
-  as its call's result.
+  stall — a model repeating one decision, step after step. The same decision made again by
+  the graph (a task its `RetryPolicy` runs again, a call a `ToolRetryMiddleware` tries again)
+  is not counted.
 * Code outside tool calls — your own nodes, the model calls — runs again on a re-run (no
   checkpointer): keep side effects in tools.
 
