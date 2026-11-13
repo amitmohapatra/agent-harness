@@ -1469,7 +1469,9 @@ async def test_a_session_with_work_is_kept_past_the_idle_bound_but_not_for_ever(
     await asyncio.sleep(0.4)
     assert open_sessions(agent) == 1 and alive(one["pid"])
     await until(lambda: open_sessions(agent) == 0)
-    await until(lambda: not alive(one["pid"]))
+    # Claude Code goes on with a subagent's work once its stdin closes (as the bundled CLI
+    # does); the SDK's close stops it 5 s later
+    await until(lambda: not alive(one["pid"]), seconds=15)
     events = [e async for e in agent.stream("and?", user="u1", thread="t1")]
     [said] = warned(events)
     assert "t1 (research the market)" in said  # the task that ended with it is not lost in silence

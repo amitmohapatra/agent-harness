@@ -19,6 +19,8 @@ from trellis.harness.bounded import LRU
 from trellis.harness.bridges.claude_live import (
     _NUDGE,
     _OVER,
+    GONE,
+    GONE_SAID,
     LEFT,
     STOPPED,
     UNATTENDED,
@@ -27,9 +29,11 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     LiveSessions,
     Turn,
+    gone,
 )
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
+from trellis.harness.runs import LocalRuns
 
 REFUSED = {"content": [{"type": "text", "text": UNATTENDED}], "is_error": True}
 
@@ -401,3 +405,42 @@ async def test_the_share_of_a_turn_no_run_is_served_for_stays_for_the_next_turn(
     assert usage is None and round(share, 6) == 0.001
     assert round(session.billed, 6) == 0.001 and found.unbilled == 0
     await ended(session, found, store)
+
+
+async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run() -> None:
+    """``gone``: the answer is recorded on the run, which ends ``ERROR`` (a ``CANCEL`` ends it
+    ``CANCELLED`` already), and the turn is told; a run no longer waiting on that question is
+    left as it is, and nothing is said."""
+    from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution, RunStart
+
+    runs, said = LocalRuns(), []
+    runtime: Any = SimpleNamespace(
+        agent=SimpleNamespace(harness=SimpleNamespace(runs=runs)),
+        tenant="t",
+        events=SimpleNamespace(warning=lambda code, message: said.append((code, message))),
+    )
+
+    async def waiting(run_id: str) -> Interrupt:
+        await runs.start(RunStart(run_id=run_id, tenant_id="t", agent_id="a"))
+        asked = Interrupt(tenant_id="t", run_id=run_id, question="refund?")
+        await runs.pause(asked)
+        return asked
+
+    def answer(decision: InterruptDecision) -> InterruptResolution:
+        return InterruptResolution(interrupt_id="turn.1", run_id="turn", decision=decision)
+
+    asked = await waiting("run_approved")
+    await gone(runtime, "run_approved", asked.interrupt_id, answer(InterruptDecision.APPROVE))
+    ended = await runs.get("run_approved")
+    assert ended is not None and ended.status is RunStatus.ERROR and ended.error is not None
+    assert (ended.error.code, ended.error.message) == ("holder_lost", GONE)
+    assert said == [("claude_session", GONE_SAID)]
+
+    asked = await waiting("run_cancelled")
+    await gone(runtime, "run_cancelled", asked.interrupt_id, answer(InterruptDecision.CANCEL))
+    cancelled = await runs.get("run_cancelled")
+    assert cancelled is not None and cancelled.status is RunStatus.CANCELLED
+
+    said.clear()
+    await gone(runtime, "run_approved", asked.interrupt_id, answer(InterruptDecision.APPROVE))
+    assert said == []  # it waits on nothing any more

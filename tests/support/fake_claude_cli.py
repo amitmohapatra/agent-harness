@@ -38,9 +38,9 @@ recovery gave up (``success``, no text, ``stop_reason`` ``max_tokens``).
 A query runs in a session (its id on every message), kept in ``FAKE_CLAUDE_SESSIONS`` (else
 the temporary directory): the steps done so far — a tool call that failed or paused is not done.
 ``--resume=<id>`` goes on after them, as the real CLI continues a conversation; a session it
-does not hold is the real CLI's error result. Stdin closed (the SDK's process died) with nothing
-in the background, the process ends; with background work it goes on to that work's end (a
-call it makes has nobody to decide it: it does not run), then ends, as the bundled CLI does. With ``--session-mirror`` (the SDK has a
+does not hold is the real CLI's error result. Stdin closed (the SDK's process died) with no
+subagent at work in the background, the process ends; with one it goes on to that work's end
+(a call it makes has nobody to decide it: it does not run), then ends, as the bundled CLI does. With ``--session-mirror`` (the SDK has a
 ``SessionStore``) every step is mirrored as the real CLI mirrors its transcript (a
 ``transcript_mirror`` frame), and a resume the SDK materialised (``CLAUDE_CONFIG_DIR``) goes on
 from that transcript — whatever this machine's own sessions hold. ``--max-turns`` stops a query after that many
@@ -133,12 +133,13 @@ def send(message: dict[str, Any]) -> None:
 
 
 def orphaned(cli: Cli) -> None:
-    """Stdin closed (the SDK's process died) while background work runs: as the bundled CLI
-    (2.1.283) does, that work goes on to its end — a call it makes has nobody to decide it
+    """Stdin closed (the SDK's process died) while a background subagent works: as the bundled
+    CLI (2.1.283) does, its work goes on to its end — a call it makes has nobody to decide it
     and does not run — and then the process ends (its parent ``SIGKILL``-ed, driven against a
-    scripted model on this machine)."""
+    scripted model on this machine). A background shell command ends with the process, as
+    before (not probed)."""
     _SDK["orphaned"] = True
-    while cli.tasks:
+    while any(task["agent"] != "shell" for task in cli.tasks.values()):
         cli.triggers()
         time.sleep(0.02)
 
