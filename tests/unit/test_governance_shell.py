@@ -140,6 +140,7 @@ READS = [
     "sed -E 's/[0-9]+/N/g; s|a|b|2' s.csv",
     "awk -F , -v n=3 'NR <= n {print $1}' s.csv",
     "sort -t, -k2,2nr s.csv | uniq -c | sort -rn",
+    "uniq -c s.csv",  # one file: the one it reads
     "/usr/bin/wc -l s.csv",
     "echo a#b  # a comment",
     """grep "total$" s.csv | cut -d, -f2 ; echo a\\ b "it's \\$5" '{$x}' "{a,b}" $""",
@@ -753,6 +754,13 @@ def test_a_shell_that_keeps_its_folder_is_read_from_every_folder_it_may_be_in(
     bash.ran({"command": "cd sub && cd nosuch && ls"})  # stops at the one that fails
     assert bash.places == {run, run / "sub"}
     assert bash.read_only("Bash", {"command": "cat a.csv"})
+    for n in range(2):
+        (run / f"more{n}").mkdir()
+        bash.ran({"command": f"cd {run / f'more{n}'}"})
+    assert bash.places is not None and len(bash.places) == 4  # four folders followed
+    (run / "more2").mkdir()
+    bash.ran({"command": f"cd {run / 'more2'}"})
+    assert bash.places is None  # a fifth: where it is is no longer known
 
 
 @pytest.mark.parametrize(
