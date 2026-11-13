@@ -235,6 +235,10 @@ class Runtime:
     #: the results the conversation's earlier turns saved in this process, by path
     #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
     earlier_results: dict[str, str] = field(default_factory=dict)
+    #: the graph state the run's conversation carries from turn to turn
+    #: (``adapters.langgraph.CARRIED``): what its last turn ended with in this process
+    #: (``Agent.results``), then what the attempt's latest graph checkpoint holds of it
+    carried: dict[str, Any] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,

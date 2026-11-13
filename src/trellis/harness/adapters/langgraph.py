@@ -36,7 +36,8 @@
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
-  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns)
+  but the state its conversation carries from turn to turn (:data:`CARRIED`).
   A graph built with ``middleware()`` and compiled without a checkpointer is run as a copy
   that has one (:func:`checkpointing`); one compiled with a checkpointer of its own keeps it,
   its checkpoints marked with the run (:data:`RUN_METADATA`), and the attempt after a crash
@@ -124,6 +125,12 @@ STOPPED_CALL: Final = (
 )
 #: The node of Deep Agents' ``PatchToolCallsMiddleware``: a graph that answers such calls itself.
 PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
+#: The graph state channels a conversation carries from one turn to the next where the graph's
+#: thread is its run (:func:`run_scoped`), as a thread of the graph's own would hold them: Deep
+#: Agents' list of the background tasks its async sub-agents run (``AsyncSubAgentState``),
+#: which its task tools read a task id against. A turn starts with what the conversation's
+#: last turn ended with in this process (``Runtime.carried``; ``pipeline``).
+CARRIED: Final = ("async_tasks",)
 
 
 class LangGraphAdapter:
@@ -537,7 +544,9 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     resumed = isinstance(native_input, Command)
     if run_scoped(target):
         if not replay.journal.graph:
-            return native_input
+            # a new turn: its state starts with what its conversation carries (:data:`CARRIED`)
+            carries = isinstance(native_input, dict) and runtime.carried
+            return {**runtime.carried, **native_input} if carries else native_input
         replay.resumed = _latest(replay.journal.graph)
         return native_input if resumed else None
     state = await target.aget_state({"configurable": {"thread_id": thread}})
