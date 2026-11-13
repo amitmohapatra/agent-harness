@@ -43,7 +43,7 @@ Then, closing what was left:
   copy of its agent (read from the SDK's `Handoff._agent_ref`, checked at `h.wrap`).
 - **A tool's failure** the SDK formats is recorded as a failed call; **its own timeout** as
   that tool's call that timed out (it said "the run was cancelled"); **`failure_error_function
-  =None`** (a function tool's, an MCP server's) ends the run with the error, as the SDK does.
+  =None`** (a function tool's, an MCP server's, an agent tool's) ends the run with the error, as the SDK does; an agent tool that fails under the default policy is a failed child run whose caller reads the SDK's default text (it read the harness's `check failed: ...`).
 - **A call that pauses inside** (a question in a tool, an approval inside an agent tool)
   counted twice toward `max_tool_calls`: once now.
 - **A `session_input_callback`** that put the earlier turns after the new input got the memory

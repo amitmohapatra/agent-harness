@@ -103,7 +103,9 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     with ``failure_error_function=None``, or a ``FunctionTool`` whose invoke raises, the run
     ends with the error. A call past the tool's own ``timeout`` is recorded as timed out
     (:func:`_own_time_is_up`) and is then the SDK's timeout (its text, or its
-    ``ToolTimeoutError``). An agent tool's failure is an error its caller's model reads.
+    ``ToolTimeoutError``). An agent called as a tool is no different: its failure ends its
+    child run as failed, and is then told as its own ``failure_error_function`` says (the SDK's
+    default text; ``None`` ends the run).
 
     A tool the SDK runs on this machine (a shell, a patch editor, a computer, a custom tool)
     has each call go through the bridge where the SDK hands it to the tool's own code
@@ -116,10 +118,10 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         return tool
     original = tool.on_invoke_tool
     helps = getattr(tool, AGENT_TOOL, False)
-    function = None if helps else getattr(original, FUNCTION, None)
+    function = getattr(original, FUNCTION, None)
     ran = cast("Invoke", function) if callable(function) else original
     if helpers is not None and helps:
-        ran = _helped(tool, original, helpers)
+        ran = _helped(tool, ran, helpers)
 
     async def invoke(context: ToolContext[Any], arguments: str) -> Any:
         args = arguments_of(arguments)
@@ -141,7 +143,7 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
                 raised.append(cut)
                 raise PastItsOwnLimit(tool.name) from cut
             except Exception as error:
-                if not helps and not is_pause_signal(error):
+                if not is_pause_signal(error):
                     raised.append(error)
                 raise
             if waits_inside(context):
@@ -303,6 +305,9 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
                 answer = await invoke(context, arguments)
         except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
             await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+            pending = helpers.runtime.pending
+            if pending is not None:  # paused inside, the pause wrapped in the SDK's error
+                raise Paused(pending.interrupt) from exc
             raise
         finally:
             given, said, cached = (
