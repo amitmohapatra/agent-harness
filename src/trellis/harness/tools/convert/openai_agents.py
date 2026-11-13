@@ -23,7 +23,6 @@ import copy
 import dataclasses
 import inspect
 import json
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, cast
 
@@ -123,7 +122,13 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     if helpers is not None and helps:
         ran = _helped(tool, ran, helpers)
 
-    async def invoke(context: ToolContext[Any], arguments: str) -> Any:
+    def invoke(context: ToolContext[Any], arguments: str) -> Awaitable[Any]:
+        # called in the step in which the SDK starts its own clock for the call (its
+        # ``asyncio.wait_for`` around what this returns, for a tool with a ``timeout``): the
+        # call is due then, however late the SDK's task for it begins (:func:`_own_time_is_up`)
+        return invoked(context, arguments, _due(tool))
+
+    async def invoked(context: ToolContext[Any], arguments: str, due: float | None) -> Any:
         args = arguments_of(arguments)
         runtime = current()
         if isinstance(args, str) or runtime is None:
@@ -132,13 +137,12 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         if repeat is not None:
             return results.readable(repeat.output, tool.name)
         raised: list[BaseException] = []
-        began = time.monotonic()
 
         async def run(given: dict[str, Any]) -> Any:
             try:
                 answer = await ran(context, json.dumps(given))
             except asyncio.CancelledError as cut:
-                if not _own_time_is_up(tool, runtime, began):
+                if not _own_time_is_up(runtime, due):
                     raise
                 raised.append(cut)
                 raise PastItsOwnLimit(tool.name) from cut
@@ -178,16 +182,25 @@ class PastItsOwnLimit(TimeoutError):
     retryable = False
 
 
-def _own_time_is_up(tool: FunctionTool, runtime: Runtime, began: float) -> bool:
-    """Whether a call cut short while it ran was cut by the SDK at the tool's own time limit
-    (``function_tool(timeout=...)``: the SDK's clock for the call started before ``began``,
-    so past the limit since then it has rung) and not with its run (cancelled, out of time)."""
+def _due(tool: FunctionTool) -> float | None:
+    """When the SDK stops waiting for a call of ``tool`` starting now, on the event loop's clock
+    — as the SDK sets it: ``asyncio.wait_for(task, timeout=tool.timeout_seconds)`` in the step
+    that makes the call's coroutine — or ``None`` for a tool with no time limit of its own."""
     limit = tool.timeout_seconds
+    return None if limit is None else asyncio.get_running_loop().time() + limit
+
+
+def _own_time_is_up(runtime: Runtime, due: float | None) -> bool:
+    """Whether a call cut short while it ran was cut by the SDK at the tool's own time limit
+    (``function_tool(timeout=...)``: the SDK cancels the call's task when its ``wait_for``
+    runs out, at ``due`` — :func:`_due`, from the moment the SDK made the call, not from when
+    its task began, which a call beside it holding the loop can make late) and not with its
+    run (cancelled, out of time)."""
     return (
-        limit is not None
+        due is not None
         and runtime.cancelled is None
         and runtime.remaining() != 0
-        and time.monotonic() - began >= limit
+        and asyncio.get_running_loop().time() >= due
     )
 
 

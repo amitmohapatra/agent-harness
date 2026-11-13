@@ -13,6 +13,7 @@ does without it."""
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -363,6 +364,53 @@ async def test_a_tools_own_time_limit_is_the_sdks_and_its_call_is_recorded_timed
     assert failed.error.code == "ToolTimeoutError" and len(model.inputs) == 1
     await h.writes.drain()
     assert recorded(memory_service) == [("slow", "timeout"), ("strict", "timeout")]
+
+
+class HeldLoop:
+    """``asyncio`` as the SDK's ``agents.tool`` reads it, where the task the SDK makes for a call
+    of a tool with a time limit of its own begins only after the loop was held past that limit
+    — what a blocking call of the same reply does (a library holding the loop) — though the
+    SDK's clock for the call started as it made the task."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+    @staticmethod
+    def ensure_future(made: Any, **kwargs: Any) -> Any:
+        async def late() -> Any:
+            # the loop held: the call's own limit (0.1 s) passes meanwhile
+            time.sleep(0.3)  # noqa: ASYNC251
+            return await made
+
+        return asyncio.ensure_future(late(), **kwargs)
+
+
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
+async def test_a_tools_own_time_limit_is_recorded_as_such_when_its_task_began_late(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK starts a call's clock when it makes the call; the call's task may begin later
+    (another call of the reply holding the loop). Cut at its own limit, the call is that tool's
+    call that timed out — on the stream, in the tool records, the run not said to be
+    cancelled — however soon after its task began the SDK stopped waiting."""
+    import agents.tool
+
+    @function_tool(timeout=0.1)
+    async def slow(order: str) -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+    monkeypatch.setattr(agents.tool, "asyncio", HeldLoop())
+    h = declaring(memory_harness, slow="write")
+    model = ScriptedModel([("slow", {"order": "o2"}), "ok"])
+    agent = h.wrap(Agent(name="desk", model=model, tools=[slow]), id="late")
+    events = [e async for e in agent.stream("try", user="u")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    assert outputs(model) == ["Tool 'slow' timed out after 0.1 seconds."]
+    [cut] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert cut["status"] == "timeout" and "cancelled" not in cut["output"], cut
+    await h.writes.drain()
+    assert recorded(memory_service) == [("slow", "timeout")]
 
 
 async def test_a_cancelled_run_still_cuts_a_tool_that_has_a_time_limit_of_its_own(
