@@ -45,6 +45,8 @@ def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> Non
     assert rows["spool_dir"] == ("unset", "default")
     assert set(rows) == set(Settings.model_fields)  # every setting, and nothing else
     assert doctor.shown("api_key", "short") == "set"
+    assert doctor.shown("api_key", "8letters") == "set"  # its last 4 would be half of it
+    assert doctor.shown("api_key", "9_letters") == "set (...ters)"
 
 
 MEM = "http://mem.test"
