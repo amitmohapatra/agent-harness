@@ -344,6 +344,8 @@ async def _called(
         cancelled = isinstance(cut, RunCancelled)
         if cancelled or is_pause_signal(cut):
             _cut(runtime, ref, tool.name, CANCELLED if cancelled else PAUSED)
+        if is_pause_signal(cut):  # not over: made again on the resume, and counted then
+            budget.count_tool_call(runtime, times=-1)
         raise
     runtime.fetched[ref] = snapshots.now()  # what a later turn's replay says it is from
     _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)

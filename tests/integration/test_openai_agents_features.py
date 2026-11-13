@@ -883,6 +883,60 @@ async def test_an_sdk_approval_inside_an_agent_tool_continues_the_agent_inside(
     assert sorted(recorded(memory_service)) == [("check", "ok"), ("gated", "ok")]
 
 
+async def resumed_spent(agent: Any, interrupt_id: str, run_id: str, **answer: Any) -> Any:
+    """The resumed run's result, and what its end says it spent (``RUN_FINISHED``)."""
+    events: list[Any] = []
+
+    async def follow() -> None:
+        async for event in agent.events(run_id):
+            events.append(event)
+
+    following = asyncio.create_task(follow())
+    await asyncio.sleep(0)
+    done = await agent.resume(interrupt_id, reviewer="r", **answer)
+    await asyncio.wait_for(following, 10)
+    return done, events[-1].data["spent"]
+
+
+async def test_a_call_paused_on_an_approval_inside_it_counts_once(harness: Harness) -> None:
+    """The agent tool's call that waited on an approval inside it is made again on the resume:
+    one call, counted once toward the run's tool calls (``Budget(max_tool_calls=)``)."""
+    _, _, desk = checker_and_desk()
+    agent = declaring(harness, gated="read").wrap(desk, id="counted-once")
+    paused = await agent.run("check o1", user="u")
+    assert paused.interrupt is not None
+    done, spent = await resumed_spent(
+        agent, paused.interrupt.interrupt_id, paused.run_id, decision="approve"
+    )
+    assert done.status is RunStatus.SUCCESS
+    assert spent["tool_calls"] == 2  # check, and gated inside it
+
+
+async def test_a_question_asked_inside_a_tool_counts_its_call_once(harness: Harness) -> None:
+    """A tool that asks a person (``trellis.current().ask``) is called again on the resume: one
+    call, counted once."""
+    from trellis import current
+
+    @function_tool
+    async def confirm(order: str) -> str:
+        runtime = current()
+        assert runtime is not None
+        return str(await runtime.ask(f"Ship {order}?", options=["yes", "no"]))
+
+    # the run is run again from its input: its model makes the call again
+    model = ScriptedModel([("confirm", {"order": "o1"})] * 2 + ["confirmed"])
+    agent = declaring(harness, confirm="read").wrap(
+        Agent(name="desk", model=model, tools=[confirm]), id="asked-once"
+    )
+    paused = await agent.run("ship o1", user="u")
+    assert paused.interrupt is not None
+    done, spent = await resumed_spent(
+        agent, paused.interrupt.interrupt_id, paused.run_id, decision="answer", answer="yes"
+    )
+    assert done.status is RunStatus.SUCCESS and spent["tool_calls"] == 1
+    assert outputs(model) == ["yes"]
+
+
 async def test_a_rejected_sdk_approval_inside_an_agent_tool_is_what_the_agent_inside_reads(
     harness: Harness,
 ) -> None:
