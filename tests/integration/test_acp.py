@@ -1001,3 +1001,100 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
     gone = not Path(started).exists()  # noqa: ASYNC240
     assert started != str(usual) and gone  # the run's, removed with it
+
+
+# --------------------------------------------------------------------------- the rest of ACP
+async def test_every_other_update_and_an_extension_pass_through_a_turn(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """What ACP has beside text, plans and tool calls — a thought, a message chunk that is not
+    text, the agent's commands, its mode, its usage, the session's title — and its extension
+    points (a notification; a request, which a client with no extensions refuses) change
+    nothing of the turn: the answer is the agent's text, the stream carries only it, the
+    harness tool called after them is recorded, and the turn is written to memory."""
+    script = [
+        {"updates": True},
+        {"tool": "lookup", "args": {"topic": "tides"}},
+        {"text": "so: {last}"},
+    ]
+    agent = arm(memory_harness.wrap(fake(tmp_path, script), id="updates"), [lookup])
+    events = [e async for e in agent.stream("what of the tides?", user="u1")]
+    await memory_harness.writes.drain()
+    assert events[-1].type is RunEventType.RUN_FINISHED
+    assert events[-1].data["result"] == "so: facts about tides"
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert "".join(deltas) == "so: facts about tides"  # no thought, no link
+    record = recorded(tmp_path)
+    assert record["extensions"] == [{"refused": -32601}]  # method not found: none served
+    assert "errors" not in record
+    assert memory_service.context_text in record["prompts"][0]
+    tools = [c.body["tool"] for c in memory_service.named("record_tool")]
+    assert tools == ["lookup"]
+    said = [
+        (m["role"], m["content"])
+        for call in memory_service.named("messages")
+        for m in call.body["messages"]
+        if m["role"] in ("USER", "ASSISTANT") and m["content"]
+    ]
+    assert said[0] == ("USER", "what of the tides?")
+    assert said[-1] == ("ASSISTANT", "so: facts about tides")
+
+
+async def test_an_acp_agent_the_harness_has_no_profile_of_has_its_own_calls_asked_about(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """Any ACP agent (no profile: the harness knows none of its tools): a call it asks
+    permission for that declares nothing is governance's question, once; one the catalog says
+    is a write is asked about because the agent asks (named as "the agent", not as Kimi);
+    each resume continues the agent's session, and a call it runs without asking is recorded
+    as it reports it."""
+    script = [
+        {"builtin": "Peek", "args": {"at": "prod"}, "output": "3 pods"},
+        {"builtin": "Deploy", "args": {"to": "prod"}, "ask": True, "output": "deployed"},
+        {"builtin": "Notify", "args": {"who": "ops"}, "ask": True, "output": "told ops"},
+        {"text": "done: {last}"},
+    ]
+    memory_service.catalog = {"Notify": {"side_effects": "write"}}
+    agent = memory_harness.wrap(fake(tmp_path, script, profile=None), id="generic-asks")
+    first = await agent.run("ship it", user="u1")
+    assert first.status is RunStatus.PAUSED and first.interrupt is not None
+    assert first.interrupt.tool_call is not None
+    assert (first.interrupt.tool_call.tool, first.interrupt.tool_call.args) == (
+        "Deploy",
+        {"to": "prod"},
+    )
+    second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert second.status is RunStatus.PAUSED and second.interrupt is not None
+    assert second.interrupt.tool_call is not None and second.interrupt.tool_call.tool == "Notify"
+    assert "has not declared" in first.interrupt.question
+    assert second.interrupt.question == "Approve Notify? The agent asks before it runs this call."
+    done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done: told ops"
+    record = recorded(tmp_path)
+    assert [s["how"] for s in record["sessions"]] == ["new", "resume", "resume"]
+    answers = [(p["title"], p["answer"]) for p in record["permissions"]]
+    assert answers.count(("Deploy", "approve_once")) == 1
+    assert answers.count(("Notify", "approve_once")) == 1
+    await memory_harness.writes.drain()
+    calls = [(c.body["tool"], c.body["status"]) for c in memory_service.named("record_tool")]
+    assert calls == [("Peek", "ok"), ("Deploy", "ok"), ("Notify", "ok")]
+
+
+async def test_a_call_governance_and_the_agent_both_ask_about_is_asked_once(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A tool of the agent's own MCP server declares nothing, so governance asks about its
+    call, and the agent asks permission for it too: the person is asked once, and the approved
+    call runs once."""
+    script = [
+        {"builtin": "mcp__crm__send", "args": {"to": "ada"}, "ask": True, "output": "sent"},
+        {"text": "done: {last}"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="asked-once")
+    asked = await agent.run("tell ada", user="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.question.startswith("Approve mcp__crm__send?")
+    done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done: sent"
+    answers = [p["answer"] for p in recorded(tmp_path)["permissions"]]
+    assert answers == ["cancelled", "approve_once"]  # stopped to ask, then let through

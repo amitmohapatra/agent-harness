@@ -178,12 +178,17 @@ def same(
     return outcome
 
 
-async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+async def permitted(
+    spec: ToolSpec, args: dict[str, Any], *, framework: str | None = None
+) -> ToolCall | ToolOutcome:
     """A call its framework runs itself (Claude Code's built-in tools, through its permission
     callback), decided as a harness call is — the run's ``before_tool`` hooks, then governance,
     and a person when it asks — but not run, journaled or recorded here: the call to let
     through (its arguments rewritten or edited, perhaps), or the outcome of one that is not
-    (denied, rejected). A pause propagates."""
+    (denied, rejected). A pause propagates. ``framework``: the framework asks its own user
+    about this call too (:func:`asked`, its name in the question) — asked here once the call
+    is let through as it was made, unless a person was just asked about it (governance's
+    question, a hook's): one call, one question."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = content_key("call", spec.name, args)
@@ -191,8 +196,12 @@ async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutc
     call, verdict = await _hooked(runtime, call, key)
     if isinstance(verdict, Deny):
         return denied(call, verdict)
-    _, call, rejected = await _decided(runtime, spec, call, verdict)
-    return call if rejected is None else rejected
+    decision, call, rejected = await _decided(runtime, spec, call, verdict)
+    if rejected is not None:
+        return rejected
+    if framework is None or decision.asks or call.args != args:
+        return call
+    return await asked(spec, args, framework)
 
 
 async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCall | ToolOutcome:
