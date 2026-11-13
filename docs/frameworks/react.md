@@ -100,7 +100,8 @@ The names are Deep Agents' where both have one. In four tiers:
   `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`,
   `permissions`, `response_format`) or a `CompiledSubAgent` `{"name", "description",
   "runnable"}` (another `ReAct` among them) — and wrapped agents (`h.wrap(...)`) and `a2a(url)`,
-  each a tool of its own.
+  each a tool of its own. Deep Agents' `AsyncSubAgent` (`graph_id`, `url`) runs a task on a
+  server of yours instead ([a task in the background](#a-task-in-the-background)).
 * `skills`, `memory_files`, `permissions` — Deep Agents' skill sources, its `memory`
   (`AGENTS.md`-style files loaded into the instructions; named so it is not taken for the memory
   service) and its file permission rules, as they are; skills and memory files are read through
@@ -500,6 +501,42 @@ lead = ReAct(
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+### A task in the background
+
+Deep Agents' async sub-agent runs a task on a server of yours while the chat goes on. Declare it
+as Deep Agents does, an `AsyncSubAgent` dict with a `graph_id`:
+
+```python
+optimizer = {
+    "name": "optimizer",
+    "description": "Runs the slow optimization, in the background.",
+    "graph_id": "optimizer",
+    "url": "https://agents.example",  # and "headers": {...} for its authentication
+}
+agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="chat")
+```
+
+* **What you host** — an Agent Protocol server (a LangGraph server) at `url` that serves the
+  graph `graph_id`: Deep Agents' tools create a thread and a run there, read them and cancel
+  the run. Give the `url`: without one Deep Agents looks for a LangGraph server in its own
+  process, which a harness process is not, and the task cannot start. The spec reaches Deep
+  Agents as you wrote it; the server is sent the task's text and your `headers`, nothing of
+  the run's user or thread.
+* **In the chat** — the model starts a task with `start_async_task` and the turn ends at once
+  with the task's id; the next messages are answered while it runs. Nothing is pushed when it
+  ends: the result is fetched when the model checks (`check_async_task`, `list_async_tasks`)
+  in a later turn, and `update_async_task` and `cancel_async_task` reach it by its id.
+* **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
+  Deep Agents' own tools, announced on the stream and not asked about. To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Across turns** — Deep Agents keeps its list of tasks in the graph's state, and a `ReAct`
+  graph's state is its run's, so the harness carries that list from a conversation's turn to
+  its next one (per user and thread, a cancelled turn's too). It is kept in the process that
+  ran the turn: after a restart, or on another worker, the next turn starts with no list and
+  a task id is refused. A graph with a checkpointer of its own
+  (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the list in its
+  thread instead.
 
 ## Where sandbox, skills and hooks go
 
