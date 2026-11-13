@@ -19,8 +19,12 @@ said once per agent.
 Every message has an id (:func:`message_id`): a digest of the conversation and the message's
 own name in it — the run's question (``<run>:input``), its answer (``<run>:answer``, the id
 its text streams under), a tool call's result (``result:<call>``), an assistant message's
-calls (``call:<first call>``) — so the same message keeps its id across a resume, a replay
-and a cleared tool result, and two conversations never share one (:func:`identified`).
+calls (``call:<first call>``), anything else the run said by what it said
+(``<run>:said:...``, :func:`said_id`) — so the same message keeps its id across a resume, a
+replay and a cleared tool result, and two conversations never share one (:func:`identified`).
+A paused attempt has not answered: its last message is what it said, not the run's answer,
+so the answer the resumed attempt gives takes the answer's id (the memory service keeps the
+first message of an id it has seen, so a draft under it would stand for the answer).
 """
 
 from __future__ import annotations
@@ -96,17 +100,28 @@ def result_id(conversation: str, call_id: str) -> str:
     return message_id(conversation, f"result:{call_id}")
 
 
-def identified(said: Sequence[Said], runtime: Runtime) -> list[Said]:
+def said_id(conversation: str, run_id: str, said: Said, occurrence: int) -> str:
+    """The id of a message run ``run_id`` said that names nothing else (an assistant's words
+    on the way, a result with no call id): by who said what, and which time it said it
+    (``occurrence``, from 0) — the same on every attempt that says it again (a resumed graph
+    sends its whole transcript), and another for anything said differently."""
+    digest = hashlib.sha256(f"{said.role.value}\0{said.content}".encode()).hexdigest()[:16]
+    return message_id(conversation, f"{run_id}:said:{digest}:{occurrence}")
+
+
+def identified(said: Sequence[Said], runtime: Runtime, *, answered: bool = True) -> list[Said]:
     """An attempt's messages (its question first, when it has one) each with its id: one
     named already keeps it (a steered message, an earlier turn); the question is the run's
     input; a tool result the call it answers; an assistant message that calls tools its
-    first call; the last thing the assistant said without one, the run's answer; anything
-    else its run, attempt and place."""
+    first call; the last thing the assistant said without one, the run's answer — when the
+    attempt ``answered`` (a paused one has not: it answers on its resume); anything else
+    what it said (:func:`said_id`)."""
     conversation, run_id = runtime.conversation, runtime.run_id
     last = max(
         (n for n, s in enumerate(said) if s.role is Speaker.ASSISTANT and not s.tool_calls),
         default=-1,
     )
+    seen: dict[tuple[Speaker, str], int] = {}
     out: list[Said] = []
     for n, s in enumerate(said):
         if s.id is not None:
@@ -117,10 +132,12 @@ def identified(said: Sequence[Said], runtime: Runtime) -> list[Said]:
             found = result_id(conversation, s.tool_call_id)
         elif s.tool_calls:
             found = message_id(conversation, f"call:{s.tool_calls[0].id}")
-        elif n == last:
+        elif n == last and answered:
             found = answer_id(conversation, run_id)
         else:
-            found = message_id(conversation, f"{run_id}:{runtime.attempt}:{n}")
+            occurrence = seen.get((s.role, s.content), 0)
+            seen[(s.role, s.content)] = occurrence + 1
+            found = said_id(conversation, run_id, s, occurrence)
         out.append(dataclasses.replace(s, id=found))
     return out
 

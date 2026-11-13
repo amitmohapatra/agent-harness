@@ -725,6 +725,53 @@ async def test_a_resumed_graph_run_stores_each_message_of_its_transcript_once(
     assert len(ids) == len(set(ids)), ids
 
 
+async def test_a_graphs_own_interrupt_after_a_draft_keeps_the_resumed_answer(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A graph that pauses with its own ``interrupt()`` after the model wrote a draft: the
+    paused attempt's draft is not the run's answer, so it does not take the answer's id; the
+    resumed attempt's final answer is what memory keeps as the run's last message, and the
+    draft it sends again is stored once (memory keeps the first message of an id it has
+    seen: ``source_message_id``)."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    model = ScriptedChatModel(turns=["Done. 3"])
+
+    async def think(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    def confirm(state: MessagesState) -> dict[str, Any]:
+        answer = interrupt({"question": "Send the stock report?"})
+        said = state["messages"][-1].content
+        return {"messages": [AIMessage(content=f"{said} (confirmed: {answer})")]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("model", think)
+    builder.add_node("confirm", confirm)
+    builder.add_edge(START, "model")
+    builder.add_edge("model", "confirm")
+    builder.add_edge("confirm", END)
+    agent = memory_harness.wrap(builder.compile(checkpointer=InMemorySaver()), id="reporter")
+    paused = await agent.run("Is A-1 low?", user="u", thread="t-report")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    await memory_harness.writes.drain()
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. 3 (confirmed: yes)"
+    await memory_harness.writes.drain()
+    conversation = await memory_harness.conversation(user="u", thread="t-report")
+    stored = memory_service.threads[conversation]
+    said = [(m["role"], m["content"]) for m in stored]
+    assert said == [
+        ("USER", "Is A-1 low?"),
+        ("ASSISTANT", "Done. 3"),
+        ("ASSISTANT", "Done. 3 (confirmed: yes)"),
+    ], said
+    last = stored[-1]["custom_metadata"]["message_id"]
+    assert last == answer_id(conversation, done.run_id)
+
+
 async def test_an_approval_decision_is_feedback_on_the_tool_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
