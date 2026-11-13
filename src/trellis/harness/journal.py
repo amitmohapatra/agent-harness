@@ -61,10 +61,12 @@ arguments is a new call, and an approval is asked about again.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -140,6 +142,24 @@ class Save(BaseModel):
     checkpoint: dict[str, Any]
     segments: list[PayloadRef]
     dumped: dict[str, Any]
+
+
+#: The keys of the recorded answers read in this context, while :func:`answers_read` watches.
+_READ: ContextVar[list[str] | None] = ContextVar("trellis_answers_read", default=None)
+
+
+@contextlib.contextmanager
+def answers_read() -> Iterator[list[str]]:
+    """The keys of the recorded answers (:meth:`Replay.answer`) the code it holds reads,
+    tasks it starts included: whether a person was answered about what that code decided —
+    whatever asked them (a catalog rule, a hook's ``Ask``, a rule about the arguments a hook
+    rewrote), however the question's key was made."""
+    read: list[str] = []
+    token = _READ.set(read)
+    try:
+        yield read
+    finally:
+        _READ.reset(token)
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -427,13 +447,11 @@ class Replay:
         if index < len(recorded):
             self._seen[f"a:{key}"] = index + 1
             self._mark("a", key, index, self._here())
+            watching = _READ.get()
+            if watching is not None:  # :func:`answers_read`
+                watching.append(key)
             return InterruptResolution.model_validate(recorded[index])
         return None
-
-    def taken(self, key: str) -> int:
-        """How many recorded answers of ``key`` this attempt has read so far: one more once a
-        person's answer about a call was read for it (:meth:`answer`)."""
-        return self._seen[f"a:{key}"]
 
     def answered(self, key: str) -> bool:
         """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""

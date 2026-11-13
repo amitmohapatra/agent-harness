@@ -106,7 +106,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, content_key
+from trellis.harness.journal import Pending, answers_read
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -1227,12 +1227,11 @@ def _governance(steps: Steps) -> Any:
         if name.startswith(f"mcp__{SERVER}__"):
             steps.started(call_id, name, args)  # the bridge records it
             return _decided("allow")
-        approval = content_key("approve", name, args)
-        read = runtime.replay.taken(approval)
         assert runtime.helpers is not None  # the query runs with the attempt's helpers
+        helper = await steps.helper_of(call_id, given)
         try:
             # a subagent's call is decided as its helper's work: an approval names the helper
-            with runtime.helpers.working(await steps.helper_of(call_id, given)):
+            with answers_read() as read, runtime.helpers.working(helper):
                 decided = await bridge.permitted(_spec(runtime, name), args)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             steps.helped.pop(call_id, None)
@@ -1240,7 +1239,7 @@ def _governance(steps: Steps) -> Any:
         if isinstance(decided, ToolOutcome):
             steps.helped.pop(call_id, None)
             return _decided("deny", str(decided.output))
-        if runtime.replay.taken(approval) > read:  # a person answered about this call
+        if read:  # a person answered about this call, whatever made governance ask
             steps.answered.add(call_id)
         if name in SUBAGENT_TOOLS:
             ran = await _briefed(runtime, call_id, name, decided.args)

@@ -32,11 +32,14 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import PermissionRuleValue
 
-from tests.support.arm import arm
+from tests.support.arm import arm, with_governance
+from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, current, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis import Ask, Harness, Hooks, Rewrite, Settings, current, tool
+from trellis.contracts import RunEventType, RunStatus, ToolCall
 from trellis.harness.adapters.claude import BUILTIN_SIDE_EFFECTS, OUTLIVES_THE_QUERY, ClaudeAdapter
+from trellis.harness.governance import Governance
+from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import DELIVERS_HERE
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -512,6 +515,48 @@ async def test_a_write_claude_code_asks_about_is_one_question_and_the_same_call_
         paused = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert paused.status is RunStatus.SUCCESS and paused.answer == "Bash ran"
     assert len(lines(tmp_path / "builtins.jsonl")) == 2
+
+
+#: Why governance asks a person about a call of Claude's own: the catalog's rule for its
+#: tool, a run hook's ``Ask``, the catalog's rule about the arguments a run hook rewrote.
+WHY_ASKED = ("rule", "hook", "rewritten")
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("inside", [False, True], ids=["main-agent", "subagent"])
+@pytest.mark.parametrize("why", WHY_ASKED)
+async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_it_ask(
+    tmp_path: Path, path: str, inside: bool, why: str
+) -> None:
+    """Governance asks a person about a call of Claude's own before it runs (``PreToolUse``),
+    and Claude Code asks its user about the same call (``can_use_tool``: ``Bash`` is not in
+    its allowed tools): one call, one question — whatever made governance ask, on either
+    path, the main agent's call or a subagent's. Approved, it runs once, as decided."""
+    command = {"command": "make deploy"}
+    call = {"builtin": "Bash", "args": command}
+    deploys = {"agent": "deployer", "prompt": "deploy", "steps": [call, {"text": "deployed"}]}
+    script = [deploys if inside else call, {"text": "{last}"}]
+
+    class Asking(Hooks):
+        async def before_tool(self, call: ToolCall) -> Ask | Rewrite | None:
+            if call.tool != "Bash" or why == "rule":
+                return None
+            return Ask("Deploy now?") if why == "hook" else Rewrite({"command": "make deploy -n"})
+
+    rules = {} if why == "hook" else {"Bash": Rule(risk="irreversible")}
+    agents = {"deployer": AgentDefinition(description="Deploys.", prompt="Deploy it.")}
+    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog(rules))) as h:
+        target = options(tmp_path, script, agents=agents)
+        agent = h.wrap(target, id="deploys", hooks=[Asking()])
+        paused = await agent.run("deploy", user="u1", thread=conversation(path))
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "Bash"
+        assert "Claude Code asks" not in paused.interrupt.question  # governance's question
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        again = None if done.interrupt is None else done.interrupt.question
+        assert done.status is RunStatus.SUCCESS, again  # no second question
+    ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
+    assert ran == [("Bash", {"command": "make deploy -n"} if why == "rewritten" else command)]
 
 
 @pytest.mark.parametrize("path", PATHS)
