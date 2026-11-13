@@ -103,8 +103,16 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     with ``failure_error_function=None``, or a ``FunctionTool`` whose invoke raises, the run
     ends with the error. A call past the tool's own ``timeout`` is recorded as timed out
     (:func:`_own_time_is_up`) and is then the SDK's timeout (its text, or its
-    ``ToolTimeoutError``). An agent tool's failure is an error its caller's model reads."""
-    if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
+    ``ToolTimeoutError``). An agent tool's failure is an error its caller's model reads.
+
+    A tool the SDK runs on this machine (a shell, a patch editor, a computer, a custom tool)
+    has each call go through the bridge where the SDK hands it to the tool's own code
+    (``tools.convert.openai_local.run_here``)."""
+    if not isinstance(tool, FunctionTool):
+        from trellis.harness.tools.convert.openai_local import run_here
+
+        return run_here(tool)
+    if getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
     helps = getattr(tool, AGENT_TOOL, False)

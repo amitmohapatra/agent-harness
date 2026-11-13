@@ -31,10 +31,23 @@ Each of the two libraries' own features was run through a wrapped agent with a s
   framework's question only when no person was just asked about the call. An agent with no
   profile is named "the agent" in it, not Kimi Code.
 
-Recorded as they are today (`test_today_...`): a `function_tool` failure the SDK formats is
-recorded `ok`; `failure_error_function=None` does not end a harness run; the tools the SDK
-runs itself (a local shell, a patch editor, a computer) are not governed or recorded unless
-they have their own `needs_approval`.
+Then, closing what was left:
+
+- **The tools the SDK runs on this machine** (`ShellTool` with a local executor,
+  `LocalShellTool`, `ApplyPatchTool`, `ComputerTool`, `CustomTool`) ran with no governance
+  and no record: an `rm -rf` the model asked for ran unseen. Each call now goes through the
+  bridge where the SDK hands it to the tool's code (`tools.convert.openai_local`): governed
+  (one that declares nothing asks; the person sees the call), journaled, recorded, counted;
+  reject and edit work; a call the tool's own `needs_approval` held is asked about once.
+- **A `handoff(agent, ...)` object's agent** ran ungoverned: it now hands off to the governed
+  copy of its agent (read from the SDK's `Handoff._agent_ref`, checked at `h.wrap`).
+- **A tool's failure** the SDK formats is recorded as a failed call; **its own timeout** as
+  that tool's call that timed out (it said "the run was cancelled"); **`failure_error_function
+  =None`** (a function tool's, an MCP server's) ends the run with the error, as the SDK does.
+- **A call that pauses inside** (a question in a tool, an approval inside an agent tool)
+  counted twice toward `max_tool_calls`: once now.
+- **A `session_input_callback`** that put the earlier turns after the new input got the memory
+  context marked into an earlier question: it goes into this run's.
 
 ### Changed: memory is asked for its whole budget unless the model's window is small
 

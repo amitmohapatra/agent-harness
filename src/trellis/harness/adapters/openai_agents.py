@@ -1196,13 +1196,13 @@ def _asked_about(item: Any) -> dict[str, Any]:
     """What a person is shown of the call the SDK waits on (its ``ToolApprovalItem``): its
     arguments — the SDK pauses on a call before reading them, so ones that are not a JSON
     object reach the person as the model wrote them — and, for a call that has none of that
-    name (a shell tool's commands, a patch's operation: the SDK's own tools), the call itself
-    as the model made it."""
+    name (the SDK's tools that run here: a shell's commands, a patch's operation), what the
+    call does as the model made it (``openai_local.call_args``: what governance decides on
+    when it runs, so the person's answer is the one answer the call needs)."""
     if item.arguments is None:
-        raw = item.raw_item
-        return (
-            dict(raw) if isinstance(raw, dict) else raw.model_dump(mode="json", exclude_none=True)
-        )
+        from trellis.harness.tools.convert.openai_local import call_args
+
+        return call_args(item.raw_item)
     args = _arguments(item)
     return args if isinstance(args, dict) else {"arguments": item.arguments}
 

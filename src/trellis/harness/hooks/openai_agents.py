@@ -51,9 +51,11 @@ class ModelHooks(RunHooks[Any]):
         await self._theirs.on_handoff(context, from_agent, to_agent)
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
+        _stopped()
         await self._theirs.on_tool_start(context, agent, tool)
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        _stopped()
         await self._theirs.on_tool_end(context, agent, tool, result)
 
     async def on_llm_start(
@@ -63,6 +65,7 @@ class ModelHooks(RunHooks[Any]):
         system_prompt: str | None,
         input_items: list[Any],
     ) -> None:
+        _stopped()
         await self._theirs.on_llm_start(context, agent, system_prompt, input_items)
         model = agent.model if isinstance(agent.model, str) else None
         self._calls[agent.name] = (model, time.time())
@@ -91,6 +94,17 @@ class ModelHooks(RunHooks[Any]):
                 output_tokens=usage.output_tokens,
                 cached=int(getattr(details, "cached_tokens", 0) or 0),
             )
+
+
+def _stopped() -> None:
+    """The run stops here when a call of a tool the SDK runs on this machine paused it inside
+    the SDK's own ``try`` (``tools.convert.openai_local.paused_inside``): the pause is raised
+    out of the SDK's run before its next step."""
+    from trellis.harness.tools.convert.openai_local import paused_inside  # noqa: PLC0415
+
+    paused = paused_inside(current())
+    if paused is not None:
+        raise paused
 
 
 def _step(agent: Agent[Any]) -> str:

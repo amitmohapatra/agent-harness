@@ -46,7 +46,6 @@ from tests.support.openai_model import Items, ScriptedModel
 from trellis import Budget, Harness, Settings
 from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus
 from trellis.harness import budget
-from trellis.harness.adapters.openai_agents import _asked_about
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools import bridge
 
@@ -1084,13 +1083,13 @@ async def test_the_memory_context_is_marked_in_the_question_wherever_the_callbac
 
 
 # --------------------------------------------------------------------------- the SDK's own tools
-def shell_call(command: str) -> Any:
+def shell_call(command: str, call_id: str = "call_sh") -> Any:
     from openai.types.responses import ResponseFunctionShellToolCall
     from openai.types.responses.response_function_shell_tool_call import Action
 
     return ResponseFunctionShellToolCall(
-        id="sh_1",
-        call_id="call_sh",
+        id=f"sh_{call_id}",
+        call_id=call_id,
         status="completed",
         type="shell_call",
         action=Action(commands=[command], max_output_length=None, timeout_ms=None),
@@ -1099,62 +1098,286 @@ def shell_call(command: str) -> Any:
 
 async def shell(request: Any) -> str:
     ran.extend(request.data.action.commands)
-    return "ran"
+    return "ran " + " && ".join(request.data.action.commands)
+
+
+def shell_said(model: ScriptedModel) -> list[str]:
+    """What the model's latest call read of each shell call: the outputs' text."""
+    return [
+        " ".join(str(part.get("stdout", "")) for part in item["output"])
+        for item in model.inputs[-1]
+        if isinstance(item, dict) and item.get("type") == "shell_call_output"
+    ]
+
+
+def twice(*items: Any) -> list[Any]:
+    """A reply made again: a run paused by the harness runs again from its input."""
+    return [Items(*items), Items(*items)]
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
+async def test_a_shell_command_the_sdk_runs_here_asks_and_runs_once_recorded(
+    memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
+) -> None:
+    """A ``ShellTool`` with a local executor declares nothing: each command asks a person, who
+    sees the command; nothing runs before the approval; approved, it runs once — recorded,
+    counted, on the stream — and the model reads its output."""
+    model = ScriptedModel([*twice(shell_call("rm -rf build")), "cleaned"])
+    target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
+    agent = memory_harness.wrap(target, id=f"shell-{streamed}", without={"schedules"})
+    if streamed:
+        events = [e async for e in agent.stream("clean up", user="u")]
+        asked = next(e for e in events if e.type is RunEventType.INTERRUPT)
+        interrupt_id, tool_call = asked.data["interrupt_id"], asked.data["tool_call"]
+        assert events[-1].outcome is RunOutcome.INTERRUPT
+    else:
+        paused = await agent.run("clean up", user="u")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        assert paused.interrupt.tool_call is not None
+        interrupt_id = paused.interrupt.interrupt_id
+        tool_call = paused.interrupt.tool_call.model_dump()
+    assert ran == [] and tool_call["tool"] == "shell"
+    assert tool_call["args"] == {"action": {"commands": ["rm -rf build"]}}
+    done = await agent.resume(interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and done.answer == "cleaned"
+    assert ran == ["rm -rf build"] and shell_said(model) == ["ran rm -rf build"]
+    await memory_harness.writes.drain()
+    assert recorded(memory_service) == [("shell", "ok")]
+
+
+async def test_a_rejected_or_edited_shell_command_is_what_the_person_decided(
+    harness: Harness,
+) -> None:
+    """Rejected, the command does not run and the model reads why; edited, the edited command
+    runs instead."""
+    model = ScriptedModel([*twice(shell_call("rm -rf /")), "stopped"])
+    agent = harness.wrap(
+        Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-reject"
+    )
+    paused = await agent.run("clean up", user="u")
+    assert paused.interrupt is not None
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "reject", answer="never the root", reviewer="r"
+    )
+    assert done.status is RunStatus.SUCCESS and ran == []
+    [said] = shell_said(model)
+    assert "was not run" in said and "never the root" in said
+    model = ScriptedModel([*twice(shell_call("rm -rf /")), "cleaned"])
+    agent = harness.wrap(
+        Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-edit"
+    )
+    paused = await agent.run("clean up", user="u")
+    assert paused.interrupt is not None
+    edited = {"action": {"commands": ["rm -rf build"]}}
+    done = await agent.resume(paused.interrupt.interrupt_id, "edit", answer=edited, reviewer="r")
+    assert done.status is RunStatus.SUCCESS and ran == ["rm -rf build"]
 
 
 @pytest.mark.parametrize("decision", ["approve", "reject"])
-async def test_a_shell_tools_own_approval_shows_the_person_the_command(
-    harness: Harness, decision: str
+async def test_a_shell_tools_own_approval_is_the_one_question_for_its_call(
+    memory_harness: Harness, memory_service: FakeMemoryService, decision: str
 ) -> None:
     """The SDK's ``ShellTool(needs_approval=True)``: the run pauses on the SDK's approval, the
-    person shown the call as the model made it (a shell call has no arguments of that name:
-    its commands); approved it runs, rejected it does not."""
+    person shown the command; that answer is the call's only question — approved, it runs once
+    (recorded, the model not asked again); rejected, it does not run."""
     model = ScriptedModel([Items(shell_call("rm -rf build")), "done"])
     target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell, needs_approval=True)])
-    agent = harness.wrap(target, id=f"shell-{decision}")
+    agent = memory_harness.wrap(target, id=f"shell-{decision}", without={"schedules"})
     paused = await agent.run("clean up", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and ran == []
     asked = paused.interrupt.tool_call
     assert asked is not None and asked.tool == "shell"
-    assert asked.args["action"]["commands"] == ["rm -rf build"]
+    assert asked.args == {"action": {"commands": ["rm -rf build"]}}
     done = await agent.resume(paused.interrupt.interrupt_id, decision, reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "done"
-    assert ran == (["rm -rf build"] if decision == "approve" else [])
+    assert len(model.inputs) == 2  # continued from the SDK's state: no second question
+    await memory_harness.writes.drain()
+    if decision == "approve":
+        assert ran == ["rm -rf build"] and recorded(memory_service) == [("shell", "ok")]
+    else:
+        assert ran == [] and recorded(memory_service) == []
 
 
-def test_what_a_person_is_shown_of_a_call_the_sdk_waits_on() -> None:
-    """Its arguments; as written when they are not a JSON object; the call itself when it has
-    none (the SDK's own tools: a shell's commands), whether the SDK holds it as an object or
-    as the JSON its saved state restored."""
-
-    class Waiting:
-        def __init__(self, raw: Any, arguments: str | None) -> None:
-            self.raw_item, self.arguments = raw, arguments
-
-    assert _asked_about(Waiting(None, '{"order": "o1"}')) == {"order": "o1"}
-    assert _asked_about(Waiting(None, "o1, please")) == {"arguments": "o1, please"}
-    assert _asked_about(Waiting(None, "")) == {}
-    restored = {"type": "shell_call", "action": {"commands": ["ls"]}}
-    assert _asked_about(Waiting(restored, None)) == restored
-    shown = _asked_about(Waiting(shell_call("ls"), None))
-    assert shown["action"] == {"commands": ["ls"]} and shown["call_id"] == "call_sh"
-
-
-async def test_today_a_tool_the_sdk_runs_itself_with_no_gate_is_not_governed_or_recorded(
+async def test_a_command_the_catalog_says_reads_runs_unasked_and_a_failure_is_recorded(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    """Today: a shell tool with a local executor and no ``needs_approval`` (and the SDK's other
-    tools that run code here: a local shell, a patch editor, a computer) is run by the SDK
-    with no call through the harness: nobody is asked about a command that declares nothing,
-    and no tool call is recorded. (Its own ``needs_approval`` is the gate that holds it.)"""
-    model = ScriptedModel([Items(shell_call("rm -rf build")), "done"])
-    target = Agent(name="ops", model=model, tools=[ShellTool(executor=shell)])
-    events = [e async for e in memory_harness.wrap(target, id="shell").stream("clean", user="u")]
+    async def fails(request: Any) -> str:
+        ran.extend(request.data.action.commands)
+        raise RuntimeError("no such file")
+
+    memory_service.catalog = {"shell": {"side_effects": "read"}}
+    model = ScriptedModel([Items(shell_call("cat a.txt")), Items(shell_call("ls", "c2")), "done"])
+    agent = memory_harness.wrap(
+        Agent(name="ops", model=model, tools=[ShellTool(executor=shell)]), id="shell-read"
+    )
+    assert (await agent.run("look", user="u")).status is RunStatus.SUCCESS
+    model = ScriptedModel([Items(shell_call("cat b.txt")), "it failed"])
+    agent = memory_harness.wrap(
+        Agent(name="ops", model=model, tools=[ShellTool(executor=fails)]), id="shell-fails"
+    )
+    assert (await agent.run("look", user="u")).status is RunStatus.SUCCESS
+    assert "no such file" in shell_said(model)[0]  # what the SDK makes of the failure
     await memory_harness.writes.drain()
-    assert events[-1].outcome is RunOutcome.SUCCESS and ran == ["rm -rf build"]
-    assert recorded(memory_service) == []
-    assert not [e for e in events if e.type is RunEventType.TOOL_CALL_START]
-    assert events[-1].data["spent"]["tool_calls"] == 0
+    assert ran == ["cat a.txt", "ls", "cat b.txt"]
+    assert recorded(memory_service) == [("shell", "ok"), ("shell", "ok"), ("shell", "error")]
+
+
+async def test_a_local_shell_call_asks_and_runs_once_recorded(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    from agents import LocalShellTool
+    from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
+
+    def execute(request: Any) -> str:
+        ran.append(" ".join(request.data.action.command))
+        return "done"
+
+    call = LocalShellCall(
+        id="ls_1",
+        call_id="call_ls",
+        status="completed",
+        type="local_shell_call",
+        action=LocalShellCallAction(type="exec", command=["rm", "-rf", "x"], env={}),
+    )
+    model = ScriptedModel([*twice(call), "removed"])
+    agent = memory_harness.wrap(
+        Agent(name="ops", model=model, tools=[LocalShellTool(executor=execute)]), id="local"
+    )
+    paused = await agent.run("remove x", user="u")
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None and ran == []
+    assert paused.interrupt.tool_call.args["action"]["command"] == ["rm", "-rf", "x"]
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and ran == ["rm -rf x"]
+    await memory_harness.writes.drain()
+    assert recorded(memory_service) == [("local_shell", "ok")]
+
+
+async def test_a_patch_and_a_custom_tool_ask_before_they_run(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """An ``ApplyPatchTool``'s editor and a ``CustomTool`` run nothing before a person
+    approves; the patch's own ``needs_approval`` is the one question for its call; a rejected
+    custom call does not run and the model reads why."""
+    from agents import ApplyPatchTool, CustomTool
+    from openai.types.responses import ResponseApplyPatchToolCall, ResponseCustomToolCall
+
+    class Editor:
+        def create_file(self, operation: Any) -> str:
+            ran.append(f"create {operation.path}")
+            return "created"
+
+        def update_file(self, operation: Any) -> str:
+            ran.append(f"update {operation.path}")
+            return "updated"
+
+        def delete_file(self, operation: Any) -> str:
+            ran.append(f"delete {operation.path}")
+            return "deleted"
+
+    def patch(path: str) -> Any:
+        return ResponseApplyPatchToolCall.model_validate(
+            {
+                "id": "ap_1",
+                "call_id": "call_ap",
+                "status": "completed",
+                "type": "apply_patch_call",
+                "operation": {"type": "delete_file", "path": path},
+            }
+        )
+
+    for gate in (False, True):
+        ran.clear()
+        tool_ = ApplyPatchTool(editor=Editor(), needs_approval=gate)
+        model = ScriptedModel([*twice(patch("old.py")), "deleted it"])
+        agent = memory_harness.wrap(
+            Agent(name="dev", model=model, tools=[tool_]), id=f"patch-{gate}"
+        )
+        paused = await agent.run("delete old.py", user="u")
+        assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+        assert paused.interrupt.tool_call.args == {
+            "operation": {"type": "delete_file", "path": "old.py"}
+        }
+        assert ran == []
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+        assert done.status is RunStatus.SUCCESS and ran == ["delete old.py"]  # one question
+    custom_ran: list[str] = []
+
+    def invoke(context: Any, given: str) -> str:
+        custom_ran.append(given)
+        return "sql ran"
+
+    call = ResponseCustomToolCall(
+        id="ct_1", call_id="call_ct", type="custom_tool_call", name="sql", input="DROP TABLE t"
+    )
+    model = ScriptedModel([*twice(call), "not dropped"])
+    agent = memory_harness.wrap(
+        Agent(
+            name="dba",
+            model=model,
+            tools=[CustomTool(name="sql", description="Run SQL.", on_invoke_tool=invoke)],
+        ),
+        id="custom",
+    )
+    paused = await agent.run("drop t", user="u")
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.args == {"name": "sql", "input": "DROP TABLE t"}
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", answer="no", reviewer="r")
+    assert done.status is RunStatus.SUCCESS and custom_ran == []
+    [told] = [i["output"] for i in model.inputs[-1] if i.get("type") == "custom_tool_call_output"]
+    assert "was not run" in told
+    await memory_harness.writes.drain()
+    assert recorded(memory_service) == [("apply_patch", "ok"), ("apply_patch", "ok")]
+
+
+async def test_a_computers_actions_are_governed_and_recorded_one_by_one(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A ``ComputerTool``: each action of a computer call asks (the computer declares nothing),
+    the person shown the action; approved for the run, the click and the screenshot after it
+    run, each recorded; a computer the catalog says reads runs unasked."""
+    from agents import ComputerTool
+    from openai.types.responses import ResponseComputerToolCall
+
+    from tests.support.computer import Screen
+
+    def click(call_id: str) -> Any:
+        return ResponseComputerToolCall.model_validate(
+            {
+                "id": f"cu_{call_id}",
+                "call_id": call_id,
+                "status": "completed",
+                "type": "computer_call",
+                "pending_safety_checks": [],
+                "action": {"type": "click", "x": 10, "y": 20, "button": "left"},
+            }
+        )
+
+    screen = Screen()
+    model = ScriptedModel([*twice(click("call_cu")), "clicked"])
+    agent = memory_harness.wrap(
+        Agent(name="ui", model=model, tools=[ComputerTool(computer=screen)]), id="computer"
+    )
+    paused = await agent.run("click it", user="u")
+    assert paused.interrupt is not None and paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.args == {
+        "action": {"type": "click", "x": 10, "y": 20, "button": "left"}
+    }
+    assert screen.done == []
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "approve", reviewer="r", remember="run"
+    )
+    assert done.status is RunStatus.SUCCESS and screen.done == ["click 10 20", "screenshot"]
+    await memory_harness.writes.drain()
+    tool = "computer_use_preview"
+    assert recorded(memory_service) == [(tool, "ok"), (tool, "ok")]
+    memory_service.catalog = {tool: {"side_effects": "read"}}
+    screen.done.clear()
+    model = ScriptedModel([Items(click("call_cu2")), "clicked"])
+    agent = memory_harness.wrap(
+        Agent(name="ui", model=model, tools=[ComputerTool(computer=screen)]), id="computer-read"
+    )
+    assert (await agent.run("click it", user="u")).status is RunStatus.SUCCESS
+    assert screen.done == ["click 10 20", "screenshot"]
 
 
 async def test_a_hosted_mcp_tools_approval_request_pauses_or_asks_its_own_callback(
