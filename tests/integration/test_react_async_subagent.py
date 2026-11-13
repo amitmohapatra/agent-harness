@@ -9,19 +9,21 @@ five routes the ``langgraph_sdk`` client calls from ``deepagents.middleware.asyn
 run takes :data:`TASK_SECONDS` and then answers :data:`RESULT`. No model is called: the chat
 model is scripted, and reads a task id as a model would, from what it is shown.
 
-Each test asserts what a user needs. One that fails today is kept, marked ``xfail`` (strict)
-with what was seen; a test whose docstring starts "Today:" pins an observation that is not what
-a user needs, as the evidence of a finding. What was found:
+Each test asserts what a user needs; a test whose docstring starts "Today:" pins an observation
+that is not what a user needs, as the evidence of a finding. What they show:
 
-* T1 and T2 work once the five tools say what they do (the catalog): the task starts, the turn
-  ends at once with the task id, the next message is answered while the task runs.
-* T3 does not: Deep Agents keeps its task list in the graph's state (``async_tasks``), a
-  ``ReAct`` graph's state is its run's, so the next turn has no task list and ``check``,
-  ``list``, ``update`` and ``cancel`` all refuse the id — whether or not the id is in the
-  history the turn sees. Within one turn, and on a graph with a checkpointer of its own (one
-  LangGraph thread per conversation), they work.
-* Undeclared, each of the five tools asks a person; nothing tells the chat when the task ends;
-  cancelling the turn leaves the task running with its id lost; with no ``url`` it cannot start.
+* T1 and T2: the task starts, the turn ends at once with the task id, the next message is
+  answered while the task runs. The five tools say what they do by default (:data:`RISKS`):
+  a status check or the list never asks a person, a start, an update or a cancel is announced.
+* T3: Deep Agents keeps its task list in the graph's state (``async_tasks``) and a ``ReAct``
+  graph's state is its run's, so the harness carries that list from a conversation's turn to
+  its next one (``adapters.langgraph.CARRIED``): ``check``, ``list``, ``update`` and
+  ``cancel`` find the task in a later turn, memory on or off, and another user's thread of
+  the same name does not. It is kept in the process that ran the turn: a turn another worker
+  runs starts with no list ("Today:").
+* Nothing tells the chat when the task ends; cancelling the turn leaves the task running (the
+  next turn's list has it); with no ``url`` it cannot start; memory on, the start's result in
+  a later turn's history is marked out of date, with the advice to call it again.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.journals import journal_of
 from trellis import Harness, ReAct, Settings, middleware, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
 from trellis.harness.agui.sse import decode
@@ -74,7 +76,7 @@ TOOLS: Final = (
     "cancel_async_task",
     "list_async_tasks",
 )
-#: What the tool catalog is told the five tools do, so they run without asking a person.
+#: What the five tools do, as the harness declares Deep Agents' own (``middleware.ASYNC_TASKS``).
 RISKS: Final = {
     "start_async_task": "write",
     "update_async_task": "write",
@@ -89,12 +91,8 @@ START: Final = (
 #: Everything a start sends the server (``client.runs.create``): the graph, the task's text and
 #: the SDK's stream defaults — no idempotency key, no metadata, no config.
 SENT: Final = {"assistant_id", "input", "stream_mode", "stream_resumable", "stream_subgraphs"}
-LOST: Final = (
-    "Deep Agents keeps the task list in the graph's state (async_tasks) and a ReAct graph's "
-    "state is its run's (RunCheckpointer: thread_id is the run id), so a later turn starts with "
-    'no task list: the tool answers "No tracked task found for task_id: \'<id>\'" (list: "No '
-    'async subagent tasks tracked.") and the server is never asked'
-)
+#: What Deep Agents' ``list_async_tasks`` says of a thread with no task.
+NO_TASKS: Final = "No async subagent tasks tracked."
 
 
 # --------------------------------------------------------------------------- the stand-in server
@@ -258,17 +256,15 @@ def tool_results(messages: list[BaseMessage]) -> list[str]:
 
 
 # --------------------------------------------------------------------------- the chat
-def subagent(server: StandIn, **more: Any) -> dict[str, Any]:
+def subagent(server: StandIn, **more: Any) -> Any:
     spec = {"name": "optimizer", "description": "Runs the slow optimization, in the background."}
     return {**spec, "graph_id": "optimizer", "url": server.url, **more}
 
 
-def chat(harness: Harness, server: StandIn, model: Model, *, declared: bool = True) -> Agent:
-    """A wrapped ``ReAct`` with the async sub-agent; ``declared``: the tool catalog says what
-    the five Deep Agents tools do (else each asks a person: ``test_b_...``)."""
-    if declared:
-        declaring(harness, **RISKS)
-    return harness.wrap(ReAct("You help.", model, subagents=[subagent(server)]), id="bg")
+def chat(harness: Harness, server: StandIn, model: Model, **more: Any) -> Agent:
+    """A wrapped ``ReAct`` with the async sub-agent — and no word in the tool catalog on Deep
+    Agents' five tools."""
+    return harness.wrap(ReAct("You help.", model, subagents=[subagent(server)], **more), id="bg")
 
 
 async def timed[T](work: Awaitable[T]) -> tuple[T, float]:
@@ -322,7 +318,6 @@ async def later_turn(harness: Harness, server: StandIn, *turns: Any) -> tuple[Mo
     return model, await say(agent, "is the optimization done?")
 
 
-@pytest.mark.xfail(strict=True, reason=LOST)
 async def test_t3_a_later_turn_gets_the_result(harness: Harness, server: StandIn) -> None:
     model, third = await later_turn(
         harness, server, calls("check_async_task"), says_what_the_tool_said
@@ -332,14 +327,12 @@ async def test_t3_a_later_turn_gets_the_result(harness: Harness, server: StandIn
     assert RESULT in third.answer
 
 
-@pytest.mark.xfail(strict=True, reason=LOST)
 async def test_t3_a_later_turn_lists_the_task(harness: Harness, server: StandIn) -> None:
     _, third = await later_turn(harness, server, ("list_async_tasks", {}), says_what_the_tool_said)
     assert third.status is RunStatus.SUCCESS, third.error
     assert f"task_id: {server.task_id}  agent: optimizer  status: success" in third.answer
 
 
-@pytest.mark.xfail(strict=True, reason=LOST)
 async def test_a_later_turn_cancels_the_task(harness: Harness, server: StandIn) -> None:
     server.seconds = 60
     model = Model(turns=[START, reports_the_id, calls("cancel_async_task"), "cancelled"])
@@ -349,7 +342,6 @@ async def test_a_later_turn_cancels_the_task(harness: Harness, server: StandIn) 
     assert server.status(server.task_id) == "cancelled"
 
 
-@pytest.mark.xfail(strict=True, reason=LOST)
 async def test_a_later_turn_sends_the_task_new_instructions(
     harness: Harness, server: StandIn
 ) -> None:
@@ -361,12 +353,13 @@ async def test_a_later_turn_sends_the_task_new_instructions(
 
 
 # --------------------------------------------------------------------------- a. state across turns
-async def test_a_today_the_next_turn_sees_the_answer_but_no_tool_result_and_no_task_list(
+async def test_a_the_task_list_is_carried_whatever_history_the_next_turn_sees(
     harness: Harness, server: StandIn
 ) -> None:
-    """Today: memory off, the next turn's history is the earlier questions and answers (the
-    run store's): the task id is in it only because the model's answer said it, T1's tool
-    result is not, and the id the model reads there is refused — the server is never asked."""
+    """Memory off, the next turn's history is the earlier questions and answers (the run
+    store's): the task id is in it only because the model's answer said it, T1's tool result
+    is not — and the id the model reads there is found in the task list the conversation
+    carries, so the server is asked for its result."""
     model, third = await later_turn(
         harness, server, calls("check_async_task"), says_what_the_tool_said
     )
@@ -377,25 +370,53 @@ async def test_a_today_the_next_turn_sees_the_answer_but_no_tool_result_and_no_t
         f"The optimization is running in the background. Task id: {server.task_id}",
         "4",
     ]
-    assert third.answer == f"No tracked task found for task_id: {server.task_id!r}"
-    assert [method for method, _ in server.calls] == ["POST", "POST"]  # no run was read
+    assert RESULT in third.answer
+    assert [method for method, _ in server.calls] == ["POST", "POST", "GET", "GET"]
 
 
-async def test_a_today_with_memory_the_tool_result_is_in_the_history_and_the_id_still_refused(
+async def test_a_today_with_memory_the_start_in_the_history_is_marked_out_of_date(
     memory_harness: Harness, server: StandIn
 ) -> None:
     """Today: memory on, the next turn's history holds T1's call and its result (the id in
     it), marked out of date with the advice to call ``start_async_task`` again — which would
-    start a second task — and ``check_async_task`` still refuses the id."""
-    model, third = await later_turn(
-        memory_harness, server, calls("check_async_task"), says_what_the_tool_said
-    )
-    [kept] = tool_results(model.seen[3])
-    assert kept == (
+    start a second task: an earlier result is marked by how long its tool's data stays
+    current, whatever the tool does. The id read there is found all the same (the list the
+    conversation carries), and a status check's earlier result is rightly marked."""
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), "It runs.", "Yes."])
+    agent = chat(memory_harness, server, model)
+    await say(agent, "run the optimization")
+    second = await say(agent, "is the optimization done?")
+    assert second.status is RunStatus.SUCCESS, second.error
+    started = (
         "[out of date: call start_async_task again for the current value]\n"
         f"Launched async subagent. task_id: {server.task_id}"
     )
-    assert third.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert tool_results(model.seen[2]) == [started]  # the second turn's history
+    assert '"status": "running"' in tool_results(model.seen[3])[-1]  # the id, found
+    await say(agent, "are you sure?")
+    kept = tool_results(model.seen[4])
+    assert kept[0] == started and len(server.runs) == 1
+    assert kept[1].startswith("[out of date: call check_async_task again for the current value]")
+
+
+async def test_a_another_users_thread_of_the_same_name_has_no_task(
+    harness: Harness, server: StandIn
+) -> None:
+    """The list is the conversation's — its user's thread: another user naming a thread
+    alike is shown none, and asked for the first user's task id is refused it."""
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    await say(agent, "run the optimization")
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    other = await agent.run("which tasks are there?", user="bob", thread=THREAD)
+    assert other.answer == NO_TASKS
+    model.turns += [("check_async_task", {"task_id": server.task_id}), says_what_the_tool_said]
+    other = await agent.run("how is that task?", user="bob", thread=THREAD)
+    assert other.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert len(server.calls) == 2  # the server was asked nothing for bob
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    mine = await say(agent, "which tasks are there?")
+    assert f"task_id: {server.task_id}  agent: optimizer  status: running" in mine.answer
 
 
 async def test_a_within_one_turn_the_task_is_started_and_checked(
@@ -418,7 +439,6 @@ async def test_a_a_graph_with_its_own_checkpointer_keeps_the_task_list_across_tu
     """Not ``ReAct``: ``create_deep_agent`` with ``middleware()`` and a checkpointer of its own
     runs on the conversation's LangGraph thread, so its state — the task list — is the next
     turn's: T1, T2 and T3 all work, and another user's same-named thread has no task."""
-    declaring(harness, **RISKS)
     model = Model(turns=[START, reports_the_id, "4"])
     graph = create_deep_agent(
         model, subagents=[subagent(server)], middleware=middleware(), checkpointer=InMemorySaver()
@@ -437,42 +457,49 @@ async def test_a_a_graph_with_its_own_checkpointer_keeps_the_task_list_across_tu
     assert f"task_id: {server.task_id}  agent: optimizer  status: success" in fourth.answer
     model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
     other = await agent.run("which tasks are there?", user="bob", thread=THREAD)
-    assert other.answer == "No async subagent tasks tracked."
+    assert other.answer == NO_TASKS
 
 
 # --------------------------------------------------------------------------- b. governance
+async def test_b_the_five_tools_say_what_they_do(harness: Harness, server: StandIn) -> None:
+    """The five tools are Deep Agents', and say nothing of what they do themselves: the
+    harness says it for them, as it does of Deep Agents' ``execute`` — the run's tool set has
+    each with its risk, with no word in the tool catalog."""
+    agent = chat(harness, server, Model(turns=[]))
+    own = await agent.adapter.native(agent.target)
+    assert {spec.name: spec.side_effects for spec in own if spec.name in TOOLS} == RISKS
+
+
 @pytest.mark.parametrize("name", TOOLS)
-async def test_b_today_undeclared_each_async_tool_asks_a_person(
+async def test_b_a_read_runs_and_a_write_is_announced_and_none_asks_a_person(
     harness: Harness, server: StandIn, name: str
 ) -> None:
-    """Today: the five tools are Deep Agents', and say nothing of what they do, so a call of
-    any — a status check included — pauses the run for an approval before it runs."""
+    """A status check and the list are reads: they run. A start, an update and a cancel are
+    writes of Deep Agents' own tools, announced on the run's stream and not asked about."""
     args = {"description": "d", "subagent_type": "optimizer", "task_id": "t", "message": "m"}
     model = Model(turns=[(name, args), "done"])
-    agent = chat(harness, server, model, declared=False)
-    paused = await say(agent, "go")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
-    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == name
-    assert f"{name} has not declared its side effects" in paused.interrupt.question
-    assert server.calls == []  # nothing ran yet
+    agent = chat(harness, server, model)
+    events = [e async for e in agent.stream("go", user=USER, thread=THREAD)]
+    assert events[-1].type is RunEventType.RUN_FINISHED
+    assert events[-1].outcome is RunOutcome.SUCCESS  # it ran: no pause for an approval
+    assert [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START] == [name]
+    announced = [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"]
+    assert announced == ([name] if RISKS[name] == "write" else [])
 
 
-async def test_b_today_an_approval_for_the_conversation_starts_later_tasks_unasked(
+async def test_b_the_catalog_still_decides_a_start_declared_irreversible_asks(
     harness: Harness, server: StandIn
 ) -> None:
-    """Today: approved "for this conversation", the start runs once and the thread's later
-    starts are not asked about; a ``write`` in the catalog runs it unasked too (announced:
-    ``test_d_...``), as Deep Agents' own tools are counted confined to the run."""
-    model = Model(turns=[START, reports_the_id, START, reports_the_id])
-    agent = chat(harness, server, model, declared=False)
+    """What the harness says of the five tools is a default: the tool catalog's word comes
+    first, so an app that wants a person to approve every start says so there."""
+    declaring(harness, start_async_task="irreversible")
+    agent = chat(harness, server, Model(turns=[START, reports_the_id]))
     paused = await say(agent, "run the optimization")
-    assert paused.interrupt is not None
-    done = await agent.resume(
-        paused.interrupt.interrupt_id, "approve", reviewer=USER, remember="run"
-    )
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    assert paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "start_async_task" and server.calls == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer=USER)
     assert done.status is RunStatus.SUCCESS and len(server.runs) == 1, done.error
-    again = await say(agent, "run it once more")
-    assert again.status is RunStatus.SUCCESS and len(server.runs) == 2, again.interrupt
 
 
 # --------------------------------------------------------------------------- c. journal, retries
@@ -524,12 +551,7 @@ async def crash_then_finish(
 ) -> Any:
     """The turn queued, run by the first worker, which dies mid-run; the second finishes it."""
     first, second = workers
-    dying, taking_over = (
-        declaring(h, **RISKS).wrap(
-            ReAct("You help.", model, tools=tools, subagents=[subagent(server)]), id="bg"
-        )
-        for h in (first, second)
-    )
+    dying, taking_over = (chat(h, server, model, tools=tools) for h in (first, second))
     store = first.runs
     assert isinstance(store, LocalRuns)
     handle = await dying.start("run the optimization", user=USER, thread=THREAD)
@@ -647,13 +669,54 @@ async def test_d_the_stream_shows_the_call_and_nothing_tells_the_chat_the_task_e
     assert len(runs) == 1  # and no run was started in the thread to say so
 
 
+# --------------------------------------------------------------------------- a worker's turn
+async def test_c_a_worker_of_the_process_runs_the_next_turn_with_the_task_list(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    """The next message queued, and run by a worker of the process that ran the turn before:
+    the list that turn ended with is there."""
+    server.seconds = 0.2
+    first, _ = workers
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    agent = chat(first, server, model)
+    await say(agent, "run the optimization")
+    await server.finished()
+    handle = await agent.start("is the optimization done?", user=USER, thread=THREAD)
+    assert await first.worker([agent]).run_once()
+    done = await handle.result(wait=5)
+    assert done.status is RunStatus.SUCCESS and RESULT in done.answer, done.error
+
+
+async def test_c_today_a_worker_of_another_process_runs_the_next_turn_without_the_task_list(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    """Today: the list a turn ended with is kept in the process that ran it, as the session
+    and the saved results of a conversation are (``Agent.results``) — the run store keeps a
+    finished run's question and answer, not its graph's state. A worker of another process
+    that runs the conversation's next turn starts with no list: the id, which the history has
+    (the first turn's answer), is refused, and the server is never asked."""
+    server.seconds = 0.2
+    _, second = workers
+    model = Model(turns=[START, reports_the_id, calls("check_async_task"), says_what_the_tool_said])
+    here, there = (chat(h, server, model) for h in workers)
+    await say(here, "run the optimization")
+    await server.finished()
+    handle = await here.start("is the optimization done?", user=USER, thread=THREAD)
+    assert await second.worker([there]).run_once()
+    done = await handle.result(wait=5)
+    assert done.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert [method for method, _ in server.calls] == ["POST", "POST"]  # no run was read
+
+
 # --------------------------------------------------------------------------- e. cancel
-async def test_e_today_cancelling_the_turn_leaves_the_task_running_and_its_id_lost(
+async def test_e_today_cancelling_the_turn_leaves_the_task_running_for_the_next_turn_to_find(
     harness: Harness, server: StandIn
 ) -> None:
     """Today: the turn cancelled after the start (its model still working), the task is not
-    cancelled on the server and ends on its own, and the next turn sees the cancelled turn's
-    question only — no id to check or cancel it by."""
+    cancelled on the server. The next turn's history is the cancelled turn's question only —
+    no id — but the list the cancelled turn ended with is carried: the task is listed, and
+    cancelled by the id read there."""
+    server.seconds = 60
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = chat(harness, server, model)
     turn = asyncio.create_task(say(agent, "run the optimization"))
@@ -666,11 +729,15 @@ async def test_e_today_cancelling_the_turn_leaves_the_task_running_and_its_id_lo
     assert cancelled.status is RunStatus.CANCELLED and cancelled.answer is None
     assert server.status(server.task_id) == "running"
     assert server.calls == [("POST", "/threads"), ("POST", f"/threads/{server.task_id}/runs")]
-    model.hold_from, model.turns = None, ["I see no task."]
-    await say(agent, "is the optimization running?")
-    assert id_in(model.seen[-1]) is None
-    await server.finished()
-    assert server.status(server.task_id) == "success"  # it ran to its end, unread
+    model.hold_from = None
+    model.turns = [("list_async_tasks", {}), calls("cancel_async_task"), "It is stopped."]
+    await say(agent, "is the optimization running? stop it")
+    assert id_in(model.seen[1]) is None  # the history names no task
+    assert (
+        f"task_id: {server.task_id}  agent: optimizer  status: running"
+        in tool_results(model.seen[2])[-1]
+    )
+    assert server.status(server.task_id) == "cancelled"
 
 
 # --------------------------------------------------------------------------- f. configuration
@@ -679,7 +746,6 @@ async def test_f_what_the_server_is_sent(harness: Harness, server: StandIn) -> N
     ``x-auth-scheme: langsmith`` is sent unless ``headers`` says otherwise, the spec's own
     headers ride along, and the request names the graph and the task's text — nothing of the
     harness's run (its user, tenant, thread or run id)."""
-    declaring(harness, **RISKS)
     spec = subagent(server, headers={"authorization": "Bearer of-the-app"})
     model = Model(turns=[START, reports_the_id])
     agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
@@ -700,7 +766,6 @@ async def test_f_today_without_a_url_the_task_cannot_start(harness: Harness) -> 
     """Today: with no ``url`` the SDK looks for a LangGraph server in this process
     (``langgraph_api.server``), which a harness process is not: the start fails as a tool
     result the model reads, and the turn goes on."""
-    declaring(harness, **RISKS)
     spec = {"name": "optimizer", "description": "Runs the optimization.", "graph_id": "optimizer"}
     model = Model(turns=[START, says_what_the_tool_said])
     agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
@@ -710,11 +775,11 @@ async def test_f_today_without_a_url_the_task_cannot_start(harness: Harness) -> 
 
 
 # --------------------------------------------------------------------------- the AG-UI routes
-async def test_through_the_ag_ui_routes_t1_and_t2_work_and_t3_does_not(server: StandIn) -> None:
+async def test_through_the_ag_ui_routes_t1_t2_and_t3_work(server: StandIn) -> None:
     """The same chat over ``serve_chat``: ``POST /agui/run`` per message."""
-    harness = declaring(Harness(config=Settings()), **RISKS)
+    harness = Harness(config=Settings())
     model = Model(turns=[START, reports_the_id, "4"])
-    agent = harness.wrap(ReAct("You help.", model, subagents=[subagent(server)]), id="bg")
+    agent = chat(harness, server, model)
     app = FastAPI()
     agent.serve_chat(app, identity=lambda request: request.headers.get("x-user", ""))
     transport = httpx.ASGITransport(app=app)
@@ -740,7 +805,6 @@ async def test_through_the_ag_ui_routes_t1_and_t2_work_and_t3_does_not(server: S
             await server.finished()
             model.turns += [calls("check_async_task"), says_what_the_tool_said]
             third = await post(http, "is the optimization done?")
-            # today (LOST): what a user needs here is RESULT
-            assert third[-1]["result"] == f"No tracked task found for task_id: {server.task_id!r}"
+            assert RESULT in third[-1]["result"]
     finally:
         await harness.aclose()

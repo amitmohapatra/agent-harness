@@ -103,3 +103,13 @@ def test_a_turns_transcript_is_kept_and_counted_with_the_results() -> None:
     assert kept.turns("b") == {}
     kept.add("b", {"/x": "1234567890123"}, {})  # past the bound: "a" goes, results and turns
     assert kept.turns("a") == {} and kept.chars == 13
+
+
+def test_the_graph_state_a_turn_ended_with_is_kept_and_counted_with_the_results() -> None:
+    kept = results.Conversations(most=40)
+    kept.left("a", {"tasks": {"t": 1}})
+    kept.left("a", {"tasks": {"t": 1, "u": 2}})  # the next turn's, in its place
+    assert kept.state("a") == {"tasks": {"t": 1, "u": 2}} and kept.state("b") == {}
+    assert kept.chars == len(repr(kept.state("a")))
+    kept.add("b", {"/x": "1" * 30}, {})  # past the bound: "a" goes, its state too
+    assert kept.state("a") == {} and kept.chars == 30

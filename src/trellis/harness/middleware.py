@@ -129,7 +129,7 @@ from trellis.harness import (
     snapshots,
 )
 from trellis.harness.adapters.base import FIT_SHARE
-from trellis.harness.adapters.langgraph import CONTEXT_MESSAGE_ID, TASK_TOOL
+from trellis.harness.adapters.langgraph import CARRIED, CONTEXT_MESSAGE_ID, TASK_TOOL
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.clients.memory import TOOL_SEARCH
@@ -249,6 +249,16 @@ FILES_CHANNEL: Final = "files"
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
+#: Deep Agents' tools for the background tasks of its async sub-agents
+#: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
+#: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
+ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
+    "start_async_task": "write",
+    "update_async_task": "write",
+    "cancel_async_task": "write",
+    "check_async_task": "read",
+    "list_async_tasks": "read",
+}
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
 
@@ -274,7 +284,9 @@ def declare_files(graph: Any) -> None:
     :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
     ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
     is: those calls only change the state, which its checkpoint keeps. Deep Agents'
-    :data:`EXECUTE` is declared a write. Only the framework's own (:func:`framework_made`)."""
+    :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
+    (:data:`ASYNC_TASKS`) — a tool that says so itself keeps its word. Only the framework's own
+    (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -296,6 +308,8 @@ def declare_files(graph: Any) -> None:
                 tool.metadata = {**said, **outside_state(name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
+            elif name in ASYNC_TASKS and "side_effects" not in said:
+                tool.metadata = {**said, "side_effects": ASYNC_TASKS[name]}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
@@ -2782,7 +2796,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     As the root graph's checkpoint moves past a step, the journal's records of that step's
     calls go (``Replay.passed``): the graph never makes them again, so a long run's journal is
     its latest checkpoint and the records of the step under way. A checkpoint that cannot be
-    read back fails the run (:class:`CheckpointUnreadable`)."""
+    read back fails the run (:class:`CheckpointUnreadable`). The thread ends with the run; what
+    its conversation carries to its next turn (``adapters.langgraph.CARRIED``) is read from
+    each checkpoint as it is kept (``Runtime.carried``)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -2884,6 +2900,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         runtime = current()
         if not ns and runtime is not None and runtime.run_id == thread_id:
             runtime.replay.passed(parent)  # the steps it follows are done: not made again
+            # what the run's conversation carries to its next turn, as the graph now holds it
+            values = checkpoint["channel_values"]
+            runtime.carried = {name: values[name] for name in CARRIED if name in values}
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(
