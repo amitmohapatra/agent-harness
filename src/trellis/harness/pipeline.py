@@ -24,7 +24,7 @@ import dataclasses
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -475,6 +475,12 @@ async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
     (:func:`_keep_carried`), wherever that turn ran: the list a turn on another server, or
     before a restart, left. None kept: none; one that cannot be read is said in the log and
     left out — the turn starts with what this process kept."""
+    found = await _read_carried(agent, runtime)
+    return {} if found is None else found
+
+
+async def _read_carried(agent: Agent, runtime: Runtime) -> dict[str, Any] | None:
+    """:func:`_carried`, ``None`` when what is kept cannot be read (said in the log)."""
     try:
         data = await agent.harness.files.read(_carried_at(agent, runtime), CARRIED_FILE)
         found = json.loads(data) if data else {}
@@ -484,30 +490,73 @@ async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
     except Exception as exc:
         problem = f"{type(exc).__name__}: {exc}"
     log.warning("run %s: what the conversation carries was not read: %s", runtime.run_id, problem)
-    return {}
+    return None
 
 
 async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
     """The graph state the turn ended with, kept in the file store for the conversation's next
-    turn on any server, over what is kept there (``results.merged``: a turn another server
-    ended meanwhile loses nothing) — JSON, at most :data:`CARRIED_BYTES`. A state that cannot
-    be kept there (not JSON, past the bound, the store out of reach) is said in the log: this
-    process keeps it all the same (``Agent.results``)."""
-    kept = await _carried(agent, runtime)
-    state = merged_state(kept, runtime.carried)
-    if state == kept:
-        return
+    turn on any server, over what is kept there (``results.merged``) — JSON, at most
+    :data:`CARRIED_BYTES`. A state that cannot be kept there (not JSON, past the bound, the
+    store out of reach) is said in the log: this process keeps it all the same
+    (``Agent.results``).
+
+    The file store has no conditional write (fsspec writes a file whole, with no generation or
+    ``If-Match`` to compare), so two turns ending together could each read the list, add their
+    own and write it, the second losing the first's. In this process the turns of one
+    conversation keep it one at a time (:func:`_carrying`); across servers each turn reads what
+    it wrote back and merges again until what is kept holds its state
+    (:data:`CARRIED_TRIES` at most). That narrows the race but cannot close it: a turn on
+    another server that read before this one wrote, and writes after this one read back, still
+    replaces it — until the next turn of the conversation, which merges what it carried."""
+    folder = _carried_at(agent, runtime)
+    async with _carrying(folder):
+        kept = await _carried(agent, runtime)
+        for _ in range(CARRIED_TRIES):
+            state = merged_state(kept, runtime.carried)
+            if state == kept:
+                return  # what is kept holds this turn's state
+            try:
+                data = json.dumps(state).encode()
+                if len(data) > CARRIED_BYTES:
+                    raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
+                await agent.harness.files.put(folder, CARRIED_FILE, data, source=CARRIED_FOLDER)
+            except Exception as exc:
+                problem = f"{type(exc).__name__}: {exc}"
+                break
+            read_back = await _read_carried(agent, runtime)  # what another server wrote since
+            if read_back is None:
+                return  # written, and not read back: said in the log
+            kept = read_back
+        else:
+            problem = (
+                f"what is kept did not hold this turn's state after {CARRIED_TRIES} writes "
+                "(another server writing over it, or the store not read back)"
+            )
+    log.warning("run %s: what the conversation carries was not kept: %s", runtime.run_id, problem)
+
+
+#: How many times a turn writes what its conversation carries, each after reading back a list
+#: another server wrote over its own (:func:`_keep_carried`).
+CARRIED_TRIES: Final = 5
+#: The turns keeping what a conversation carries now, by where it is kept and the event loop
+#: they run in (an ``asyncio.Lock`` is its loop's): one at a time, and how many wait.
+_CARRYING_NOW: dict[tuple[int, str], tuple[asyncio.Lock, list[int]]] = {}
+
+
+@contextlib.asynccontextmanager
+async def _carrying(folder: str) -> AsyncIterator[None]:
+    """While a turn keeps what its conversation carries (``folder``): no other turn of this
+    process keeps it at once."""
+    key = (id(asyncio.get_running_loop()), folder)
+    lock, users = _CARRYING_NOW.setdefault(key, (asyncio.Lock(), [0]))
+    users[0] += 1
     try:
-        data = json.dumps(state).encode()
-        if len(data) > CARRIED_BYTES:
-            raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
-        folder = _carried_at(agent, runtime)
-        await agent.harness.files.put(folder, CARRIED_FILE, data, source=CARRIED_FOLDER)
-    except Exception as exc:
-        problem = f"{type(exc).__name__}: {exc}"
-        log.warning(
-            "run %s: what the conversation carries was not kept: %s", runtime.run_id, problem
-        )
+        async with lock:
+            yield
+    finally:
+        users[0] -= 1
+        if not users[0]:
+            del _CARRYING_NOW[key]
 
 
 async def _worked(

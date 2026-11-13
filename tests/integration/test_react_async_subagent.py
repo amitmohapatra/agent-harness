@@ -40,6 +40,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Final
 
 import httpx
@@ -1049,6 +1050,74 @@ async def test_g_a_workers_turn_still_running_while_another_turn_ends_loses_neit
     listed = await say(agent, "which tasks are there?")
     for task in server.runs:
         assert f"task_id: {task}  agent: optimizer  status: running" in listed.answer
+
+
+def ending(run_id: str, task: str) -> Any:
+    """A turn of one conversation ending with the task it started in its list (as much of a
+    run as keeping it reads)."""
+    return SimpleNamespace(
+        tenant="t",
+        user="u",
+        conversation="c1",
+        run_id=run_id,
+        carried={"async_tasks": {task: {"task_id": task, "status": "running"}}},
+    )
+
+
+async def test_g_two_turns_ending_together_both_keep_their_task_in_the_file_store(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two turns of a conversation end together, each keeping the list it ended with in the
+    file store (read what is kept, merge, write; the store slow to answer a read): they keep
+    it one after the other, so the second merges over the first's and neither task is lost."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    read = harness.files.read
+
+    async def slowly(folder: str, name: str) -> bytes | None:
+        found = await read(folder, name)  # what is kept now, answered a while later
+        await asyncio.sleep(0.05)
+        return found
+
+    monkeypatch.setattr(harness.files, "read", slowly)
+    await asyncio.gather(
+        pipeline._keep_carried(agent, ending("run_x", "task_x")),
+        pipeline._keep_carried(agent, ending("run_y", "task_y")),
+    )
+    kept = await pipeline._carried(agent, ending("run_z", "none"))
+    assert set(kept["async_tasks"]) == {"task_x", "task_y"}
+
+
+async def test_g_a_list_another_server_wrote_over_this_turns_is_merged_again(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The file store has no conditional write: another server's turn that read the list
+    before this one wrote it writes its own over it. Reading back what it wrote, the turn
+    finds its task gone and merges again — unless the other server writes over it every
+    time: then, after ``CARRIED_TRIES`` writes, it is said in the log (the process keeps the
+    list all the same)."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    files = harness.files
+    put = files.put
+    theirs = json.dumps({"async_tasks": {"task_y": {"task_id": "task_y"}}}).encode()
+    overwritten: list[int] = []
+
+    async def raced(folder: str, name: str, data: bytes, **kwargs: Any) -> Any:
+        stored = await put(folder, name, data, **kwargs)
+        if len(overwritten) < times:
+            overwritten.append(1)
+            await put(folder, name, theirs, **kwargs)  # the other server's, landing after
+        return stored
+
+    monkeypatch.setattr(files, "put", raced)
+    times = 1
+    await pipeline._keep_carried(agent, ending("run_x", "task_x"))
+    kept = await pipeline._carried(agent, ending("run_z", "none"))
+    assert set(kept["async_tasks"]) == {"task_x", "task_y"} and overwritten == [1]
+    times, overwritten[:] = pipeline.CARRIED_TRIES, []
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        await pipeline._keep_carried(agent, ending("run_w", "task_w"))
+    assert len(overwritten) == pipeline.CARRIED_TRIES
+    assert f"did not hold this turn's state after {pipeline.CARRIED_TRIES} writes" in caplog.text
 
 
 # --------------------------------------------------------------------------- e. cancel
