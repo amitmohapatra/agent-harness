@@ -5,6 +5,42 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: one question a call, run once, decided once — every adapter, whatever asks
+
+`tests/integration/test_one_question.py` checks, for every adapter and every way a call can
+need a person's approval (a tool that declares nothing, a catalog rule, a write, a hook's
+`Ask`, an allowance for the conversation or always, the library's own gate: LangChain's and
+Deep Agents' `interrupt_on`, OpenAI's `needs_approval` and an MCP server's
+`require_approval`, Claude Code's `can_use_tool`, an ACP agent's permission request), on a
+run, a stream, a resume on another harness, inside a sub-agent: one question a call, its
+body run once when approved and never when rejected, one record of it (journal, memory) and
+one count (budget), and its decision fed back once on the run that recorded it. What did
+not hold:
+
+- **The same call twice in a turn: the second took the first's answer.** A replayed call
+  did not read past the answer it had read, so the next identical call took that answer
+  for its own: a function target or a graph without a checkpointer, approving the first
+  and rejecting the second, ran both. A framework that goes on from its session (Claude,
+  Kimi over ACP) or its saved run (OpenAI's `needs_approval`) does not make the calls before
+  the paused one again, but the attempt read the journal from its start: the call made
+  again got the earlier call's record (approved, it did not run) or answer (Claude Code's
+  question rejected for the second call ran it). The journal keeps what each call read
+  (`reads`) and how far the calls before the pause read (`cursors`); a subagent paused in its
+  work, which its framework starts again, reads its own again. (Not changed: a person's
+  denial of a call stands for the run, so in a session the same call made again later in
+  the turn is denied without asking.)
+- **A subagent started again ran a built-in it had run.** Claude starts a subagent paused in
+  its work again: it made its earlier built-in calls again, and they ran again on their
+  recorded approval. A built-in that ran is recorded in the journal; made again, it is not
+  run, and the subagent reads its result.
+- **A decision on a call whose arguments nest was never counted.** The memory service refuses
+  feedback whose metadata nests past two levels or passes 8 KiB: the decision on a list or
+  object argument (an OpenAI shell command, any tool taking one) was lost. Each nested value
+  is sent as its JSON text, cut to fit.
+- **An OpenAI agent tool's own approval was fed back on the calling run.** The SDK's
+  `needs_approval` inside `Agent.as_tool` names the agent tool's child run, which records the
+  call, as governance's approvals of a helper's call do.
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries
