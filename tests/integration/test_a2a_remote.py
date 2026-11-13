@@ -11,6 +11,7 @@ import httpx
 import pytest
 from a2a.helpers import new_data_part, new_text_part
 from a2a.types import (
+    AgentCard,
     Artifact,
     Message,
     StreamResponse,
@@ -211,6 +212,17 @@ async def test_a_remote_agent_opens_and_closes_its_own_client(
     monkeypatch.undo()
     async with a2a_client._http(REMOTE_TIMEOUT_SECONDS) as default:
         assert default.timeout.read == REMOTE_TIMEOUT_SECONDS
+
+
+def test_a_card_becomes_a_tool_named_and_described_within_the_models_limits() -> None:
+    long = AgentCard(name="p" * 70, description="Prices  orders,\n\tin bulk. " + "x" * 500)
+    spec = a2a_client._spec(long, None)
+    assert spec.name == "p" * 64
+    assert spec.description.startswith("Prices orders, in bulk. x")  # its whitespace collapsed
+    assert len(spec.description) == 400
+    blank = a2a_client._spec(AgentCard(name="pricing", description=" \n "), "über pricing")
+    assert blank.description == "the pricing agent"
+    assert blank.name == "_ber_pricing"  # a name a model takes: letters, digits, _ and -
 
 
 def test_a_reply_reduces_to_its_artifacts_or_its_text() -> None:
