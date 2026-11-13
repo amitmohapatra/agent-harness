@@ -78,6 +78,11 @@ async def test_at_most_max_pages_are_fetched_and_the_result_says_there_were_more
     monkeypatch.setattr(pages, "MAX_PAGES", 2)
     merged = await pages.every_page(paged(), {}, book(5))
     assert merged["pages"] == 2 and merged[pages.MORE] is True and len(merged["items"]) == 4
+    monkeypatch.undo()
+    most = await pages.every_page(paged(), {}, book(201))
+    assert most["pages"] == 200 and most[pages.MORE] is True  # at most 200 pages a call
+    whole = await pages.every_page(paged(), {}, book(200))
+    assert whole["pages"] == 200 and pages.MORE not in whole
 
 
 def test_paging_is_declared_as_data_beside_freshness() -> None:

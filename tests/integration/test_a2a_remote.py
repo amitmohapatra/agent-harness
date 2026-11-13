@@ -211,7 +211,7 @@ async def test_a_remote_agent_opens_and_closes_its_own_client(
     await harness.aclose()
     monkeypatch.undo()
     async with a2a_client._http(REMOTE_TIMEOUT_SECONDS) as default:
-        assert default.timeout.read == REMOTE_TIMEOUT_SECONDS
+        assert default.timeout.read == REMOTE_TIMEOUT_SECONDS == 120.0  # a remote tool's default
 
 
 def test_a_card_becomes_a_tool_named_and_described_within_the_models_limits() -> None:

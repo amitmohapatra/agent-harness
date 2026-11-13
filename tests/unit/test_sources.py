@@ -6,7 +6,6 @@ import respx
 
 from trellis import a2a, openapi, tool
 from trellis.contracts import ConfigurationError
-from trellis.harness.tools.base import REMOTE_TIMEOUT_SECONDS
 from trellis.harness.tools.sources import as_source
 
 
@@ -82,7 +81,7 @@ async def test_openapi_operations_are_tools_judged_by_their_method() -> None:
     respx.post("http://erp.test/orders").mock(return_value=httpx.Response(201, json={"id": "o2"}))
     tools = {t.name: t for t in await openapi(DOCUMENT).resolve()}
     # one default for every remote tool: an OpenAPI operation as an A2A exchange
-    assert {t.timeout for t in tools.values()} == {REMOTE_TIMEOUT_SECONDS} == {a2a("x").timeout}
+    assert {t.timeout for t in tools.values()} == {120.0} == {a2a("x").timeout}
     assert {n: t.side_effects for n, t in tools.items()} == {
         "get_order": "read",
         "cancel_order": "irreversible",

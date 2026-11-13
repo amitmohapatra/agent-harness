@@ -19,7 +19,7 @@ from trellis.harness.clients.bifrost import CODE_MODE_TOOLS
 from trellis.harness.sandbox import sandbox
 from trellis.harness.tools.convert import claude, openai_agents
 from trellis.harness.tools.convert import langchain as lc
-from trellis.harness.tools.lint import MANY_TOOLS, MOST_TOOLS, Finding, lint
+from trellis.harness.tools.lint import Finding, lint
 from trellis.harness.tools.sources import documented
 
 
@@ -209,12 +209,13 @@ def test_pairs_a_model_cannot_tell_apart() -> None:
 def test_too_many_tools_at_once() -> None:
     many = [
         spec(f"t{n}", f"Report number {n} of the ledger, its totals and its lines.")
-        for n in range(MANY_TOOLS)
+        for n in range(20)  # 20 at once: OpenAI's guide suggests fewer
     ]
     # ...described alike: only the set's finding is asserted here
     assert lint(many)[-1].code == "many_tools"
     assert "many_tools" not in [f.code for f in lint(many[:-1])]
-    most = [spec(f"t{n}") for n in range(MOST_TOOLS + 1)]
+    most = [spec(f"t{n}") for n in range(129)]  # over 128: the most the OpenAI API takes
+    assert "too_many_tools" not in [f.code for f in lint(most[:-1])]
     found = lint(most)
     assert found[-1] == Finding(None, "too_many_tools", found[-1].message)
     assert str(found[-1]) == found[-1].message
