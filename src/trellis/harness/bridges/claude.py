@@ -41,12 +41,15 @@ PROMPT_EVENT: Final = "UserPromptSubmit"
 
 def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dict[str, Any]:
     """The options' hooks with one more ``UserPromptSubmit`` matcher, whose hook adds
-    ``context`` to every prompt (the options' own hooks run as they did)."""
+    ``context`` to every prompt — nothing, when there is none — (the options' own hooks run
+    as they did)."""
     from claude_agent_sdk import HookMatcher
 
     async def add_context(
         given: HookInput, tool_use_id: str | None, hook: HookContext
     ) -> SyncHookJSONOutput:
+        if not context:
+            return {}
         return {"hookSpecificOutput": {"hookEventName": PROMPT_EVENT, "additionalContext": context}}
 
     own = dict(hooks or {})

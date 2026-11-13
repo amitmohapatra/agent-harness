@@ -400,6 +400,13 @@ class Agent:
         #: whether a run's memory context reaching nothing was said (``unreached``: once)
         self._unreached_said = False
 
+    async def aclose(self) -> None:
+        """End what the agent's framework keeps running between runs in this process (the
+        Claude Agent SDK's live sessions: ``bridges.claude_live``), where it keeps any."""
+        close = getattr(self.adapter, "aclose", None)
+        if close is not None:
+            await close()
+
     @property
     def evals(self) -> EvalServices:
         """What this agent's runs are evaluated with: the harness's services (the judge is the
