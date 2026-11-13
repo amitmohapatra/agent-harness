@@ -1,0 +1,746 @@
+"""An investigation, kept as tests: "start a slow task in the background, keep chatting in the
+same chat, get the result later" through ``ReAct`` with Deep Agents' own async sub-agents (an
+``AsyncSubAgent`` dict, ``{"name", "description", "graph_id", "url"}``, in ``subagents=``), one
+user, one thread.
+
+The remote sub-agent is a stand-in Agent Protocol server (FastAPI on a local port, below): the
+five routes the ``langgraph_sdk`` client calls from ``deepagents.middleware.async_subagents``
+— a thread made, a run started on it, the run read, the thread read, the run cancelled — whose
+run takes :data:`TASK_SECONDS` and then answers :data:`RESULT`. No model is called: the chat
+model is scripted, and reads a task id as a model would, from what it is shown.
+
+Each test asserts what a user needs. One that fails today is kept, marked ``xfail`` (strict)
+with what was seen; a test whose docstring starts "Today:" pins an observation that is not what
+a user needs, as the evidence of a finding. What was found:
+
+* T1 and T2 work once the five tools say what they do (the catalog): the task starts, the turn
+  ends at once with the task id, the next message is answered while the task runs.
+* T3 does not: Deep Agents keeps its task list in the graph's state (``async_tasks``), a
+  ``ReAct`` graph's state is its run's, so the next turn has no task list and ``check``,
+  ``list``, ``update`` and ``cancel`` all refuse the id — whether or not the id is in the
+  history the turn sees. Within one turn, and on a graph with a checkpointer of its own (one
+  LangGraph thread per conversation), they work.
+* Undeclared, each of the five tools asks a person; nothing tells the chat when the task ends;
+  cancelling the turn leaves the task running with its id lost; with no ``url`` it cannot start.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import socket
+import threading
+import time
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
+
+import httpx
+import pytest
+import uvicorn
+from deepagents import create_deep_agent
+from fastapi import FastAPI, Request
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.tools import tool as lc_tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph_sdk._async.runs import RunsClient
+
+from tests.support.arm import arm, declaring
+from tests.support.chat_model import ScriptedChatModel
+from tests.support.journals import journal_of
+from trellis import Harness, ReAct, Settings, middleware, tool
+from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.agent import Agent
+from trellis.harness.agui import threads as threads_module
+from trellis.harness.agui.sse import decode
+from trellis.harness.agui.threads import Threads
+from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.runs import LocalRuns
+from trellis.runs import Job
+
+#: How long the background task takes on the server, and what it answers.
+TASK_SECONDS: Final = 1.5
+RESULT: Final = "OPTIMUM: x=42, cost=7"
+#: A turn that starts the task must end far sooner than the task does.
+AT_ONCE: Final = TASK_SECONDS / 3
+
+USER: Final = "ada"
+THREAD: Final = "chat-1"
+TOOLS: Final = (
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+)
+#: What the tool catalog is told the five tools do, so they run without asking a person.
+RISKS: Final = {
+    "start_async_task": "write",
+    "update_async_task": "write",
+    "cancel_async_task": "write",
+    "check_async_task": "read",
+    "list_async_tasks": "read",
+}
+START: Final = (
+    "start_async_task",
+    {"description": "Find the optimum.", "subagent_type": "optimizer"},
+)
+#: Everything a start sends the server (``client.runs.create``): the graph, the task's text and
+#: the SDK's stream defaults — no idempotency key, no metadata, no config.
+SENT: Final = {"assistant_id", "input", "stream_mode", "stream_resumable", "stream_subgraphs"}
+LOST: Final = (
+    "Deep Agents keeps the task list in the graph's state (async_tasks) and a ReAct graph's "
+    "state is its run's (RunCheckpointer: thread_id is the run id), so a later turn starts with "
+    'no task list: the tool answers "No tracked task found for task_id: \'<id>\'" (list: "No '
+    'async subagent tasks tracked.") and the server is never asked'
+)
+
+
+# --------------------------------------------------------------------------- the stand-in server
+class StandIn:
+    """An Agent Protocol server standing for a remote sub-agent's: exactly the routes the
+    ``langgraph_sdk`` client calls from Deep Agents' async sub-agent tools. A run is ``running``
+    for ``seconds`` and then ``success``, its thread's last message :data:`RESULT`."""
+
+    def __init__(self, seconds: float = TASK_SECONDS) -> None:
+        self.seconds = seconds
+        self.runs: dict[str, dict[str, Any]] = {}  # by thread id (the task id): its latest run
+        self.calls: list[tuple[str, str]] = []  # (method, path), in order
+        self.headers: list[dict[str, str]] = []
+        self.bodies: list[Any] = []
+        self.app = FastAPI()
+        self.url = ""
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
+        app = self.app
+
+        @app.post("/threads")  # client.threads.create()
+        async def create_thread(request: Request) -> dict[str, Any]:
+            await self._saw(request)
+            return {"thread_id": str(uuid.uuid4()), "status": "idle", "values": None}
+
+        @app.post("/threads/{thread_id}/runs")  # client.runs.create(thread_id=, ...)
+        async def create_run(thread_id: str, request: Request) -> dict[str, Any]:
+            body = await self._saw(request)
+            self.runs[thread_id] = {
+                "run_id": str(uuid.uuid4()),
+                "thread_id": thread_id,
+                "assistant_id": body["assistant_id"],
+                "status": "running",
+                "input": body["input"],
+                "started": time.monotonic(),
+            }
+            return self._run(thread_id)
+
+        @app.get("/threads/{thread_id}/runs/{run_id}")  # client.runs.get(thread_id=, run_id=)
+        async def get_run(thread_id: str, run_id: str, request: Request) -> dict[str, Any]:
+            await self._saw(request)
+            return self._run(thread_id)
+
+        @app.get("/threads/{thread_id}")  # client.threads.get(thread_id=)
+        async def get_thread(thread_id: str, request: Request) -> dict[str, Any]:
+            await self._saw(request)
+            run = self.runs[thread_id]
+            said = list(run["input"]["messages"])
+            if self.status(thread_id) == "success":
+                said.append({"role": "assistant", "content": RESULT})
+            return {"thread_id": thread_id, "status": "idle", "values": {"messages": said}}
+
+        @app.post("/threads/{thread_id}/runs/{run_id}/cancel")  # client.runs.cancel(...)
+        async def cancel_run(thread_id: str, run_id: str, request: Request) -> None:
+            await self._saw(request)
+            self.runs[thread_id]["status"] = "cancelled"
+
+    async def _saw(self, request: Request) -> Any:
+        self.calls.append((request.method, request.url.path))
+        self.headers.append(dict(request.headers))
+        body = await request.json() if await request.body() else None
+        self.bodies.append(body)
+        return body
+
+    def _run(self, thread_id: str) -> dict[str, Any]:
+        run = self.runs[thread_id]
+        public = {k: run[k] for k in ("run_id", "thread_id", "assistant_id")}
+        return {**public, "status": self.status(thread_id)}
+
+    def status(self, task_id: str) -> str:
+        run = self.runs[task_id]
+        over = time.monotonic() - run["started"] >= self.seconds
+        return "success" if run["status"] == "running" and over else run["status"]
+
+    @property
+    def task_id(self) -> str:
+        """The one task started here (a task's id is its thread's)."""
+        [found] = self.runs
+        return found
+
+    async def finished(self) -> None:
+        """Waits until every task started here has ended."""
+        while any(self.status(t) == "running" for t in self.runs):  # noqa: ASYNC110 - by the clock
+            await asyncio.sleep(0.05)
+
+    def start(self) -> None:
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        self.url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        self._server = uvicorn.Server(uvicorn.Config(self.app, log_level="warning"))
+        self._thread = threading.Thread(target=self._server.run, args=([sock],), daemon=True)
+        self._thread.start()
+        while not self._server.started:
+            time.sleep(0.01)
+
+    def stop(self) -> None:
+        assert self._server is not None and self._thread is not None
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture
+def server() -> Iterator[StandIn]:
+    found = StandIn()
+    found.start()
+    yield found
+    found.stop()
+
+
+# --------------------------------------------------------------------------- the scripted model
+class Model(ScriptedChatModel):
+    """A scripted model whose turn may be a function of the messages it is shown — it reads a
+    task id where a model would, in a tool's result or in the conversation — and that stops
+    answering from its ``hold_from``-th call (a turn still working)."""
+
+    hold_from: int | None = None
+
+    async def _agenerate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+        if self.hold_from is not None and len(self.seen) >= self.hold_from:
+            await asyncio.sleep(3600)
+        return await super()._agenerate(messages, *args, **kwargs)
+
+    def _generate(self, messages: list[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+        if self.turns and callable(self.turns[0]):
+            self.turns[0] = self.turns[0](messages)
+        return super()._generate(messages, *args, **kwargs)
+
+
+_ID: Final = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+
+
+def id_in(messages: list[BaseMessage]) -> str | None:
+    """The last task id in what the model is shown."""
+    found = [i for m in messages for i in _ID.findall(str(m.content))]
+    return found[-1] if found else None
+
+
+def reports_the_id(messages: list[BaseMessage]) -> str:
+    """The answer of a model that starts a task as the tool says to: it reports the task id."""
+    return f"The optimization is running in the background. Task id: {id_in(messages[-1:])}"
+
+
+def calls(name: str, **args: Any) -> Callable[[list[BaseMessage]], Any]:
+    """A call of ``name`` with the task id the model can read in what it is shown."""
+
+    def turn(messages: list[BaseMessage]) -> Any:
+        found = id_in(messages)
+        if found is None:
+            return "I see no task id in this conversation."
+        return (name, {"task_id": found, **args})
+
+    return turn
+
+
+def says_what_the_tool_said(messages: list[BaseMessage]) -> str:
+    return str(messages[-1].content)
+
+
+def tool_results(messages: list[BaseMessage]) -> list[str]:
+    return [str(m.content) for m in messages if isinstance(m, ToolMessage)]
+
+
+# --------------------------------------------------------------------------- the chat
+def subagent(server: StandIn, **more: Any) -> dict[str, Any]:
+    spec = {"name": "optimizer", "description": "Runs the slow optimization, in the background."}
+    return {**spec, "graph_id": "optimizer", "url": server.url, **more}
+
+
+def chat(harness: Harness, server: StandIn, model: Model, *, declared: bool = True) -> Agent:
+    """A wrapped ``ReAct`` with the async sub-agent; ``declared``: the tool catalog says what
+    the five Deep Agents tools do (else each asks a person: ``test_b_...``)."""
+    if declared:
+        declaring(harness, **RISKS)
+    return harness.wrap(ReAct("You help.", model, subagents=[subagent(server)]), id="bg")
+
+
+async def timed[T](work: Awaitable[T]) -> tuple[T, float]:
+    began = time.monotonic()
+    return await work, time.monotonic() - began
+
+
+async def say(agent: Agent, text: str, **more: Any) -> Any:
+    return await agent.run(text, user=USER, thread=THREAD, **more)
+
+
+# --------------------------------------------------------------------------- T1, T2, T3
+async def test_t1_the_task_starts_and_the_turn_ends_at_once_with_its_id(
+    harness: Harness, server: StandIn
+) -> None:
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    first, took = await timed(say(agent, "run the optimization"))
+    assert first.status is RunStatus.SUCCESS and first.interrupt is None, first.error
+    assert set(TOOLS) <= set(model.requests[0]["tools"])  # the five tools, offered to the model
+    assert server.calls == [("POST", "/threads"), ("POST", f"/threads/{server.task_id}/runs")]
+    assert server.bodies[1]["input"]["messages"][0]["content"] == "Find the optimum."
+    assert tool_results(model.seen[1]) == [f"Launched async subagent. task_id: {server.task_id}"]
+    assert server.task_id in first.answer  # the reply names the task
+    assert took < AT_ONCE, took  # the turn did not wait for the task ...
+    assert server.status(server.task_id) == "running"  # ... which is still running
+
+
+async def test_t2_the_next_message_is_answered_while_the_task_runs(
+    harness: Harness, server: StandIn
+) -> None:
+    model = Model(turns=[START, reports_the_id, "4"])
+    agent = chat(harness, server, model)
+    began = time.monotonic()
+    await say(agent, "run the optimization")
+    second, took = await timed(say(agent, "what is 2+2?"))
+    assert second.status is RunStatus.SUCCESS and second.answer == "4", second.error
+    assert took < AT_ONCE and time.monotonic() - began < TASK_SECONDS  # not queued behind it
+    assert server.status(server.task_id) == "running"
+    assert len(server.calls) == 2  # and the second turn asked the server nothing
+
+
+async def later_turn(harness: Harness, server: StandIn, *turns: Any) -> tuple[Model, Any]:
+    """T1, T2, the task ended on the server, then a third turn scripted with ``turns``."""
+    model = Model(turns=[START, reports_the_id, "4"])
+    agent = chat(harness, server, model)
+    await say(agent, "run the optimization")
+    await say(agent, "what is 2+2?")
+    await server.finished()
+    model.turns += turns
+    return model, await say(agent, "is the optimization done?")
+
+
+@pytest.mark.xfail(strict=True, reason=LOST)
+async def test_t3_a_later_turn_gets_the_result(harness: Harness, server: StandIn) -> None:
+    model, third = await later_turn(
+        harness, server, calls("check_async_task"), says_what_the_tool_said
+    )
+    assert third.status is RunStatus.SUCCESS, third.error
+    assert RESULT in tool_results(model.seen[-1])[-1]
+    assert RESULT in third.answer
+
+
+@pytest.mark.xfail(strict=True, reason=LOST)
+async def test_t3_a_later_turn_lists_the_task(harness: Harness, server: StandIn) -> None:
+    _, third = await later_turn(harness, server, ("list_async_tasks", {}), says_what_the_tool_said)
+    assert third.status is RunStatus.SUCCESS, third.error
+    assert f"task_id: {server.task_id}  agent: optimizer  status: success" in third.answer
+
+
+@pytest.mark.xfail(strict=True, reason=LOST)
+async def test_a_later_turn_cancels_the_task(harness: Harness, server: StandIn) -> None:
+    server.seconds = 60
+    model = Model(turns=[START, reports_the_id, calls("cancel_async_task"), "cancelled"])
+    agent = chat(harness, server, model)
+    await say(agent, "run the optimization")
+    await say(agent, "stop the optimization")
+    assert server.status(server.task_id) == "cancelled"
+
+
+@pytest.mark.xfail(strict=True, reason=LOST)
+async def test_a_later_turn_sends_the_task_new_instructions(
+    harness: Harness, server: StandIn
+) -> None:
+    turns = [START, reports_the_id, calls("update_async_task", message="Minimise cost."), "sent"]
+    agent = chat(harness, server, Model(turns=turns))
+    await say(agent, "run the optimization")
+    await say(agent, "minimise cost instead")
+    assert server.bodies[-1]["input"]["messages"][0]["content"] == "Minimise cost."
+
+
+# --------------------------------------------------------------------------- a. state across turns
+async def test_a_today_the_next_turn_sees_the_answer_but_no_tool_result_and_no_task_list(
+    harness: Harness, server: StandIn
+) -> None:
+    """Today: memory off, the next turn's history is the earlier questions and answers (the
+    run store's): the task id is in it only because the model's answer said it, T1's tool
+    result is not, and the id the model reads there is refused — the server is never asked."""
+    model, third = await later_turn(
+        harness, server, calls("check_async_task"), says_what_the_tool_said
+    )
+    shown = model.seen[3]  # the third turn's first model call
+    assert not tool_results(shown)
+    said = [str(m.content) for m in shown if isinstance(m, AIMessage)]
+    assert said == [
+        f"The optimization is running in the background. Task id: {server.task_id}",
+        "4",
+    ]
+    assert third.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert [method for method, _ in server.calls] == ["POST", "POST"]  # no run was read
+
+
+async def test_a_today_with_memory_the_tool_result_is_in_the_history_and_the_id_still_refused(
+    memory_harness: Harness, server: StandIn
+) -> None:
+    """Today: memory on, the next turn's history holds T1's call and its result (the id in
+    it), marked out of date with the advice to call ``start_async_task`` again — which would
+    start a second task — and ``check_async_task`` still refuses the id."""
+    model, third = await later_turn(
+        memory_harness, server, calls("check_async_task"), says_what_the_tool_said
+    )
+    [kept] = tool_results(model.seen[3])
+    assert kept == (
+        "[out of date: call start_async_task again for the current value]\n"
+        f"Launched async subagent. task_id: {server.task_id}"
+    )
+    assert third.answer == f"No tracked task found for task_id: {server.task_id!r}"
+
+
+async def test_a_within_one_turn_the_task_is_started_and_checked(
+    harness: Harness, server: StandIn
+) -> None:
+    """The tools and the stand-in do work together while the graph's state is there: one turn
+    starts the task and, the task over, reads its result."""
+    server.seconds = 0.2
+    turns = [START, calls("check_async_task"), says_what_the_tool_said]
+    model = Model(turns=turns, stall=0.3)
+    done = await say(chat(harness, server, model), "run the optimization and wait for it")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert RESULT in done.answer and '"status": "success"' in done.answer
+    assert [method for method, _ in server.calls] == ["POST", "POST", "GET", "GET"]
+
+
+async def test_a_a_graph_with_its_own_checkpointer_keeps_the_task_list_across_turns(
+    harness: Harness, server: StandIn
+) -> None:
+    """Not ``ReAct``: ``create_deep_agent`` with ``middleware()`` and a checkpointer of its own
+    runs on the conversation's LangGraph thread, so its state — the task list — is the next
+    turn's: T1, T2 and T3 all work, and another user's same-named thread has no task."""
+    declaring(harness, **RISKS)
+    model = Model(turns=[START, reports_the_id, "4"])
+    graph = create_deep_agent(
+        model, subagents=[subagent(server)], middleware=middleware(), checkpointer=InMemorySaver()
+    )
+    agent = harness.wrap(graph, id="own-thread")
+    first, took = await timed(say(agent, "run the optimization"))
+    assert server.task_id in first.answer and took < AT_ONCE
+    assert (await say(agent, "what is 2+2?")).answer == "4"
+    assert server.status(server.task_id) == "running"
+    await server.finished()
+    model.turns += [calls("check_async_task"), says_what_the_tool_said]
+    third = await say(agent, "is the optimization done?")
+    assert RESULT in third.answer, third.answer
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    fourth = await say(agent, "which tasks are there?")
+    assert f"task_id: {server.task_id}  agent: optimizer  status: success" in fourth.answer
+    model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
+    other = await agent.run("which tasks are there?", user="bob", thread=THREAD)
+    assert other.answer == "No async subagent tasks tracked."
+
+
+# --------------------------------------------------------------------------- b. governance
+@pytest.mark.parametrize("name", TOOLS)
+async def test_b_today_undeclared_each_async_tool_asks_a_person(
+    harness: Harness, server: StandIn, name: str
+) -> None:
+    """Today: the five tools are Deep Agents', and say nothing of what they do, so a call of
+    any — a status check included — pauses the run for an approval before it runs."""
+    args = {"description": "d", "subagent_type": "optimizer", "task_id": "t", "message": "m"}
+    model = Model(turns=[(name, args), "done"])
+    agent = chat(harness, server, model, declared=False)
+    paused = await say(agent, "go")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == name
+    assert f"{name} has not declared its side effects" in paused.interrupt.question
+    assert server.calls == []  # nothing ran yet
+
+
+async def test_b_today_an_approval_for_the_conversation_starts_later_tasks_unasked(
+    harness: Harness, server: StandIn
+) -> None:
+    """Today: approved "for this conversation", the start runs once and the thread's later
+    starts are not asked about; a ``write`` in the catalog runs it unasked too (announced:
+    ``test_d_...``), as Deep Agents' own tools are counted confined to the run."""
+    model = Model(turns=[START, reports_the_id, START, reports_the_id])
+    agent = chat(harness, server, model, declared=False)
+    paused = await say(agent, "run the optimization")
+    assert paused.interrupt is not None
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "approve", reviewer=USER, remember="run"
+    )
+    assert done.status is RunStatus.SUCCESS and len(server.runs) == 1, done.error
+    again = await say(agent, "run it once more")
+    assert again.status is RunStatus.SUCCESS and len(server.runs) == 2, again.interrupt
+
+
+# --------------------------------------------------------------------------- c. journal, retries
+@tool(side_effects="irreversible")
+def publish(text: str) -> str:
+    """Publish a text to the customers' page, once a person approved it.
+
+    Args:
+        text: The text to publish.
+    """
+    return f"published {text}"
+
+
+async def test_c_a_resume_after_the_start_starts_no_second_task(
+    harness: Harness, server: StandIn
+) -> None:
+    """The call is recorded on the run (its trajectory) and its result kept in the graph's
+    checkpoint in the run's journal: a turn paused after the start and resumed continues from
+    there."""
+    model = Model(turns=[START, ("publish", {"text": "started"}), "done"])
+    agent = arm(chat(harness, server, model), [publish])
+    paused = await say(agent, "run the optimization and publish that it started")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    journal = await journal_of(harness.runs, await harness.runs.get(paused.run_id))
+    [(made, outcome)] = journal.trajectory
+    assert made.tool == "start_async_task" and server.task_id in str(outcome.output)
+    assert journal.graph  # the graph's checkpoint: the tool's message and async_tasks
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer=USER)
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    assert len(server.runs) == 1 and len(model.seen) == 3  # one task; the model not asked again
+
+
+class Crash(BaseException):
+    """The worker process dies: nothing more is written, the lease lapses."""
+
+
+@pytest.fixture
+async def workers() -> AsyncIterator[tuple[Harness, Harness]]:
+    """Two worker processes: two harnesses sharing nothing but the run store."""
+    store = LocalRuns()
+    pair = (Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store))
+    yield pair
+    for h in pair:
+        await h.aclose()
+
+
+async def crash_then_finish(
+    workers: tuple[Harness, Harness], server: StandIn, model: Model, tools: list[Any]
+) -> Any:
+    """The turn queued, run by the first worker, which dies mid-run; the second finishes it."""
+    first, second = workers
+    dying, taking_over = (
+        declaring(h, **RISKS).wrap(
+            ReAct("You help.", model, tools=tools, subagents=[subagent(server)]), id="bg"
+        )
+        for h in (first, second)
+    )
+    store = first.runs
+    assert isinstance(store, LocalRuns)
+    handle = await dying.start("run the optimization", user=USER, thread=THREAD)
+    worker = first.worker([dying])
+    claimed = await store.claim(worker.worker_id, [dying.id])
+    assert claimed is not None
+    with pytest.raises(Crash):
+        await dying.execute(
+            Job(record=claimed.run, worker_id=worker.worker_id, lease_seconds=60, store=store)
+        )
+    held, _ = store._leases[handle.id]
+    store._leases[handle.id] = (held, datetime.now(UTC) - timedelta(seconds=1))
+    assert await second.worker([taking_over]).run_once()
+    result = await handle.result(wait=5)
+    assert (await handle.status()).attempt == 2
+    return result
+
+
+async def test_c_a_crash_after_the_start_starts_no_second_task(
+    workers: tuple[Harness, Harness], server: StandIn
+) -> None:
+    crashes: list[BaseException] = [Crash()]
+
+    @lc_tool
+    def boom() -> str:
+        """The worker dies here, once."""
+        if crashes:
+            raise crashes.pop()
+        return "fine"
+
+    boom.metadata = {"side_effects": "read"}
+    model = Model(turns=[START, ("boom", {}), reports_the_id])
+    result = await crash_then_finish(workers, server, model, [boom])
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert len(server.runs) == 1  # the retried turn did not start the task again
+    assert server.task_id in tool_results(model.seen[-1])[0]  # its result, from the checkpoint
+
+
+async def test_c_today_a_crash_inside_the_start_leaves_a_task_nobody_holds_the_id_of(
+    workers: tuple[Harness, Harness], server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Today: the worker dies after the server took the run and before the call's result was
+    kept. The retried turn does not start it blind — the model is told the effect is unknown
+    — but the request carries no idempotency key and the task's id was never kept, so the
+    task runs on with nothing able to check, cancel or find it."""
+    crashes: list[BaseException] = [Crash()]
+    create = RunsClient.create
+
+    async def dies_once(self: RunsClient, *args: Any, **kwargs: Any) -> Any:
+        run = await create(self, *args, **kwargs)
+        if crashes:
+            raise crashes.pop()
+        return run
+
+    monkeypatch.setattr(RunsClient, "create", dies_once)
+    model = Model(turns=[START, says_what_the_tool_said])
+    result = await crash_then_finish(workers, server, model, [])
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == (
+        "start_async_task was interrupted by a crash; it may or may not have taken effect: "
+        "check before calling it again"
+    )
+    assert len(server.runs) == 1 and server.status(server.task_id) == "running"
+    assert set(server.bodies[1]) == SENT  # no idempotency key: nothing to find it again by
+    assert all(id_in(shown) is None for shown in model.seen)  # its id reached no one
+
+
+# --------------------------------------------------------------------------- d. events
+async def test_d_the_stream_shows_the_call_and_nothing_tells_the_chat_the_task_ended(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn's stream shows the start as any tool call (announced: a write), its result
+    naming the task. Then nothing: the harness never asks the server again, no run starts in
+    the thread when the task ends, and the thread's stream stays silent."""
+    monkeypatch.setattr(threads_module, "POLL_SECONDS", 0.01)
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    events = [e async for e in agent.stream("run the optimization", user=USER, thread=THREAD)]
+    assert [e.type.value for e in events] == [
+        "RUN_STARTED",
+        "CUSTOM",  # tool_notice: the write, announced
+        "TOOL_CALL_START",
+        "TOOL_CALL_ARGS",
+        "TOOL_CALL_END",
+        "TOOL_CALL_RESULT",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "RUN_FINISHED",
+    ]
+    notice = events[1].data
+    assert (notice["name"], notice["tool"]) == ("tool_notice", "start_async_task")
+    [told] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert told["output"] == f"Launched async subagent. task_id: {server.task_id}"
+
+    chunks: list[str] = []
+
+    async def follow() -> None:
+        async for chunk in Threads(agent).stream(LOCAL_TENANT, USER, THREAD, None):
+            chunks.append(chunk)
+
+    following = asyncio.create_task(follow())
+    try:
+        await asyncio.sleep(0.3)  # the thread's stream, open: T1's run replayed
+        replayed = len(chunks)
+        assert replayed and server.status(server.task_id) == "running"
+        await server.finished()
+        await asyncio.sleep(0.5)  # the task ended while no turn runs
+        assert len(chunks) == replayed  # nothing reached the chat
+    finally:
+        following.cancel()
+        await asyncio.gather(following, return_exceptions=True)
+    assert len(server.calls) == 2  # nobody asked the server how the task went
+    runs = [r async for r in harness.runs.iterate(agent_id="bg", thread_id=THREAD)]
+    assert len(runs) == 1  # and no run was started in the thread to say so
+
+
+# --------------------------------------------------------------------------- e. cancel
+async def test_e_today_cancelling_the_turn_leaves_the_task_running_and_its_id_lost(
+    harness: Harness, server: StandIn
+) -> None:
+    """Today: the turn cancelled after the start (its model still working), the task is not
+    cancelled on the server and ends on its own, and the next turn sees the cancelled turn's
+    question only — no id to check or cancel it by."""
+    model = Model(turns=[START, "never said"], hold_from=1)
+    agent = chat(harness, server, model)
+    turn = asyncio.create_task(say(agent, "run the optimization"))
+    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)  # the start returned; the model's next call hangs
+    [run_id] = agent.running
+    await agent.cancel(run_id, reason="the user stopped the turn")
+    cancelled = await turn
+    assert cancelled.status is RunStatus.CANCELLED and cancelled.answer is None
+    assert server.status(server.task_id) == "running"
+    assert server.calls == [("POST", "/threads"), ("POST", f"/threads/{server.task_id}/runs")]
+    model.hold_from, model.turns = None, ["I see no task."]
+    await say(agent, "is the optimization running?")
+    assert id_in(model.seen[-1]) is None
+    await server.finished()
+    assert server.status(server.task_id) == "success"  # it ran to its end, unread
+
+
+# --------------------------------------------------------------------------- f. configuration
+async def test_f_what_the_server_is_sent(harness: Harness, server: StandIn) -> None:
+    """The spec's ``url`` and ``headers`` are all an app configures: the SDK's default
+    ``x-auth-scheme: langsmith`` is sent unless ``headers`` says otherwise, the spec's own
+    headers ride along, and the request names the graph and the task's text — nothing of the
+    harness's run (its user, tenant, thread or run id)."""
+    declaring(harness, **RISKS)
+    spec = subagent(server, headers={"authorization": "Bearer of-the-app"})
+    model = Model(turns=[START, reports_the_id])
+    agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
+    done = await say(agent, "run the optimization")
+    assert done.status is RunStatus.SUCCESS, done.error
+    for sent in server.headers:
+        assert sent["x-auth-scheme"] == "langsmith"
+        assert sent["authorization"] == "Bearer of-the-app"
+        assert not [name for name in sent if "trellis" in name]
+    assert server.bodies[0] == {}
+    started = server.bodies[1]
+    assert set(started) == SENT and started["assistant_id"] == "optimizer"
+    assert started["input"] == {"messages": [{"role": "user", "content": "Find the optimum."}]}
+    assert USER not in str(server.bodies) and THREAD not in str(server.bodies)
+
+
+async def test_f_today_without_a_url_the_task_cannot_start(harness: Harness) -> None:
+    """Today: with no ``url`` the SDK looks for a LangGraph server in this process
+    (``langgraph_api.server``), which a harness process is not: the start fails as a tool
+    result the model reads, and the turn goes on."""
+    declaring(harness, **RISKS)
+    spec = {"name": "optimizer", "description": "Runs the optimization.", "graph_id": "optimizer"}
+    model = Model(turns=[START, says_what_the_tool_said])
+    agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
+    done = await say(agent, "run the optimization")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer.startswith("Failed to launch async subagent 'optimizer':"), done.answer
+
+
+# --------------------------------------------------------------------------- the AG-UI routes
+async def test_through_the_ag_ui_routes_t1_and_t2_work_and_t3_does_not(server: StandIn) -> None:
+    """The same chat over ``serve_chat``: ``POST /agui/run`` per message."""
+    harness = declaring(Harness(config=Settings()), **RISKS)
+    model = Model(turns=[START, reports_the_id, "4"])
+    agent = harness.wrap(ReAct("You help.", model, subagents=[subagent(server)]), id="bg")
+    app = FastAPI()
+    agent.serve_chat(app, identity=lambda request: request.headers.get("x-user", ""))
+    transport = httpx.ASGITransport(app=app)
+
+    async def post(http: httpx.AsyncClient, text: str) -> list[dict[str, Any]]:
+        messages = [{"id": str(uuid.uuid4()), "role": "user", "content": text}]
+        response = await http.post("/agui/run", json={"threadId": THREAD, "messages": messages})
+        assert response.status_code == 200, response.text
+        return [event for _, event in decode(response.text)]
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://agui", headers={"x-user": USER}
+        ) as http:
+            first, took = await timed(post(http, "run the optimization"))
+            assert first[-1]["outcome"] == {"type": "success"}, first[-1]
+            assert server.task_id in first[-1]["result"] and took < AT_ONCE
+            [told] = [e for e in first if e["type"] == "TOOL_CALL_RESULT"]
+            assert server.task_id in told["content"]
+            second, took = await timed(post(http, "what is 2+2?"))
+            assert second[-1]["result"] == "4" and took < AT_ONCE
+            assert server.status(server.task_id) == "running"
+            await server.finished()
+            model.turns += [calls("check_async_task"), says_what_the_tool_said]
+            third = await post(http, "is the optimization done?")
+            # today (LOST): what a user needs here is RESULT
+            assert third[-1]["result"] == f"No tracked task found for task_id: {server.task_id!r}"
+    finally:
+        await harness.aclose()
