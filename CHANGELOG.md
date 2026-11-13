@@ -5,6 +5,30 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a conversation's Claude Code process stays between its turns, with its background work
+
+A Claude Agent SDK turn ran in a CLI process of its own, and the next turn started another
+that resumed the session. What Claude started in the background — a subagent with
+`background`, a `Bash` command with `run_in_background` — belongs to its process: a
+background subagent held the turn open until it finished, a background command ended with the
+turn, and an approval ended both. A conversation's turn now leaves its process running
+(`bridges.claude_live`: the SDK's `ClaudeSDKClient`) and the next turn is sent into it, so
+that work goes on between the turns. A turn ends at the result of its own prompt
+(`ResultMessage.origin` none or `human`), never at one the session injected for a finished
+task; a pause ends the turn and keeps the process, and the resumed attempt is sent into it;
+cancelling a turn stops that turn only (Claude Code's own interrupt stops its background work
+too, so with any under way the turn ends at its next tool call instead). Each turn's hooks,
+permission check and harness tools still run for that turn's run. Between two turns there is
+no run: a tool call background work makes then is refused, not run unchecked, and the next
+run says so (`claude_session`). A turn is charged what the process's running cost grew
+by. With no live process (a restart, another server, one closed for being idle, a
+run with no `thread`) a turn runs as before, resuming the session from the journal, which
+holds what was mirrored between the turns too. Limits and what is not kept:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#conversations).
+`TaskStop` (a write) and six tools that only list or look up (reads) have a declared risk;
+they asked a person on every call. Claude Code's own schedules (`CronCreate`,
+`ScheduleWakeup`) stay off: a turn they fire has no run.
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

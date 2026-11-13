@@ -99,10 +99,13 @@ the user Claude Code would ask:
   ([governance.md](../governance.md)): a team that wants every shell command approved, even
   one that only reads, gives `Bash` the risk `irreversible` (or an `approve_when` such as
   `true`) there.
-* **Not offered: schedules.** The CLI runs for one attempt and ends with it, so a scheduled
-  prompt (`CronCreate`) or a wake-up (`ScheduleWakeup`) would never fire: these, with
-  `CronList` and `CronDelete`, are added to the query's `disallowed_tools`, after your own.
-  Offered, Claude promised a weekly report that nothing would send.
+* **Not offered: schedules.** A scheduled prompt (`CronCreate`) or a wake-up
+  (`ScheduleWakeup`) fires only in a CLI that is running then. A query's own process ends
+  with it; a conversation's process (below) outlives the turn, but only until it is idle,
+  and the turn a schedule fires has no run: its tool calls are refused and its answer reaches
+  nobody. So these, with `CronList` and `CronDelete`, are added to the query's
+  `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
+  would send.
 * **Your own `can_use_tool`** answers what Claude Code asks, as without the harness: it is
   asked when Claude Code would ask its user, after your hooks and governance, with the
   arguments as they were decided (a call a hook rewrote is asked about as rewritten); what it
@@ -155,7 +158,8 @@ The answer is the `ResultMessage`'s `structured_output` (an `output_format`) or 
 A harness tool that asks (`irreversible`, a catalog `approve_when`, a hook's `Ask`),
 `trellis.current().ask` inside one, or a built-in tool that asks, pauses the run: the call is
 answered "Waiting for a person's approval.", the harness stops consuming the query and the CLI
-process ends. The session the CLI kept (`ResultMessage.session_id`) is in the run's journal.
+process ends (a conversation's process stays, its turn ended, and the resumed attempt is
+sent into it: below). The session the CLI kept (`ResultMessage.session_id`) is in the run's journal.
 `agent.resume(...)` runs the next attempt in that session (`ClaudeAgentOptions(resume=...)`),
 told to call the tool it was calling again: Claude goes on from where it was — the built-in
 tools it ran are not run again, the steps before are not asked again — and the journal answers
@@ -212,10 +216,47 @@ the worker's machine needs the CLI; `llm_judge` asks the gateway's judge alias (
 
 ## Conversations
 
-A conversation's turn continues the session the conversation's last turn ran in, in this
-process (`resume=`, through the journal's session store, with the turn's own prompt:
+A conversation's turn leaves its CLI process running, and the conversation's next turn in
+this process is sent into it (the SDK's `ClaudeSDKClient`), with the turn's own prompt. With
+no such process (it closed, or the server restarted) the turn starts one that resumes the
+session the last turn ran in (`resume=`, through the journal's session store:
 [runs.md](../runs.md#a-claude-or-acp-session-across-turns)); in another process, or the first turn, a new session — with memory off given
-the run store's earlier turns in its context. `mode="steer"` gives the message to Claude after
+the run store's earlier turns in its context.
+
+**Background work.** What Claude starts in the background — a subagent with `background`, a
+`Bash` command with `run_in_background` — therefore goes on between the turns: the turn that
+started it ends at its own answer, the next ones are answered while it runs, and Claude's
+session holds its notification when it ends. A turn ends at the result of its own prompt: a
+turn the session runs by itself (a finished task's notification) is never a user's answer.
+
+* Between two turns no run is under way, so nothing can check a tool call (your hooks,
+  governance, an approval, the budget) or record it: a call background work makes then is
+  refused, and the conversation's next run says how many were (`claude_session` warning).
+  A call it makes while a turn is being answered is decided and recorded for that turn's run.
+  A background shell command needs no call to go on; a background subagent does.
+* A result's cost is the process's running total (its usage is the turn's own): a turn is
+  charged what the cost grew by, so what background work cost between two turns is on the
+  next one. Its tokens are in no turn's usage.
+* A turn that is left — its run paused, or cancelled — is stopped with the SDK's `interrupt`
+  only when nothing runs in the background: Claude Code's interrupt stops the background work
+  too. With work under way the run ends at once and the CLI's turn at its next tool call
+  (refused with the hook's `continue: false`, which leaves the work). The next message waits
+  for that turn's result, 30 seconds at most; past that the process is replaced.
+* A message is sent into the process once no turn is under way in it: sent during one, Claude
+  Code may hand it to that turn at its next tool call, and it gets no answer of its own.
+* The process is one per conversation, in one server process, at most 16 per agent. It closes
+  5 minutes after its last activity when nothing works in it, 6 hours after its last turn
+  whatever does, when a turn's options are not the ones it was started with
+  (`framework_options`, another set of harness tools), and with the harness
+  (`Harness.aclose`). Background work that ends with it is said in the conversation's next
+  run (`claude_session`); a restart loses it.
+* Not kept: a run with no `thread`, a sub-agent's run, the last answer at the turn limit, and
+  options with a `ClaudeSkills` plugin or an in-process MCP server of your own
+  (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn).
+  These run in a process of their own, as before.
+* The model calls of a kept process carry the gateway headers (the run's dimensions, its
+  `traceparent`) of the turn that started it: the CLI reads them once, as it starts.
+ `mode="steer"` gives the message to Claude after
 its next tool call (a `PostToolUse` hook's `additionalContext`); a query that calls no tool
 takes none, and the message then runs as its own turn ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 

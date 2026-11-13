@@ -191,6 +191,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         framework_options={},
         agent_id="a",
         attempt=1,
+        parent=None,  # a run with no conversation of its own: a process of its own
+        run_id="run_1",
+        conversation="run_1",
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
