@@ -87,6 +87,7 @@ were seen from the bundled CLI driven against a scripted model; no real model wa
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -152,6 +153,27 @@ def argument(name: str) -> str | None:
     args = sys.argv[1:]
     joined = [a.split("=", 1)[1] for a in args if a.startswith(f"{name}=")]
     return joined[0] if joined else args[args.index(name) + 1] if name in args else None
+
+
+def replaced(path: str, data: Any) -> None:
+    """``path`` holds ``data`` (JSON) whole: written beside it, then put in its place — a
+    test, or another process of the stand-in, never reads it half written."""
+    part = f"{path}.{os.getpid()}.part"
+    with open(part, "w") as handle:
+        json.dump(data, handle)
+    os.replace(part, path)
+
+
+def appended(path: str, data: Any) -> None:
+    """``data`` (JSON) a line of ``path``, under a lock on it: the stand-in's processes that
+    run at once (a matrix cell's runs) each write whole lines."""
+    with open(path, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            handle.write(json.dumps(data) + "\n")
+            handle.flush()
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def plugins() -> dict[str, dict[str, str]]:
@@ -526,8 +548,7 @@ class Cli:
                 added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
                 record = os.environ.get("FAKE_CLAUDE_RECORD")
                 if added and record:
-                    with open(f"{record}.added", "a") as handle:
-                        handle.write(json.dumps(added) + "\n")
+                    appended(f"{record}.added", added)
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -626,8 +647,7 @@ class Cli:
         )
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:  # what the SDK answered, as the CLI reads it
-            with open(f"{record}.permissions", "a") as handle:
-                handle.write(json.dumps({"tool": name, "answer": answered}) + "\n")
+            appended(f"{record}.permissions", {"tool": name, "answer": answered})
         return answered
 
     def resumes(self) -> str | None:
@@ -741,37 +761,33 @@ class Cli:
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:
             servers = json.loads(argument("--mcp-config") or "{}").get("mcpServers", {})
-            with open(record, "w") as handle:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "session": session,
-                        "started_resuming": argument("--resume"),
-                        "system_prompt": argument("--system-prompt"),
-                        "allowed_tools": argument("--allowedTools"),
-                        "mcp_config": argument("--mcp-config"),
-                        "tools": self.listed() if SERVER in servers else [],
-                        "permission_prompt_tool": argument("--permission-prompt-tool"),
-                        "resume": argument("--resume") if first else None,
-                        "prompt": prompt,
-                        "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
-                        "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
-                        "context": context,
-                        "materialised": mirrored(session) is not None,
-                        "earlier": earlier,
-                        "disallowed_tools": argument("--disallowedTools"),
-                        "builtins": argument("--tools"),
-                        "max_turns": argument("--max-turns"),
-                        "plugins": plugins(),
-                        "argv": sys.argv[1:],
-                        "cwd": os.getcwd(),
-                        "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
-                        "initialize": self.initialized,
-                    },
-                    handle,
-                )
-            with open(record) as written, open(f"{record}.turns", "a") as turns:
-                turns.write(json.dumps(json.load(written)) + "\n")
+            said = {
+                "pid": os.getpid(),
+                "session": session,
+                "started_resuming": argument("--resume"),
+                "system_prompt": argument("--system-prompt"),
+                "allowed_tools": argument("--allowedTools"),
+                "mcp_config": argument("--mcp-config"),
+                "tools": self.listed() if SERVER in servers else [],
+                "permission_prompt_tool": argument("--permission-prompt-tool"),
+                "resume": argument("--resume") if first else None,
+                "prompt": prompt,
+                "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
+                "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
+                "context": context,
+                "materialised": mirrored(session) is not None,
+                "earlier": earlier,
+                "disallowed_tools": argument("--disallowedTools"),
+                "builtins": argument("--tools"),
+                "max_turns": argument("--max-turns"),
+                "plugins": plugins(),
+                "argv": sys.argv[1:],
+                "cwd": os.getcwd(),
+                "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
+                "initialize": self.initialized,
+            }
+            replaced(record, said)
+            appended(f"{record}.turns", said)
 
     def played(
         self, session: str, script: list[dict[str, Any]], done: int, turn: int, context: str
@@ -874,8 +890,7 @@ class Cli:
             given = permission.get("updatedInput", args)
             briefs = os.environ.get("FAKE_CLAUDE_BRIEFS")
             if briefs:  # what the subagent was given, the hooks' updates included
-                with open(briefs, "a") as log:
-                    log.write(json.dumps({"agent": one["agent"], "prompt": given["prompt"]}) + "\n")
+                appended(briefs, {"agent": one["agent"], "prompt": given["prompt"]})
             who = {"agent_id": f"agent_{tool_id}", "agent_type": one["agent"]}
             subs.append({"item": one, "tool_id": tool_id, "who": who, "args": given, "last": ""})
         if not subs:
@@ -1018,8 +1033,7 @@ class Cli:
         if allowed and builtin == STRUCTURED:
             self.structured = ran
         if allowed and builtin:
-            with open(os.environ["FAKE_CLAUDE_BUILTINS"], "a") as log:
-                log.write(json.dumps({"tool": builtin, "args": ran}) + "\n")
+            appended(os.environ["FAKE_CLAUDE_BUILTINS"], {"tool": builtin, "args": ran})
             failure = item.get("fails")
             error = failure is not None
             text = f"{builtin} failed: {failure}" if error else f"{builtin} ran"
