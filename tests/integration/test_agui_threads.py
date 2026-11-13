@@ -148,6 +148,8 @@ async def test_one_poller_and_one_listing_per_tick_serve_every_open_thread(
     for stream in streams:
         await events(stream, 4)  # each replayed the thread
     replays = len(listings)
+    connects = [k for k in listings if k.get("thread_id") == THREAD]
+    assert len(connects) == 3 and all(k["limit"] == 20 for k in connects)  # its latest 20 runs
     await chat.fire(sid, "Only 4 left.")
     for stream in streams:
         assert texts(await events(stream, 4)) == ["Only 4 left."]
@@ -156,8 +158,7 @@ async def test_one_poller_and_one_listing_per_tick_serve_every_open_thread(
     ticks = [k for k in listings[replays:] if "thread_id" not in k and "status" not in k]
     assert ticks and all(k.get("max_pages") for k in ticks)  # one tenant listing per tick
     # no listing per stream (the run's own turn order reads its thread, as any run does)
-    replayed = threads_module.REPLAY_RUNS
-    assert not [k for k in listings[replays:] if k.get("limit") == replayed]
+    assert not [k for k in listings[replays:] if k.get("limit") == 20]
     for stream in streams:
         await stream.aclose()
     await asyncio.sleep(0.05)
