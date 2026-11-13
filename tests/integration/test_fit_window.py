@@ -79,6 +79,27 @@ async def test_a_request_that_fits_is_sent_as_it_is() -> None:
         FitWindow(optional=("a text",))  # pyright: ignore[reportCallIssue]
 
 
+async def test_a_request_the_size_of_its_budget_exactly_is_sent_as_it_is() -> None:
+    given = request([HumanMessage("how many SKUs are over 100?")], [lc("a"), lc("b")])
+    size = _size(given)
+    window = next(w for w in range(size, 2 * size) if FitWindow(w)._budget(given) == size)
+    assert await sent(FitWindow(window), given) is given  # it fits: the same object
+    assert await sent(FitWindow(window - 2), given) is not given  # a token less: made to fit
+
+
+async def test_a_model_error_that_is_no_overflow_is_raised_and_not_sent_again() -> None:
+    given = request([HumanMessage("hi")], [lc("a")])
+    calls: list[ModelRequest[Any]] = []
+
+    async def failing(r: ModelRequest[Any]) -> ModelResponse[Any]:
+        calls.append(r)
+        raise RuntimeError("the provider is down")
+
+    with pytest.raises(RuntimeError, match="the provider is down"):
+        await FitWindow(100_000).awrap_model_call(given, failing)
+    assert len(calls) == 1
+
+
 async def test_the_tools_are_narrowed_to_the_most_relevant_then_compacted(narrowing: None) -> None:
     tools = [lc(f"tool_{n}") for n in range(40)] + [lc("refund_order", "Refunds an order.")]
     given = request([HumanMessage("please refund order o-7")], tools)
