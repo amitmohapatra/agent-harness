@@ -66,6 +66,7 @@ from trellis.contracts import (
     ToolSpec,
     ToolStatus,
 )
+from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget, snapshots
 from trellis.harness.adapters.base import (
     Extracted,
@@ -479,9 +480,12 @@ class GovernedServer:
     run goes through the bridge (``tools.bridge.call``: hooks, the catalog's rules — its tools'
     annotations as they were listed for their risk —, a person when governance asks, the
     journal, the record), the server itself as it was (connected, listed, its prompts and
-    resources read, cleaned up by its owner). A call that pauses the run raises out of the
-    SDK's run (``_failure_error_function`` ``None``: the SDK raises instead of telling the
-    model), and a tool's own error is the result the model reads, as before. Made by
+    resources read, cleaned up by its owner). A tool's own error (the server's result) is the
+    result the model reads, as before. A call the server could not take (the call itself
+    raised) is recorded as the call's failure and is then the SDK's to tell, as without the
+    harness: the model reads what the server's — else the agent's — ``failure_error_function``
+    makes of it, and with ``failure_error_function=None`` the run ends with the error. A
+    call that pauses the run raises out of the SDK's run whatever that function is. Made by
     :meth:`of`, a subclass of the SDK's ``MCPServer`` built when first needed."""
 
     @staticmethod
@@ -497,12 +501,25 @@ def _governed_server() -> type:
     from mcp.types import CallToolResult, TextContent
 
     class Governed(MCPServer, GovernedServer):  # type: ignore[misc]
-        #: a pause raises out of the SDK's run rather than becoming an error text
-        _failure_error_function = None
-
         def __init__(self, inner: Any) -> None:  # the SDK's own state is the inner server's
             self._inner = inner
             self._annotations: dict[str, Any] = {}
+
+        def _get_failure_error_function(self, agent_failure_error_function: Any) -> Any:
+            """The server's own way of telling the model a call failed (else its agent's),
+            except while the run is pausing: a pause raises out of the SDK's run rather than
+            becoming an error text."""
+            theirs = self._inner._get_failure_error_function(agent_failure_error_function)
+            if theirs is None:
+                return None
+
+            def told(context: Any, error: Exception) -> Any:
+                runtime = current()
+                if runtime is not None and runtime.pending is not None:
+                    raise error
+                return theirs(context, error)
+
+            return told
 
         def __getattr__(self, name: str) -> Any:
             return getattr(self._inner, name)
@@ -550,8 +567,14 @@ def _governed_server() -> type:
             if current() is None:
                 return await inner.call_tool(tool_name, arguments, meta)
 
+            raised: list[Exception] = []
+
             async def run(args: dict[str, Any]) -> Any:
-                result = await inner.call_tool(tool_name, args, meta)
+                try:
+                    result = await inner.call_tool(tool_name, args, meta)
+                except Exception as error:
+                    raised.append(error)
+                    raise
                 if result.is_error:
                     said = "".join(getattr(c, "text", "") for c in result.content)
                     raise ToolError(said or f"{tool_name} failed", source="mcp")
@@ -567,6 +590,8 @@ def _governed_server() -> type:
             outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
             if outcome.ok and isinstance(outcome.output, dict):
                 return CallToolResult.model_validate(outcome.output)
+            if raised and not is_pause_signal(raised[-1]):
+                raise raised[-1]  # the call itself failed: the SDK's to tell, or to raise
             text = outcome.output if isinstance(outcome.output, str) else json.dumps(outcome.output)
             return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 

@@ -160,12 +160,11 @@ async def test_a_failing_tool_tells_the_model_what_its_failure_function_says(
     ]
 
 
-async def test_today_a_failure_the_sdk_formats_is_recorded_as_an_ok_call(
+async def test_a_failure_the_sdk_tells_the_model_is_recorded_as_a_failed_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    """Today: the SDK turns the tool's exception into text inside the tool's own invoke, which
-    is all the harness sees of it — the call is recorded ``ok``, its output the failure text.
-    (The SDK gives no public sign that the text is a failure.)"""
+    """The model reads the failure as the SDK words it; the call is the run's failed call: on
+    the stream, in the tool records."""
 
     @function_tool
     def boom(order: str) -> str:
@@ -180,40 +179,70 @@ async def test_today_a_failure_the_sdk_formats_is_recorded_as_an_ok_call(
         )
     ]
     await h.writes.drain()
-    assert recorded(memory_service) == [("boom", "ok")]
+    assert recorded(memory_service) == [("boom", "error")]
     [result] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
-    assert result["status"] == "ok" and "it broke" in result["output"]
+    assert result["status"] == "error" and "it broke" in result["output"]
+    assert outputs(model) == [
+        "An error occurred while running the tool. Please try again. Error: it broke"
+    ]
+    assert events[-1].outcome is RunOutcome.SUCCESS and events[-1].data["spent"]["tool_calls"] == 1
 
 
-async def test_today_a_tool_that_asks_to_raise_does_not_end_the_run(
-    memory_harness: Harness, memory_service: FakeMemoryService
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
+async def test_a_tool_that_asks_to_raise_ends_the_run_with_its_error(
+    memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
 ) -> None:
-    """Today: ``failure_error_function=None`` (the SDK: the exception ends the run) does not end
-    a harness run — every failure of a governed call is an outcome its model reads
-    (``tools.bridge.call``), recorded as an error."""
+    """``failure_error_function=None`` (the SDK: the tool's exception is raised) ends the run
+    with the error the SDK raises for it (its ``UserError`` naming the tool, the tool's own
+    under it), the call recorded as failed; so does a ``FunctionTool`` built by hand whose
+    invoke raises."""
+    from agents import FunctionTool
 
     @function_tool(failure_error_function=None)
     def boom(order: str) -> str:
         raise ValueError("it broke")
 
-    model = ScriptedModel([("boom", {"order": "o1"}), "it failed"])
-    h = declaring(memory_harness, boom="read")
-    result = await h.wrap(Agent(name="desk", model=model, tools=[boom]), id="raises").run(
-        "try", user="u"
+    async def raises(context: Any, arguments: str) -> str:
+        raise KeyError("no such order")
+
+    by_hand = FunctionTool(
+        name="by_hand",
+        description="Built by hand.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=raises,
     )
+    h = declaring(memory_harness, boom="read", by_hand="read")
+    for name, tool_, why in (("boom", boom, "it broke"), ("by_hand", by_hand, "no such order")):
+        model = ScriptedModel([(name, {} if name == "by_hand" else {"order": "o1"}), "never"])
+        agent = h.wrap(Agent(name="desk", model=model, tools=[tool_]), id=f"raises-{name}")
+        if streamed:
+            events = [e async for e in agent.stream("try", user="u")]
+            assert events[-1].outcome is RunOutcome.ERROR
+            failed = await h.runs.get(events[0].run_id)
+            assert failed is not None and failed.error is not None
+            error = failed.error
+        else:
+            result = await agent.run("try", user="u")
+            assert result.status is RunStatus.ERROR and result.error is not None
+            error = result.error
+        assert why in error.message and error.source == "openai_agents"
+        assert len(model.inputs) == 1  # the model was not asked again
     await h.writes.drain()
-    assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
-    assert outputs(model) == ["boom failed: it broke"]
-    assert recorded(memory_service) == [("boom", "error")]
+    assert recorded(memory_service) == [("boom", "error"), ("by_hand", "error")]
 
 
-async def test_a_tools_own_time_limit_is_the_sdks(harness: Harness) -> None:
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
+async def test_a_tools_own_time_limit_is_the_sdks_and_its_call_is_recorded_timed_out(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
     """``function_tool(timeout=...)``: past it the model reads the SDK's timeout text and the
     run goes on; with ``timeout_behavior="raise_exception"`` the run fails with the SDK's
-    ``ToolTimeoutError``."""
+    ``ToolTimeoutError``. Either way the call is that tool's call that timed out — on the
+    stream and in the tool records — not a call a cancelled run cut short."""
 
     @function_tool(timeout=0.05)
     async def slow(order: str) -> str:
+        ran.append("slow")
         await asyncio.sleep(5)
         return "late"
 
@@ -222,7 +251,7 @@ async def test_a_tools_own_time_limit_is_the_sdks(harness: Harness) -> None:
         await asyncio.sleep(5)
         return "late"
 
-    h = declaring(harness, slow="read", strict="read")
+    h = declaring(memory_harness, slow="read", strict="write")
     model = ScriptedModel([("slow", {"order": "o1"}), "it timed out"])
     events = [
         e
@@ -232,16 +261,50 @@ async def test_a_tools_own_time_limit_is_the_sdks(harness: Harness) -> None:
     ]
     assert events[-1].outcome is RunOutcome.SUCCESS
     assert outputs(model) == ["Tool 'slow' timed out after 0.05 seconds."]
-    # today: the SDK cancels the call it timed out, which the harness reports as a call cut
-    # short by a cancelled run
     [cut] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
-    assert cut["status"] == bridge.CANCELLED
+    assert cut["status"] == "timeout" and cut["output"].startswith("slow timed out after")
+    assert "cancelled" not in cut["output"]
+    assert ran == ["slow"]  # a read, but not tried again: the SDK stopped waiting for it
     model = ScriptedModel([("strict", {"order": "o1"}), "never"])
     failed = await h.wrap(Agent(name="desk", model=model, tools=[strict]), id="strict").run(
         "try", user="u"
     )
     assert failed.status is RunStatus.ERROR and failed.error is not None
     assert failed.error.code == "ToolTimeoutError" and len(model.inputs) == 1
+    await h.writes.drain()
+    assert recorded(memory_service) == [("slow", "timeout"), ("strict", "timeout")]
+
+
+async def test_a_cancelled_run_still_cuts_a_tool_that_has_a_time_limit_of_its_own(
+    harness: Harness,
+) -> None:
+    """A run cancelled while a tool with its own ``timeout`` is under way (the limit not
+    reached) is a cancelled call of a cancelled run, as for any tool."""
+    started = asyncio.Event()
+
+    @function_tool(timeout=60)
+    async def slow(order: str) -> str:
+        started.set()
+        await asyncio.sleep(30)
+        return "late"
+
+    model = ScriptedModel([("slow", {"order": "o1"}), "never"])
+    agent = declaring(harness, slow="read").wrap(
+        Agent(name="desk", model=model, tools=[slow]), id="cut"
+    )
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in agent.stream("try", user="u"):
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), 10)
+    await agent.cancel(events[0].run_id, reason="enough")
+    await asyncio.wait_for(task, 10)
+    assert events[-1].outcome is RunOutcome.CANCELLED
+    [cut] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert cut["status"] == bridge.CANCELLED
 
 
 async def test_the_runs_context_object_reaches_tools_instructions_and_agent_hooks(

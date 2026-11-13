@@ -251,3 +251,83 @@ async def test_the_governed_copy_of_a_server_reads_its_resources_and_cached_tool
         assert (await governed.list_resource_templates()).resource_templates == []
         with pytest.raises(Exception, match=r"(?i)unknown resource|not found"):
             await governed.read_resource("note://missing")
+
+
+class Unreachable:
+    """An MCP server of the agent's own whose calls cannot be made (its transport is gone)."""
+
+    def __init__(self) -> None:
+        self.called: list[str] = []
+
+    async def connect(self) -> None:
+        return None
+
+    async def cleanup(self) -> None:
+        return None
+
+    async def list_tools(self, run_context: Any = None, agent: Any = None) -> list[Any]:
+        from mcp.types import Tool, ToolAnnotations
+
+        return [
+            Tool(
+                name="find",
+                description="Find an order.",
+                input_schema={"type": "object", "properties": {"order": {"type": "string"}}},
+                annotations=ToolAnnotations(read_only_hint=True, idempotent_hint=False),
+            )
+        ]
+
+    async def call_tool(self, tool_name: str, arguments: Any, meta: Any = None) -> Any:
+        self.called.append(tool_name)
+        raise ConnectionResetError("the server hung up")
+
+    async def list_prompts(self) -> Any:
+        return []
+
+    async def get_prompt(self, name: str, arguments: Any = None) -> Any:
+        return None
+
+
+def unreachable(**settings: Any) -> Any:
+    from agents.mcp import MCPServer
+
+    class Own(Unreachable, MCPServer):  # type: ignore[misc]
+        @property
+        def name(self) -> str:
+            return "crm"
+
+    found = Own.__new__(Own)
+    MCPServer.__init__(found, **settings)
+    Unreachable.__init__(found)
+    return found
+
+
+@pytest.mark.parametrize("policy", ["default", "custom", "none"])
+async def test_a_call_the_server_could_not_take_is_told_as_its_failure_function_says(
+    memory_harness: Harness, memory_service: FakeMemoryService, policy: str
+) -> None:
+    """A call that raises (the transport, not the tool): recorded as the call's failure, then
+    the SDK's to tell — its default text, the server's own ``failure_error_function``'s, or
+    with ``failure_error_function=None`` the run ends with the error."""
+    settings: dict[str, Any] = {
+        "default": {},
+        "custom": {"failure_error_function": lambda _context, error: "the CRM is down"},
+        "none": {"failure_error_function": None},
+    }[policy]
+    server = unreachable(**settings)
+    model = ScriptedModel([("find", {"order": "o1"}), "it failed"])
+    agent = memory_harness.wrap(
+        Agent(name="desk", model=model, mcp_servers=[server]),
+        id=f"unreachable-{policy}",
+        without={"schedules"},
+    )
+    result = await agent.run("find o1", user="u")
+    await memory_harness.writes.drain()
+    assert server.called and recorded(memory_service)[-1] == ("find", "error")
+    if policy == "none":
+        assert result.status is RunStatus.ERROR and result.error is not None
+        assert "the server hung up" in result.error.message and len(model.inputs) == 1
+        return
+    assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
+    [told] = results(model)
+    assert (told == "the CRM is down") if policy == "custom" else ("the server hung up" in told)
