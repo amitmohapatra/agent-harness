@@ -383,6 +383,34 @@ def test_endings_that_are_not_errors_or_successes() -> None:
     assert translate(asked) is None  # RUN_FINISHED carries it
 
 
+def test_an_interrupt_entry_carries_what_a_client_renders_under_its_metadata() -> None:
+    from trellis.harness.agui.translate import interrupt_entry
+
+    shown = {
+        "ui": "form",
+        "options": ["a"],
+        "multiple": True,
+        "ui_schema": {"w": 1},
+        "component": "Picker",
+        "props": {"p": 1},
+        "payload": {"rows": 2},
+        "payload_ref": {"artifact_id": "art_1"},
+        "tool_call": {"tool": "pay", "idempotency_key": "k1"},
+        "assignee": "role:ops",
+        "deadline": "2026-11-14T09:00:00Z",
+    }
+    raw = {**shown, "interrupt_id": "i1", "reason": "APPROVAL", "question": "Pay?", "run_id": "r"}
+    entry = interrupt_entry({**raw, "expects": {"type": "string"}})
+    assert entry.metadata == shown  # each documented field, and not the run's own
+    assert (entry.id, entry.reason, entry.message, entry.tool_call_id) == (
+        "i1",
+        "approval",
+        "Pay?",
+        "k1",
+    )
+    assert entry.response_schema == {"type": "string"}
+
+
 def test_an_event_the_protocol_has_no_type_for_is_not_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
