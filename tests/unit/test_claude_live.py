@@ -1,6 +1,7 @@
 """A live Claude session's rules where no process is needed to show them
-(``bridges.claude_live``): what a request gets when no turn can take it, and what a turn is
-charged of the process's running totals."""
+(``bridges.claude_live``): what a request gets when no turn can take it, what a turn is
+charged of the process's running totals, and what a background subagent's run does with
+what comes while no attempt of it is under way."""
 
 from __future__ import annotations
 
@@ -9,17 +10,25 @@ import contextvars
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from claude_agent_sdk import HookMatcher, PermissionResultDeny
 from claude_agent_sdk._internal.message_parser import parse_message
 
+from trellis.contracts import RunStatus
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.claude_live import (
+    _NUDGE,
+    _OVER,
     LEFT,
+    STOPPED,
     UNATTENDED,
+    Background,
+    Left,
     LiveSession,
     LiveSessions,
     Turn,
 )
+from trellis.harness.journal import Journal
 
 REFUSED = {"content": [{"type": "text", "text": UNATTENDED}], "is_error": True}
 
@@ -138,3 +147,250 @@ def test_a_turn_is_charged_what_the_processs_running_cost_grew_by() -> None:
     third = session.charged(result(0.001, input_tokens=40, output_tokens=5))
     assert third.total_cost_usd == 0.001
     assert session.charged(result(None, input_tokens=50, output_tokens=6)).total_cost_usd is None
+
+
+# --------------------------------------------------------------------------- a background run
+class Store:
+    """The run store of a background run's agent (``agent.harness.runs``): the run's first
+    read — its own attempt's — waits until ``broken`` is set and then fails, as a store that
+    cannot be reached does; the others read ``records``."""
+
+    def __init__(self) -> None:
+        self.broken = asyncio.Event()
+        self.records: dict[str, Any] = {}
+        self.cancelled: list[tuple[str, str]] = []
+        self.on_cancel: Any = None
+        self._first = True
+
+    async def get(self, run_id: str, tenant: str | None = None) -> Any:
+        if self._first:
+            self._first = False
+            await self.broken.wait()
+            raise ConnectionError("the run store cannot be reached")
+        return self.records.get(run_id)
+
+    async def cancel(self, run_id: str, *, reason: str, tenant: str | None = None) -> None:
+        self.cancelled.append((run_id, reason))
+        if self.on_cancel is not None:
+            self.on_cancel()
+
+
+def runtime_of(agent: Any, run_id: str) -> Any:
+    return SimpleNamespace(
+        agent=agent,
+        tenant="default",
+        framework_options={},
+        run_id=run_id,
+        parent=None,
+        budget=None,
+        budget_spent=None,
+        pending=None,
+        cancelled=None,
+        replay=SimpleNamespace(journal=Journal()),
+    )
+
+
+def turn_of(agent: Any, run_id: str) -> Turn:
+    return Turn(
+        runtime_of(agent, run_id), SimpleNamespace(model="m"), None, contextvars.copy_context()
+    )
+
+
+async def background() -> tuple[LiveSession, Background, Store]:
+    """A session with one background subagent's run (``child``, task ``t1``), started by the
+    turn ``turn``, whose own attempt has not begun (its record is still being read)."""
+    store = Store()
+    agent = SimpleNamespace(
+        harness=SimpleNamespace(runs=store),
+        running={},
+        sessions=LRU(),
+        adapter=SimpleNamespace(name="claude"),
+    )
+    session = LiveSession("conversation", (), LiveSessions())
+    session.turn = turn_of(agent, "turn")
+    helper = SimpleNamespace(run_id="child", parent_run_id="turn", name="researcher", began=0.0)
+    found = Background(session, "t1", "toolu_bg_t1", helper)
+    session.turn = None
+    session.background["t1"] = found
+    await asyncio.sleep(0)  # its attempt is reading the record
+    return session, found, store
+
+
+async def ended(session: LiveSession, found: Background, store: Store) -> None:
+    """The store fails the run's read: the run ends (logged), the session closes."""
+    store.broken.set()
+    await asyncio.wait({found.task})
+    assert found.over and "child" not in session.sessions.attended
+    await session.close()
+
+
+def reply(text: str, usage: dict[str, Any] | None, message_id: str | None) -> Any:
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    return AssistantMessage(
+        [TextBlock(text)], "m", parent_tool_use_id="toolu_bg_t1", usage=usage, message_id=message_id
+    )
+
+
+async def test_what_comes_while_no_attempt_of_a_background_run_is_under_way_waits_for_one() -> None:
+    """The subagent's messages, what its replies used and its task's end, come while no
+    attempt of its run is under way: each is kept, and the attempt that follows is served
+    them in order, charged the replies (each counted once) and ends with the task's end."""
+    session, found, store = await background()
+    used = {"input_tokens": 10, "output_tokens": 2}
+    first, again = reply("looking", used, "msg_1"), reply("looking", used, "msg_1")
+    unnamed, quiet = reply("found it", used, None), reply("", None, None)
+    for message in (first, again, unnamed, quiet):
+        found.took(message)
+    found.finished("completed", "")
+    assert found.said == "found it" and found.unbilled == 24  # msg_1 once, the unnamed one
+    assert len(found._owed) == 2 and found.turn is None
+
+    store.records["child"] = SimpleNamespace(final=False)
+    found._settled.set()  # what the task cost is known
+    turn = turn_of(found.agent, "child")
+    served = [m async for m in found.served(turn)]
+    assert served[:4] == [first, again, unnamed, quiet]
+    assert served[4].result == "found it" and not served[4].is_error
+    spent = turn.runtime.replay.journal.spent
+    assert (spent["tokens"], spent["model_calls"]) == (24, 2)
+    await ended(session, found, store)
+
+
+async def test_an_attempt_that_pauses_keeps_what_comes_after_and_ends_its_requests() -> None:
+    """An attempt nudged with nothing new goes on; once its run pauses, what comes is kept
+    for the attempt that follows, and the requests still under way end with the attempt."""
+    session, found, store = await background()
+    store.records["child"] = SimpleNamespace(final=False)
+    turn = turn_of(found.agent, "child")
+    attempt = found.served(turn)
+    waiting = asyncio.ensure_future(anext(attempt))
+    await asyncio.sleep(0)
+    turn.queue.put_nowait(_NUDGE)  # nothing new: no end of its task yet
+    first = reply("one", None, None)
+    turn.queue.put_nowait(first)
+    assert await waiting is first
+    never = asyncio.Event()
+    asked = asyncio.ensure_future(turn.within(never.wait()))
+    await asyncio.sleep(0)
+    turn.runtime.pending = "paused"
+    later = reply("two", None, None)
+    turn.queue.put_nowait(later)
+    assert [m async for m in attempt] == []  # it ended paused
+    assert found._backlog == [later] and found.turn is None
+    with pytest.raises(Left):
+        await asked  # cancelled with the attempt
+    await ended(session, found, store)
+
+
+async def test_an_attempt_left_with_a_request_under_way_ends_it_first() -> None:
+    """An attempt closed while it is served (its run cancelled) cancels the requests under
+    way and waits for them before it ends."""
+    session, found, store = await background()
+    store.records["child"] = SimpleNamespace(final=False)
+    turn = turn_of(found.agent, "child")
+    attempt = found.served(turn)
+    waiting = asyncio.ensure_future(anext(attempt))
+    await asyncio.sleep(0)
+    message = reply("one", None, None)
+    turn.queue.put_nowait(message)
+    assert await waiting is message
+    never = asyncio.Event()
+    asked = asyncio.ensure_future(turn.within(never.wait()))
+    await asyncio.sleep(0)
+    await attempt.aclose()
+    assert found.turn is None and not turn.calls
+    with pytest.raises(Left):
+        await asked
+    await ended(session, found, store)
+
+
+async def test_a_background_run_that_cannot_go_on_says_why_and_asks_nothing_more() -> None:
+    """A run given up (its session closed, its task stopped) fails its next attempt with the
+    reason; a request whose attempt is left waits for the next, and once the run is over is
+    answered as with no run — a hook, a harness tool's call — and refused."""
+    session, found, store = await background()
+    nobody: Any = SimpleNamespace()
+    found.answered(nobody)  # nothing waits for an answer: no change
+    found.cancel("the turn was cancelled")  # no attempt under way to cancel
+    assert found.stopped == "the turn was cancelled"
+    await found.abandoned("its session was closed")  # no attempt, no question: only said
+    assert store.cancelled == []
+    with pytest.raises(RuntimeError, match="its session was closed"):
+        await anext(found.served(turn_of(found.agent, "child")))
+
+    turn = turn_of(found.agent, "child")
+    found.turn = turn
+    never = asyncio.Event()
+
+    async def make(at: Turn) -> Any:
+        await never.wait()
+
+    asked = asyncio.ensure_future(found.asked(make))
+    await asyncio.sleep(0)
+    found._detach(turn)  # the attempt ended: the request waits for the next
+    await asyncio.sleep(0)
+    assert not asked.done()
+    found.over = True
+    found._woken()
+    assert await asked is _OVER
+
+    async def hook(given: Any, tool_use_id: str | None, context: Any) -> Any:
+        raise AssertionError("a hook of a run that is over")
+
+    relay = session._hooks({"PreToolUse": [HookMatcher(hooks=[hook])]})["PreToolUse"][0].hooks[0]
+    hooked = await relay({"tool_name": "Read", "agent_id": "t1"}, "toolu_1", None)
+    assert refusal(hooked) == ("deny", UNATTENDED)
+    session._calling["toolu_2"] = ("refund", {"order": "o1"}, found)
+    assert await session._call("refund", {"order": "o1"}) == REFUSED
+    # a hook that asks (neither lets it through nor refuses it) says nothing of whose it is
+    given = {"tool_name": "mcp__trellis__refund", "tool_use_id": "toolu_3"}
+    session._noted(
+        "PreToolUse", given, {"hookSpecificOutput": {"permissionDecision": "ask"}}, found
+    )
+    assert "toolu_3" not in session._calling
+    await ended(session, found, store)
+
+
+async def test_a_task_that_ends_while_its_run_waits_for_a_person_cancels_the_run() -> None:
+    """The task a run waits about ends (stopped in Claude Code): the run is cancelled in the
+    store, saying so, and stops waiting — also when the store's cancel ended the wait."""
+    session, found, store = await background()
+    loop = asyncio.get_running_loop()
+    found._answer = loop.create_future()
+    found.finished("killed", "")
+    await asyncio.wait(session._aside)
+    assert store.cancelled == [("child", STOPPED)] and found._answer.result() is None
+
+    found._answer = waits = loop.create_future()
+    store.on_cancel = lambda: waits.set_result(None)  # the run ended meanwhile
+    await found.abandoned("nobody answered")
+    assert waits.result() is None and store.cancelled[-1] == ("child", "nobody answered")
+    await ended(session, found, store)
+
+
+async def test_a_question_of_a_run_cancelled_where_it_waited_is_not_asked() -> None:
+    """The conversation's next turn asks the questions its background runs wait on: one
+    whose run is no longer paused (cancelled where it waited) is not asked."""
+    session, found, store = await background()
+    question: Any = SimpleNamespace(run_id="child", interrupt_id="i1")
+    found.question = question
+    store.records["child"] = SimpleNamespace(status=RunStatus.CANCELLED)
+    await session.asks(runtime_of(found.agent, "turn2"))  # it would pause: it does not
+    await ended(session, found, store)
+
+
+async def test_the_share_of_a_turn_no_run_is_served_for_stays_for_the_next_turn() -> None:
+    """A result of a turn the session ran by itself, no run served and no task's end to
+    charge it to: each background run is charged its replies' share, and the turn's own
+    share is not billed — the conversation's next turn is charged it."""
+    session, found, store = await background()
+    found.unbilled = 100
+    charged = session.charged(
+        result(0.003, input_tokens=150, output_tokens=50), own=False, taken=False
+    )
+    assert charged.total_cost_usd == 0.003  # the result as it came
+    [(usage, share)] = found._owed  # no attempt under way: the next one's
+    assert usage is None and round(share, 6) == 0.001
+    assert round(session.billed, 6) == 0.001 and found.unbilled == 0
+    await ended(session, found, store)
