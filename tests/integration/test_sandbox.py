@@ -799,8 +799,9 @@ async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On success each file directly in outputs/ goes to the file store (named in the journal,
-    announced); one it cannot keep is a warning; a run that fails keeps none."""
-    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 8)
+    announced), one of exactly the most kept too; one it cannot keep is a warning; a run that
+    fails keeps none."""
+    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 4)  # report.csv's size
     harness = Harness(config=Settings(files_url=f"memory://outputs-{id(object())}"))
     provider = FakeSandboxes()
     box = sandbox(provider)
@@ -827,7 +828,7 @@ async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
     ]
     warned = sorted(w["message"] for w in custom(events, "warning") if w["code"] == "sandbox")
     assert warned[0].startswith("the output a b.csv was not kept: 'a b.csv' is not a file")
-    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 8 kept"
+    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 4 kept"
     folder = runtime.files_folder()
     assert await harness.files.size(folder, "report.csv") == 4
     assert provider.calls[-1][0] == "delete"  # kept before the sandbox went
