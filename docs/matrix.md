@@ -217,6 +217,8 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 - Spending: tokens from Kimi's usage log (every agent's), toward the budget; dollars only with the follow-up that reads the gateway's log (a `max_cost` budget does not see them yet).
 - Sandbox (F73 runs the harness's sandbox tools; `kimi(sandbox=sandbox())` is Kimi's own): its commands and writes run in the sandbox, its reads (`Read`, `Glob`, `Grep`) read the host: reads are not isolated.
 - Swarms run their members concurrently, as Kimi does (`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` in `env` caps it).
+- Background work (`run_in_background`) keeps a conversation's `kimi` process between turns, its sub-agent's child run open until Kimi's log says the task ended; ACP shows none of it (tests/integration/test_acp_background.py, test_kimi.py).
+- Tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`) is off: its workers ask about none of their calls.
 
 ## Reasons
 

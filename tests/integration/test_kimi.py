@@ -7,6 +7,7 @@ fails here. CI installs the pinned ``@moonshot-ai/kimi-code``; without it they a
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
@@ -514,6 +515,167 @@ async def test_kimi_runs_its_own_sub_agents_together_and_the_harness_tools_one_b
     assert second - first < MEMBER_SECONDS  # the second asked before the first was answered
     (_, ended), (began, _) = sorted(spans)
     assert began >= ended  # the harness's second read began after its first ended
+
+
+def _said_last(body: dict[str, Any]) -> str:
+    """What the request's last user message says (not a reminder Kimi put before it)."""
+    users = [text_of(m.get("content")) for m in body["messages"] if m.get("role") == "user"]
+    return [u for u in users if not u.startswith("<system-reminder>")][-1]
+
+
+def _backgrounded(sub: Any) -> Any:
+    """The main agent runs a sub-agent in the background (``sub``: what that sub-agent does)
+    and says it started; Kimi's own turn for its end (its notification) notes it; the next
+    turn answers with what the conversation heard of it."""
+
+    def turn(body: dict[str, Any]) -> Any:
+        if not _member(body):
+            said, last = _said_last(body), body["messages"][-1]
+            if said.startswith("<notification"):
+                return "noted"
+            if "look for tea" in said:
+                if last.get("role") == "tool":
+                    return "started it"
+                look = {"description": "look", "prompt": "find tea", "run_in_background": True}
+                return ("Agent", look)
+            notified = "task.completed" in json.dumps(body["messages"])  # its notification
+            return f"heard: {'it ended' if notified else 'nothing'}"
+        return sub(body)
+
+    return turn
+
+
+async def _until(check: Any, seconds: float = 30.0) -> Any:
+    """``check`` (a coroutine function) awaited until what it gives holds: that."""
+    async with asyncio.timeout(seconds):
+        while not (found := await check()):  # noqa: ASYNC110 - what Kimi's process did
+            await asyncio.sleep(0.1)
+    return found
+
+
+def _finds_tea(body: dict[str, Any]) -> Any:
+    return "the sub-agent found tea"
+
+
+async def test_a_sub_agent_kimi_runs_in_the_background_finishes_after_its_turn(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi's ``Agent(run_in_background=true)`` answers at once; its turn ends. The
+    conversation's Kimi process is kept while the sub-agent works: its child run stays
+    ``RUNNING`` (not ``SUCCESS`` with the launch's words), then ends with what the sub-agent
+    said; Kimi's own turn for its end runs (ACP shows the client none of it), and the
+    conversation's next turn — served by the same process — has its notification."""
+    stall = lambda body: 1.5 * _member(body)  # noqa: E731 - the sub-agent takes a while
+    async with PlannedEndpoint(turns=_backgrounded(_finds_tea), stall=stall).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background")
+        first = await agent.run("look for tea in the background", user="u1", thread="t1")
+        assert first.status is RunStatus.SUCCESS and first.answer == "started it", first.error
+        [summary] = [s async for s in harness.runs.iterate(parent_run_id=first.run_id)]
+        child = await harness.runs.get(summary.run_id)
+        assert child is not None and child.status is RunStatus.RUNNING
+        child = await _until(lambda: _ended(harness, summary.run_id))
+        assert child.status is RunStatus.SUCCESS and child.output == "the sub-agent found tea"
+
+        async def noted() -> bool:  # Kimi's own turn for its end: it noted the result
+            return any(_said_last(b).startswith("<notification") for b in endpoint.requests)
+
+        await _until(noted)
+        second = await agent.run("what did it find?", user="u1", thread="t1")
+    assert second.status is RunStatus.SUCCESS and second.answer == "heard: it ended", second.error
+    sessions = {json.dumps(b["messages"][0]) for b in endpoint.requests if not _member(b)}
+    assert len(sessions) == 1  # one conversation in Kimi: the next turn was sent into it
+
+
+async def _ended(harness: Harness, run_id: str) -> Any:
+    """The run's record once it ended (``None`` before)."""
+    record = await harness.runs.get(run_id)
+    return record if record is not None and record.status.final else None
+
+
+async def _paused(harness: Harness, run_id: str) -> bool:
+    record = await harness.runs.get(run_id)
+    return record is not None and record.status is RunStatus.PAUSED
+
+
+def _makes_it(body: dict[str, Any]) -> Any:
+    """A sub-agent whose work writes a file (its ``Bash``: Kimi asks first)."""
+    if body["messages"][-1].get("role") == "tool":
+        return "made it"
+    return ("Bash", {"command": "touch made.txt"})
+
+
+async def test_a_background_sub_agents_call_kimi_asks_about_is_governed_in_its_own_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The background sub-agent's ``Bash`` asks permission after its turn ended (Kimi's
+    approvals are its session's, not a turn's): the call is decided in the sub-agent's own run
+    — a person is asked, so that run pauses, and the conversation's next turn asks it. Approved,
+    the command runs, the task ends and its run with it; then the turn's own prompt goes."""
+    stall = lambda body: 1.0 * _member(body)  # noqa: E731 - the sub-agent takes a while
+    async with PlannedEndpoint(turns=_backgrounded(_makes_it), stall=stall).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-asks")
+        first = await agent.run("look for tea in the background", user="u1", thread="t1")
+        assert first.status is RunStatus.SUCCESS, first.error
+        [summary] = [s async for s in harness.runs.iterate(parent_run_id=first.run_id)]
+        await _until(lambda: _paused(harness, summary.run_id))
+        assert not (tmp_path / "kimi-work" / "made.txt").exists()
+        second = await agent.run("how is it going?", user="u1", thread="t1")
+        assert second.status is RunStatus.PAUSED and second.interrupt is not None
+        call = second.interrupt.tool_call
+        assert call is not None and call.tool == "Bash"
+        done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        child = await _until(lambda: _ended(harness, summary.run_id))
+    assert child.status is RunStatus.SUCCESS and child.output == "made it"
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+def _looks_up(body: dict[str, Any]) -> Any:
+    """A sub-agent that calls the harness's ``lookup`` (through its MCP server)."""
+    if body["messages"][-1].get("role") == "tool":
+        return "looked: " + result_text(body["messages"][-1]["content"])
+    return ("mcp__trellis__lookup", {"topic": "tea"})
+
+
+async def test_a_background_sub_agents_harness_tool_call_is_made_in_its_own_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The background sub-agent calls a harness tool after its turn ended: Kimi asks
+    permission for it first (whose it is: its log's ``interaction.request``), and the call
+    runs for the sub-agent's own run."""
+    lookups.clear()
+    stall = lambda body: 1.0 * _member(body)  # noqa: E731 - the sub-agent takes a while
+    async with PlannedEndpoint(turns=_backgrounded(_looks_up), stall=stall).serving() as endpoint:
+        target = kimi_target(endpoint, tmp_path)
+        agent = arm(harness.wrap(target, id="kimi-background-tool"), [lookup])
+        first = await agent.run("look for tea in the background", user="u1", thread="t1")
+        [summary] = [s async for s in harness.runs.iterate(parent_run_id=first.run_id)]
+        child = await _until(lambda: _ended(harness, summary.run_id))
+    assert child.status is RunStatus.SUCCESS and child.output == "looked: facts about tea"
+    assert lookups == ["tea"]
+
+
+async def test_a_command_kimi_runs_in_the_background_finishes_after_its_turn(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``Bash(run_in_background=true)`` answers at once with its task; the process is
+    kept while the command works, so the command finishes after the turn ended."""
+    command = {
+        "command": "sleep 2 && echo done > done.txt",
+        "run_in_background": True,
+        "description": "wait",
+    }
+    endpoint.plan = [("Bash", command)]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-background-bash")
+    paused = await agent.run("wait a bit", user="u1", thread="t1")
+    assert paused.interrupt is not None  # Kimi asks about a command that writes
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and "task_id:" in str(done.answer), done.error
+    made = tmp_path / "kimi-work" / "done.txt"
+    assert not made.exists()  # still at work when the turn ended
+    async with asyncio.timeout(20):
+        while not made.exists():  # noqa: ASYNC110 - a file the command writes
+            await asyncio.sleep(0.1)
 
 
 async def test_kimis_answer_streams(

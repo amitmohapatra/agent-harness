@@ -28,10 +28,12 @@ a user needs, as the evidence of a finding. What they show:
   the app's, one for every user, and the SDK's shell tools are not governed ("today").
 * **A function** — its code queues a child run (``agent.start`` inside the run) and answers
   with the run's id; a worker runs it; a later turn reads the run by the id its history holds.
-* **An ACP agent (Kimi Code)** — each turn runs in an agent process of its own, ended with the
-  turn, its scheduling turned off; the next turn resumes the session in a new process. Whatever
-  the agent left running in its process is gone ("today"). No ``kimi`` is installed here: what
-  Kimi's own background tasks do across that is not tested.
+* **An ACP agent (Kimi Code)** — a turn that leaves nothing running runs in an agent process of
+  its own, ended with the turn, its scheduling turned off; the next turn resumes the session in
+  a new process. A turn that leaves a task running in the agent's background (Kimi's
+  ``run_in_background``) leaves its process to the conversation: the next turns are served by
+  it while the task works, and the sub-agent's child run ends with its result
+  (``bridges.acp_live``; ``tests/integration/test_kimi.py`` runs Kimi Code itself).
 """
 
 from __future__ import annotations
@@ -82,7 +84,7 @@ from tests.integration.test_react_async_subagent import (
 from tests.support.arm import arm
 from tests.support.openai_model import ScriptedModel
 from trellis import Harness, Runtime, Settings, current, middleware, tool
-from trellis.contracts import RunEventType, RunOutcome, RunStatus
+from trellis.contracts import RunEventType, RunOutcome, RunRecord, RunStatus
 from trellis.harness.adapters.acp import KIMI_ENV
 from trellis.harness.adapters.langgraph import run_scoped
 from trellis.harness.agent import Agent
@@ -517,8 +519,7 @@ async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session
     """Today: what the harness does around an ACP agent (Kimi Code) from turn to turn, with
     the scripted agent — no ``kimi`` is installed here. Each turn of a chat runs in an agent
     process of its own, started with Kimi's scheduling off and ended with the turn; the next
-    turn starts another and resumes the session the last one ended in. So the conversation
-    goes on, and nothing the agent left running in its process does."""
+    turn starts another and resumes the session the last one ended in: nothing ran on in it."""
     script = [{"text": "started"}, {"stop": "end_turn"}, {"text": "4"}]
     agent = harness.wrap(fake(tmp_path, script), id="bg")
     first = await say(agent, "run the optimization")
@@ -531,6 +532,36 @@ async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session
     new, resumed = record["sessions"]
     assert (new["how"], resumed["how"]) == ("new", "resume") and new["id"] == resumed["id"]
     assert agent.adapter.steers(agent.target) is False  # and no message reaches a turn under way
+
+
+async def test_c_an_acp_agents_background_sub_agent_works_on_across_the_turns(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """T1 starts a sub-agent in the agent's background (its call answers at once) and ends;
+    T2 is answered while it works, by the same process; once it ended, its child run has its
+    result — the turn's child, kept open past the turn."""
+    look = {"description": "optimize", "prompt": "run the optimization", "run_in_background": True}
+    script = [
+        {"agent": look, "background": {"after": 1.0, "result": RESULT}},
+        {"text": "started"},
+        {"stop": "end_turn"},
+        {"text": "4"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="bg-kimi")
+    first = await say(agent, "run the optimization")
+    second = await say(agent, "what is 2+2?")
+    assert (first.answer, second.answer) == ("started", "4"), second.error
+    assert len(recorded(tmp_path)["started"]) == 1  # one process for both turns
+    [summary] = [s async for s in harness.runs.iterate(parent_run_id=first.run_id)]
+
+    async def ended() -> RunRecord | None:
+        record = await harness.runs.get(summary.run_id)
+        return record if record is not None and record.status.final else None
+
+    async with asyncio.timeout(10):
+        while (child := await ended()) is None:  # noqa: ASYNC110 - another process's task
+            await asyncio.sleep(0.05)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, RESULT)
 
 
 # --------------------------------------------------------------------------- E. side by side

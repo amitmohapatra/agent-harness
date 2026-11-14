@@ -54,8 +54,10 @@ from trellis.harness.adapters.claude import (
 )
 from trellis.harness.agent import Agent
 from trellis.harness.bridges import claude_live
-from trellis.harness.bridges.claude_live import UNATTENDED, LiveSession
+from trellis.harness.bridges import live as shared
+from trellis.harness.bridges.claude_live import LiveSession
 from trellis.harness.bridges.helpers import HELPER
+from trellis.harness.bridges.live import UNATTENDED
 from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
@@ -121,7 +123,9 @@ async def until(check: Callable[[], Any], seconds: float = 5.0) -> None:
 def live_of(agent: Agent, user: str = "u1", thread: str = "t1") -> LiveSession | None:
     adapter = agent.adapter
     assert isinstance(adapter, ClaudeAdapter)
-    return adapter.live.get(conversation_key("default", user, thread))
+    found = adapter.live.get(conversation_key("default", user, thread))
+    assert found is None or isinstance(found, LiveSession)
+    return found
 
 
 def open_sessions(agent: Agent) -> int:
@@ -783,7 +787,7 @@ async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_p
     """A session nothing works in closes when it has been idle (as a restart or another
     server leaves none): the next turn starts a process that resumes the conversation's
     session, as before — with what the closed one mirrored between the turns."""
-    monkeypatch.setattr(claude_live, "IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(shared, "IDLE_SECONDS", 0.2)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="idle")
     await agent.run("research the market", user="u1", thread="t1")
@@ -811,7 +815,7 @@ async def test_a_session_is_not_idle_while_its_own_turn_for_a_finished_task_is_d
     itself, as soon as it gets to it (here half a second later, longer than the idle bound):
     the session is not idle meanwhile, nor while that turn runs — it closes once the turn
     ended, and the next turn's session holds what it said."""
-    monkeypatch.setattr(claude_live, "IDLE_SECONDS", 0.2)
+    monkeypatch.setattr(shared, "IDLE_SECONDS", 0.2)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
     target = options(tmp_path, scripts, env={"FAKE_CLAUDE_INJECTS_AFTER": "0.5"})
     agent = harness.wrap(target, id="due")
@@ -829,7 +833,7 @@ async def test_there_is_room_for_so_many_sessions_and_a_turn_beyond_runs_as_befo
     """A background shell command, too, goes on in a live session. With every session at work
     and no room for another, a conversation's turn runs in a process of its own, where the
     command ends with the query — as it always did."""
-    monkeypatch.setattr(claude_live, "KEPT", 1)
+    monkeypatch.setattr(shared, "KEPT", 1)
     scripts = [[SHELL, {"text": "started it"}], [{"text": "ok"}]]
     agent = harness.wrap(options(tmp_path, scripts, allowed_tools=["Bash"]), id="room")
     await agent.run("watch the build", user="u1", thread="t1")
@@ -850,7 +854,7 @@ async def test_there_is_room_for_so_many_sessions_and_a_turn_beyond_runs_as_befo
 async def test_an_idle_session_gives_its_place_to_another_conversation(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(claude_live, "KEPT", 1)
+    monkeypatch.setattr(shared, "KEPT", 1)
     agent = harness.wrap(options(tmp_path, [[{"text": "ok"}]]), id="place")
     await agent.run("hi", user="u1", thread="t1")
     await agent.run("hi", user="u2", thread="t1")
@@ -1086,7 +1090,7 @@ async def test_a_session_that_owes_a_left_turns_result_for_too_long_is_replaced(
     next prompt (the CLI could hand it to the turn under way); when it takes too long, the
     session is closed, the turn runs in a new process, and the run says what work that
     ended."""
-    monkeypatch.setattr(claude_live, "SETTLE_SECONDS", 0.3)
+    monkeypatch.setattr(shared, "SETTLE_SECONDS", 0.3)
     scripts = [
         [BACKGROUND, {"text": "started it"}],
         [{"stall": 30}, {"text": "never said"}],
@@ -1253,7 +1257,7 @@ async def test_a_background_subagent_that_ends_while_its_turn_still_runs_says_so
     subagent that ends with its call says it. Once the turn has ended there is no stream
     of it left to say so on (the child run's own stream has its end)."""
     # the task's run waits this long for the session's next result (what it cost) at most
-    monkeypatch.setattr(claude_live, "SETTLE_SECONDS", 0.2)
+    monkeypatch.setattr(shared, "SETTLE_SECONDS", 0.2)
     scripts = [[BACKGROUND, {"stall": 30}, {"text": "never said"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="told")
     events: list[RunEvent] = []
@@ -1494,7 +1498,7 @@ async def test_a_background_subagents_call_of_a_tool_its_run_does_not_have_is_re
     import contextvars
     from types import SimpleNamespace
 
-    at = claude_live.Turn(SimpleNamespace(toolbox={}), None, None, contextvars.copy_context())
+    at = shared.Turn(SimpleNamespace(toolbox={}), None, None, contextvars.copy_context())
     answer = await claude_live._handler(at, "gone")({})
     assert answer["is_error"] and "gone is not a tool of this run" in answer["content"][0]["text"]
 
@@ -1505,8 +1509,8 @@ async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_t
     """The call waits in Claude Code's hook, which the CLI is told to wait for longer than the
     harness waits for a person: unanswered, the run is cancelled and the task stopped —
     never left to the CLI's own timeout."""
-    monkeypatch.setattr(claude_live, "ANSWER_SECONDS", 0.2)
-    monkeypatch.setattr(claude_live, "WAITS_SECONDS", 0.1)
+    monkeypatch.setattr(shared, "ANSWER_SECONDS", 0.2)
+    monkeypatch.setattr(shared, "WAITS_SECONDS", 0.1)
     scripts = [[BACKGROUND, {"text": "started it"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="unanswered")
     first = await agent.run("research the market", user="u1", thread="t1")
@@ -1593,7 +1597,7 @@ async def test_cancelling_a_background_run_that_waits_for_a_person_stops_its_tas
 ) -> None:
     """A paused run is cancelled at once, wherever it is cancelled from; the session, which
     looks every few seconds, then stops the task and answers the call that waited."""
-    monkeypatch.setattr(claude_live, "WAITS_SECONDS", 0.1)
+    monkeypatch.setattr(shared, "WAITS_SECONDS", 0.1)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="cancel-paused")
     first = await agent.run("research the market", user="u1", thread="t1")
@@ -1774,8 +1778,8 @@ async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
 
     from claude_agent_sdk import AssistantMessage, TextBlock
 
-    session = LiveSession("k", None, claude_live.LiveSessions())
-    turn = claude_live.Turn(None, None, None, contextvars.copy_context(), stopped=True)
+    session = LiveSession("k", None, shared.LiveSessions())
+    turn = shared.Turn(None, None, None, contextvars.copy_context(), stopped=True)
     said = AssistantMessage(content=[TextBlock("…")], model="m")
     ended = ResultMessage("success", 1, 1, False, 1, "s")
     for message in (said, ended):
@@ -1785,7 +1789,7 @@ async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
     turn.queue.put_nowait(None)  # the process ended
     assert await session.outcome(turn) is None and session.left is None
     turn.queue.put_nowait(None)  # and another's result is the one owed now
-    session.left = other = claude_live.Turn(None, None, None, contextvars.copy_context())
+    session.left = other = shared.Turn(None, None, None, contextvars.copy_context())
     assert await session.outcome(turn) is None and session.left is other
 
 
@@ -1936,8 +1940,8 @@ async def test_a_foreground_subagents_run_ends_with_its_call_in_a_live_session_t
 async def test_a_session_with_work_is_kept_past_the_idle_bound_but_not_for_ever(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(claude_live, "IDLE_SECONDS", 0.1)
-    monkeypatch.setattr(claude_live, "WORKING_SECONDS", 0.8)
+    monkeypatch.setattr(shared, "IDLE_SECONDS", 0.1)
+    monkeypatch.setattr(shared, "WORKING_SECONDS", 0.8)
     scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
     agent = harness.wrap(options(tmp_path, scripts), id="bounded")
     await agent.run("research the market", user="u1", thread="t1")

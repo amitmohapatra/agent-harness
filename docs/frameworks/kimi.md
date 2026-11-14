@@ -60,22 +60,24 @@ command="kimi", reads=())`:
 | | |
 |---|---|
 | Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt), marked off from the question as `ReAct`'s is (`<memory_context>`, `history.ASKED_WITH`) |
-| Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the attempt on `127.0.0.1` with a bearer token of its own, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run, from 30 tools of the run's own (Kimi's built-ins are not counted); `read_file` pages a large result |
+| Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the `kimi` process on `127.0.0.1` with a bearer token of its own, each call made in the run being served, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run, from 30 tools of the run's own (Kimi's built-ins are not counted); `read_file` pages a large result |
 | Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked (once: a call governance asks about too, such as a tool of Kimi's own MCP servers that declares nothing, is one question), unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`), reading only what the run may read: its folder (or the folder the call names, Bash's `cwd`), `reads`, the run's skills, where a kept result is read; with the environment Kimi is given (`env`: its `PATH`, `PYTHONPATH`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Kimi Code 2.1.1 reads `[permission]` rules in its `config.toml` but does not apply them over ACP (pinned by `test_kimi.py`): it still asks, and a person is asked |
-| Schedules: off | Kimi runs for one attempt and ends with it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them, as ACP has no way to take a built-in off. A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
+| Schedules: off | Kimi runs for an attempt — kept only while work in its background goes on ([below](#background-work)) — and ends after it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them, as ACP has no way to take a built-in off. A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
+| Tower mode: off | Kimi's experimental tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`: `TowerInit`, `TowerSpawn`, `TowerMerge`...) starts each worker in Kimi's `auto` permission mode, which asks about none of its calls, so the harness could govern none of them. Kimi's own switch is set for it, `KIMI_CODE_EXPERIMENTAL_TOWER=0`, which Kimi reads over its `config.toml`'s; turned on in the agent's `env` (Kimi then offers `TowerInit`, `TowerStatus` and `TowerTeardown` even over ACP), it stays off and the run says why (`acp_env` warning, as for `KIMI_DISABLE_CRON=0`). A run's sub-agents work through `Agent` and `AgentSwarm`, whose calls Kimi asks about |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
-| Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result. Kimi decides when (the model calls the tool): nothing to configure |
+| Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result; so is each it goes on with (`Agent(resume=...)`, a swarm's `resume_agent_ids`), named by the type Kimi started it with (its log's `profile.bind`), its task the prompt it goes on with. One it runs in the background (`run_in_background`) is a child run until its task ends ([below](#background-work)). Kimi decides when (the model calls the tool): nothing to configure |
 | Questions | Kimi's `AskUserQuestion` is the run's question (`Runtime.ask`): a durable pause, the answer one of its options |
 | Spending | Kimi's own usage log (`usage.record` lines: every model request of the main agent and of every sub-agent) is read as the turn runs: tokens count toward the budget, and past it the turn is cancelled and the run ends `PARTIAL`. Dollars are not counted yet (a follow-up reads them from the gateway's log): a `max_cost` budget does not see Kimi's spending |
 | Stalls | a model step that sends nothing for `STALL_SECONDS` (a tool's time not counted) ends the run with a `ModelTimeout` |
-| Cancel and time limits | a cancelled run, or one past its `run_timeout`, ends the attempt: a harness tool still under way is cancelled with it (recorded `cancelled` or `timeout`), as an in-process tool is, then the `kimi` process ends. Kimi starts in a second or two per attempt, inside the run's time limit |
+| Cancel and time limits | a cancelled run, or one past its `run_timeout`, ends the attempt: a harness tool still under way is cancelled with it (recorded `cancelled` or `timeout`), as an in-process tool is, then the `kimi` process ends (unless work in its background keeps it: [below](#background-work)). Kimi starts in a second or two per attempt, inside the run's time limit |
 | Grounding, judges, tracing | as for every target |
 
 ## Approvals and pauses
 
 A harness tool that asks, `trellis.current().ask` inside one, or a call of Kimi's own that asks,
-pauses the run: the turn is cancelled (`session/cancel`) and the `kimi` process ends. The
-session is in the run's journal; `agent.resume(...)` starts `kimi acp` again, resumes that
+pauses the run: the turn is cancelled (`session/cancel`) and the `kimi` process ends (kept
+while work in its background goes on: the resumed attempt is then sent into it). The session
+is in the run's journal; `agent.resume(...)` starts `kimi acp` again, resumes that
 session (`session/resume`, else `session/load`) and tells Kimi to call the tool again — the
 journal answers it, or runs the approved call once. After a deny, Kimi is told the call will not
 run, with the reviewer's reason.
@@ -123,6 +125,68 @@ Kimi's own tools run again.
 * **A sub-agent's own calls.** Kimi shows a sub-agent's (and a swarm member's) calls only when it
   asks permission for one — those are governed; the others are not recorded, and the child run
   holds the sub-agent's task and answer.
+* **Background work and Kimi's own turns.** Nothing of them reaches the client: the harness
+  reads Kimi's log ([above](#background-work)).
+
+## Background work
+
+Kimi runs a sub-agent in the background (`Agent(run_in_background=true)`) and a command
+(`Bash(run_in_background=true)`; a foreground one past its time limit, too): the call answers at
+once with the task's id, and the task works on — in the `kimi` process, which a turn's end
+would end. So a conversation's turn that ends with a task at work leaves the process to the
+conversation (`bridges.acp_live`), and its next turn is served by it, with its own prompt; a turn
+that ends with nothing at work ends it, as ever.
+
+* **What ACP shows of it: nothing.** Kimi's ACP server forwards only the events of the turn the
+  current prompt started: a background sub-agent's work, the turn Kimi runs by itself when a
+  task ends (its notification, which Kimi's own context keeps: the next turn's model has it) and
+  anything after a prompt's answer never reach the client. The harness reads Kimi's log of the
+  session instead — the `agents/<id>/wire.jsonl` it reads usage from: each task's start and end
+  (`task.started`, `task.terminated`, a sub-agent's last word in `subagent.completed`), the main
+  agent's turns (`agent.turn.started`, one with no prompt's `queueItemId` being Kimi's own,
+  `turn.ended`), whose a permission request is (`interaction.request`: ACP's names no agent),
+  and each sub-agent's usage.
+* **A background sub-agent keeps its child run.** The child run its `Agent` call started stays
+  `RUNNING` from there — never `SUCCESS` with the launch's words — until Kimi's log says its task
+  ended: `SUCCESS` with what the sub-agent said last, `ERROR` when it failed, `CANCELLED` when it
+  was stopped in Kimi (`TaskStop`), and `ERROR`, saying so, when the process ends first (it
+  closed, it died). It is held in the run store meanwhile, as Claude's is (`holding`; a killed
+  server leaves it to agent-runs, `holder_lost`), and its attempts go through the pipeline.
+* **Its calls are its run's.** Kimi asks about a sub-agent's call whenever it comes — turn or no
+  turn: approvals are its session's — and the harness decides it in the sub-agent's run, as a
+  call of Kimi's own is decided: your hooks, governance by risk and the catalog, a person when
+  Kimi asks (unless it only reads); its harness tool calls run for that run. A call that asks a
+  person pauses that run, and Kimi waits; the conversation's **next turn** asks the person
+  first (`payload["subagent"]` names the run, with `background: true`), then sends its prompt.
+  Approved the call runs, rejected it does not (ACP carries no reason to the sub-agent). An
+  answer that reaches another server, where the session is not, ends the run `ERROR` and the
+  turn says so (`acp_session`). Its tokens (its own log) are its run's, under the agent's
+  `budget` and `run_timeout`; past them the run ends there.
+* **No run, no call.** A call Kimi asks about while no run is under way — the main agent's, in the
+  turn Kimi runs for a task's end — is refused, and the conversation's next run says how many
+  were (`acp_session`). Its reads Kimi runs without asking, as always; what its own turns spend is
+  on the next turn.
+* **One prompt at a time.** A prompt sent while Kimi runs a turn of its own is queued behind it:
+  Kimi answers it `end_turn` at once and runs it later, unseen. So a prompt waits until Kimi's log
+  shows it idle (30 seconds at most; past that the process is replaced), and a prompt Kimi
+  queued anyway fails the turn saying so — never an empty answer taken for its own.
+* **ACP cannot stop one task** (`session/cancel` stops the main agent's turn, and its tasks go
+  on): a background run that ends first — cancelled (with the turn that started it, or on its
+  own), out of time, its budget spent — leaves its task at work, refused whatever it asks, until
+  it ends or the process does.
+* **Its life**, as Claude's: one process per conversation, in one server process, at most 16 per
+  agent; it closes 5 minutes after its last activity when nothing works in it, 6 hours after its
+  last turn whatever does, when a turn brings other settings (`framework_options`, other harness
+  tools) or does not continue its session, and with the harness (`Harness.aclose`). Work that
+  ends with it is said in the conversation's next run (`acp_session`); a restart loses it.
+* **On another worker.** A turn whose session another worker's process still holds (a background
+  run it handed on, not ended) forks it (`session/fork`) and goes on there in a process of its own.
+* **Not kept:** a run with no `thread`, a sub-agent's run, a sandboxed run (its sandbox is the
+  run's) and one given skills (a home of the run's own, removed with it): their process ends with
+  the attempt, as before — a background sub-agent that ended by then ends its run with its result,
+  one still at work was cut off (`ERROR`). Kimi's `keepAliveOnExit` (`[task]` in its config) is no
+  way around it: it only leaves tasks unstopped as `kimi` exits, and a sub-agent's loop runs inside
+  that process.
 
 ## Conversations
 

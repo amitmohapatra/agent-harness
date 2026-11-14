@@ -169,3 +169,19 @@ async def test_a_turns_end_logged_late_is_still_read(
     await writing
     assert attempt.usage.limited == 1  # the step limit was read: the run asks once more
     assert attempt.usage.ended
+
+
+async def test_a_prompt_waits_for_the_agent_to_be_free_and_fails_when_it_never_is() -> None:
+    """A prompt is sent once the agent runs no turn of its own (``Keeper.settled``): one that
+    never ends fails the turn — a prompt sent then would be queued behind it, unseen."""
+    from trellis.harness.bridges.acp_live import QUEUED
+
+    async def never() -> bool:
+        return False
+
+    attempt = acp.Attempt(ACPAdapter(), SimpleNamespace(), kimi())  # type: ignore[arg-type]
+    attempt.session = SimpleNamespace(settled=never)  # type: ignore[assignment]
+    with pytest.raises(acp.ACPRunError, match="queued the prompt"):
+        async for _ in attempt._turn("hi"):
+            pass
+    assert "queued the prompt" in QUEUED

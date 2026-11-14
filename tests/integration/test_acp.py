@@ -367,7 +367,7 @@ async def test_a_question_answered_with_no_option_it_offers_is_skipped(
     agent = harness.wrap(fake(tmp_path, script), id="skipper")
     asked = await agent.run("x", user="u1")
     assert asked.interrupt is not None
-    answer = acp._chosen([], "reject_once")
+    answer = acp.chosen([], "reject_once")
     assert answer.outcome.outcome == "cancelled"  # no option of that kind: the question dismissed
 
 
@@ -466,6 +466,7 @@ async def test_resumed_sub_agents_and_swarm_members_are_child_runs_by_their_own_
             "agent": {"description": "more", "prompt": "carry on", "resume": "agent-0"},
             "result": "ok",
         },
+        {"usage": {"inputOther": 1, "output": 1}, "agent": "agent-9"},  # a log, no profile
         {"agent": {"description": "lost", "prompt": "who?", "resume": "agent-9"}, "result": "?"},
         {"text": "reviewed"},
     ]
@@ -477,7 +478,7 @@ async def test_resumed_sub_agents_and_swarm_members_are_child_runs_by_their_own_
         ("carry on", "explore", RunStatus.SUCCESS),
         ("continue", "explore", RunStatus.SUCCESS),
         ("fix it", "plan", RunStatus.ERROR),
-        ("who?", "agent-9", RunStatus.SUCCESS),  # no log of it: named by its id
+        ("who?", "agent-9", RunStatus.SUCCESS),  # no log says its type: named by its id
     ]
     assert [c.output for c in kids[:3]] == ["fine", "ok", "went on"]
     assert kids[3].error is not None and kids[3].error.message == "it timed out"

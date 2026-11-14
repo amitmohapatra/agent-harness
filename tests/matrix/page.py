@@ -53,6 +53,11 @@ LIMITS: Final = {
         "read the host: reads are not isolated.",
         "Swarms run their members concurrently, as Kimi does "
         "(`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` in `env` caps it).",
+        "Background work (`run_in_background`) keeps a conversation's `kimi` process between "
+        "turns, its sub-agent's child run open until Kimi's log says the task ended; ACP shows "
+        "none of it (tests/integration/test_acp_background.py, test_kimi.py).",
+        "Tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`) is off: its workers ask about none of "
+        "their calls.",
     ],
 }
 

@@ -16,21 +16,16 @@ from claude_agent_sdk._internal.message_parser import parse_message
 
 from trellis.contracts import RunStatus
 from trellis.harness.bounded import LRU
+from trellis.harness.bridges import live
 from trellis.harness.bridges.claude_live import (
-    _NUDGE,
-    _OVER,
     GONE,
     GONE_SAID,
     LEFT,
     STOPPED,
-    UNATTENDED,
     Background,
-    Left,
     LiveSession,
-    LiveSessions,
-    Turn,
-    gone,
 )
+from trellis.harness.bridges.live import NUDGE, OVER, UNATTENDED, Left, LiveSessions, Turn
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -277,7 +272,7 @@ async def test_an_attempt_that_pauses_keeps_what_comes_after_and_ends_its_reques
     attempt = found.served(turn)
     waiting = asyncio.ensure_future(anext(attempt))
     await asyncio.sleep(0)
-    turn.queue.put_nowait(_NUDGE)  # nothing new: no end of its task yet
+    turn.queue.put_nowait(NUDGE)  # nothing new: no end of its task yet
     first = reply("one", None, None)
     turn.queue.put_nowait(first)
     assert await waiting is first
@@ -344,7 +339,7 @@ async def test_a_background_run_that_cannot_go_on_says_why_and_asks_nothing_more
     assert not asked.done()
     found.over = True
     found._woken()
-    assert await asked is _OVER
+    assert await asked is OVER
 
     async def hook(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of a run that is over")
@@ -415,7 +410,9 @@ async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run
 
     runs, said = LocalRuns(), []
     runtime: Any = SimpleNamespace(
-        agent=SimpleNamespace(harness=SimpleNamespace(runs=runs)),
+        agent=SimpleNamespace(
+            harness=SimpleNamespace(runs=runs), adapter=SimpleNamespace(name="claude_agent_sdk")
+        ),
         tenant="t",
         events=SimpleNamespace(warning=lambda code, message: said.append((code, message))),
     )
@@ -428,6 +425,9 @@ async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run
 
     def answer(decision: InterruptDecision) -> InterruptResolution:
         return InterruptResolution(interrupt_id="turn.1", run_id="turn", decision=decision)
+
+    async def gone(*given: Any) -> None:  # as the Claude adapter calls it
+        await live.gone(*given, why=GONE, said=GONE_SAID, code="claude_session")
 
     asked = await waiting("run_approved")
     await gone(runtime, "run_approved", asked.interrupt_id, answer(InterruptDecision.APPROVE))
@@ -465,3 +465,13 @@ def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> 
     assert first == listed()
     [update] = [schema for name, schema in first if name == "update_schedule"]
     assert '"enabled": {"description": "false pauses it, true resumes it."' in update
+
+
+async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:
+    """What a session started aside (a stop, an interrupt) ends with it."""
+    session = LiveSession("conversation", (), LiveSessions())
+    session._aside_run(asyncio.sleep(30))
+    [aside] = list(session._aside)
+    await session.close()
+    await asyncio.sleep(0)
+    assert aside.cancelled()

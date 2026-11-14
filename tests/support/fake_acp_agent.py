@@ -17,6 +17,19 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
 * ``{"agent": {...}, "result": "...", "fails": false}`` a sub-agent (``Agent``, its own call
   asking nothing; ``"asks": {...builtin step}`` a call it makes asking permission, which shows
   no update); ``{"swarm": {...}, "result": "..."}`` a swarm (``AgentSwarm``);
+* ``{"agent": {..., "run_in_background": true}, "background": {...}}`` a sub-agent in the
+  background, and ``{"builtin": "Bash", "args": {..., "run_in_background": true}, "background":
+  {...}}`` a command: the call answers at once with the task's id (and the sub-agent's), as
+  Kimi's does, and the task works on — ``"after"`` seconds, then (a sub-agent's) ``"usage"``
+  in its log and ``"asks"`` (a call it asks permission for, its request in its log first:
+  ``interaction.request``; ``{"tool": ...}`` a harness tool's, called once allowed —
+  ``"call_after"`` seconds later), ``"calls"`` (a harness tool's call it asks nothing for),
+  then it ends (``"result"``, or ``"fails": "why"``) in the main
+  agent's log (``task.started``, ``subagent.completed``, ``task.terminated``) — and then Kimi
+  runs a turn of its own for the task's end (``agent.turn.started`` with no prompt's id, then
+  ``turn.ended``; ``"own_turn"`` seconds long; ``"notified": {...builtin step}`` a call it asks
+  permission for). A prompt that comes while that turn runs is answered ``end_turn`` at once
+  and recorded (``queued``), as Kimi queues it behind its turn;
 * ``{"question": "...", "options": [...]}`` its question to the user (``AskUserQuestion``);
 * ``{"usage": {...}, "agent": "main"}`` a model request's usage, in its usage log under
   ``KIMI_CODE_HOME`` (Kimi's ``usage.record`` line); ``{"bound": {"agent": "agent-0",
@@ -35,7 +48,8 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
 environment's ``KIMI_*`` and ``HOME``, its working directory, the client's capabilities, each
 session's MCP servers and how it began, the prompts, the permission answers).
 ``FAKE_ACP_VERSION`` is the version it reports (``2.1.1``); ``FAKE_ACP_RESUME=0`` offers no
-``session/resume`` (only ``session/load``, which replays the session's text).
+``session/resume`` (only ``session/load``, which replays the session's text) and no
+``session/fork`` (which copies a session into a new one, as Kimi's does).
 """
 
 from __future__ import annotations
@@ -60,6 +74,7 @@ from acp.schema import (
     ContentToolCallContent,
     CurrentModeUpdate,
     EnvVariable,
+    ForkSessionResponse,
     Implementation,
     InitializeResponse,
     LoadSessionResponse,
@@ -163,6 +178,12 @@ class FakeAgent:
         self.servers: dict[str, list[Any]] = {}
         self.cancelled: dict[str, asyncio.Event] = {}
         self.calls = 0
+        #: its background tasks at work
+        self.tasks: set[asyncio.Task[None]] = set()
+        #: a turn of its own is under way (a prompt now is queued behind it)
+        self.busy = False
+        #: its main agent's turns so far
+        self.turns = 0
 
     def on_connect(self, conn: Any) -> None:
         self.conn = conn
@@ -192,7 +213,7 @@ class FakeAgent:
         )
         caps: dict[str, Any] = {"loadSession": True}
         if os.environ.get("FAKE_ACP_RESUME", "1") == "1":
-            caps["sessionCapabilities"] = {"resume": {}}
+            caps["sessionCapabilities"] = {"resume": {}, "fork": {}}
         return InitializeResponse(
             protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities.model_validate(caps),
@@ -224,6 +245,17 @@ class FakeAgent:
         record("sessions", {"how": "resume", "id": session_id})
         return ResumeSessionResponse()
 
+    async def fork_session(
+        self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, **kw: Any
+    ) -> Any:
+        if not (session_dir(session_id) / "state.json").exists():
+            raise RequestError.resource_not_found(session_id)
+        forked = f"session_{uuid.uuid4().hex[:8]}"
+        self.servers[forked] = list(mcp_servers or [])
+        save(forked, state(session_id))
+        record("sessions", {"how": "fork", "id": forked, "from": session_id})
+        return ForkSessionResponse(session_id=forked)
+
     async def load_session(
         self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, **kw: Any
     ) -> Any:
@@ -247,8 +279,13 @@ class FakeAgent:
         self.cancelled.setdefault(session_id, asyncio.Event()).set()
 
     async def prompt(self, prompt: list[Any], session_id: str, **kw: Any) -> Any:
+        if self.busy:  # queued behind its own turn: no turn of the prompt's own, as Kimi does
+            record("queued", "\n".join(getattr(b, "text", "") for b in prompt))
+            return PromptResponse(stop_reason="end_turn")
         self.limit: int | None = None
         reason = "failed"
+        self.turns += 1
+        logged(session_id, "main", {"type": "agent.turn.started", "queueItemId": f"p{self.turns}"})
         try:
             answered = await self._prompt(prompt, session_id)
             stopped = answered.stop_reason == "cancelled"
@@ -355,6 +392,7 @@ class FakeAgent:
             return None
         if "bound" in step:
             agent, profile = step["bound"]["agent"], step["bound"]["profile"]
+            logged(session_id, agent, {"type": "metadata", "protocol_version": "1.5"})
             logged(session_id, agent, {"type": "profile.bind", "profileName": profile})
             return None
         if "stall" in step:
@@ -488,6 +526,8 @@ class FakeAgent:
         if "wait" in step:
             await asyncio.sleep(step["wait"])
         output = step.get("output", f"{name} ran")
+        if "background" in step:  # a command run in the background: launched
+            output = self.launch(session_id, "process", step["background"])
         if self.client is not None and self.client.terminal and name == "Bash":
             output = await self.terminal(session_id, call_id, args["command"], step)
         if self.client is not None and self.client.fs.write_text_file and name == "Write":
@@ -512,6 +552,65 @@ class FakeAgent:
             return step["fails"]
         await self.progress(session_id, call_id, status="completed", raw_output=output)
         return output
+
+    def launch(self, session_id: str, kind: str, task: dict[str, Any]) -> str:
+        """A task started in the background (``kind``: an ``agent``, a ``process``), as Kimi
+        logs it, at work on its own: what its call answers (Kimi's words)."""
+        number = len(self.tasks)
+        task_id, agent = f"{kind[:5]}-{PROCESS}{number}", f"agent-{PROCESS}{number}"
+        info = {"taskId": task_id, "kind": kind, "status": "running", "detached": True}
+        if kind == "agent":
+            info["agentId"] = agent
+        logged(session_id, "main", {"type": "task.started", "agentId": "main", "info": info})
+        work = asyncio.ensure_future(self.background(session_id, info, task))
+        self.tasks.add(work)
+        work.add_done_callback(self.tasks.discard)
+        said = f"task_id: {task_id}\nstatus: running\n"
+        if kind == "agent":
+            said += f"agent_id: {agent}\nactual_subagent_type: coder\n"
+        return said + "automatic_notification: true\n"
+
+    async def background(self, session_id: str, info: dict[str, Any], task: dict[str, Any]) -> None:
+        """A background task's work, its end, and the turn Kimi runs of its own for it."""
+        await asyncio.sleep(task.get("after", 0))
+        agent = info.get("agentId", "")
+        if "usage" in task:
+            logged_usage(session_id, agent, task["usage"])
+        if "asks" in task:
+            asked, call_id = task["asks"], f"call_bg_{info['taskId']}"
+            line = {"type": "interaction.request", "agentId": agent, "toolCallId": call_id}
+            logged(session_id, agent, line)
+            title = f"mcp__trellis__{asked['tool']}" if "tool" in asked else asked["builtin"]
+            said = f"Requesting approval to Running: {json.dumps(asked['args'])}"
+            chosen = await self.permitted(session_id, f"0:{call_id}", title, said)
+            record("background", {"task": info["taskId"], "answer": chosen})
+            if "tool" in asked and chosen == "approve_once":  # its harness tool's call
+                await asyncio.sleep(task.get("call_after", 0))
+                said = await self.called(session_id, asked["tool"], asked["args"])
+                record("background", {"task": info["taskId"], "result": said})
+        if "calls" in task:  # a harness tool's call it asks no permission for
+            said = await self.called(session_id, task["calls"]["tool"], task["calls"]["args"])
+            record("background", {"task": info["taskId"], "result": said})
+        status = task.get("status", "failed" if "fails" in task else "completed")
+        if status == "completed" and agent:
+            line = {"type": "subagent.completed", "subagentId": agent}
+            logged(session_id, "main", {**line, "resultSummary": task.get("result", "")})
+        ended = {**info, "status": status, "stopReason": task.get("fails")}
+        logged(session_id, "main", {"type": "task.terminated", "agentId": "main", "info": ended})
+        self.busy = True  # Kimi's own turn for the task's end: the client sees none of it
+        logged(session_id, "main", {"type": "agent.turn.started"})
+        try:
+            if "notified" in task:
+                notified, call_id = task["notified"], f"call_own_{info['taskId']}"
+                line = {"type": "interaction.request", "agentId": "main", "toolCallId": call_id}
+                logged(session_id, "main", line)
+                said = f"Requesting approval to {notified['builtin']}"
+                chosen = await self.permitted(session_id, f"0:{call_id}", notified["builtin"], said)
+                record("own", {"task": info["taskId"], "answer": chosen})
+            await asyncio.sleep(task.get("own_turn", 0))
+        finally:
+            self.busy = False
+            logged_end(session_id, "completed")
 
     async def parallel(self, session_id: str, names: list[str]) -> str:
         """Its own read calls made together: each starts and runs, then each ends."""
@@ -558,27 +657,37 @@ class FakeAgent:
         return output.output
 
     async def mcp_call(self, session_id: str, tool: str, args: dict[str, Any]) -> str:
-        from mcp import Client
-        from mcp.client.streamable_http import streamable_http_client
-        from mcp.shared._httpx_utils import create_mcp_http_client
-
         name = f"mcp__trellis__{tool}"
         call_id = self.call_id()
         await self.started(session_id, call_id, name, args)
         await self.decided(session_id, call_id, name, args)
         await self.progress(session_id, call_id, status="in_progress", raw_input=args)
-        server = next(s for s in self.servers[session_id] if s.name == "trellis")
-        http = create_mcp_http_client(headers={h.name: h.value for h in server.headers})
-        async with http, Client(streamable_http_client(server.url, http_client=http)) as client:
-            listed = await client.list_tools()
-            record("listed", [t.name for t in listed.tools])
-            result = await client.call_tool(tool, args)
-        text = "".join(getattr(c, "text", "") for c in result.content)
-        status = "failed" if result.is_error else "completed"
+        text, failed = await self.called(session_id, tool, args, listed=True)
+        status = "failed" if failed else "completed"
         await self.progress(session_id, call_id, status=status, raw_output=text)
         if text == "Waiting for a person's approval.":
             raise Stopped("paused")
         return text
+
+    async def called(
+        self, session_id: str, tool: str, args: dict[str, Any], *, listed: bool = False
+    ) -> Any:
+        """A call of the harness's MCP server (``trellis``), as the session was handed it: its
+        text and whether it failed (``listed``: the tools it lists recorded first); a
+        background sub-agent's: its text."""
+        from mcp import Client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        server = next(s for s in self.servers[session_id] if s.name == "trellis")
+        http = create_mcp_http_client(headers={h.name: h.value for h in server.headers})
+        async with http, Client(streamable_http_client(server.url, http_client=http)) as client:
+            if listed:
+                found = await client.list_tools()
+                record("listed", [t.name for t in found.tools])
+            result = await client.call_tool(tool, args)
+        text = "".join(getattr(c, "text", "") for c in result.content)
+        return (text, result.is_error) if listed else text
 
     async def subagent(self, session_id: str, step: dict[str, Any]) -> str:
         args = step["agent"]
@@ -587,6 +696,12 @@ class FakeAgent:
         await self.progress(
             session_id, call_id, status="in_progress", title="Launching agent", raw_input=args
         )
+        if "background" in step:  # launched: the call answers at once, the task works on
+            launched = self.launch(session_id, "agent", step["background"])
+            if step["background"].get("first"):  # it ends before its call's answer is read
+                await asyncio.wait(self.tasks)
+            await self.progress(session_id, call_id, status="completed", raw_output=launched)
+            return launched
         if "asks" in step:  # a call of the sub-agent's own: no update, only its permission
             asked = step["asks"]
             chosen = await self.permitted(
