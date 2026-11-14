@@ -5,6 +5,31 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: sub-agents in the background, with no server to host
+
+`ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts
+— take tasks in the background in a chat a person reads: Deep Agents' five async sub-agent tools
+(`start_async_task`...), the task a child run of the turn at work in the process and held in the
+run store, its result a notification (langchain-core's notification metadata, Deep Agents'
+shape) given to the conversation's model at its next model call or turn, or by a turn of the
+chat's own on its thread stream when it is idle; its questions asked through the chat
+(`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
+
+### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
+
+- Deep Agents reads its async tasks' statuses itself and adds each outcome as a notification:
+  the harness treats a notification as a message the user did not type (the turn's question,
+  the transcript and memory record, the earlier-results and turn logic, the conversation's
+  earlier turns); the records it updates are carried with the task list; the extra model turn
+  after a final answer counts against `max_steps`, and past it the run keeps its answer
+  instead of LangChain's "Model call limits exceeded".
+- A task held by a server is read every 10 s: an idle chat is told how it ended, a task whose
+  run was cancelled from another server is cancelled on its server, and a follow-up to a task
+  that ended is a run of its own.
+- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`); a
+  start of a sub-agent with `mode="fork"` is irreversible.
+- An empty task list is not carried.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

@@ -17,11 +17,11 @@ too).
 
 | Distribution | Extra | Pinned range | Tested |
 |---|---|---|---|
-| `langgraph` | `langgraph` | `>=1.2,<1.3` | 1.2.11 |
-| `langchain` | `langgraph` | `>=1.4,<1.5` | 1.4.2 |
-| `langchain-core` | `langgraph` | `>=1.6,<1.7` | 1.6.13 |
+| `langgraph` | `langgraph` | `>=1.2,<1.3` | 1.2.22 |
+| `langchain` | `langgraph` | `>=1.5,<1.6` | 1.5.0 |
+| `langchain-core` | `langgraph` | `>=1.8,<1.9` | 1.8.0 |
 | `langchain-openai` | `react` | `>=1.6,<1.7` | 1.6.6 |
-| `deepagents` | `deepagents`, `react` | `>=0.7.19,<0.8` | 0.7.19 |
+| `deepagents` | `deepagents`, `react` | `>=0.7.38,<0.8` | 0.7.38 |
 | `openai-agents` | `openai-agents` | `>=0.22.3,<0.23` | 0.22.3 |
 | `claude-agent-sdk` | `claude-agent-sdk` | `>=0.2.160,<0.3` | 0.2.160 |
 | `a2a-sdk` | `a2a` | `>=1.1,<1.2` | 1.1.5 |
@@ -32,8 +32,8 @@ The providers' own LangChain packages, for a model name on the provider SDK's ro
 
 | Distribution | Extra | Pinned range | Tested |
 |---|---|---|---|
-| `langchain-anthropic` | `anthropic` | `>=1.7,<2` | 1.7.4 |
-| `langchain-google-genai` | `gemini` | `>=4.4,<5` | 4.4.0 |
+| `langchain-anthropic` | `anthropic` | `>=1.7,<2` | 1.7.10 |
+| `langchain-google-genai` | `gemini` | `>=4.4,<5` | 4.4.3 |
 | `langchain-google-vertexai` | `vertex` (with `bifrost-sdk[google]`) | `>=3.2,<4` | 3.2.5 |
 | `langchain-aws` | `bedrock` (with `bifrost-sdk[aws]`) | `>=1.9,<2` | 1.9.1 |
 

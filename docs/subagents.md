@@ -188,10 +188,25 @@ recorded, so the memory service counts it.
 * A child that cannot be started (the run store refuses it) is the call's error, like any tool
   call's.
 
+## In the background
+
+In a chat a person reads (`serve_chat`), a `ReAct`'s sub-agents — wrapped agents and Deep
+Agents' dicts — also take tasks in the background: `start_async_task` starts a child run of the
+turn that works on after the turn replied, apart from it, held in the run store; the chat takes
+new messages meanwhile, and the task's result comes back as a notification at the next model
+call or turn, or by a turn of the chat's own when it is idle (its thread stream delivers it).
+Its questions are asked through the chat, as a sub-agent's are through its parent; cancelling
+the turn cancels it. The tools and the task record are Deep Agents' async sub-agent ones, and
+the mechanism is the harness's own (`trellis.harness.background`): an adapter with no
+background of its own plugs into it — a tool that starts a child run calls `background.start`
+(or starts the run itself) and the outcome reaches the chat by `background.delivered`, which
+takes any child run of a chat's turn ([react.md](frameworks/react.md#a-task-in-the-background)).
+
 ## Limits
 
 * A child runs in its parent's process, inside the parent's call — not queued to other
-  workers. "Running elsewhere" can only be what a crashed attempt left: it is continued, not
+  workers (a task in the background too: in the process that started it, apart from the
+  call). "Running elsewhere" can only be what a crashed attempt left: it is continued, not
   waited for.
 * A child's events (its text, its own tool calls) are on its own run's stream, not the
   parent's; the parent's stream shows the call and its result.
