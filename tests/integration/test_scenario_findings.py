@@ -82,3 +82,59 @@ async def test_scn4_the_next_turn_has_the_turn_before_when_memory_writes_slowly(
         second = await agent.run("What is the locker code?", user="ada", thread="t1")
         assert second.status.value == "SUCCESS"
         assert "4242" in str(model.requests[-1]["messages"]), "the turn before is not in the window"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="SCN-6: a write is lost when the memory service is down longer than its retries",
+)
+async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The memory service refuses every write for a while (down, or past its deadlines under
+    load: the client's circuit opens) and then comes back: the turn made meanwhile is kept once
+    it is back. Today the write gets ``WRITE_ATTEMPTS`` (3) tries with a short backoff and, with no
+    spool (none in a container: ``settings.default_spool``), is given up "failed and is lost"
+    (``writes._attempt``); seen on the real stack as transcripts, tool records and outcomes lost
+    while the memory service answered 504s."""
+    import httpx
+
+    from tests.support.memory import URL, FakeMemoryService
+    from tests.support.models import ScriptedChat
+    from trellis import ReAct, Settings
+    from trellis.harness import agent as agent_module
+    from trellis.harness import writes as writes_module
+    from trellis.memory import MemoryClient
+
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.1)
+    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.05)
+    service = FakeMemoryService()
+    down = {"on": False}
+
+    async def flaky(request: httpx.Request) -> httpx.Response:
+        if down["on"] and (request.method, request.url.path) == ("POST", "/v1/messages"):
+            problem = {
+                "title": "unavailable",
+                "status": 503,
+                "code": "DEPENDENCY_UNAVAILABLE",
+                "retryable": True,
+            }
+            return httpx.Response(
+                503, json=problem, headers={"content-type": "application/problem+json"}
+            )
+        return service._checked(request)
+
+    client = MemoryClient(
+        URL,
+        api_key="test",
+        max_retries=0,
+        http_client=httpx.AsyncClient(base_url=URL, transport=httpx.MockTransport(flaky)),
+    )
+    async with Harness(config=Settings(), memory=client) as h:
+        agent = h.wrap(ReAct(system_prompt="You help.", model=ScriptedChat(["Noted."])), id="scn6")
+        down["on"] = True
+        done = await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        assert done.status.value == "SUCCESS"
+        await asyncio.sleep(1.0)  # down for longer than the write's retries
+        down["on"] = False
+        await h.writes.drain()
+        kept = [c for c in service.named("messages") if "4242" in str(c.body)]
+        assert kept, "the turn made while the memory service was down is lost"

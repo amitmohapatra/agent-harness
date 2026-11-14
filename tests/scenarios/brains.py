@@ -66,6 +66,12 @@ LOOP: Final = re.compile(r"loop:([0-9]+):([a-z_]+)")
 #: ``fail:model``: the model's provider fails the message's first call (a 500)
 FAIL: Final = "fail:model"
 UUID: Final = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+#: what the harness tells a model whose call a reviewer edited, where the framework cannot take
+#: the edited arguments in place (OpenAI Agents, ACP): make the call again with them — a model
+#: told so does (``adapters.openai_agents``, ``adapters.acp``)
+REDO: Final = re.compile(
+    r"Call (\S+) again(?: now)? with exactly these arguments: (\{.*\})", re.DOTALL
+)
 ANSWER: Final = re.compile(r"ANS (\S+) SEEN (\S*) MEM (\S*) LAST (.*)", re.DOTALL)
 #: the long-term memories of a memory context (user-level recall), apart from the conversation
 MEMORIES: Final = re.compile(r"## Memories\n(.*?)(?=\n## |</memory_context>|$)", re.DOTALL)
@@ -137,6 +143,12 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
     slow = SLOW.search(asked)
     if FAIL in asked and not results:
         return Turned(fail=True)
+    redo = REDO.search(results[-1]) if results else None
+    if redo is not None:  # a reviewer's edit to make: the call again, with those arguments
+        try:
+            return Turned(call=(redo[1].removeprefix("mcp__trellis__"), json.loads(redo[2])))
+        except ValueError:
+            pass
     done = 0
     for step in _steps(commands):  # a step: one call, or several in one message (``batch``)
         size = len(step) if isinstance(step, list) else 1

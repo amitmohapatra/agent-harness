@@ -47,23 +47,20 @@ async def test_a_pause_while_another_chat_works(  # noqa: PLR0917 - pytest's fix
     agent, _ = await wrapped(h, adapter, TOOLS, tmp_path, id=f"s4-{adapter}-{uid}", claude=claude)
     user, paying, chatting = f"ada-{uid}", f"pay-{uid}", f"talk-{uid}"
     before = len(ledger())
+    # the scripted Claude CLI's script is the agent's: the other chat talks to one that calls
+    # nothing (the same user, another conversation of the same harness)
+    talker = agent
+    if adapter == "claude_agent_sdk":
+        talker, _ = await wrapped(h, adapter, TOOLS, tmp_path, id=f"s4t-{adapter}-{uid}")
     pause = asyncio.create_task(
         agent.run(f"{token('p' + uid[:4], 1)} pay {said}", user=user, thread=paying)
     )
-    talk = (
-        [
-            await agent.run(f"{token('t' + uid[:4], n)} hello", user=user, thread=chatting)
-            for n in range(1, 3)
-        ]
-        if adapter == "claude_agent_sdk"
-        else None
-    )
+    await asyncio.sleep(0.5)  # the turn under way, the other chat works meanwhile
+    talk = [
+        await talker.run(f"{token('t' + uid[:4], n)} hello", user=user, thread=chatting)
+        for n in range(1, 3)
+    ]
     paused = await pause
-    if talk is None:  # the other chat works while this one waits for the person
-        talk = [
-            await agent.run(f"{token('t' + uid[:4], n)} hello", user=user, thread=chatting)
-            for n in range(1, 3)
-        ]
     assert all(t.status is RunStatus.SUCCESS for t in talk), [
         (t.status, t.error, t.answer, t.interrupt) for t in talk
     ]
