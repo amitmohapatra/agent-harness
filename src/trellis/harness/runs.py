@@ -18,8 +18,9 @@ interchangeable. Both behave the same way:
 * a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
   the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
   run is cancelled when its lease runs out;
-* a run started ``RUNNING`` with a ``concurrency_key`` takes its key's place (:func:`place`)
-  and is born to be held: nobody holding it within :data:`RESUME_GRACE_SECONDS` ends it
+* a run of a ``concurrency_key`` is placed among the key's runs when it is started, and again
+  when it is answered, as its ``placed_at`` says (:func:`place`); one started ``RUNNING`` is
+  born to be held: nobody holding it within :data:`RESUME_GRACE_SECONDS` ends it
   ``ERROR`` (``holder_lost``), so a process that died before its first heartbeat blocks nobody;
 * a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
   it for the ``worker_id`` (the process running it) instead, for at most
@@ -57,7 +58,7 @@ import tempfile
 import time
 import weakref
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
@@ -248,6 +249,7 @@ class RunStore(Protocol):
         assignee: str | None = ...,
         agent_id: str | None = ...,
         thread_id: str | None = ...,
+        concurrency_key: str | None = ...,
         parent_run_id: str | None = ...,
         limit: int = ...,
         tenant: str | None = ...,
@@ -284,12 +286,19 @@ class RunStore(Protocol):
 Place = tuple[datetime, str]
 
 
-def place(record: RunRecord, answers: Iterable[ResolutionEntry]) -> Place:
-    """The place of the run ``record`` among its key's runs, as every run store keeps it:
-    when it was started, or when the latest of its ``answers`` was recorded (it took its place
-    again then). A conversation's turns are answered in this order (``line``), and a queued
-    run is claimed only while no run placed before it runs."""
-    return max([record.created_at, *(entry.recorded_at for entry in answers)]), record.run_id
+def place(record: RunRecord) -> Place:
+    """The place the run store gave the run ``record`` among its key's runs (its
+    ``placed_at``: when it was started, or when its latest answer was recorded), then its id.
+    A conversation's turns are answered in this order (``line``), and a queued run is claimed
+    only while no run placed before it runs. A store that sends no place (an agent-runs older
+    than ``placed_at``) cannot order a line: :class:`ConfigurationError`, never a guess."""
+    if record.placed_at is None:
+        raise ConfigurationError(
+            f"run {record.run_id} of concurrency_key {record.concurrency_key!r} came back "
+            "without placed_at: this run store is older than the harness needs to order a "
+            "conversation's turns (upgrade agent-runs to one that sends placed_at)"
+        )
+    return record.placed_at, record.run_id
 
 
 class LocalRuns:
@@ -368,6 +377,8 @@ class LocalRuns:
         if existing is not None:  # idempotent on the run id
             return existing
         record = RunRecord.from_start(start, status=status)
+        if record.concurrency_key is not None:  # placed among its key's runs: when it started
+            record = record.model_copy(update={"placed_at": record.created_at})
         self._runs[record.run_id] = record
         if status is RunStatus.QUEUED:
             self._enqueue(record.run_id)
@@ -413,17 +424,13 @@ class LocalRuns:
         one running in its caller's process placed before it (:func:`place`): a run placed
         after it waits for it there."""
         key = record.concurrency_key
-        mine = self._place(record)
         return key is None or not any(
             r.status is RunStatus.RUNNING
             and r.concurrency_key == key
             and r.tenant_id == record.tenant_id
-            and (r.run_id in self._leases or self._place(r) < mine)
+            and (r.run_id in self._leases or place(r) < place(record))
             for r in self._runs.values()
         )
-
-    def _place(self, record: RunRecord) -> Place:
-        return place(record, self._resolutions.get(record.run_id, ()))
 
     async def heartbeat(
         self,
@@ -508,8 +515,10 @@ class LocalRuns:
             recorded_at=datetime.now(UTC),
         )
         self._resolutions.setdefault(record.run_id, []).append(entry)
+        # a run of a key takes its place again when its answer is recorded
+        placed = {"placed_at": entry.recorded_at} if record.concurrency_key is not None else {}
         if resolution.decision is InterruptDecision.CANCEL:
-            return self._move(record, RunStatus.CANCELLED, last_resolution=resolution)
+            return self._move(record, RunStatus.CANCELLED, last_resolution=resolution, **placed)
         requeue = record.run_id in self._queued
         moved = self._move(
             record,
@@ -517,6 +526,7 @@ class LocalRuns:
             awaiting=None,
             last_resolution=resolution,
             attempt=record.attempt + 1,
+            **placed,
         )
         if requeue:
             self._enqueue(moved.run_id)
@@ -551,6 +561,7 @@ class LocalRuns:
         assignee: str | None = None,
         agent_id: str | None = None,
         thread_id: str | None = None,
+        concurrency_key: str | None = None,
         parent_run_id: str | None = None,
         limit: int = PAGE_LIMIT,
         tenant: str | None = None,
@@ -565,6 +576,7 @@ class LocalRuns:
             and status in (None, r.status)
             and agent_id in (None, r.agent_id)
             and thread_id in (None, r.thread_id)
+            and concurrency_key in (None, r.concurrency_key)
             and parent_run_id in (None, r.parent_run_id)
             and assignee in (None, _assignee(r))
         ]
@@ -579,6 +591,7 @@ class LocalRuns:
                 deadline=record.deadline,
                 thread_id=record.thread_id,
                 updated_at=record.updated_at,
+                placed_at=record.placed_at,
             )
 
     async def resolutions(

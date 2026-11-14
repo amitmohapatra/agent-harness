@@ -7,14 +7,16 @@ A turn of a conversation that a process executes outside the queue — ``agent.r
 ``serve_chat``, ``serve_a2a``, or a run continued after its answer — is recorded ``RUNNING``
 with the conversation's ``concurrency_key`` (``thread:<conversation>``, the key a queued turn
 gets), and held while it waits and while it works (``holding``). Its place in the line
-(``runs.place``) is when it took it: its ``created_at``, or the ``recorded_at`` of its latest
-answer — set by agent-runs, which places a run of a key after every run of that key already
-running or queued, in the order they commit. A queued turn (``start``) holds its place the same
+(``runs.place``) is the run store's ``placed_at``: when it took it — its start, or its latest
+answer — decided by agent-runs, which places a run of a key after every run of that key
+already running or queued, in the order they commit. The line reads it and never recomputes
+it. A queued turn (``start``) holds its place the same
 way while it waits for a worker, and a worker claims it only once no run placed before it runs
 (the run store's claim): a stream of messages cannot keep it waiting.
 
-A run takes its turn once no run of the same agent and conversation that is ``RUNNING`` or
-``QUEUED`` in the store is placed before it (:meth:`Line.turn`): a run that ended, paused for a
+A run takes its turn once no run of the same agent and conversation key that is ``QUEUED`` or
+``RUNNING`` in the store is placed before it (:meth:`Line.turn`), the line listed by its key
+(so another user's thread named alike is never read): a run that ended, paused for a
 person or whose process died (its hold lapsed, and the store ended it) has left the line. A run
 cancelled while it waited, or ended in the store before its turn came, takes none. It waits for
 the run just ahead of it: one of this process until it leaves the line here; one elsewhere
@@ -51,8 +53,10 @@ DROPPED_MAX_SECONDS: Final = 5.0
 #: The most runs ahead whose event logs one process follows at once (each an open stream): a
 #: run waiting behind another one elsewhere reads the line again after a pause instead.
 MAX_FOLLOWED: Final = 32
-#: The statuses of the runs in a line.
-IN_LINE: Final = (RunStatus.RUNNING, RunStatus.QUEUED)
+#: The statuses of the runs in a line, in the order the line lists them: a queued run a worker
+#: claims between the two listings is in one of them or both, never in neither; a run kept in
+#: its caller's process (the run waiting its turn) is never queued, so it is in the second.
+IN_LINE: Final = (RunStatus.QUEUED, RunStatus.RUNNING)
 
 
 #: The ``RunStart.metadata`` key a run sent with ``mode="interrupt"`` keeps, under it the run
@@ -64,14 +68,11 @@ INTERRUPTS: Final = "interrupts"
 @dataclass(frozen=True, slots=True)
 class Seen:
     """A run as the line read it: its ``updated_at`` then (a run that moved is read again),
-    its place (``None``: in no line — a child run), the line it is in (its ``concurrency_key``:
-    shared by the lines of every conversation of a thread named alike, each reads only its
-    own), its attempt (the one whose end its event log says) and the run it asks to
-    interrupt."""
+    its place (``None``: outside the line — it ended or paused since it was listed),
+    its attempt (the one whose end its event log says) and the run it asks to interrupt."""
 
     updated_at: datetime
     place: Place | None
-    key: str | None
     attempt: int
     interrupts: str | None = None
 
@@ -139,22 +140,9 @@ class Followers:
         return True
 
 
-async def placed(runs: RunStore, record: RunRecord) -> Place:
-    """The place of the run ``record`` is (``runs.place``), its answers read from the store."""
-    if record.last_resolution is None:
-        return place(record, ())
-    answers = []
-    cursor: str | None = None
-    while True:
-        page = await runs.resolutions(record.run_id, cursor=cursor, tenant=record.tenant_id)
-        answers += page.items
-        if (cursor := page.next_cursor) is None:
-            return place(record, answers)
-
-
 @dataclass(slots=True)
 class Line:
-    """The line the run ``record`` waits in: the ``RUNNING`` and ``QUEUED`` runs of its agent
+    """The line the run ``record`` waits in: the ``QUEUED`` and ``RUNNING`` runs of its agent
     and conversation (its ``concurrency_key``) in the run store, by their places. ``seen`` is
     what this process's lines read of the runs (``Turns.seen``), ``followers`` the event logs it
     follows (``Harness.followers``)."""
@@ -189,20 +177,20 @@ class Line:
 
     async def _standing(self, *statuses: RunStatus) -> dict[Place, Seen]:
         """The runs in the line with one of ``statuses``, by their places (each run read once:
-        :attr:`seen`)."""
+        :attr:`seen`), listed by the line's own key."""
         record = self.record
         standing: dict[Place, Seen] = {}
         for status in statuses:
             async for summary in self.runs.iterate(
                 agent_id=record.agent_id,
-                thread_id=record.thread_id,
+                concurrency_key=record.concurrency_key,
                 status=status,
                 tenant=record.tenant_id,
             ):
                 seen = self.seen.get(summary.run_id)
                 if seen is None or seen.updated_at != summary.updated_at:
                     seen = await self._seen(summary.run_id, summary.updated_at)
-                if seen.place is not None and seen.key == record.concurrency_key:
+                if seen.place is not None:
                     standing[seen.place] = seen
         return standing
 
@@ -247,11 +235,10 @@ class Line:
     async def _seen(self, run_id: str, updated_at: datetime) -> Seen:
         found = await self.runs.get(run_id, tenant=self.record.tenant_id)
         if found is None or found.status not in IN_LINE:
-            seen = Seen(updated_at, None, None, 1)
+            seen = Seen(updated_at, None, 1)
         else:
             asks = found.metadata.get(INTERRUPTS)
-            place = await placed(self.runs, found)
-            seen = Seen(updated_at, place, found.concurrency_key, found.attempt, asks)
+            seen = Seen(updated_at, place(found), found.attempt, asks)
         self.seen[run_id] = seen
         return seen
 
@@ -268,5 +255,4 @@ __all__ = [
     "Here",
     "Line",
     "Seen",
-    "placed",
 ]

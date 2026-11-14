@@ -68,8 +68,9 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
    conversation's `concurrency_key` too; agent-runs creates each run of a key in its place —
    under the key's transaction lock, in the one statement that follows it, after the key's
    running and queued runs — and a claim takes a queued run only while no run placed before it
-   runs. The harness reads the place (`runs.place`: `created_at`, or the latest answer's
-   `recorded_at`) and waits for the run just ahead: a local one until it leaves the line, one
+   runs. The harness reads the place agent-runs gives the run (`RunRecord.placed_at`: its
+   start, or its latest answer's `recorded_at`; `runs.place`), never recomputing it, lists the
+   line by its own key (`concurrency_key`), and waits for the run just ahead: a local one until it leaves the line, one
    elsewhere by following its event stream (shared, capped: `line.Followers`). A conversation's
    starts leave one process in the order they were sent (`Turns.accepting`). `interrupt`
    across processes needs no new call: the message's run names the run it interrupts in its
@@ -79,9 +80,10 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
    does, said once per agent. Set aside: a run started `QUEUED` and claimed by its own process
    (a claim of one named run is a contract change); a cancel the store asks of the holder
    (changes the cancel endpoint's documented behaviour; parked on the `-chat-order-cancel`
-   branches, not needed); and the place returned by the store as a field of the run
-   (`placed_at`: an addition to the contract, which would let the harness stop reading
-   answers to compute it — proposed, not made).
+   branches, not needed). *Amended again (2026-11-14, approved):* the place is returned by
+   the store as a field of the run (`placed_at`, optional and read-only) and the run listing
+   takes `concurrency_key`: the harness no longer reads answers to compute the place, nor
+   another user's runs on a thread named alike.
 
 ## Consequences
 

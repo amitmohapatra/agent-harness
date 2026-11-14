@@ -246,8 +246,10 @@ messages sent to one process are recorded in the order they were sent; agent-run
 each run of a key in its place, after the key's runs already running or queued, in the order
 the starts commit. A run's place is when it was created, or when its latest answer was recorded
 (a run continued after a pause joins the line then, after the turns that arrived while it
-waited). It takes its turn once no `RUNNING` or `QUEUED` run of its agent and conversation is
-placed before it. A queued run (`start`) holds its place while it waits for a worker, and a
+waited); agent-runs gives it on the run as `placed_at`, and the harness orders by it without
+recomputing it. It takes its turn once no `QUEUED` or `RUNNING` run of its agent and
+conversation is placed before it, the line listed by its key (another user's thread with the
+same name is never read). A queued run (`start`) holds its place while it waits for a worker, and a
 worker claims it only once no run placed before it runs: a stream of messages cannot keep it
 waiting. A run that pauses for a person, ends, or whose process dies leaves the line: a process
 killed while it holds a turn frees it once its hold lapses (60 s) and agent-runs ends its run
@@ -265,8 +267,9 @@ none: it ends `CANCELLED` without running.
 **On failure.** A priority outside -1000..1000 or a key over 200 characters is refused by the
 contract (`ValidationError`). A run waiting for its turn is held like any run this process
 executes: it counts its working time while it waits, and a deadline or time limit ends it there.
-An agent-runs older than this release places runs by their callers' clocks: two messages of one
-conversation started at the same instant on two replicas may then both run. During a rolling
+An agent-runs older than this release sends no `placed_at`: a conversation's turn then fails with
+a `ConfigurationError` naming the run, rather than run in a guessed order; upgrade agent-runs
+before the harness. During a rolling
 deploy, a turn started by a harness older than this release has no `concurrency_key`: it is
 not in the line, so a message sent meanwhile to a new replica does not wait for it (and a turn
 paused by an old release, continued on a new one, waits for nobody). Let the turns under way

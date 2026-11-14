@@ -25,6 +25,7 @@ from tests.support.arm import arm
 from tests.support.runlog import LoggedRuns
 from trellis import Harness, Runtime, Settings, current, tool
 from trellis.contracts import (
+    ConfigurationError,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
@@ -40,9 +41,9 @@ from trellis.harness.agent import Agent
 from trellis.harness.bounded import LRU
 from trellis.harness.conversation import EARLIER_RUNS, earlier
 from trellis.harness.identity import conversation_key
-from trellis.harness.line import Line, placed
+from trellis.harness.line import Followers, Line
 from trellis.harness.runlog import RunLog
-from trellis.harness.runs import LocalRuns
+from trellis.harness.runs import LocalRuns, place
 from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError
 
 THREAD = "chat-9"
@@ -224,7 +225,8 @@ async def test_a_workers_queued_turn_and_the_servers_turns_take_turns(
 async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     servers: tuple[Harness, Harness],
 ) -> None:
-    """Its place is when it last started running: the line's order is the store's."""
+    """Its place is when it last started running: the line's order is the store's
+    (``placed_at``), read as the store gives it."""
     runs = servers[0].runs
 
     @tool(side_effects="irreversible")
@@ -240,7 +242,7 @@ async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     assert asked.interrupt is not None
     record = await runs.get(asked.run_id)
     assert record is not None
-    assert await placed(runs, record) == (record.created_at, record.run_id)
+    assert place(record) == (record.created_at, record.run_id)
     await runs.resume(
         InterruptResolution(
             interrupt_id=asked.interrupt.interrupt_id,
@@ -251,7 +253,7 @@ async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     )
     continued = await runs.get(asked.run_id)
     assert continued is not None
-    at, _ = await placed(runs, continued)
+    at, _ = place(continued)
     assert at > record.created_at and at - continued.updated_at < timedelta(seconds=1)
     assert await Line(runs, continued, LRU(), servers[0].followers).ahead() == []
 
@@ -363,38 +365,101 @@ async def test_a_refused_hold_stops_only_a_run_cancelled_in_the_store(
     await runs.aclose()
 
 
-async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nobody(
-    servers: tuple[Harness, Harness],
-) -> None:
-    runs = servers[0].runs
-    started = RunStart(tenant_id="default", agent_id="chat", user_id="ada", thread_id=THREAD)
-    record = await runs.start(started)
-    answers = [
-        ResolutionEntry(
-            interrupt=Interrupt(tenant_id="default", run_id=record.run_id, question=f"q{n}"),
-            resolution=InterruptResolution(
-                interrupt_id=f"i{n}", run_id=record.run_id, decision=InterruptDecision.APPROVE
-            ),
-            attempt=n + 1,
-            recorded_at=record.created_at + timedelta(seconds=n + 1),
+class Counted(LocalRuns):
+    """The in-process store, counting the reads a line makes: ``get`` by run, ``resolutions``
+    by run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.got: list[str] = []
+        self.answers_read: list[str] = []
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> Any:
+        self.got.append(run_id)
+        return await super().get(run_id, tenant=tenant)
+
+    async def resolutions(self, run_id: str, **kwargs: Any) -> Page[ResolutionEntry]:
+        self.answers_read.append(run_id)
+        return await super().resolutions(run_id, **kwargs)
+
+
+def turn_of(user: str, thread: str = THREAD) -> RunStart:
+    """A turn of ``user``'s conversation ``thread``, keyed as the harness keys it."""
+    key = f"thread:{conversation_key('default', user, thread)}"
+    return RunStart(
+        tenant_id="default", agent_id="chat", user_id=user, thread_id=thread, concurrency_key=key
+    )
+
+
+async def test_arch15_a_line_is_ordered_by_the_stores_places_reading_no_answers() -> None:
+    """ARCH-15: the place is the store's (``placed_at``): a line of runs answered three times
+    over is ordered without reading one answer — the run continued after its answers is
+    behind the run that came in while it waited — and a run ended is behind nobody."""
+    runs = Counted()
+    answered = await runs.start(turn_of("ada"))
+    waited = None
+    for n in range(3):
+        asked = Interrupt(tenant_id="default", run_id=answered.run_id, question=f"q{n}")
+        await runs.pause(asked)
+        waited = waited or await runs.start(turn_of("ada"))  # it came in while the first waited
+        await runs.resume(
+            InterruptResolution(
+                interrupt_id=asked.interrupt_id,
+                run_id=answered.run_id,
+                decision=InterruptDecision.APPROVE,
+            )
         )
-        for n in range(3)
-    ]
-    answered = record.model_copy(update={"last_resolution": answers[-1].resolution})
-    pages = Page[ResolutionEntry]
+    assert waited is not None
+    mine = await runs.start(turn_of("ada"))
+    runs.answers_read.clear()
+    line = Line(runs, mine, LRU(), Followers(lambda: None))
+    assert await line.ahead() == [waited.run_id, answered.run_id]
+    assert runs.answers_read == []  # (before: every page of its answers)
+    ended = await runs.finish(mine.run_id, RunStatus.SUCCESS)
+    assert await Line(runs, ended, LRU(), Followers(lambda: None)).ahead() is None  # it left
+    await runs.aclose()
 
-    async def paged(run_id: str, *, cursor: str | None = None, **kw: Any) -> Any:
-        n = int(cursor or 0)
-        return pages(items=answers[n : n + 1], next_cursor=str(n + 1) if n < 2 else None)
 
-    runs.resolutions = paged  # type: ignore[method-assign]
-    assert await placed(runs, answered) == (answers[-1].recorded_at, record.run_id)
-    ended = await runs.finish(record.run_id, RunStatus.SUCCESS)
-    same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
-    assert same.status is RunStatus.RUNNING
-    assert (
-        await Line(runs, ended, LRU(), servers[0].followers).ahead() is None
-    )  # it no longer runs: it left the line
+async def test_arch15_a_line_run_without_a_place_is_a_clear_error_never_an_order() -> None:
+    """A run store that sends no ``placed_at`` (older than this harness) cannot order a line:
+    the line says so, naming the run, rather than guessing an order."""
+    runs = LocalRuns()
+    ahead = await runs.start(turn_of("ada"))
+    mine = await runs.start(turn_of("ada"))
+    get = runs.get
+
+    async def unplaced(run_id: str, **kwargs: Any) -> Any:
+        found = await get(run_id, **kwargs)
+        return found.model_copy(update={"placed_at": None}) if found else None
+
+    runs.get = unplaced  # type: ignore[method-assign]
+    named = f"run ({ahead.run_id}|{mine.run_id}) of concurrency_key .* without placed_at"
+    with pytest.raises(ConfigurationError, match=named):
+        await Line(runs, mine, LRU(), Followers(lambda: None)).ahead()
+    await runs.aclose()
+
+
+async def test_secr11_a_run_claimed_between_the_lines_listings_is_still_ahead() -> None:
+    """The line lists its key's queued runs, then its running ones: a queued run a worker
+    claims in between (``QUEUED`` to ``RUNNING``, its place unchanged) is in one listing or
+    both, never in neither; the run itself, running throughout, is in the second."""
+    runs = LocalRuns()
+    queued = await runs.start(turn_of("ada"), queue=True)
+    mine = await runs.start(turn_of("ada"))
+    iterate = runs.iterate
+    listed: list[RunStatus | None] = []
+
+    async def claiming(**kwargs: Any) -> AsyncIterator[Any]:
+        async for summary in iterate(**kwargs):
+            yield summary
+        listed.append(kwargs.get("status"))
+        if len(listed) == 1:
+            assert await runs.claim("worker-1", ["chat"]) is not None
+
+    runs.iterate = claiming  # type: ignore[method-assign]
+    assert await Line(runs, mine, LRU(), Followers(lambda: None)).ahead() == [queued.run_id]
+    assert listed == [RunStatus.QUEUED, RunStatus.RUNNING]
+    await runs.aclose()
 
 
 async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
@@ -610,30 +675,27 @@ async def held_elsewhere(runs: LocalRuns, user: str, thread: str) -> str:
     return run_id
 
 
-async def test_secr11_another_users_turns_on_a_thread_named_alike_are_read_once_and_never_waited_for(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SEC-R-11: the store lists a line by thread name, so another user's turns on a thread
-    named alike are listed too. A server reads each once (then knows it is outside the line,
-    until it moves), and nobody waits for them."""
-    runs = LocalRuns()
-    bobs = [await held_elsewhere(runs, "bob", THREAD) for _ in range(3)]
-    read: list[str] = []
-    get = runs.get
-
-    async def counted(run_id: str, **kwargs: Any) -> Any:
-        read.append(run_id)
-        return await get(run_id, **kwargs)
-
-    monkeypatch.setattr(runs, "get", counted)
+async def test_secr11_another_users_turns_on_a_thread_named_alike_are_never_read_or_waited_for() -> (
+    None
+):
+    """SEC-R-11: the line is listed by its own key (``thread:<conversation>``), not by thread
+    name: 200 turns of another user on a thread named alike, running on another server, are
+    neither read (no ``get``) nor waited for."""
+    runs = Counted()
+    bobs = {await held_elsewhere(runs, "bob", THREAD) for _ in range(200)}
+    mine = await runs.start(turn_of("ada"))
+    runs.got.clear()
+    assert await Line(runs, mine, LRU(), Followers(lambda: None)).ahead() == []
+    assert bobs.isdisjoint(runs.got) and runs.answers_read == []
+    await runs.finish(mine.run_id, RunStatus.SUCCESS)
     async with Harness(config=Settings(), runs=runs) as h:
         agent = chat(h, [], {})
         answers = [
             (await asyncio.wait_for(agent.run(f"ada {n}", user="ada", thread=THREAD), 10)).answer
-            for n in range(3)
+            for n in range(2)
         ]
-    assert answers == ["re: ada 0", "re: ada 1", "re: ada 2"]  # bob's turns held none up
-    assert sorted(run for run in read if run in bobs) == sorted(bobs)  # each once, not a turn
+    assert answers == ["re: ada 0", "re: ada 1"]
+    assert bobs.isdisjoint(runs.got)  # bob's turns held none up, and none was read
     await runs.aclose()
 
 
