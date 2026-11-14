@@ -168,10 +168,9 @@ async def test_missed_fires_fire_once_and_an_overlapping_fire_is_skipped(
         return runs_sql("select run_id, status from agent_runs where agent_id = :1", agent_id + "")
 
     async def runs_of_schedule() -> list[dict]:
-        rows = runs_sql(
+        return runs_sql(
             "select run_id, status from agent_runs where run_metadata->>'schedule_id' = :1", sid
         )
-        return rows
 
     first = await eventually(runs_of_schedule, within=90)
     assert len(first) == 1, first  # once, not once per missed day

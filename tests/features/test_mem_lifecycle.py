@@ -323,7 +323,7 @@ async def test_a_profile_the_agent_edits_is_in_every_next_chat(
 @pytest.mark.plan("MEM-07")
 @pytest.mark.parametrize(("window", "expected"), [(None, 8000), (24_000, 6000), (6000, 2000)])
 async def test_the_memory_budget_follows_the_models_window(
-    traffic: Traffic, tmp_path: Path, uid: str, window: int | None, expected: int
+    traffic: Traffic, uid: str, window: int | None, expected: int
 ) -> None:
     """The context the model is given is asked for 8,000 tokens; a model whose window is known
     to be under 32,000 gets a quarter of it, never under 2,000 — and the service holds the

@@ -13,8 +13,6 @@ The two sweeps are periodic jobs (daily, hourly): each is run once on demand
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from tests.features.conftest import (
@@ -83,9 +81,7 @@ async def test_retention_forgets_what_is_older_than_the_tenants_policy(uid: str)
 
 @pytest.mark.plan("MEM-15")
 @pytest.mark.timeout(400)
-async def test_a_purged_message_is_read_back_whole_from_its_archive_segment(
-    tmp_path: Path, uid: str
-) -> None:
+async def test_a_purged_message_is_read_back_whole_from_its_archive_segment(uid: str) -> None:
     user = f"pia-{uid}"
     big = [
         f"Line {n} of my inventory notes for {uid}: " + "pallet bay row " * 400 for n in range(3)

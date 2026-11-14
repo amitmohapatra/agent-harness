@@ -696,11 +696,14 @@ class Invariants:
             return []
         out = []
         for e in self.traffic.exchanges:
-            for what, text in (("request", e.raw_request), ("answer", e.raw_response)):
-                if what == "answer" and (e.method, _route(e.path)) in ISSUES_SECRETS:
-                    continue  # the one answer that shows a new key or secret, once
-                if any(s in text for s in secrets):
-                    out.append(f"INV-8 a key in the {what} of {e.service} {e.method} {e.path}")
+            shown = {"request": e.raw_request, "answer": e.raw_response}
+            if (e.method, _route(e.path)) in ISSUES_SECRETS:
+                del shown["answer"]  # the one answer that shows a new key or secret, once
+            out += [
+                f"INV-8 a key in the {what} of {e.service} {e.method} {e.path}"
+                for what, text in shown.items()
+                if any(s in text for s in secrets)
+            ]
         for path in self.tmp.rglob("*.log"):
             with contextlib.suppress(OSError):
                 if any(s in path.read_text(errors="replace") for s in secrets):

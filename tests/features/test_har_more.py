@@ -61,7 +61,7 @@ async def test_a_model_that_never_answers_ends_the_run_timeout_within_its_limit(
 
 
 @pytest.mark.plan("HAR-TIME")
-async def test_the_stall_guard_ends_a_stalled_step(tmp_path: Path, uid: str) -> None:
+async def test_the_stall_guard_ends_a_stalled_step(uid: str) -> None:
     async with harness() as h:
         target = ReAct(system_prompt="You work.", model=PlannedChat([], stall=60), call_timeout=2)
         agent = h.wrap(target, id=f"guard-{uid}")
@@ -73,7 +73,7 @@ async def test_the_stall_guard_ends_a_stalled_step(tmp_path: Path, uid: str) -> 
 
 @pytest.mark.plan("HAR-STEP", "LR-02")
 async def test_the_step_limit_ends_with_the_models_answer_and_runs_nothing_past_it(
-    tmp_path: Path, uid: str
+    uid: str,
 ) -> None:
     plan = [("lookup", {"sku": f"S-{n}"}) for n in range(6)]
     async with harness() as h:
@@ -115,9 +115,7 @@ async def test_an_mcp_servers_tools_are_governed_and_recorded(
 
 
 @pytest.mark.plan("HAR-EVAL", "F54", "F55")
-async def test_evaluate_verifies_answers_against_their_contexts_in_memory(
-    tmp_path: Path, uid: str
-) -> None:
+async def test_evaluate_verifies_answers_against_their_contexts_in_memory(uid: str) -> None:
     user = f"xu-{uid}"
     async with harness() as h:
         ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)  # type: ignore[union-attr]

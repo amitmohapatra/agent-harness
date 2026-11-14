@@ -90,7 +90,7 @@ ADAPTERS: Final = (
 PUSHED: Final = ADAPTERS
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     here = Path(__file__).parent
     skip = pytest.mark.skip(
         reason="needs the memory service and agent-runs (MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)"
