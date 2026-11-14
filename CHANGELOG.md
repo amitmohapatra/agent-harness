@@ -16,6 +16,14 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Fixed: a turn Kimi could not finish fails the run, with Kimi's reason
+
+Kimi answers a prompt whose turn failed (its provider's error, past Kimi's own retries)
+`end_turn`, as it answers a finished one, and says why only in its log. Such a run ended
+`SUCCESS` with no answer, or with the half answer that came before the failure. The run now
+fails with Kimi's own error (its code, the provider's status), read from the log's
+`turn.ended`.
+
 ### Fixed: a sandboxed Kimi command is recorded with its output
 
 A sandboxed run's `Bash` runs in the client's terminal, and Kimi's last update of the call

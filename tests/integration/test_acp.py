@@ -1131,6 +1131,25 @@ async def test_a_turn_ended_at_the_step_limit_is_asked_once_more(
     assert events[-1].data.get("result") == "the answer at the limit"
 
 
+async def test_a_turn_the_agent_could_not_finish_fails_the_run_with_the_agents_reason(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi answers a prompt whose turn failed (its provider answered with an error, past its
+    own retries) ``end_turn``, like a finished one; why is in its log (``turn.ended``:
+    ``failed``, with the error). The run fails with that reason — whether or not text came
+    first — never ``SUCCESS`` with no answer or half of one."""
+    error = {"code": "provider.api_error", "name": "APIStatusError", "details": {"statusCode": 500}}
+    for n, script in enumerate(
+        ([{"turn_fails": error}], [{"text": "half"}, {"turn_fails": error}])
+    ):
+        (tmp_path / str(n)).mkdir()
+        done = await harness.wrap(fake(tmp_path / str(n), script), id=f"fails{n}").run(
+            "x", user="u1"
+        )
+        assert done.status is RunStatus.ERROR and done.error is not None
+        assert "provider.api_error" in done.error.message and "500" in done.error.message
+
+
 async def test_a_refusal_fails_the_run(harness: Harness, tmp_path: Path) -> None:
     result = await harness.wrap(fake(tmp_path, [{"stop": "refusal"}]), id="no").run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None

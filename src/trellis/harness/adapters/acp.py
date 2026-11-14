@@ -191,6 +191,8 @@ EDITED: Final = (
     "A reviewer changed the arguments of your call to {tool}, so it was not run. Call {tool} "
     "again now with exactly these arguments: {args}"
 )
+#: Why a run failed whose agent could not finish its turn: the agent's own error for it.
+FAILED_TURN: Final = "the agent could not finish its turn: {why}"
 #: What a person is asked when the agent offers options and says nothing with them.
 CHOOSE: Final = "The agent asks you to choose."
 #: Why the person denied the call, after the resumed session is told they did (ACP's answer
@@ -304,6 +306,8 @@ USAGE_RECORD: Final = "usage.record"
 #: finished turn with no answer. Its ``agent.turn.ended`` lines are another record.
 TURN_ENDED: Final = "turn.ended"
 AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
+#: ... and its ``reason`` when Kimi could not finish the turn (its ``error`` says why).
+TURN_FAILED: Final = "failed"
 #: The line of a sub-agent's log that names the profile it was started with (its type).
 PROFILE_BOUND: Final = "profile.bind"
 #: The ``stopReason`` of a turn Kimi's own repeat breaker ended (``KIMI_CODE_REPEAT_BREAKER``:
@@ -403,6 +407,9 @@ class UsageLog:
         self.ended = False
         #: whether Kimi's repeat breaker ended the main agent's latest turn (:data:`REPEAT_BREAKER`)
         self.broken = False
+        #: the error Kimi could not finish the main agent's latest turn for (its provider's,
+        #: past Kimi's own retries), when it ended ``failed`` anywhere but at its step limit
+        self.failed: dict[str, Any] | None = None
         #: the agents whose log is not read (a background sub-agent's: its run's to count)
         self.skip: set[str] = set()
 
@@ -484,6 +491,8 @@ class UsageLog:
                 error = entry.get("error") or {}
                 if error.get("code") == AT_STEP_LIMIT:
                     self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
+                elif entry.get("reason") == TURN_FAILED:
+                    self.failed = error
         return found
 
 
@@ -1289,7 +1298,7 @@ class Attempt:
             raise ACPRunError(QUEUED)
         own, seen = session.own_turns, False
         if self.usage is not None:
-            self.usage.ended = False  # this turn's end is still to come
+            self.usage.ended, self.usage.failed = False, None  # this turn's end is to come
         asking = asyncio.ensure_future(self.conn.prompt(session_id=self.session_id, prompt=prompt))
         asking.add_done_callback(self._ended)
         runtime.model_started(STEP)
@@ -1333,6 +1342,10 @@ class Attempt:
         if ended.error is not None:
             raise await session.failed(ended.error)
         self._answered_usage(ended.answer)
+        failed = self.usage.failed if self.usage is not None else None
+        if failed is not None:  # answered ``end_turn`` like a finished turn: its log says why
+            details = {k: v for k, v in failed.items() if v not in (None, "", {})}
+            raise ACPRunError(FAILED_TURN.format(why=json.dumps(details, default=str)))
         # past the agent's own retries: what a run with no answer says
         self.runtime.cut_off = stop == MAX_TOKENS
         return ended.answer

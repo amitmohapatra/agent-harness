@@ -45,7 +45,8 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   ``profile.bind`` line);
 * ``{"stall": seconds}`` sends nothing for that long; ``{"crash": "why"}`` the process ends;
   ``{"stop": "refusal"}`` ends the turn so; ``{"step_limit": n}`` ends it at Kimi's step limit (no
-  answer, the reason only in its log's ``turn.ended``); ``{"prompt_usage": {...}}`` puts ACP's own usage on
+  answer, the reason only in its log's ``turn.ended``), ``{"turn_fails": {...error}}`` as a turn
+  Kimi could not finish (its provider failed: the same, with that error); ``{"prompt_usage": {...}}`` puts ACP's own usage on
   the prompt's answer; ``{"plan": true}`` a plan update; ``{"wait": seconds}`` a tool call that
   runs that long (a cancel stops it); ``{"updates": true}`` every other update ACP has (a
   thought, a message chunk that is not text, its commands, its mode, its usage, the session's
@@ -206,13 +207,13 @@ def mode_of(session_id: str) -> tuple[bool, str]:
     return planning, permission
 
 
-def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
-    """The turn's end, as Kimi 2.1 logs every turn's after its usage (its durable
-    ``TurnEnded``: ``reason`` completed, cancelled or failed; at its step limit failed, with
-    ``loop.max_steps_exceeded``)."""
+def logged_end(session_id: str, reason: str, error: dict[str, Any] | None = None) -> None:
+    """The turn's end, as Kimi logs every turn's after its usage (its durable ``TurnEnded``:
+    ``reason`` completed, cancelled or failed, a failed one with its ``error``: at its step
+    limit ``loop.max_steps_exceeded``, a provider's ``provider.api_error``)."""
     line: dict[str, Any] = {"type": "turn.ended", "agentId": "main", "turnId": 0, "reason": reason}
-    if limit is not None:
-        line["error"] = {"code": "loop.max_steps_exceeded", "details": {"maxSteps": limit}}
+    if error is not None:
+        line["error"] = error
     logged(session_id, "main", line)
 
 
@@ -346,17 +347,17 @@ class FakeAgent:
         if self.busy:  # queued behind its own turn: no turn of the prompt's own, as Kimi does
             record("queued", "\n".join(getattr(b, "text", "") for b in prompt))
             return PromptResponse(stop_reason="end_turn")
-        self.limit: int | None = None
+        self.failed: dict[str, Any] | None = None
         reason = "failed"
         self.turns += 1
         logged(session_id, "main", {"type": "turn.prompt", "origin": {"kind": "user"}})
         try:
             answered = await self._prompt(prompt, session_id)
             stopped = answered.stop_reason == "cancelled"
-            reason = "cancelled" if stopped else "failed" if self.limit else "completed"
+            reason = "cancelled" if stopped else "failed" if self.failed else "completed"
             return answered
         finally:
-            logged_end(session_id, reason, self.limit)
+            logged_end(session_id, reason, self.failed)
 
     async def _prompt(self, prompt: list[Any], session_id: str) -> Any:
         text = "\n".join(getattr(b, "text", "") for b in prompt)
@@ -380,10 +381,13 @@ class FakeAgent:
                     data["done"] += 1
                     save(session_id, data)
                     return PromptResponse(stop_reason=step["stop"])
-                if "step_limit" in step:  # a finished turn with no answer, over ACP
+                if "step_limit" in step or "turn_fails" in step:
+                    # a failed turn is a finished one with no answer, over ACP: why is its log's
                     data["done"] += 1
                     save(session_id, data)
-                    self.limit = int(step["step_limit"])
+                    limit = {"maxSteps": step.get("step_limit")}
+                    at_limit = {"code": "loop.max_steps_exceeded", "details": limit}
+                    self.failed = step.get("turn_fails") or at_limit
                     return PromptResponse(stop_reason="end_turn")
                 if "prompt_usage" in step:
                     usage = Usage.model_validate(step["prompt_usage"])

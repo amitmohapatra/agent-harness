@@ -509,6 +509,24 @@ async def test_a_rejected_bash_call_is_not_run_and_kimi_reads_why(
     assert not (tmp_path / "kimi-work" / "build").exists()
 
 
+def _provider_down(body: dict[str, Any]) -> Any:
+    raise RuntimeError("the provider is down")
+
+
+async def test_a_turn_kimi_could_not_finish_fails_the_run_with_kimis_reason(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi's provider answers every request with an error: past its own retries Kimi ends the
+    turn ``failed`` in its log and answers the prompt ``end_turn`` with nothing. The run fails
+    with Kimi's reason (its error's code and the provider's status), not ``SUCCESS``."""
+    env = {"KIMI_LOOP_MAX_RETRIES_PER_STEP": "0", "KIMI_LOOP_MAX_ATTEMPTS_PER_STEP": "1"}
+    async with PlannedEndpoint(turns=_provider_down).serving() as endpoint:
+        target = kimi_target(endpoint, tmp_path, env=env)
+        done = await harness.wrap(target, id="kimi-provider-down").run("go", user="u1")
+    assert done.status is RunStatus.ERROR and done.error is not None
+    assert "provider.api_error" in done.error.message and "500" in done.error.message
+
+
 async def test_kimis_usage_log_is_the_contract_the_budget_reads(
     harness: Harness, tmp_path: Path
 ) -> None:
