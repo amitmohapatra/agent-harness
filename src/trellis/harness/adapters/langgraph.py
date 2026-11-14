@@ -53,7 +53,11 @@
   (``bridges.helpers``, from the governed ``task`` call: ``middleware.governed_call``): given
   the memory context for its task, its tool calls governed as the run's and recorded under its
   run, its outcome recorded; its model calls count toward the run's budget (``accounting``),
-  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run;
+  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run. A
+  Deep Agents async sub-agent's task (``start_async_task``) is a child run too, outliving the
+  turn as the task does: held while it runs on its server, ended when a later check, list or
+  cancel says how it ended, and cancelled with the turn that started it
+  (``bridges.async_tasks``);
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; a
   ``configurable.thread_id`` among them is refused (the thread is ``run(thread=)``, one owner).
@@ -87,6 +91,7 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bridges.async_tasks import AsyncTasks
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.events import STREAMED
 from trellis.harness.history import Called, Said, Speaker
@@ -174,6 +179,14 @@ class LangGraphAdapter:
         self.narrows: Narrowing = "turn" if per_turn else "none"
         #: the graph's own tools (:meth:`native`), once read
         self._native: list[ToolSpec] | None = None
+        #: the async tasks (Deep Agents' ``start_async_task``) its runs started that this
+        #: process holds the runs of (``bridges.async_tasks``)
+        self.tasks = AsyncTasks()
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` was cancelled with the run that started it: an async task's
+        that this process holds is cancelled on its server (``subagents.cancel_children``)."""
+        await self.tasks.stopped(run_id, reason)
 
     def steers(self, target: Any) -> bool:
         """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
@@ -239,6 +252,7 @@ class LangGraphAdapter:
             raise
         finally:
             await helpers.closed(error)
+            await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from langchain_core.messages import AIMessage
@@ -275,6 +289,7 @@ class LangGraphAdapter:
             raise
         finally:
             await helpers.closed(error)
+            await self.tasks.cancelled(run.runtime)
         _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 

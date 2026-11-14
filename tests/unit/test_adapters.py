@@ -35,6 +35,7 @@ from trellis.harness.adapters.claude import (
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
+    UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
     configured_servers,
@@ -221,7 +222,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    assert sent.disallowed_tools == list(OUTLIVES_THE_QUERY)  # nothing narrowed: only these
+    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
     assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
     unchanged = {
         "hooks": None,
@@ -278,6 +279,7 @@ async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -
         run_memory=None,
         attempt=1,
         pending=None,
+        cancelled=None,
         worker_id=None,
         events=SimpleNamespace(custom=lambda name, **data: written.append((name, data))),
     )

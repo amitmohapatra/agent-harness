@@ -502,22 +502,60 @@ async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------------- its outcome
-async def delivered(parent: Agent, record: RunRecord, *, ending: str | None = None) -> None:
-    """The run of a task ended or paused: its outcome told to the chat it came from by a turn
-    of the chat's own (:func:`notify`) when the chat is idle — a turn at work, or waiting for a
-    person, gives its model the outcome itself (at its next model call, after its answer, or at
-    the conversation's next turn). ``ending``: the turn of the chat that is ending now, which
-    took no notice of it (:func:`left`)."""
-    origin = record.metadata.get(BACKGROUND)
+async def delivered(
+    parent: Agent,
+    record: RunRecord,
+    *,
+    update: Mapping[str, Any] | None = None,
+    ending: str | None = None,
+) -> None:
+    """A child run of a chat's turn ended or paused — a task here, a Deep Agents async task on
+    its server (``bridges.async_tasks``), any run a tool started in the background: its outcome
+    (``update``: the ``TaskEvent`` and what the model reads of it, else :func:`update_of` the
+    run) told to the chat it came from by a turn of the chat's own (:func:`notify`) when the
+    chat is idle — a turn at work, or waiting for a person, gives its model the outcome itself
+    (at its next model call, after its answer, or at the conversation's next turn). ``ending``:
+    the turn of the chat that is ending now, which took no notice of it (:func:`left`)."""
+    origin = await origin_of(parent, record)
     user = record.user_id
-    if not isinstance(origin, Mapping) or not origin.get("thread") or not user:
+    if origin is None or not user:
         return
-    task = {"task_id": record.thread_id, "agent_name": origin.get("name", "")}
-    update = update_of(task, record)
     thread = str(origin["thread"])
+    if update is None:
+        task = {"task_id": origin["task_id"], "agent_name": origin.get("name", "")}
+        update = update_of(task, record)
     if update is None or not await idle(parent, record.tenant_id, user, thread, ending=ending):
         return
     await notify(parent, record, update, user=user, thread=thread, origin=origin)
+
+
+async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
+    """Where the child run ``record`` came from, as its outcome is told: the chat ``thread``,
+    the sub-agent's ``name``, the ``task_id`` the model knows it by and the chat's front end
+    (:data:`~trellis.harness.frontend.FRONTEND`) — its :data:`BACKGROUND` metadata, else its
+    parent's record (a framework's helper: its ``task_id`` the one it names, else its run's);
+    ``None``: no chat to tell (a run with no thread of its own)."""
+    from trellis.harness.bridges.helpers import HELPER  # noqa: PLC0415 - it imports this
+
+    own = record.metadata.get(BACKGROUND)
+    if isinstance(own, Mapping):
+        found = {**own, "task_id": record.thread_id}
+        return found if found.get("thread") else None
+    above = None
+    if record.parent_run_id is not None:
+        above = await parent.harness.runs.get(record.parent_run_id, tenant=record.tenant_id)
+    if above is None or not above.thread_id or above.thread_id == above.run_id:
+        return None
+    helper = record.metadata.get(HELPER) or {}
+    found = {
+        "thread": above.thread_id,
+        "name": str(helper.get("name") or record.agent_id),
+        "agent": above.agent_id,
+        "task_id": str(helper.get("task_id") or record.run_id),
+    }
+    if FRONTEND in above.metadata:
+        found[FRONTEND] = above.metadata[FRONTEND]
+    return found
 
 
 async def idle(
