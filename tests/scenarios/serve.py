@@ -68,11 +68,11 @@ async def main() -> None:
                 uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
             )
             tasks.append(asyncio.create_task(server.serve()))
-            while not server.started:
+            while not server.started:  # noqa: ASYNC110 - uvicorn says so by a flag
                 await asyncio.sleep(0.05)
         ready = os.environ.get("SCEN_READY")
         if ready:
-            Path(ready).write_text("ready")
+            Path(ready).write_text("ready")  # noqa: ASYNC240 - one small file, once
         await stop.wait()
         for t in tasks:
             t.cancel()

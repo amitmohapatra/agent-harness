@@ -18,7 +18,7 @@ import pytest
 from tests.scenarios import workflows
 from tests.scenarios.brains import command, parse, token, wrapped
 from tests.scenarios.conftest import harness
-from tests.scenarios.kit import TOOLS, Served, eventually, ledger, record
+from tests.scenarios.kit import TOOLS, Served, asked_id, eventually, ledger, record
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
 
@@ -131,7 +131,7 @@ async def test_an_approval_mid_workflow_resumed_on_another_worker(
             f"note:step1 {tok}"
         ]  # done before the pause
         await agent.resume(
-            paused.interrupt.interrupt_id,
+            asked_id(paused),
             decision,
             answer="not now" if decision == "reject" else None,
             reviewer=f"ada-{uid}",
@@ -172,14 +172,12 @@ async def test_langgraphs_own_interrupt_mid_graph(
         _message(adapter, tok, confirm=True), user=f"ada-{uid}", thread=f"t-{uid}"
     )
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.error
-    went = await agent.resume(
-        asked.interrupt.interrupt_id, "answer", answer="yes", reviewer=f"ada-{uid}"
-    )
+    went = await agent.resume(asked_id(asked), "answer", answer="yes", reviewer=f"ada-{uid}")
     assert went.status is RunStatus.PAUSED and went.interrupt is not None, (
         went
     )  # then the payment asks
     assert went.interrupt.tool_call is not None and went.interrupt.tool_call.tool == "transfer"
-    done = await agent.resume(went.interrupt.interrupt_id, "approve", reviewer=f"ada-{uid}")
+    done = await agent.resume(asked_id(went), "approve", reviewer=f"ada-{uid}")
     assert done.status is RunStatus.SUCCESS, done.error
     assert "confirmed:yes" in done.answer
     ran = ledger()[before:]

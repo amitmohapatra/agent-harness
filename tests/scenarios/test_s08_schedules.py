@@ -26,7 +26,9 @@ pytestmark = [pytest.mark.timeout(900), pytest.mark.plan("SCH")]
 
 
 async def _schedules(h: Harness, user: str, agent_id: str) -> list:
-    return [s for s in await h.runs.schedules.list(on_behalf_of=user) if s.agent_id == agent_id]
+    return [
+        s for s in (await h.runs.schedules.list(on_behalf_of=user)).items if s.agent_id == agent_id
+    ]
 
 
 @pytest.mark.parametrize(

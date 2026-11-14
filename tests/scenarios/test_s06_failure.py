@@ -186,7 +186,7 @@ async def test_memory_down_mid_chat_then_back(uid: str, tmp_path: Path, invarian
 @pytest.mark.plan("REL")
 @pytest.mark.parametrize("fault", ["slow", "down"])
 @pytest.mark.parametrize("adapter", ["react", "openai_agents", "claude_agent_sdk"])
-async def test_runs_service_slow_or_briefly_down_mid_turn(
+async def test_runs_service_slow_or_briefly_down_mid_turn(  # noqa: PLR0917 - pytest's fixtures
     h: Harness, adapter: str, fault: str, uid: str, tmp_path: Path, invariants: object
 ) -> None:
     claude = [{"tool": "wait", "args": {"seconds": 6}}]

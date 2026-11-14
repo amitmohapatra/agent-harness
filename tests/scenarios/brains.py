@@ -45,6 +45,7 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
+from pydantic import Field
 
 from tests.support.arm import arm, native_tools
 from tests.support.chat_model import ScriptedChatModel
@@ -309,7 +310,7 @@ def _langchain_messages(messages: list[BaseMessage]) -> list[tuple[str, str]]:
 class BrainChatModel(ScriptedChatModel):
     """A LangChain chat model answered by the brain (``create_agent``, a graph, Deep Agents)."""
 
-    turns: list[Any] = []
+    turns: list[Any] = Field(default_factory=list)
 
     async def _agenerate(
         self, messages: list[BaseMessage], stop: Any = None, run_manager: Any = None, **kwargs: Any
@@ -339,7 +340,9 @@ class BrainChatModel(ScriptedChatModel):
 
 
 def _item_text(item: Any) -> tuple[str, str]:
-    get = (lambda k: item.get(k)) if isinstance(item, dict) else (lambda k: getattr(item, k, None))
+    def get(key: str) -> Any:
+        return item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+
     if get("type") == "function_call_output":
         return "tool", text(get("output"))
     role = get("role") or get("type") or ""
@@ -373,9 +376,9 @@ class BrainModel(ScriptedModel):
             await asyncio.sleep(turned.slow)
         return await super().get_response(system_instructions, input, *args, **kwargs)
 
-    async def stream_response(
+    async def stream_response(  # type: ignore[override]
         self, system_instructions: str | None, input: Any, *args: Any, **kwargs: Any
-    ) -> Any:  # type: ignore[override]
+    ) -> Any:
         turned = decide(self._request(input, system_instructions))
         if turned.slow:
             await asyncio.sleep(turned.slow)

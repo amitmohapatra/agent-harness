@@ -198,19 +198,44 @@ def _models(e: Exchange) -> list[str]:
         if (e.method, e.path) == ("POST", "/v1/runs") and isinstance(e.request, dict):
             # agent-runs' wire body is a RunStart and its own ``queue`` flag (RunStartRequest)
             checks.append((c.RunStart, {k: v for k, v in e.request.items() if k != "queue"}))
-        if e.method == "GET" and len(parts) == 3 and parts[1] == "runs" and ok and isinstance(e.response, dict):
+        if (
+            e.method == "GET"
+            and len(parts) == 3
+            and parts[1] == "runs"
+            and ok
+            and isinstance(e.response, dict)
+        ):
             checks.append((c.RunRecord, e.response))
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "events" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "events"
+            and isinstance(e.request, dict)
+        ):
             checks += [(c.RunEvent, ev) for ev in e.request.get("events", [])]
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "pause" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "pause"
+            and isinstance(e.request, dict)
+        ):
             checks.append((c.Interrupt, e.request.get("interrupt")))
-        if e.method == "POST" and len(parts) == 4 and parts[3] == "resume" and isinstance(e.request, dict):
+        if (
+            e.method == "POST"
+            and len(parts) == 4
+            and parts[3] == "resume"
+            and isinstance(e.request, dict)
+        ):
             checks.append((c.InterruptResolution, e.request))
         if (e.method, e.path) == ("POST", "/v1/schedules") and isinstance(e.request, dict):
             checks.append((c.ScheduleSpec, e.request))
             if ok and isinstance(e.response, dict):
                 checks.append((c.Schedule, e.response))
-    if e.service == "memory" and (e.method, e.path) == ("POST", "/v1/feedback") and isinstance(e.request, dict):
+    if (
+        e.service == "memory"
+        and (e.method, e.path) == ("POST", "/v1/feedback")
+        and isinstance(e.request, dict)
+    ):
         body = e.request
         if body.get("source") == KNOWN_DRIFT_SOURCE:  # reported: see KNOWN_DRIFT_SOURCE
             body = {**body, "source": "judge"}
@@ -312,6 +337,7 @@ class Invariants:
         self.waiting: set[str] = set()
         self.waived: dict[str, str] = {}
         self.files: list[Path] = []
+        self._loaded: set[Path] = set()
         self.secrets = {v for n in SECRET_VARIABLES if (v := os.environ.get(n, "").strip())}
 
     def waits(self, run_id: str) -> None:
@@ -329,10 +355,12 @@ class Invariants:
         return path
 
     # -- reading back -------------------------------------------------------------------
-    def _load_files(self) -> None:
+    def load_files(self) -> None:
+        """What the test's processes recorded, read once (a test may read it before teardown)."""
         for path in self.files:
-            if not path.exists():
+            if not path.exists() or path in self._loaded:
                 continue
+            self._loaded.add(path)
             for line in path.read_text().splitlines():
                 item = json.loads(line)
                 if "violation" in item:
@@ -379,7 +407,7 @@ class Invariants:
                 return out
 
     async def check(self) -> list[str]:
-        self._load_files()
+        self.load_files()
         out = list(dict.fromkeys(self.traffic.violations))
         runs = self.runs()
         runs_url = os.environ.get("RUNS_URL", "").rstrip("/")
@@ -658,7 +686,7 @@ class Invariants:
     def secrets_in(self, text: str) -> bool:
         return any(s in text for s in getattr(self, "_secrets", self.secrets))
 
-    def _inv10(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:
+    def _inv10(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:  # noqa: PLR0912
         out = []
         for run_id, evs in events.items():
             by_attempt: dict[int, list[dict[str, Any]]] = defaultdict(list)

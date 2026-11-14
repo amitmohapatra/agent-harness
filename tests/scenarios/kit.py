@@ -134,6 +134,12 @@ def asked(messages: Sequence[tuple[str, str]], tokens: Sequence[str]) -> list[st
     ]
 
 
+def asked_id(result: Any) -> str:
+    """The id of the question a paused run (a ``Result``) waits on."""
+    assert result.interrupt is not None, (result.status, result.error)
+    return str(result.interrupt.interrupt_id)
+
+
 async def record(h: Harness, run_id: str) -> RunRecord:
     """The run as agent-runs keeps it, read over its own API and parsed as the contract."""
     url = os.environ["RUNS_URL"]

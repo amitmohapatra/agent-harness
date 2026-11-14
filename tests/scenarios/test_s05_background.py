@@ -20,7 +20,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
@@ -125,7 +125,9 @@ async def test_deep_agents_async_task_while_the_user_chats(
             target: Any = ReAct(SYSTEM, BrainChat(), subagents=[_async_spec(server)])
         else:
             target = create_deep_agent(
-                model=BrainChatModel(), subagents=[_async_spec(server)], system_prompt=SYSTEM
+                model=BrainChatModel(),
+                subagents=cast(Any, [_async_spec(server)]),
+                system_prompt=SYSTEM,
             )
         agent = arm(h.wrap(target, id=f"s5d-{adapter}-{uid}"), TOOLS)
         user, thread = f"ada-{uid}", f"chat-{uid}"
@@ -163,7 +165,9 @@ async def test_kimi_background_shell_result_reaches_a_later_turn(
     shell = command("Bash", command=f"sleep 8; echo BGDONE-$((40+2))-{uid}", run_in_background=True)
     first = await agent.run(f"{token(uid, 1)} {shell}", user=user, thread=thread)
     assert first.status is RunStatus.SUCCESS, first.error
-    meanwhile = await agent.run(f"{token(uid, 2)} meanwhile", user=user, thread=thread)  # still working
+    meanwhile = await agent.run(
+        f"{token(uid, 2)} meanwhile", user=user, thread=thread
+    )  # still working
     assert meanwhile.status is RunStatus.SUCCESS, meanwhile.error
     await asyncio.sleep(10)  # the job ends after the turn that started it, and its process, ended
     later = await agent.run(f"{token(uid, 3)} is it done?", user=user, thread=thread)

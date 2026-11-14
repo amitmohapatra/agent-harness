@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import operator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from agents import Agent as OpenAIAgent
 from agents import handoff
@@ -44,7 +44,7 @@ class Flow(MessagesState):
     key: str
 
 
-def _asked(state: dict[str, Any]) -> str:
+def _asked(state: Any) -> str:
     said = [text(m.content) for m in state["messages"] if getattr(m, "type", "") == "human"]
     return said[-1] if said else ""
 
@@ -60,7 +60,7 @@ async def _graph(
     def fan_out(state: Flow) -> list[Send]:
         return [Send("fetch", {"key": f"k{n}", "messages": []}) for n in range(3)]
 
-    async def fetch(state: dict[str, Any]) -> dict[str, Any]:
+    async def fetch(state: Flow) -> dict[str, Any]:
         return {"fetched": [str(await by_name["lookup"].ainvoke({"key": state["key"]}))]}
 
     async def step1(state: Flow) -> dict[str, Any]:
@@ -133,7 +133,10 @@ async def _wf_deepagents(h: Harness, tools: list[Any], tmp: Path, claude: Any) -
         "tools": built,
     }
     graph = create_deep_agent(
-        model=BrainChatModel(), tools=built, subagents=[helper], system_prompt=brains.SYSTEM
+        model=BrainChatModel(),
+        tools=built,
+        subagents=cast(Any, [helper]),
+        system_prompt=brains.SYSTEM,
     )
     return Built(graph, tools)
 

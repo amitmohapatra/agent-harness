@@ -1,4 +1,5 @@
-"""The scenario stack's memory API (scripts/scenarios/stack.sh): the API and its job worker from the checkout on PYTHONPATH, in ONE process.
+"""The scenario stack's memory API (scripts/scenarios/stack.sh): the API and its job worker
+from the checkout on PYTHONPATH, in ONE process.
 
 What is real: the service's own entry point (``run_api``), PostgreSQL, Redis, the filesystem
 blob store, the frozen embedding / NLI models under ./models, and the job queue: Procrastinate
@@ -21,7 +22,7 @@ import contextlib
 import os
 import signal
 
-import memory_service.api.app as app
+from memory_service.api import app
 from memory_service.application.container import Overrides, worker_pools_for
 from memory_service.config.constants import OVERLOAD, TASKS
 from memory_service.observability.logging import get_logger

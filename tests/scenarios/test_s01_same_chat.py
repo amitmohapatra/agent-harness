@@ -18,6 +18,10 @@ from trellis.contracts import RunStatus
 pytestmark = pytest.mark.timeout(900)
 
 
+def _read(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
+
+
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_messages_one_after_another(
     h: Harness, adapter: str, uid: str, tmp_path: Path
@@ -103,8 +107,7 @@ async def test_a_message_to_a_busy_chat(
         assert done.status is RunStatus.SUCCESS and second.status is RunStatus.SUCCESS
         assert second.answer == done.answer, (second.answer, done.answer)  # one answer covers both
         if adapter == "claude_agent_sdk":  # steered after the tool call: the hook's added context
-            added = Path(f"{built.model}.added")
-            assert added.exists() and second_tok in added.read_text(), (
+            assert second_tok in _read(Path(f"{built.model}.added")), (
                 "the steer never reached Claude"
             )
         else:

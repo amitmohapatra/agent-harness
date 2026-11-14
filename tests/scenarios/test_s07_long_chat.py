@@ -46,6 +46,7 @@ async def test_fifty_five_turns(h: Harness, adapter: str, uid: str, tmp_path: Pa
     fact = f"my locker code for {uid} is 4242"
     tokens = [token(uid, n) for n in range(1, TURNS + 1)]
     spent_tokens = spent_calls = 0.0
+    done = None
     for n, tok in enumerate(tokens):
         said = f"{tok} {fact}" if n == 0 else f"{tok} turn {n} " + "lorem ipsum " * 20
         if n == TURNS - 1 and adapter != "claude_agent_sdk":
@@ -60,17 +61,16 @@ async def test_fifty_five_turns(h: Harness, adapter: str, uid: str, tmp_path: Pa
             await h.writes.drain()
             scope = await user_scope(h, user=user, agent_id=agent.id)
 
-            async def indexed() -> bool:
-                return any(
-                    "4242" in i.text
-                    for i in await scope.search(f"locker code {uid}", kinds=["message"])
-                )
+            async def indexed(scope: object = scope) -> bool:
+                found = await scope.search(f"locker code {uid}", kinds=["message"])  # type: ignore[attr-defined]
+                return any("4242" in i.text for i in found)
 
             assert await eventually(indexed, within=90)
     kept = await history(h, user=user, agent_id=agent.id, thread=thread)
     assert answered(kept) == tokens, [t for t in tokens if t not in answered(kept)][
         :5
     ]  # each once, in order
+    assert done is not None and done.answer is not None
     if adapter != "claude_agent_sdk":
         assert "4242" in done.answer, ("the early fact was not recalled", done.answer[:500])
     # what the turns spent is exactly what the model reported

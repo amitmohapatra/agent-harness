@@ -16,7 +16,9 @@ def main(paths: list[str]) -> None:
     for path in paths:
         for case in ET.parse(path).getroot().iter("testcase"):
             name = f"{case.get('classname')}::{case.get('name')}"
-            ids = next((p.get("value", "") for p in case.iter("property") if p.get("name") == "plan"), "")
+            ids = next(
+                (p.get("value", "") for p in case.iter("property") if p.get("name") == "plan"), ""
+            )
             if case.find("failure") is not None:
                 outcome = "fail"
             elif case.find("error") is not None:
@@ -32,14 +34,14 @@ def main(paths: list[str]) -> None:
                 # a test with an error at teardown also has its call's outcome: the worse stays
                 if previous in (None, "pass") or outcome in ("fail", "error", "invariant"):
                     seen[plan_id][name] = outcome
-    print(f"{'plan id':<10} pass fail inv  err  skip xfail")
+    sys.stdout.write(f"{'plan id':<10} pass fail inv  err  skip xfail\n")
     for plan_id in sorted(seen):
         counts = defaultdict(int)
         for outcome in seen[plan_id].values():
             counts[outcome] += 1
-        print(
+        sys.stdout.write(
             f"{plan_id:<10} {counts['pass']:>4} {counts['fail']:>4} {counts['invariant']:>4} "
-            f"{counts['error']:>4} {counts['skip']:>4} {counts['xfail']:>5}"
+            f"{counts['error']:>4} {counts['skip']:>4} {counts['xfail']:>5}\n"
         )
 
 

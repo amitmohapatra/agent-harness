@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, eventually, ledger, record, thread_scope
+from tests.scenarios.kit import TOOLS, Served, asked_id, eventually, ledger, record, thread_scope
 from trellis import Harness
 from trellis.contracts import InterruptReason, RunStatus
 
@@ -34,7 +34,7 @@ async def _fed_back(h: Harness, user: str, agent_id: str, thread: str, call_key:
 
 @pytest.mark.parametrize("decision", ["approve", "reject", "edit"])
 @pytest.mark.parametrize("adapter", ADAPTERS)
-async def test_a_pause_while_another_chat_works(
+async def test_a_pause_while_another_chat_works(  # noqa: PLR0917 - pytest's fixtures
     h: Harness,
     adapter: str,
     decision: str,
@@ -113,9 +113,7 @@ async def test_always_allow_in_one_chat_applies_in_another(
     write = command("note", text=f"n-{uid}")
     first = await agent.run(f"{token('a' + uid[:4], 1)} {write}", user=user, thread=f"one-{uid}")
     assert first.status is RunStatus.PAUSED and first.interrupt is not None, first.error
-    done = await agent.resume(
-        first.interrupt.interrupt_id, "approve", reviewer=user, remember="always"
-    )
+    done = await agent.resume(asked_id(first), "approve", reviewer=user, remember="always")
     assert done.status is RunStatus.SUCCESS, done.error
     await h.writes.drain()
 
@@ -126,7 +124,7 @@ async def test_always_allow_in_one_chat_applies_in_another(
             thread=f"two-{uid}-{asyncio.get_running_loop().time()}",
         )
         if r.status is RunStatus.PAUSED and r.interrupt is not None:
-            await agent.resume(r.interrupt.interrupt_id, "reject", answer="probe", reviewer=user)
+            await agent.resume(asked_id(r), "reject", answer="probe", reviewer=user)
             return False
         assert r.status is RunStatus.SUCCESS, r.error
         return True
@@ -138,7 +136,7 @@ async def test_always_allow_in_one_chat_applies_in_another(
         f"{token('c' + uid[:4], 1)} {write}", user=f"eve-{uid}", thread=f"one-{uid}"
     )
     assert other.status is RunStatus.PAUSED, "another user's write ran on this user's approval"
-    await agent.resume(other.interrupt.interrupt_id, "reject", answer="no", reviewer=f"eve-{uid}")
+    await agent.resume(asked_id(other), "reject", answer="no", reviewer=f"eve-{uid}")
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS)
@@ -162,7 +160,7 @@ async def test_one_question_per_call_under_concurrency(
     for p in paused:
         assert inbox.count(p.run_id) == 1
     done = await asyncio.gather(
-        *(agent.resume(p.interrupt.interrupt_id, "approve", reviewer=user) for p in paused)
+        *(agent.resume(asked_id(p), "approve", reviewer=user) for p in paused)
     )
     assert all(d.status is RunStatus.SUCCESS for d in done), [(d.status, d.error) for d in done]
     assert len(ledger()) - before == 5
@@ -208,7 +206,7 @@ async def test_resumed_on_another_worker(
             decision
         )
         resumed = await agent.resume(
-            paused.interrupt.interrupt_id, decision, answer=answer, reviewer=f"ada-{uid}"
+            asked_id(paused), decision, answer=answer, reviewer=f"ada-{uid}"
         )
         assert resumed.status is RunStatus.QUEUED, resumed  # back on the queue, for any worker
         two = await Served(spec, tmp_path, "w2").started()

@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI, Request
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, history, ledger, record
+from tests.scenarios.kit import TOOLS, Served, asked_id, history, ledger, record
 from trellis import Harness
 from trellis.contracts import ConfigurationError, RunStatus
 
@@ -105,7 +105,7 @@ async def test_tool_arguments_at_their_limits(
         and pay.interrupt.tool_call is not None
     ), pay.error
     assert pay.interrupt.tool_call.args["meta"] == deep  # nested 30 deep, kept structured
-    ok = await agent.resume(pay.interrupt.interrupt_id, "approve", reviewer=f"ada-{uid}")
+    ok = await agent.resume(asked_id(pay), "approve", reviewer=f"ada-{uid}")
     assert ok.status is RunStatus.SUCCESS and len(ledger()) == before + 1, ok.error
 
 
@@ -183,9 +183,7 @@ async def test_cancel_a_paused_run_and_a_resuming_one(
         finally:
             worker.stop()
         assert waiting.status is RunStatus.PAUSED, waiting
-        resumed = await agent.resume(
-            waiting.interrupt.interrupt_id, "approve", reviewer=f"ada-{uid}"
-        )
+        resumed = await agent.resume(asked_id(waiting), "approve", reviewer=f"ada-{uid}")
         assert resumed.status is RunStatus.QUEUED
         assert (await agent.cancel(handle.id, reason="too late")).status is RunStatus.CANCELLED
         assert not any(line.startswith("transfer:2:x") for line in ledger()[before:])
