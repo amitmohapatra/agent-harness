@@ -39,7 +39,7 @@ import socket
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Final
@@ -76,8 +76,6 @@ from trellis.runs import Job
 #: How long the background task takes on the server, and what it answers.
 TASK_SECONDS: Final = 1.5
 RESULT: Final = "OPTIMUM: x=42, cost=7"
-#: A turn that starts the task must end far sooner than the task does.
-AT_ONCE: Final = TASK_SECONDS / 3
 
 USER: Final = "ada"
 THREAD: Final = "chat-1"
@@ -115,6 +113,8 @@ class StandIn:
 
     def __init__(self, seconds: float = TASK_SECONDS) -> None:
         self.seconds = seconds
+        #: every task runs until :meth:`release`, whatever the clock says (:meth:`hold`)
+        self.held = False
         self.runs: dict[str, dict[str, Any]] = {}  # by thread id (the task id): its latest run
         self.calls: list[tuple[str, str]] = []  # (method, path), in order
         self.headers: list[dict[str, str]] = []
@@ -176,8 +176,18 @@ class StandIn:
 
     def status(self, task_id: str) -> str:
         run = self.runs[task_id]
-        over = time.monotonic() - run["started"] >= self.seconds
+        over = not self.held and time.monotonic() - run["started"] >= self.seconds
         return "success" if run["status"] == "running" and over else run["status"]
+
+    def hold(self) -> None:
+        """Every task runs until :meth:`release`, whatever the clock says: a turn that ends
+        meanwhile did not wait for its task, which could not end before it — proved by the
+        order things happen in, not by how long they took."""
+        self.held = True
+
+    def release(self) -> None:
+        """Every task held ends now (``success``)."""
+        self.held, self.seconds = False, 0.0
 
     @property
     def task_id(self) -> str:
@@ -279,11 +289,6 @@ def chat(harness: Harness, server: StandIn, model: Model, **more: Any) -> Agent:
     return harness.wrap(ReAct("You help.", model, subagents=[subagent(server)], **more), id="bg")
 
 
-async def timed[T](work: Awaitable[T]) -> tuple[T, float]:
-    began = time.monotonic()
-    return await work, time.monotonic() - began
-
-
 async def say(agent: Agent, text: str, **more: Any) -> Any:
     return await agent.run(text, user=USER, thread=THREAD, **more)
 
@@ -294,15 +299,17 @@ async def test_t1_the_task_starts_and_the_turn_ends_at_once_with_its_id(
 ) -> None:
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
-    first, took = await timed(say(agent, "run the optimization"))
+    server.hold()
+    first = await say(agent, "run the optimization")
     assert first.status is RunStatus.SUCCESS and first.interrupt is None, first.error
     assert set(TOOLS) <= set(model.requests[0]["tools"])  # the five tools, offered to the model
     assert server.calls == [("POST", "/threads"), ("POST", f"/threads/{server.task_id}/runs")]
     assert server.bodies[1]["input"]["messages"][0]["content"] == "Find the optimum."
     assert tool_results(model.seen[1]) == [f"Launched async subagent. task_id: {server.task_id}"]
     assert server.task_id in first.answer  # the reply names the task
-    assert took < AT_ONCE, took  # the turn did not wait for the task ...
-    assert server.status(server.task_id) == "running"  # ... which is still running
+    # the turn ended while its task could not (held): it did not wait for the task, which
+    # is still running
+    assert server.status(server.task_id) == "running"
 
 
 async def test_t2_the_next_message_is_answered_while_the_task_runs(
@@ -310,11 +317,11 @@ async def test_t2_the_next_message_is_answered_while_the_task_runs(
 ) -> None:
     model = Model(turns=[START, reports_the_id, "4"])
     agent = chat(harness, server, model)
-    began = time.monotonic()
+    server.hold()
     await say(agent, "run the optimization")
-    second, took = await timed(say(agent, "what is 2+2?"))
+    second = await say(agent, "what is 2+2?")
     assert second.status is RunStatus.SUCCESS and second.answer == "4", second.error
-    assert took < AT_ONCE and time.monotonic() - began < TASK_SECONDS  # not queued behind it
+    # answered while the task could not end (held): not queued behind it
     assert server.status(server.task_id) == "running"
     assert len(server.calls) == 2  # and the second turn asked the server nothing
 
@@ -395,6 +402,7 @@ async def test_a_with_memory_the_start_in_the_history_is_not_marked_out_of_date(
     status check's earlier result is a value that changes, and is rightly marked."""
     model = Model(turns=[START, reports_the_id, calls("check_async_task"), "It runs.", "Yes."])
     agent = chat(memory_harness, server, model)
+    server.hold()  # it runs throughout, however long the turns take
     await say(agent, "run the optimization")
     second = await say(agent, "is the optimization done?")
     assert second.status is RunStatus.SUCCESS, second.error
@@ -454,10 +462,12 @@ async def test_a_a_graph_with_its_own_checkpointer_keeps_the_task_list_across_tu
         model, subagents=[subagent(server)], middleware=middleware(), checkpointer=InMemorySaver()
     )
     agent = harness.wrap(graph, id="own-thread")
-    first, took = await timed(say(agent, "run the optimization"))
-    assert server.task_id in first.answer and took < AT_ONCE
+    server.hold()
+    first = await say(agent, "run the optimization")
+    assert server.task_id in first.answer
     assert (await say(agent, "what is 2+2?")).answer == "4"
-    assert server.status(server.task_id) == "running"
+    assert server.status(server.task_id) == "running"  # both turns ended while it could not
+    server.release()
     await server.finished()
     model.turns += [calls("check_async_task"), says_what_the_tool_said]
     third = await say(agent, "is the optimization done?")
@@ -671,6 +681,7 @@ async def test_d_the_stream_shows_the_call_and_nothing_tells_the_chat_the_task_e
     monkeypatch.setattr(threads_module, "POLL_SECONDS", 0.01)
     model = Model(turns=[START, reports_the_id])
     agent = chat(harness, server, model)
+    server.hold()  # it runs until the test ends it, below
     events = [e async for e in agent.stream("run the optimization", user=USER, thread=THREAD)]
     assert [e.type.value for e in events] == [
         "RUN_STARTED",
@@ -700,6 +711,7 @@ async def test_d_the_stream_shows_the_call_and_nothing_tells_the_chat_the_task_e
         await asyncio.sleep(0.3)  # the thread's stream, open: T1's run replayed
         replayed = len(chunks)
         assert replayed and server.status(server.task_id) == "running"
+        server.release()
         await server.finished()
         await asyncio.sleep(0.5)  # the task ended while no turn runs
         assert len(chunks) == replayed  # nothing reached the chat
@@ -1320,14 +1332,17 @@ async def test_through_the_ag_ui_routes_t1_t2_and_t3_work(server: StandIn) -> No
         async with httpx.AsyncClient(
             transport=transport, base_url="http://agui", headers={"x-user": USER}
         ) as http:
-            first, took = await timed(post(http, "run the optimization"))
+            server.hold()
+            first = await post(http, "run the optimization")
             assert first[-1]["outcome"] == {"type": "success"}, first[-1]
-            assert server.task_id in first[-1]["result"] and took < AT_ONCE
+            assert server.task_id in first[-1]["result"]
             [told] = [e for e in first if e["type"] == "TOOL_CALL_RESULT"]
             assert server.task_id in told["content"]
-            second, took = await timed(post(http, "what is 2+2?"))
-            assert second[-1]["result"] == "4" and took < AT_ONCE
+            second = await post(http, "what is 2+2?")
+            assert second[-1]["result"] == "4"
+            # both turns ended while the task could not (held): neither waited for it
             assert server.status(server.task_id) == "running"
+            server.release()
             await server.finished()
             model.turns += [calls("check_async_task"), says_what_the_tool_said]
             third = await post(http, "is the optimization done?")
@@ -1371,6 +1386,7 @@ async def test_through_the_ag_ui_routes_a_turn_with_no_task_streams_what_it_did_
             transport=transport, base_url="http://agui", headers={"x-user": USER}
         ) as http:
             assert await types(http, "what is 2+2?", "no-task") == PLAIN_TURN
+            server.hold()  # it runs throughout, however long the turns take
             started = await types(http, "run the optimization", THREAD)
             assert "TOOL_CALL_RESULT" in started and server.status(server.task_id) == "running"
             assert await types(http, "what is 2+2?", THREAD) == PLAIN_TURN  # T2, list carried
