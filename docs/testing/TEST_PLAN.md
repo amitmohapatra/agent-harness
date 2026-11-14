@@ -397,3 +397,11 @@ Open observation, not diagnosed: **SCN-12** — `test_s04::test_always_allow_in_
 passes its assertions and breaks INV-4 ("note ran though it was rejected") on the probe run it
 rejects: either Kimi made the rejected call again and it ran under the standing approval learned
 meanwhile, or the invariant misreads Kimi's events. Owner to decide: bg-kimi / scn-fixes.
+
+### Round 3 findings (scenarios job)
+
+| ID | Pri | Plan | What | Root cause | Status |
+|---|---|---|---|---|---|
+| SCN-13 | P0 | REL | A server cut off from agent-runs while it works a turn: agent-runs ends the run (`holder_lost`), and when the network is back the server carries the turn on — a write ran 30 s after its run was ended | `harness.py:490` `Harness._lost` stops the attempt only when the store has the run `CANCELLED`; a run the store ended (`ERROR`) is read back and left to go on | failing tests (xfail strict): `tests/integration/test_scenario_findings.py::test_scn13…` (in process), `tests/scenarios/test_s18_faults.py::test_a_network_cut…`; proposed: stop the attempt for any ended status, writing nothing (as a lost lease does, `pipeline.py:876`); owner: scn-fixes |
+| SCN-14 | P2 | REL, FS | A file that did not fit the file store left its first bytes there, so the next, small file failed too | `files.py` `FileStore.put`: `pipe_file` with no clean-up on failure | **fixed** (the half-written file is removed), tests `tests/integration/test_file_store_full.py`, scenario `test_s18_faults.py::test_a_full_disk_under_the_file_store` |
+| BG-11 | P1 | BG-11 | A background task's outcome, on the server that keeps its live Claude session, is not told to the conversation's next turn when that lands on another server (the task's run does end `SUCCESS` with its result; nothing is left `RUNNING`) | the notification is the live session's (in one process); nothing carries it to the conversation elsewhere | failing scenario (xfail strict) `test_s17_background_more.py::test_the_next_turn_lands_on_another_server…`; owner: bg-claude-da |

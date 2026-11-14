@@ -110,9 +110,6 @@ async def test_a_result_that_arrives_while_the_chat_is_busy(
     assert later.status is RunStatus.SUCCESS and f"found {uid}" in later.answer, later.answer
 
 
-READS = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
-
-
 @pytest.mark.plan("BG-08")
 async def test_a_budget_stops_the_background_run_and_not_the_chat(
     h: Harness, uid: str, tmp_path: Path
@@ -130,7 +127,7 @@ async def test_a_budget_stops_the_background_run_and_not_the_chat(
     for _ in range(6):  # each reply of the subagent spends tokens of its run
         if stopped.exists():
             break
-        await chat.call(READS)
+        await chat.call({"tool": "lookup", "args": {"key": "k"}})
 
         async def answered_or_stopped() -> bool:
             return (chat.tasks / "t1.called").exists() or stopped.exists()
@@ -139,13 +136,18 @@ async def test_a_budget_stops_the_background_run_and_not_the_chat(
         (chat.tasks / "t1.called").unlink(missing_ok=True)
     ended = await chat.ended(child.run_id)
     assert ended.status is RunStatus.PARTIAL and stopped.exists(), ended
-    assert ended.error is not None and "BUDGET" in ended.error.code.upper(), ended.error
+    assert ended.output == "stopped", ended.output  # cut off at its budget, said so
     assert (await record(h, first.run_id)).status is RunStatus.SUCCESS  # not charged to the turn
     turn = await chat.agent.run("and?", user=user, thread=thread)
     assert turn.status is RunStatus.SUCCESS and turn.answer == "ok", turn
 
 
 @pytest.mark.plan("BG-11", "BG-07")
+@pytest.mark.xfail(
+    strict=True,
+    reason="BG-11: bg-claude-da (a background task's outcome, on the server that keeps its live "
+    "session, is not told to the conversation's next turn on another server)",
+)
 async def test_the_next_turn_lands_on_another_server_while_a_task_runs_on_the_first(
     uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -15,6 +15,8 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 - **AG-UI: the same `runId` posted twice at once (a client's retry racing its first try)
   started the run twice.** The id was checked before the run was opened and only marked
   taken after: it is taken before the first await, and the second request is a `422`.
+- **A file that did not fit the file store left its first bytes there** (a full disk), so the
+  next file failed too: a write that fails removes what it wrote (`FileStore.put`).
 - **AG-UI: a user message with no text (`content: ""`) and no `state` started a run** that
   failed inside the framework (`EmptyInputError`); it is a `422`, as a blank message is.
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)

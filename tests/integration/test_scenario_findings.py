@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from trellis import Harness, Runtime
 
 
@@ -63,3 +65,41 @@ async def test_scn8_a_message_cancelled_while_it_waits_its_turn_ends_cancelled(
     await first
     done = await second
     assert done.status.value == "CANCELLED" and ran == ["first"], (done.status, ran)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="SCN-13: scn-fixes (harness.py Harness._lost stops a run only when the store has it "
+    "CANCELLED, not when the store ended it holder_lost)",
+)
+async def test_scn13_a_run_the_store_ended_stops_where_it_works(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run this process works on, ended by the run store meanwhile (its hold lapsed while the
+    network to the store was cut: ``ERROR``, ``holder_lost``), stops here at its next refused
+    heartbeat: what it would have done after that — a write — is not done. Today only a run the
+    store has ``CANCELLED`` is stopped; one it ended goes on to its end, side effects and all
+    (seen on the real stack: a note written 30 s after agent-runs had ended the run)."""
+    from trellis.contracts import AgentError, ErrorCategory, RunStatus
+    from trellis.harness import holding
+
+    monkeypatch.setattr(holding, "HOLD_SECONDS", 0.3)
+    started = asyncio.Event()
+    went_on: list[str] = []
+
+    async def slow(input: Any, agent: Runtime) -> str:
+        started.set()
+        await asyncio.sleep(1.5)
+        went_on.append("the write after the slow step")
+        return "done"
+
+    agent = harness.wrap(slow, id="scn13")
+    turn = asyncio.create_task(agent.run("go", user="ada", thread="t1"))
+    await started.wait()
+    [run] = [r async for r in harness.runs.iterate(agent_id="scn13")]
+    lost = AgentError(
+        code="holder_lost", category=ErrorCategory.DEPENDENCY, message="its holder stopped"
+    )
+    await harness.runs.finish(run.run_id, RunStatus.ERROR, error=lost)  # as the store's sweep does
+    await asyncio.wait({turn})
+    assert went_on == [], went_on

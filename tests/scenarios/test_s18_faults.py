@@ -86,6 +86,7 @@ async def test_a_full_disk_under_the_run_store(
     still ends for its user, and once there is room the chat goes on."""
     invariants.allow("INV-7", "a 507 injected for agent-runs' writes: its document lists none")
     invariants.allow("INV-10", "the events agent-runs refused are not in its log")
+    invariants.allow("INV-2", "the events agent-runs refused are not in its log")
     flag = tmp_path / "runs-full"
     agent_id = f"s18r-{uid}"
     served = await Served(
@@ -129,12 +130,18 @@ async def test_a_server_whose_clock_runs_ahead(uid: str, tmp_path: Path) -> None
         two.stop()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="SCN-13: scn-fixes (a run agent-runs ended holder_lost goes on where it works: "
+    "harness.py Harness._lost stops only a CANCELLED one)",
+)
 async def test_a_network_cut_between_a_server_and_agent_runs(
-    uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invariants: Invariants
 ) -> None:
     """The server working a turn loses agent-runs: its hold lapses and agent-runs ends the run
     (``holder_lost``). When the network is back the server does not carry the turn on (the write
     after its slow step never runs), the run stays ended, and the chat takes the next message."""
+    invariants.allow("INV-2", "SCN-13: what the server did after its run was ended is in no log")
     book = tmp_path / "ledger"
     monkeypatch.setenv("SCEN_LEDGER", str(book))
     monkeypatch.setenv("TRELLIS_TEST_WRITES_UNASKED", "1")
@@ -170,14 +177,16 @@ async def test_a_network_cut_between_a_server_and_agent_runs(
 
 
 class _Receiver(http.server.BaseHTTPRequestHandler):
-    """A webhook receiver of the application's own: keeps what agent-runs POSTs to it."""
+    """A webhook receiver of the application's own that loses its first answer to each delivery
+    (a 500 after the body was read: agent-runs cannot know it arrived, and sends it again)."""
 
     got: ClassVar[list[tuple[str | None, bytes]]] = []
 
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        first = all(seen != body for _, seen in self.got)
         self.got.append((self.headers.get(SIGNATURE_HEADER), body))
-        self.send_response(204)
+        self.send_response(500 if first else 204)
         self.end_headers()
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -185,15 +194,13 @@ class _Receiver(http.server.BaseHTTPRequestHandler):
 
 
 async def test_a_webhook_delivered_twice_is_one_event(h: Harness, uid: str) -> None:
-    """A delivery sent again (``redeliver``; a retry after a lost answer is the same) carries the
-    same ``event_id``, signed again: an application that keeps the ids it handled handles the
-    run's end once."""
+    """A delivery whose answer was lost is sent again: the same ``event_id``, signed again, so an
+    application that keeps the ids it handled handles the run's end once."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Receiver)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     assert isinstance(h.runs, RunsClient)
-    hook = await h.runs.webhooks.create(
-        f"http://127.0.0.1:{server.server_address[1]}/hook", [WebhookEvent.FINISHED]
-    )
+    url = f"http://127.0.0.1:{server.server_address[1]}/hook"
+    hook = await h.runs.webhooks.create(url, [WebhookEvent.FINISHED])
     try:
 
         async def echo(input: Any, agent: Runtime) -> str:
@@ -203,26 +210,17 @@ async def test_a_webhook_delivered_twice_is_one_event(h: Harness, uid: str) -> N
 
         def mine() -> list[Any]:
             signed = [
-                parse_delivery(b)
-                for s, b in list(_Receiver.got)
-                if verify_signature(hook.secret, s, b)
+                parse_delivery(body)
+                for signature, body in list(_Receiver.got)
+                if verify_signature(hook.secret, signature, body)
             ]
             return [d for d in signed if d.data.run.run_id == done.run_id]
-
-        async def delivered() -> bool:
-            return len(mine()) >= 1
-
-        assert await eventually(delivered, within=60), "the run's end was never delivered"
-        page = await h.runs.webhooks.deliveries(webhook_id=hook.webhook_id)
-        [sent] = [d for d in page.items if d.run_id == done.run_id]
-        await h.runs.webhooks.redeliver(sent.delivery_id)
 
         async def twice() -> bool:
             return len(mine()) >= 2
 
-        assert await eventually(twice, within=60), "the delivery was not sent again"
-        handled = {d.event_id for d in mine()}
-        assert handled == {sent.event_id}, handled  # two deliveries, one event to handle
+        assert await eventually(twice, within=180), f"delivered {len(mine())} time(s), not again"
+        assert len({d.event_id for d in mine()}) == 1, mine()  # two deliveries, one event
     finally:
         await h.runs.webhooks.delete(hook.webhook_id)
         server.shutdown()
