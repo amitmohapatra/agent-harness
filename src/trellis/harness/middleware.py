@@ -150,6 +150,7 @@ from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
 from trellis.harness.journal import OUTCOME, content_key
+from trellis.harness.outbound import TargetRefused
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
@@ -404,6 +405,22 @@ def _scratch_noted(done: ToolMessage | Command[Any]) -> ToolMessage | Command[An
     )
 
 
+async def _remote_tasks(runtime: Runtime, call: Any, own: Any, args: Mapping[str, Any]) -> Any:
+    """The adapter's record of Deep Agents' tasks on a server (``bridges.async_tasks``), when
+    ``call`` is of one of Deep Agents' own task tools (``own``) — a start checked first: a
+    webhook that leads somewhere private fails the call, and its server is sent nothing.
+    ``None`` for any other call."""
+    tasks = getattr(runtime.agent.adapter, "tasks", None)
+    if tasks is None or call["name"] not in task_tools.TOOLS or not framework_made(own):
+        return None
+    try:
+        await tasks.starting(own, args)
+    except TargetRefused as exc:
+        refused = f"{call['name']} was not run: its webhook: {exc}"
+        raise ToolError(refused, source="tools") from exc
+    return tasks
+
+
 async def governed_call(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
@@ -457,6 +474,7 @@ async def governed_call(
     reported: list[tuple[ToolMessage, ToolError]] = []
 
     async def run(args: dict[str, Any]) -> Any:
+        tasks = await _remote_tasks(runtime, call, own, args)
         token = _GOVERNING.set((call["name"], str(call["id"])))
         try:
             done = await _helped(runtime, call["name"], str(call["id"]), args, ran)
@@ -466,8 +484,7 @@ async def governed_call(
             failure = ToolError(text_of(done.content), source="tools")
             reported[:] = [(done, failure)]
             raise failure
-        tasks = getattr(runtime.agent.adapter, "tasks", None)
-        if tasks is not None and call["name"] in task_tools.TOOLS and framework_made(own):
+        if tasks is not None:
             # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
             try:
                 await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))

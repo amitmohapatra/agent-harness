@@ -51,6 +51,15 @@ chat's own on its thread stream when it is idle; its questions asked through the
   are dropped when the list is kept for the next turn. `check_async_task` of a task dropped
   answers that it is not tracked.
 
+### Security: an outbound URL is checked by what it says and by where it leads (SEC-R-9)
+
+- `outbound.validate_url` reads a trailing dot as the same host (`https://localhost./` is
+  refused), refuses a host that is a number (`https://2130706433/`, `https://127.1/`), and
+  returns the host lower-cased without the dot. `outbound.checked` adds the resolution: every
+  address the host resolves to must be public. A2A push uses it (its own copy is gone), and an
+  `AsyncSubAgent`'s `webhook` is checked with it each time a task is started, beside the
+  check of the spec when the agent is built.
+
 ### Security: background tasks are bounded (SEC-R-2)
 
 - A chat has at most as many unfinished background tasks as a run may have children working

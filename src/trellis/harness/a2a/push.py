@@ -15,13 +15,10 @@ never raised into the task.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
-import socket
 import time
 from typing import Final
-from urllib.parse import urlsplit
 
 import httpx
 from a2a.server.tasks import PushNotificationConfigStore, PushNotificationSender
@@ -30,7 +27,7 @@ from a2a.utils.proto_utils import to_stream_response
 from google.protobuf.json_format import MessageToDict
 from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_exponential
 
-from trellis.harness.outbound import TargetRefused, public, validate_url
+from trellis.harness.outbound import TargetRefused, checked
 from trellis.runs.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
 
 log = logging.getLogger("trellis.a2a.push")
@@ -40,18 +37,6 @@ EVENT_NAME: Final = "a2a.task_update"
 TOKEN_HEADER: Final = "X-A2A-Notification-Token"
 ATTEMPTS: Final = 3
 TIMEOUT_SECONDS: Final = 10.0
-
-
-async def check_addresses(url: str) -> None:
-    """Refuse unless every address the host resolves to is public."""
-    host = urlsplit(url).hostname or ""
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise TargetRefused("the host does not resolve") from exc
-    addresses = {str(info[4][0]) for info in infos}
-    if not addresses or not all(public(ipaddress.ip_address(a)) for a in addresses):
-        raise TargetRefused("the host resolves to a private address")
 
 
 class PushNotifier(PushNotificationSender):
@@ -66,7 +51,7 @@ class PushNotifier(PushNotificationSender):
     async def validate_url(self, url: str) -> bool:
         """The SDK's ``push_url_validator``: refused at registration, not only at delivery."""
         try:
-            await check_addresses(validate_url(url))
+            await checked(url)
         except TargetRefused as exc:
             log.warning("A2A push target refused: %s", exc)
             return False
@@ -85,8 +70,7 @@ class PushNotifier(PushNotificationSender):
             log.warning("A2A push for %s skipped: the config has no token to sign with", task_id)
             return False
         try:
-            target = validate_url(url)
-            await check_addresses(target)
+            target = await checked(url)
         except TargetRefused as exc:
             log.warning("A2A push target refused for %s: %s", task_id, exc)
             return False

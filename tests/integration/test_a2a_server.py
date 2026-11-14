@@ -32,9 +32,10 @@ from tests.support.arm import arm
 from trellis import Harness, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.a2a.identity import EXTENSION_URI
-from trellis.harness.a2a.push import PushNotifier, TargetRefused, validate_url
+from trellis.harness.a2a.push import PushNotifier
 from trellis.harness.agent import Agent
 from trellis.harness.identity import IDENTITY_HEADER, identity_headers
+from trellis.harness.outbound import TargetRefused, validate_url
 from trellis.harness.runtime import Runtime
 from trellis.runs.webhooks import SIGNATURE_HEADER, verify_signature
 
