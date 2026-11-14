@@ -15,7 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any, Final
 
 import pytest
@@ -28,6 +30,7 @@ from trellis.contracts import (
     ConfigurationError,
     InterruptDecision,
     InterruptResolution,
+    RunStart,
     RunStatus,
 )
 from trellis.harness import background, pipeline, schedules
@@ -42,6 +45,7 @@ from trellis.harness.result import Result
 from trellis.harness.runs import LocalRuns
 
 USER: Final = "ada"
+ROOT: Final = Path(__file__).resolve().parents[2]
 THREAD: Final = "chat-1"
 START: Final = (
     "start_async_task",
@@ -918,3 +922,58 @@ async def test_an_answer_handed_to_a_task_no_longer_waiting_on_it_is_left(harnes
     await background.answered(agent, publisher, waiting, cancel)  # waits on nothing now
     assert not harness.background.at_work(task.run_id)
     del asking
+
+
+async def test_two_servers_telling_one_outcome_start_one_turn(tmp_path: Path) -> None:
+    """Two server processes sharing the run store both find the chat idle and tell it one
+    task's outcome at once: the chat's own turn for it is one run (its id is the outcome's),
+    and only the server whose start made it runs it — the other finds it made and stops."""
+    from tests.support.shared_runs import FileRuns
+
+    store = FileRuns(tmp_path / "runs")
+    turn = await store.start(
+        RunStart(
+            run_id="run_turn",
+            tenant_id="default",
+            agent_id="chat",
+            thread_id="t1",
+            user_id="u1",
+            input="go",
+        )
+    )
+    await store.finish(turn.run_id, RunStatus.SUCCESS, output="started", tenant="default")
+    origin = {"name": "research", "agent": "chat", "thread": "t1"}
+    task = await store.start(
+        RunStart(
+            run_id="run_task",
+            tenant_id="default",
+            agent_id="research",
+            thread_id="task_1",
+            user_id="u1",
+            input="lighthouses",
+            parent_run_id=turn.run_id,
+            metadata={background.BACKGROUND: origin},
+        )
+    )
+    await store.finish(task.run_id, RunStatus.SUCCESS, output="FOUND", tenant="default")
+    (tmp_path / "task").write_text(task.run_id)
+    servers = [
+        await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "tests.support.notified_twice",
+            str(tmp_path / "runs"),
+            str(tmp_path),
+            name,
+            cwd=ROOT,
+        )
+        for name in ("one", "two")
+    ]
+    await asyncio.sleep(1.0)  # both built and waiting
+    (tmp_path / "go").touch()
+    assert [await s.wait() for s in servers] == [0, 0]
+    calls = sorted(int((tmp_path / name).read_text()) for name in ("one", "two"))
+    assert calls == [0, 1]  # one turn, run once
+    with store.synced():
+        own = [r async for r in store.iterate(agent_id="chat", thread_id="t1")]
+    assert len(own) == 2  # the turn, and the chat's own turn for the outcome

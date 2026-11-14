@@ -79,7 +79,8 @@ log = logging.getLogger("trellis.harness")
 #: sub-agent's name, and the agent and the chat thread that started it (and that chat's front
 #: end, :data:`~trellis.harness.frontend.FRONTEND`, when it had one).
 BACKGROUND: Final = "trellis_background"
-#: The metadata key of a notification run (:func:`notify`): the ``TaskEvent`` it delivers.
+#: The metadata key of a notification run (:func:`notify`): the ``TaskEvent`` it delivers, and
+#: the server whose start made it (``by``: its holds' name), the one that runs it.
 NOTIFIED: Final = "trellis_notified"
 #: The notification metadata source of a task's update: Deep Agents' (its ``lc_source``).
 SOURCE: Final = "async_subagent"
@@ -585,8 +586,9 @@ async def notify(
 ) -> None:
     """A turn of the chat's own that gives its model the task's ``update``: a run of ``agent``
     in the chat ``thread``, its input the notification (:func:`input_of`), started once per outcome
-    (its id is the outcome's: a question the task waits on is one), at work here and delivered
-    by the chat's thread stream."""
+    (its id is the outcome's: a question the task waits on is one) and run only by the server
+    whose start made it — another server telling the same outcome at once finds it made and
+    stops —, at work here and delivered by the chat's thread stream."""
     asked = record.awaiting.interrupt_id if record.awaiting is not None else ""
     run_id = stable_id(
         NOTIFIED, update["task_id"], update["run_id"], update["status"], asked, prefix="run_"
@@ -602,16 +604,18 @@ async def notify(
         run_id=run_id,
         record_input=True,
     )
-    metadata = {
-        **started.metadata,
-        NOTIFIED: {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")},
-    }
+    # who made it: the run store answers a start of a run that exists with that run, so the
+    # server whose start made it is the one that finds its own name there, and runs it
+    by = agent.harness.holds.name
+    told = {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")}
+    metadata = {**started.metadata, NOTIFIED: {**told, "by": by}}
     if FRONTEND in origin:  # the chat's front end: a person reads it and answers what it asks
         metadata[FRONTEND] = origin[FRONTEND]
     found = await runs.start(started.model_copy(update={"metadata": metadata}))
     tasks = agent.harness.background
-    if found.status is RunStatus.RUNNING and not tasks.at_work(run_id):  # told meanwhile
-        tasks.run(agent, found)
+    ours = (found.metadata.get(NOTIFIED) or {}).get("by") == by
+    if ours and found.status is RunStatus.RUNNING and not tasks.at_work(run_id):
+        tasks.run(agent, found)  # not told meanwhile, here or by another server
 
 
 async def stale(runtime: Runtime) -> bool:

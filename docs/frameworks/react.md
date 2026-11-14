@@ -540,8 +540,10 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   `max_steps`); when no turn works in the chat, a turn of the chat's own — a run of the agent
   in the chat's thread whose input is the notification — answers it, and the chat's thread
   stream (`GET /agui/threads/{thread}/events`) delivers that turn as it delivers a scheduled
-  run's. An outcome the conversation was told already is not told again: such a turn answers
-  `NO_REPORT` without a model call, and the stream leaves it out.
+  run's. That turn is one run per outcome (its id is the outcome's), run by the server whose
+  start made it: two servers that find the chat idle at once start one turn. An outcome the
+  conversation was told already is not told again: such a turn answers `NO_REPORT` without a
+  model call, and the stream leaves it out.
 * **Its questions** — an approval or a question inside the task pauses its run (`waiting`):
   the chat's next turn, or a turn of its own when it is idle, asks it as a sub-agent's question
   is asked through its parent (`payload["subagent"]` names the task's run, `background: true`),
