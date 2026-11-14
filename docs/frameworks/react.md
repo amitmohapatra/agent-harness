@@ -761,9 +761,10 @@ await graph.aupdate_state(states[3].config, {"messages": [...]})  # or fork it
 ```
 
 In a harness run the thread is the run, and its history is the run's: kept in its journal,
-saved with its progress, for as long as the run store keeps the run (no setting of its own) —
-read with the same `aget_state_history` from code in the run (a tool, a hook, a node), on the
-run's id.
+saved with its pause and with a worker's progress, until the run ends — the run store clears a
+run's checkpoint with its ending, so there is no setting of its own, and nothing kept past the
+run. It is read with the same `aget_state_history` from code in the run (a tool, a hook, a
+node), on the run's id, and from outside it with `agent.checkpoints` (below).
 
 What it costs, measured on a scripted run (`ReAct`, no sub-agent): about 7 checkpoints a tool
 step and 10 a turn, each about 2 KB in the journal (its checkpoint and metadata, base64 in
@@ -772,13 +773,46 @@ against 4.5 KB for the latest alone; eleven tool calls: 87 checkpoints, 217 KB a
 A save still sends what the step added; the journal is compared in memory at each save, and
 written whole every 16th.
 
-**A run is not rewound yet.** Continuing a harness run from an earlier checkpoint would make
-again the calls it made since, and the run store has no entry for it (`agent.resume` answers
-an interrupt at the latest checkpoint; a new `agent.run` is a new thread). Until there is one
-that asks a person about the writes it would repeat, a fork of a run's own thread from code
-inside it is refused (`RewindRefused`), so no write is ever made again behind governance. A
-graph with a checkpointer of its own keeps LangGraph's time travel across runs
-([langgraph.md](langgraph.md)).
+#### Rewinding a paused run
+
+```python
+states = [s async for s in agent.checkpoints(run_id)]  # LangGraph's StateSnapshots, newest first
+result = await agent.rewind(
+    run_id, states[5].config["configurable"]["checkpoint_id"], reviewer="ada"
+)
+```
+
+`agent.checkpoints(run_id)` reads the history the run store keeps of a paused run (or of one a
+worker is running: what it last saved), read-only, a page of 20 at a time. `agent.rewind`
+continues the run's conversation from one of those checkpoints, as LangGraph's time travel
+does — `values=` applied to that state first, as LangGraph's `update_state` applies them — in
+a **new run** of the same user and thread, to its end or its first pause:
+
+* **on record.** The new run's `metadata["rewound"]` names the run and the checkpoint it
+  continues, who rewound it (`reviewer`) and when. The run rewound is left as it was — paused
+  on its question, its history readable: answer it, or cancel it.
+* **nothing done twice unasked.** What the run did in the world is not undone. A call that did
+  more than read past the checkpoint asks a person before the new run makes it again —
+  whatever "allow for this conversation" or "always allow" said before, since it is a second
+  effect — and runs once when approved; rejected, it does not run. A read is made again
+  freely. Asked about once, the call is decided as any call is from then on.
+* **the budget.** What the run spent before the rewind stays counted in the new run.
+* **refused**, changing nothing: a run at work (queued or running, on any server); a run
+  that has ended; a `reviewer` who is not the run's user; a checkpoint that is none of the
+  run's (another run's, another thread's); a run that is not this agent's in the caller's
+  tenant, as for every read of a run; and an agent whose runs keep no checkpoints (Claude,
+  Kimi, OpenAI Agents, a function, a graph with a checkpointer of its own), which answers
+  that checkpoints and rewind are not supported for it.
+
+**An ended run cannot be rewound.** The run store clears a run's checkpoint when the run
+ends (agent-runs: "the checkpoint ... is cleared when the run finishes"), so only a paused
+run has a history to go back in. A graph with a checkpointer of its own keeps LangGraph's
+time travel across runs ([langgraph.md](langgraph.md)). From code inside a run, a fork of the
+run's own thread is still refused (`RewindRefused`): a rewind starts from outside the run.
+
+Claude's own file checkpoints (`enable_file_checkpointing`, `rewind_files`) are a different
+feature — files on disk restored to a user message, opt-in in the Claude Agent SDK — and this
+API does not drive them.
 
 ### Handoffs: `langgraph-swarm`
 

@@ -26,12 +26,24 @@ governance ([react.md](docs/frameworks/react.md#plan-mode)).
 
 As LangGraph's own savers do: `get_state_history`, `update_state` and a thread continued from
 a `checkpoint_id` work on a `ReAct` or `middleware()` graph. In a harness run the history is in
-the run's journal (about 2 KB a checkpoint, 17 checkpoints for a one-tool turn), for as long
-as the run store keeps the run; a journal written by an earlier release is read as it is, and
-an earlier release reads this one's (the latest checkpoint's record is unchanged). A run's own
-thread forked from an earlier checkpoint inside the run is refused (`RewindRefused`): rewinding
-a run has no governed entry yet
+the run's journal (about 2 KB a checkpoint, 17 checkpoints for a one-tool turn) until the run
+ends (the run store clears a run's checkpoint with its ending); a journal written by an
+earlier release is read as it is, and an earlier release reads this one's (the latest
+checkpoint's record is unchanged). A run's own thread forked from an earlier checkpoint by
+code inside the run is refused (`RewindRefused`)
 ([react.md](docs/frameworks/react.md#checkpoint-history-langgraphs-time-travel)).
+
+### Added: `agent.checkpoints` and `agent.rewind`
+
+`agent.checkpoints(run_id)` lists a paused `ReAct` (or `middleware()`) run's checkpoints,
+newest first, as LangGraph's `StateSnapshot`s. `agent.rewind(run_id, checkpoint_id, *,
+values=None, reviewer, tenant=None)` continues the run's conversation from one of them in a new
+run the run store records (`metadata["rewound"]`: the run, the checkpoint, who, when); the run
+rewound stays as it was. A call that did more than read past the checkpoint asks a person
+before it is made again, whatever was allowed before; what was spent stays counted. Refused:
+a run at work or ended, a reviewer who is not the run's user, a checkpoint of another run, an
+agent with no checkpoint history. Claude's file checkpoints are not driven by this API
+([react.md](docs/frameworks/react.md#rewinding-a-paused-run)).
 
 ### Added: handoffs between agents, with `langgraph-swarm`
 

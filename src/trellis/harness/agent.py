@@ -65,7 +65,12 @@ from trellis.harness.adapters.base import (
     metadata_of,
     model_name,
 )
-from trellis.harness.adapters.langgraph import checkpointing, hitl_response, is_hitl
+from trellis.harness.adapters.langgraph import (
+    checkpointing,
+    hitl_response,
+    is_hitl,
+    run_scoped,
+)
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges import helpers
 from trellis.harness.budget import BUDGET, Budget
@@ -101,7 +106,7 @@ from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
 from trellis.harness.journal import Journal
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
-from trellis.harness.runtime import Runtime, current, reason_of, run_of
+from trellis.harness.runtime import Runtime, current, principal, reason_of, run_of
 from trellis.harness.schedules import schedule_tools
 from trellis.harness.subagents import asked_by, cancel_children, child_run
 from trellis.harness.telemetry import metrics, output, retrieval_span, trace_hex
@@ -126,6 +131,19 @@ MEMORY: Final = frozenset(COVERS["memory"])
 #: Whether this trellis-contracts' schedules carry a queue order (``ScheduleSpec.priority``,
 #: ``concurrency_key``: 0.6.1 on).
 SCHEDULES_QUEUE: Final = {"priority", "concurrency_key"} <= set(ScheduleSpec.model_fields)
+#: What a run keeps of its own choices in its record's metadata (``Agent._metadata``): a run
+#: rewound from it takes them (:meth:`Agent.rewind`).
+CHOICES: Final = (WITHOUT, FRAMEWORK_OPTIONS, DOCUMENTS, BUDGET)
+#: The metadata key of a run rewound from another: the run and the checkpoint it continues,
+#: who rewound it and when.
+REWOUND: Final = "rewound"
+#: What an agent whose runs keep no checkpoint history answers :meth:`Agent.checkpoints` and
+#: :meth:`Agent.rewind`.
+NO_HISTORY: Final = (
+    "checkpoints and rewind are not supported for this agent: only a graph that keeps its "
+    "checkpoints in its run has a history to read and rewind (ReAct, or a create_agent or Deep "
+    "Agents graph built with middleware())"
+)
 #: How often ``RunHandle.result`` looks at a queued run.
 POLL_SECONDS: Final = 0.5
 #: The best tool hint's confidence below which the hints narrow nothing: every tool is offered
@@ -648,6 +666,104 @@ class Agent:
             remember=remember,
         )
         return self.hooks.answer(await self._continue(record, resolution))
+
+    async def checkpoints(self, run_id: str, *, tenant: str | None = None) -> AsyncIterator[Any]:
+        """The checkpoint history of a run of this agent, the newest first, as LangGraph's
+        ``StateSnapshot``s (its ``get_state_history``: each with its ``values``, what runs
+        ``next``, and its ``config``, whose ``checkpoint_id`` :meth:`rewind` takes) — read from
+        what the run store keeps of the run (saved with its pause, and with a worker's
+        progress), a page of ``bridges.rewind.CHECKPOINTS_PAGE`` at a time. Read-only.
+
+        The run store keeps a run's checkpoint until the run ends: an ended run has no
+        history left, and says so. For an agent whose runs keep their graph's checkpoints
+        (``ReAct``, a ``middleware()`` graph); any other answers that it has none. ``tenant``
+        is the run's, named by a platform key only; a run that is not this agent's in that
+        tenant is refused as every read of a run is."""
+        _, journal = await self._kept(run_id, tenant)
+        from trellis.harness.bridges import rewind  # noqa: PLC0415 - the react extra
+
+        async for state in rewind.checkpoints(self.target, run_id, journal):
+            yield state
+
+    async def rewind(
+        self,
+        run_id: str,
+        checkpoint_id: str,
+        *,
+        values: Any = None,
+        reviewer: str,
+        tenant: str | None = None,
+    ) -> Result:
+        """Continue a paused run's conversation from an earlier checkpoint of it
+        (:meth:`checkpoints`), as LangGraph's time travel does — ``values`` applied to that
+        state first, as its ``update_state`` applies them — in a new run of the same user and
+        thread, with what the run kept of its own choices, to its end or its first pause. The
+        run store records the new run (its ``metadata["rewound"]``: the run and the checkpoint
+        it continues, ``reviewer`` and when); the run rewound stays as it was — paused on its
+        question, its history readable: answer it, or cancel it.
+
+        What the run already did in the world is not undone, so nothing is done twice
+        unasked: a call that did more than read past the checkpoint asks a person before the
+        new run makes it again, whatever was allowed for the run or the conversation before;
+        a read is made again freely. What the run spent stays counted against the budget.
+
+        Refused: a run at work (queued or running, on any server), a run that has ended (the
+        run store keeps none of its checkpoints), a ``reviewer`` who is not the run's user, a
+        checkpoint that is none of the run's, a run that is not this agent's in ``tenant``
+        (the key's own; a platform key names it), and an agent whose runs keep no
+        checkpoints."""
+        record, journal = await self._kept(run_id, tenant)
+        if record.status is not RunStatus.PAUSED:
+            raise ConfigurationError(
+                f"run {run_id} is {record.status.value.lower()}: a run is rewound while it is "
+                "paused"
+            )
+        user = record.user_id
+        if user is None or principal(reviewer) != principal(user):
+            raise ConfigurationError(
+                f"run {run_id} is {user}'s: only its user rewinds it, not {reviewer}"
+            )
+        start = await self._start(
+            record.input,
+            user=user,
+            thread=record.thread_id,
+            tenant=record.tenant_id,
+            record_input=True,
+        )
+        from trellis.harness.bridges import rewind  # noqa: PLC0415 - the react extra
+
+        seeded = await rewind.rewound(self.target, journal, start.run_id, checkpoint_id, values)
+        if seeded is None:
+            raise ConfigurationError(f"no checkpoint {checkpoint_id} of run {run_id}")
+        kept = {key: record.metadata[key] for key in CHOICES if key in record.metadata}
+        rewound = {
+            "run_id": run_id,
+            "checkpoint_id": checkpoint_id,
+            "reviewer": reviewer,
+            "at": datetime.now(UTC).isoformat(),
+        }
+        start = start.model_copy(update={"metadata": {**kept, REWOUND: rewound}})
+        await admitted(self.harness.runs.start(start), "start")
+        opened = RunRecord.from_start(start)
+        return self.hooks.answer(await pipeline.attempt(self, opened, record.input, journal=seeded))
+
+    async def _kept(self, run_id: str, tenant: str | None) -> tuple[RunRecord, Journal]:
+        """A run of this agent whose checkpoints are read or rewound from, and the journal the
+        run store keeps of it: the agent one whose runs keep their graph's checkpoints, the
+        run its own in the caller's tenant (what every read of a run checks), and not ended —
+        the run store clears a run's checkpoint with its ending."""
+        if not run_scoped(self.target):
+            raise ConfigurationError(NO_HISTORY)
+        record = await self.harness.runs.get(run_id, tenant=await self.harness._tenant(tenant))
+        if record is None or record.agent_id != self.id:
+            raise ConfigurationError(f"no run {run_id} of agent {self.id}")
+        if record.final:
+            raise ConfigurationError(
+                f"run {run_id} has ended ({record.status.value.lower()}): the run store keeps a "
+                "run's checkpoints until it ends, so an ended run has none to read or rewind from"
+            )
+        artifacts = self.harness.runs.artifacts
+        return record, await Journal.read(record.checkpoint, artifacts, tenant=record.tenant_id)
 
     async def schedule(
         self,

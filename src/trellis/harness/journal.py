@@ -254,6 +254,14 @@ class Journal(BaseModel):
     #: with its outcome — the call and outcome its tool record is made of (what evaluators read:
     #: ``EvalCase.trajectory``); a call replayed from the journal is in it once
     trajectory: list[tuple[ToolCall, ToolOutcome]] = Field(default_factory=list)
+    #: the calls that did more than read (``content_key("call", tool, args)``), each with the
+    #: graph step it was made in (the checkpoint the step started from; ``None``: no
+    #: checkpointed graph's step), in the order made: what a rewind would make again
+    effects: list[tuple[str | None, str]] = Field(default_factory=list)
+    #: in a run rewound from another (:meth:`rewound`): the calls that one had made past the
+    #: checkpoint this one continues from — each asks a person before it is made again,
+    #: whatever was allowed before (``tools.bridge``), and leaves the list once asked
+    repeats: list[str] = Field(default_factory=list)
     #: the tools a reviewer approved for the rest of the run (``remember="run"``; ``"<tool> for
     #: <assignee>"`` when the approval was asked of someone): their later calls asked of the
     #: same are not asked about again in this run
@@ -356,6 +364,29 @@ class Journal(BaseModel):
 
     def dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
+
+    def asked_again(self, key: str | None) -> None:
+        """A person was asked about the call ``key`` (``None``: a call that is none of
+        :attr:`repeats`): the next call of it is decided as any call is."""
+        if key in self.repeats:
+            self.repeats.remove(key)
+
+    def rewound(self, graph: dict[str, Any], checkpoint_id: str) -> Journal:
+        """The journal of a run that continues this one's graph from its checkpoint
+        ``checkpoint_id`` (``graph``: its checkpoints up to there,
+        ``RunCheckpointer.rewound``): none of this run's call records — the graph makes its
+        steps past the checkpoint anew — but what they did stays known: every call that did
+        more than read past the checkpoint is one the new run asks a person about before
+        making it again (:attr:`repeats`); what this run spent stays spent, and the large
+        results its history names stay readable."""
+        past = {key for step, key in self.effects if step is None or step >= checkpoint_id}
+        return Journal(
+            graph=graph,
+            effects=list(self.effects),
+            repeats=sorted(past | set(self.repeats)),
+            spent=dict(self.spent),
+            results=dict(self.results),
+        )
 
     async def save(
         self, artifacts: RunArtifacts, run_id: str, *, worker_id: str | None, tenant: str
@@ -685,6 +716,11 @@ class Replay:
             self._mark("c", key, len(recorded) - 1, self._here())
         if tool is not None and tool not in self.journal.used:
             self.journal.used.append(tool)
+
+    def effected(self, key: str) -> None:
+        """The call ``key`` — one that does more than read — is made in the step under way
+        (``Journal.effects``)."""
+        self.journal.effects.append((self._here(), key))
 
     def record_step(self, call: ToolCall, outcome: ToolOutcome) -> None:
         """A call that ran, and its outcome, on the run's trajectory (the call without the

@@ -9,6 +9,7 @@ import asyncio
 import operator
 from typing import Annotated, Any, TypedDict
 
+import pytest
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -21,6 +22,8 @@ from trellis.contracts import RunStatus
 from trellis.harness import admission
 
 ITEMS = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+#: The admission limit the test runs under.
+AT_ONCE = 4
 
 
 class Fan(TypedDict, total=False):
@@ -55,16 +58,21 @@ def fan_out(worker: Any) -> Any:
 
 
 async def test_each_item_is_a_child_run_worked_at_once_within_the_admission_limit(
-    harness: Harness,
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # a limit that neither grows nor watches this machine: four children at once, exactly
+    monkeypatch.setattr(admission, "ADMISSION", admission.Admission(start=AT_ONCE, ceiling=AT_ONCE))
     at_once: list[int] = []
     working = 0
+    full = asyncio.Event()
 
     async def research(item: str, agent: Runtime) -> str:
         nonlocal working
         working += 1
         at_once.append(working)
-        await asyncio.sleep(0)  # the others start beside it
+        if working == AT_ONCE:
+            full.set()
+        await full.wait()  # none ends before as many work as the limit lets
         working -= 1
         return f"{item}: found"
 
@@ -87,4 +95,4 @@ async def test_each_item_is_a_child_run_worked_at_once_within_the_admission_limi
     assert sorted(str(k.input) for k in kids) == sorted(ITEMS)
     assert all(k.parent_run_id is not None and k.thread_id == "t" for k in kids)
     assert all(k.status is RunStatus.SUCCESS for k in kids)
-    assert 1 < max(at_once) <= admission.ADMISSION.limit  # at once, never past the limit
+    assert max(at_once) == AT_ONCE  # as many at once as the limit lets, never more

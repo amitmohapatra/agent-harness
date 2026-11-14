@@ -3199,6 +3199,9 @@ class RewindRefused(HarnessError):
     code = "REWIND_REFUSED"
 
 
+#: The thread whose checkpoints a task reads outside the thread's run, and where they are
+#: (:meth:`RunCheckpointer.bound`).
+_BOUND: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar("trellis_bound", default=None)
 #: Outside a run, how many threads :class:`RunCheckpointer` keeps (the most recently used).
 THREADS_KEPT: Final = 10_000
 
@@ -3208,8 +3211,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     ``get_state_history``, ``update_state`` and a thread continued from a ``checkpoint_id``
     work on it as on ``InMemorySaver``) — and, in a harness run whose ``thread_id`` is the
     run (``LangGraphAdapter`` sees to it), keeps them in the run's journal (``Journal.graph``),
-    saved with the run's progress and with its pause, for as long as the run store keeps the
-    run. A resume in any worker continues where the graph stopped: the model is not asked
+    saved with the run's progress and with its pause, until the run ends (the run store
+    clears a run's checkpoint with its ending). A resume in any worker continues where the
+    graph stopped: the model is not asked
     again, a summary is not written again, a tool that finished beside a pause is not run
     again. Outside a run it is an in-memory checkpointer.
 
@@ -3222,9 +3226,10 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
 
     As the root graph's checkpoint moves past a step, the journal's records of that step's
     calls go (``Replay.passed``): the graph does not make them again. Inside a run, a
-    checkpoint that follows an earlier one than the latest — a rewind — is refused
-    (:class:`RewindRefused`): continued from there, the run would make again the calls it
-    made since, and nothing yet asks a person about the writes among them. A checkpoint that
+    checkpoint that follows an earlier one than the latest — a fork from the run's own code —
+    is refused (:class:`RewindRefused`): a run is rewound from outside it, into a new run
+    that asks a person about the writes it would repeat (``Agent.rewind``: :meth:`rewound`,
+    :meth:`bound`). A checkpoint that
     cannot be read back fails the run (:class:`CheckpointUnreadable`). The thread ends with
     the run; what its conversation carries to its next turn
     (``adapters.langgraph.CARRIED``) is read from each checkpoint as it is kept
@@ -3237,8 +3242,42 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         self._threads: LRU[str, dict[str, Any]] = LRU(THREADS_KEPT)
 
     # ------------------------------------------------------------------ storage
+    @contextlib.contextmanager
+    def bound(self, thread_id: str, graph: dict[str, Any]) -> Iterator[None]:
+        """Inside, ``thread_id``'s checkpoints are ``graph`` — a run's ``Journal.graph``, read
+        from the run store — for the task that entered: LangGraph's own API reads a run's
+        history (``get_state_history``), or updates the state a rewound run starts from
+        (``update_state``), outside any attempt of the run (``bridges.rewind``)."""
+        token = _BOUND.set((thread_id, graph))
+        try:
+            yield
+        finally:
+            _BOUND.reset(token)
+
+    def rewound(self, graph: Mapping[str, Any], checkpoint_id: str) -> dict[str, Any] | None:
+        """``graph`` (a thread's checkpoints, by namespace) as a thread that stopped at its
+        root graph's checkpoint ``checkpoint_id``: that one its latest — with none of the
+        writes made after it, so the steps that followed it are made again —, the earlier
+        ones its history, a sub-graph's as they are. ``None``: no checkpoint it kept."""
+        root = graph.get("") or {}
+        target = _kept(root).get(checkpoint_id)
+        if target is None:
+            return None
+        names = list(root.get("deltas") or {})
+        latest = {
+            **{key: target[key] for key in ("id", "checkpoint", "metadata", "parent")},
+            "writes": [],
+            "deltas": self._delta_history(root, checkpoint_id, names),
+            "history": [r for r in root.get("history", ()) if r["id"] < checkpoint_id],
+        }
+        return {**graph, "": latest}
+
     def _slot(self, thread_id: str) -> dict[str, Any]:
-        """Where the thread's checkpoints are: the run's journal, for the run's own thread."""
+        """Where the thread's checkpoints are: what the task is :meth:`bound` to, else the
+        run's journal, for the run's own thread."""
+        bound = _BOUND.get()
+        if bound is not None and bound[0] == thread_id:
+            return bound[1]
         runtime = current()
         if runtime is not None and runtime.run_id == thread_id:
             journal = runtime.replay.journal

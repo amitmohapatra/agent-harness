@@ -225,6 +225,23 @@ stops a run wherever it is ([reliability.md](reliability.md#cancel)). `events` i
 events until it ends, from any replica with `RUNS_URL`
 ([runs.md](runs.md#a-runs-events-from-anywhere)).
 
+### agent.checkpoints, agent.rewind
+
+```text
+agent.checkpoints(run_id, *, tenant=None) -> AsyncIterator[StateSnapshot]
+await agent.rewind(run_id, checkpoint_id, *, values=None, reviewer, tenant=None) -> Result
+```
+
+For an agent whose runs keep their graph's checkpoints (`ReAct`, a `middleware()` graph).
+`checkpoints` is a paused run's checkpoint history, newest first, as LangGraph's
+`StateSnapshot`s, read-only, a page of 20 at a time. `rewind` continues the run's
+conversation from one of them in a new run of the same user and thread — `values` applied
+first as LangGraph's `update_state` applies them — recorded with who rewound what
+(`metadata["rewound"]`); a call that did more than read past the checkpoint asks a person
+before it is made again. An ended run has no checkpoints left (the run store clears them),
+and any other agent answers that it has none
+([react.md](frameworks/react.md#rewinding-a-paused-run)).
+
 ### agent.schedule
 
 ```text
