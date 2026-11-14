@@ -165,6 +165,27 @@ async def test_one_poller_and_one_listing_per_tick_serve_every_open_thread(
     assert threads.polling is None  # nobody listening: no polling
 
 
+async def test_the_poller_looks_once_a_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+    sleep = asyncio.sleep
+
+    async def quick(seconds: float) -> None:  # each wait the poller asks for, said and shortened
+        waits.append(seconds)
+        await sleep(0)
+
+    chat = Chat()
+    sid = await chat.schedule()
+    stream = chat.stream()
+    await events(stream, 4)
+    monkeypatch.setattr(threads_module.asyncio, "sleep", quick)
+    await chat.fire(sid, "Only 2 left.")
+    assert texts(await events(stream, 4)) == ["Only 2 left."]
+    monkeypatch.undo()
+    await stream.aclose()
+    await chat.harness.aclose()
+    assert 1.0 in waits  # one look per second
+
+
 async def test_the_route_needs_a_caller_and_is_in_the_openapi_document() -> None:
     chat = Chat()
     transport = httpx.ASGITransport(app=chat.app)
