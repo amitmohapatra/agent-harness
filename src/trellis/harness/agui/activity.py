@@ -5,7 +5,7 @@ It is derived from the tool events the stream already carries (each call once, b
 nothing is recorded for it: a run's line counts its calls in every attempt this replica served
 (``hub.RunBuffer.activity``), and a reconnect served from agent-runs' event log (another
 replica) derives it again from the whole log. Each line shares the number of
-the result it follows (``hub.RunBuffer.publish(derived=True)``).
+the result it follows (``hub.number_of``).
 """
 
 from __future__ import annotations

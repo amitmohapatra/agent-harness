@@ -33,9 +33,10 @@ The routes are in the app's OpenAPI document (tag ``agui``): the streams as
 ``text/event-stream``, every refusal as an RFC 9457 problem document (``code``, ``detail``).
 Each run's events are buffered in this process (``hub.py``); with agent-runs (``RUNS_URL``)
 they are also in the run's log there, so a reconnect that reaches another replica reads them
-from it — from the position its ``Last-Event-ID`` names (an id another replica numbered is no
-larger than the event's position: a failover may repeat events, never skip one). Without
-agent-runs a reconnect must reach the replica that served the run (sticky sessions).
+from it — past the event its ``Last-Event-ID`` names: an event's id is where it is in the run's
+log (its attempt and sequence: ``hub.number_of``), the same on every replica, so a failover
+neither repeats nor skips one. Without agent-runs a reconnect must reach the replica that
+served the run (sticky sessions).
 
 A start or resume agent-runs refuses for the tenant's rate limit, after its SDK's retries, is
 ``429`` (``RATE_LIMIT``) with ``Retry-After``.
@@ -79,7 +80,7 @@ from trellis.harness.agui.events import (
     ResumeStatus,
     RunAgentInput,
 )
-from trellis.harness.agui.hub import Hub, RunBuffer
+from trellis.harness.agui.hub import Hub, RunBuffer, number_of
 from trellis.harness.agui.sse import MEDIA_TYPE, encode
 from trellis.harness.agui.threads import Threads
 from trellis.harness.agui.translate import translate
@@ -340,7 +341,7 @@ class _Surface:
         except (ConfigurationError, ValueError) as exc:
             raise HTTPException(409, f"{BAD_RESUME}: {exc}") from exc
         buffer = self.hub.open(record.run_id, user)
-        after = buffer.published - 1
+        after = buffer.last
         app = _frontend_now(record.metadata, body)
         self._launch(
             buffer,
@@ -412,8 +413,8 @@ class _Surface:
         return StreamingResponse(store.chunks(folder, name), media_type=kind, headers=headers)
 
     async def logged(self, run_id: str, user: str, after: int) -> AsyncIterator[str]:
-        """A run this process did not serve, from agent-runs' event log: its events past
-        position ``after`` as AG-UI events numbered by position, live until it ends. Only the
+        """A run this process did not serve, from agent-runs' event log: its events numbered
+        past ``after`` as AG-UI events (``hub.number_of``), live until it ends. Only the
         run's own user; 404 without agent-runs, or for anyone else's run."""
         agent = self.agent
         store = event_log(agent.harness.runs)
@@ -431,12 +432,13 @@ class _Surface:
             async for entry in entries:
                 translated = translate(entry.event)
                 grouped = activity.seen(entry.event)
-                if entry.position <= after:
+                number = number_of(entry.event)  # as the replica that served it numbered it
+                if number <= after:
                     continue
                 if translated is not None:
-                    yield encode(translated, entry.position)
+                    yield encode(translated, number)
                 if grouped is not None:
-                    yield encode(grouped, entry.position)
+                    yield encode(grouped, number)
 
         return read()
 
@@ -458,12 +460,13 @@ class _Surface:
             nonlocal ended
             shown = self.agent.hooks.event(event)
             translated = translate(shown)
+            number = number_of(event)  # the same on every replica (``hub.number_of``)
             if translated is not None:
                 ended = ended or event.type is RunEventType.RUN_FINISHED
-                buffer.publish(translated)
+                buffer.publish(translated, number)
             grouped = activity.seen(shown)
             if grouped is not None:
-                buffer.publish(grouped, derived=True)
+                buffer.publish(grouped, number)
 
         async def guarded() -> None:
             try:
@@ -477,7 +480,8 @@ class _Surface:
             if ended:
                 buffer.finish()
             else:
-                buffer.publish(_ending(result, thread_id, run_id, message), final=True)
+                ending = _ending(result, thread_id, run_id, message)
+                buffer.publish(ending, buffer.last + 1, final=True)
 
         task = asyncio.create_task(guarded(), name=f"agui:{run_id}")
         self._tasks.add(task)

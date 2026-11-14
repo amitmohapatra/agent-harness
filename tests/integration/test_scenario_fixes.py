@@ -292,6 +292,42 @@ async def test_scn3_the_activity_line_of_a_run_resumed_where_it_paused_counts_ev
     assert activity[-1]["content"]["tools"] == 2, activity
 
 
+async def test_agui_event_ids_are_the_same_on_every_replica() -> None:
+    """H-AGUI: a run paused and resumed on the replica that served it, then read by a client
+    that reconnects to another replica (agent-runs' event log): every event has the same id on
+    both — across both attempts — and a reconnect with ``Last-Event-ID`` set to any event's id
+    goes on with the next one: no event repeated, none skipped."""
+    runs = LoggedRuns()
+
+    async def served(client: httpx.AsyncClient) -> list[tuple[int, dict[str, Any]]]:
+        said = {"threadId": "t1", "messages": [{"id": "u1", "role": "user", "content": "go"}]}
+        first = decode((await client.post("/agui/run", json=said)).text)
+        [entry] = first[-1][1]["outcome"]["interrupts"]
+        resume = {"interruptId": entry["id"], "payload": True}
+        answer = {"threadId": "t1", "messages": [], "resume": [resume]}
+        return first + decode((await client.post("/agui/run", json=answer)).text)
+
+    build = two_nodes(checkpointed=False)
+    here = await _served(runs, build, served)
+    run_id = here[-1][1]["runId"]
+    assert here[-1][1]["type"] == "RUN_FINISHED" and here[-1][1]["result"] == "done", here[-1]
+
+    async def read(client: httpx.AsyncClient) -> list[list[tuple[int, dict[str, Any]]]]:
+        path = f"/agui/runs/{run_id}/events"
+        whole = decode((await client.get(path)).text)
+        after = [
+            decode((await client.get(path, headers={"Last-Event-ID": str(n)})).text)
+            for n, _ in whole
+        ]
+        return [whole, *after]
+
+    there, *reconnected = await _served(runs, build, read)
+    assert [(n, e["type"]) for n, e in there] == [(n, e["type"]) for n, e in here], there
+    numbers = [n for n, _ in there]
+    for (n, _), rest in zip(there, reconnected, strict=True):
+        assert [m for m, _ in rest] == [m for m in numbers if m > n], (n, rest)
+
+
 # --------------------------------------------------------------------- a slow or absent memory
 
 
