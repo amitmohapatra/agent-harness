@@ -271,6 +271,14 @@ def test_before_its_root_span_an_item_names_no_root_and_no_environment() -> None
     assert item.root()["langfuse.experiment.description"] == "d"
 
 
+def test_a_propagated_value_of_200_characters_is_carried_and_a_longer_one_left_out() -> None:
+    item = telemetry.Experiment(id="e", name="n" * 200, item_id="i" * 201)
+    assert item.propagated() == {
+        "langfuse.experiment.id": "e",
+        "langfuse.experiment.name": "n" * 200,
+    }
+
+
 def test_an_item_id_hashes_the_input_as_the_sdk_serializes_it() -> None:
     from trellis.harness.evals import item_id_of
 
