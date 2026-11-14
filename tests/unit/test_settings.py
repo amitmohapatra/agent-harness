@@ -91,7 +91,7 @@ def test_the_spool_defaults_to_the_xdg_state_folder_where_it_lasts(
         == "/x"
     )
     with caplog.at_level("WARNING", logger="trellis.settings"):
-        for marker in settings_module.EPHEMERAL_MARKERS:
+        for marker in ("K_SERVICE", "KUBERNETES_SERVICE_HOST", "AWS_LAMBDA_FUNCTION_NAME"):  # docs
             assert (
                 Settings.from_env({marker: "1", "XDG_STATE_HOME": str(tmp_path)}).spool_dir is None
             )
