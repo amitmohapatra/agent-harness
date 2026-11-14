@@ -1,0 +1,23 @@
+LongMemEval-S retrieval benchmark: 64 questions
+ALL                        n=64 | main   turn recall@10/@50/@100 0.865/0.917/0.917 | session recall@10/@50 0.973/0.995 | all gold turns @10/@100 51/55 | memories 25.3 | tokens 7632 | about lines 2.5
+                              branch turn recall@10/@50/@100 0.865/0.917/0.917 | session recall@10/@50 0.973/0.995 | all gold turns @10/@100 51/55 | memories 26.2 | tokens 7913 | about lines 4.1
+                              first 10 identical 64 | main's memories all kept, in order, first 64 | same ranked candidates 64 | questions gaining at any depth 0, losing 0
+knowledge-update           n=10 | main   turn recall@10/@50/@100 0.950/0.950/0.950 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 9/9 | memories 27.0 | tokens 7520 | about lines 2.5
+                              branch turn recall@10/@50/@100 0.950/0.950/0.950 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 9/9 | memories 28.1 | tokens 7897 | about lines 3.9
+                              first 10 identical 10 | main's memories all kept, in order, first 10 | same ranked candidates 10 | questions gaining at any depth 0, losing 0
+multi-session              n=16 | main   turn recall@10/@50/@100 0.698/0.885/0.885 | session recall@10/@50 0.912/1.000 | all gold turns @10/@100 9/13 | memories 27.0 | tokens 7888 | about lines 2.2
+                              branch turn recall@10/@50/@100 0.698/0.885/0.885 | session recall@10/@50 0.912/1.000 | all gold turns @10/@100 9/13 | memories 27.3 | tokens 7996 | about lines 2.3
+                              first 10 identical 16 | main's memories all kept, in order, first 16 | same ranked candidates 16 | questions gaining at any depth 0, losing 0
+single-session-assistant   n= 8 | main   turn recall@10/@50/@100 1.000/1.000/1.000 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 8/8 | memories 20.1 | tokens 7439 | about lines 2.5
+                              branch turn recall@10/@50/@100 1.000/1.000/1.000 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 8/8 | memories 21.4 | tokens 7825 | about lines 5.8
+                              first 10 identical 8 | main's memories all kept, in order, first 8 | same ranked candidates 8 | questions gaining at any depth 0, losing 0
+single-session-preference  n= 4 | main   turn recall@10/@50/@100 0.333/0.417/0.417 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 1/1 | memories 23.8 | tokens 7997 | about lines 2.5
+                              branch turn recall@10/@50/@100 0.333/0.417/0.417 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 1/1 | memories 23.8 | tokens 7997 | about lines 2.5
+                              first 10 identical 4 | main's memories all kept, in order, first 4 | same ranked candidates 4 | questions gaining at any depth 0, losing 0
+single-session-user        n= 9 | main   turn recall@10/@50/@100 1.000/1.000/1.000 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 9/9 | memories 23.2 | tokens 6831 | about lines 2.9
+                              branch turn recall@10/@50/@100 1.000/1.000/1.000 | session recall@10/@50 1.000/1.000 | all gold turns @10/@100 9/9 | memories 25.7 | tokens 7675 | about lines 8.1
+                              first 10 identical 9 | main's memories all kept, in order, first 9 | same ranked candidates 9 | questions gaining at any depth 0, losing 0
+temporal-reasoning         n=17 | main   turn recall@10/@50/@100 0.961/0.961/0.961 | session recall@10/@50 0.980/0.980 | all gold turns @10/@100 15/15 | memories 26.7 | tokens 7886 | about lines 2.5
+                              branch turn recall@10/@50/@100 0.961/0.961/0.961 | session recall@10/@50 0.980/0.980 | all gold turns @10/@100 15/15 | memories 27.0 | tokens 7992 | about lines 3.3
+                              first 10 identical 17 | main's memories all kept, in order, first 17 | same ranked candidates 17 | questions gaining at any depth 0, losing 0
+ingest per question: mean 674 s

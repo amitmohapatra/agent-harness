@@ -281,3 +281,4 @@ Kimi merge job's targeted run: 991 passed, 54 skipped, 1 deselected (the hanging
 ledger line saying it was kept out of the public repo). REMAINING.md gains "Two things only
 the owner can settle": the public security findings not confirmed fixed (SEC-R-3, 4, 6, 8)
 and the three rewind decisions.
+- 23:50 UTC: at the owner's instruction, everything note-like is on main: three job notes, two older reports, the Confluence set (archive), earlier memory-experiment notes; older experiment code pushed to backup branches (harness -backup-aa-*, -asked-answer; memory -backup-router-experiment).

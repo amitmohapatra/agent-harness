@@ -1,0 +1,9 @@
+The brief has new sections. Re-read /home/user/ARCHITECT_BRIEF.md section 2 before your next commit: "No unused or unnecessary code", "SOLID, applied to this codebase" and "Design patterns". In short:
+- Delete what your change leaves without a caller, in the same commit.
+- Run `ruff check --select F,ARG,ERA,PIE,SIM,RET,C90` and `vulture --min-confidence 80` on the files you touched, and resolve every hit.
+- No speculative parameters, wrappers or defensive branches.
+- No branch on a library or tool name in shared code (pipeline.py, bridges/, tools/bridge.py); implement the existing protocol.
+- No module-level singletons.
+- Split a function that does two jobs, or that goes over ~50 statements or complexity 10.
+- Use the patterns already in the codebase; no factory, registry or base class with a single implementation.
+Apply this to the code you already wrote on your branch as well as to new code. List what you removed or restructured in your report.
