@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import logging
 import posixpath
 import re
@@ -92,6 +93,26 @@ NAME_CHARS: Final = 63
 #: How often a process deletes, in the background, a tenant's sandboxes whose runs ended
 #: without deleting them (the first time it makes one, then at most this often).
 REAP_SECONDS: Final = 600.0
+#: When this process began to delete each sandbox (the most recent; :data:`_STEPS`): a run's
+#: end and the reaper, which may come to one sandbox at once, delete it once.
+_DELETING: LRU[tuple[str, str], int] = LRU()
+_STEPS = itertools.count()
+
+
+def _claimed(ref: SandboxRef, *, since: int | None = None) -> bool:
+    """Whether this caller is the one to delete ``ref`` (and it is marked so, with no
+    ``await`` between the look and the mark): a run's end (``since`` ``None``), unless the
+    reaper began to — a run's sandbox is made once and ended once; the reaper, unless
+    someone began to since its round began (``since``: its listing may be older than that
+    delete; a sandbox deleted before it and made again since is its to delete)."""
+    key = (ref.provider, ref.id)
+    begun = _DELETING.get(key)
+    if begun is not None and (since is None or begun >= since):
+        return False
+    _DELETING[key] = next(_STEPS)
+    return True
+
+
 #: What the environment card is read with, in a sandbox made for it alone: the Python version,
 #: then each installed distribution as ``name==version`` (the standard library's
 #: ``importlib.metadata``; pip's own tools left out).
@@ -585,6 +606,8 @@ async def ended(
     if source is None:  # not among the agent's own sources (a handoff's specialist's)
         log.warning("the sandbox %s of run %s is left to the reaper", ref.id, run_id)
         return
+    if not _claimed(ref):  # the reaper is deleting it
+        return
     try:
         await source.provider_for().delete(ref)
     except Exception as exc:
@@ -599,9 +622,11 @@ async def reap(provider: SandboxProvider, runs: RunStore, *, tenant: str) -> lis
     know (kept in a process that is gone, without ``RUNS_URL``) is left alone: no store says
     it ended."""
     deleted: list[SandboxRef] = []
+    since = next(_STEPS)
     for ref in await provider.labelled({TENANT: tenant}):
         record = await runs.get(ref.labels[RUN], tenant=tenant)
-        if record is not None and record.final:
+        # not one its run's end (in this process) is deleting meanwhile
+        if record is not None and record.final and _claimed(ref, since=since):
             await provider.delete(ref)
             deleted.append(ref)
     return deleted

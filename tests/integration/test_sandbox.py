@@ -456,12 +456,15 @@ async def test_a_run_that_fails_times_out_or_is_cancelled_deletes_its_sandbox(
     [run_id] = list(agent.running)
     await agent.cancel(run_id, reason="not needed")
     assert (await running).status is RunStatus.CANCELLED
-    stream = agent.stream("wait", user="u")
+    stream, streamed = agent.stream("wait", user="u"), ""
     async for event in stream:
         if event.type is RunEventType.TOOL_CALL_RESULT:
+            streamed = event.run_id
             break
     await stream.aclose()  # the caller went away: the run ends CANCELLED
-    await asyncio.sleep(0.05)
+    async with asyncio.timeout(10):  # its attempt ends after the stream did, however slowly
+        while streamed in agent.running:  # noqa: ASYNC110 - the attempt's task is the run's own
+            await asyncio.sleep(0.01)
     asked = arm(harness.wrap(_asking, id="asker"), [sandbox(provider).tools()])
     for decided in ("cancel", "resume"):
         waiting = await asked.run("x", user="u")  # paused: no attempt ends it when cancelled
@@ -517,6 +520,35 @@ class Retrying(LocalRuns):
         if error is not None and error.retryable and worker_id is not None:
             return await self.release(run_id, worker_id, tenant=fields.get("tenant"))
         return await super().finish(run_id, status, error=error, worker_id=worker_id, **fields)
+
+
+async def test_a_sandbox_its_runs_end_and_the_reaper_delete_at_once_is_deleted_once(
+    harness: Harness,
+) -> None:
+    """The reaper (in the background, when a process makes a sandbox) lists a sandbox whose
+    run has just ended in this process while that run's end deletes it: one of them deletes
+    it, the other passes it over — never two deletes of one sandbox at once (a provider may
+    refuse the second, which would stop the reaper's round and log the run's end as not
+    deleted)."""
+
+    async def work(input: str, agent: Runtime) -> Any:
+        return "done"
+
+    provider = FakeSandboxes()
+    agent = arm(harness.wrap(work, id="ended"), [sandbox(provider).tools()])
+    ended_run = await agent.run("x", user="u")
+    ref = SandboxRef(
+        provider="fake",
+        id=f"trellis-{ended_run.run_id}",
+        labels={RUN: ended_run.run_id, TENANT: "default"},
+    )
+    await provider.create(ref, SandboxSpec())  # its run ends now, its sandbox not deleted yet
+    await asyncio.gather(
+        reap(provider, harness.runs, tenant="default"),
+        ended(agent, ref.model_dump(), ended_run.run_id),
+    )
+    assert [c for c in provider.calls if c == ("delete", ref.id)] == [("delete", ref.id)]
+    assert provider.boxes == {}
 
 
 async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
