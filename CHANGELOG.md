@@ -5,6 +5,96 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: sub-agents in the background, with no server to host
+
+`ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts
+— take tasks in the background in a chat a person reads: Deep Agents' five async sub-agent tools
+(`start_async_task`...), the task a child run of the turn at work in the process and held in the
+run store, its result a notification (langchain-core's notification metadata, Deep Agents'
+shape) given to the conversation's model at its next model call or turn, or by a turn of the
+chat's own on its thread stream when it is idle; its questions asked through the chat
+(`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
+
+### Fixed: LangChain, LangGraph and Deep Agents features through the harness
+
+A library's feature works as the library does it; the harness governs, records and counts it.
+
+- **Security.** Deep Agents' file tools on a `CompositeBackend` are governed call by call, by
+  where the path is routed: a write or read on a disk, store or sandbox route is a call of the
+  run (the catalog's rules, approvals, records) though another route keeps files in the graph's
+  state. Before, one state route — the run's skills beside a sandbox,
+  `create_deep_agent(**deep_agent(sandbox(), src))` — left every route ungoverned and unrecorded.
+- **Security.** With a `PIIMiddleware` that checks input, the memory context the harness
+  sends with the question passes the same rule (redacted, masked or hashed; `block` ends the
+  run before a model call), and the turn recorded in memory holds the question as the graph
+  kept it, not the raw input.
+- **Security.** What a run keeps of its graph — the checkpoint a `RunCheckpointer` keeps in
+  the run's journal, and a tool's `Command` kept for a replay — is read back in LangGraph's
+  strict mode: only LangGraph's and LangChain's own types and the types the graph's state
+  declares are made of stored data; anything else stays data and is never imported or called.
+- A Deep Agents graph with no thread of its own (`ReAct`, a graph compiled without a
+  checkpointer or with `RunCheckpointer`) keeps its state files and todos across the turns
+  of a conversation, as it keeps its background tasks: a file one turn wrote is read by the
+  next, one it deleted stays deleted. Bounded as before (256 KiB kept in the file store).
+- A `ReAct` sub-agent's `interrupt_on` is Deep Agents' own approval gate again, with its
+  `when`, `allowed_decisions` and `description` (it was flattened into an `irreversible`
+  catalog risk for the tools it named); still one question a call.
+- What a decision model used (`langchain_core.decisions`: the classifier of
+  `AutoModeMiddleware` and `ModelRouterMiddleware`) is counted in the run's budget, and a
+  call `AutoModeMiddleware` blocks is on the run's events and records as a failed call.
+- A graph's stream passes its stream transformers (`astream_events(version="v3")`):
+  `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
+- A graph's own tool call ends with the message its tool made: artifacts and content blocks
+  are kept (a replay after a pause included). Without `middleware()`, results are the
+  library's as returned (no large-result or table rewriting), and a call made twice in one
+  step runs twice; the harness's own tools are unchanged.
+- No false `NO_ANSWER`: a `return_direct` tool's result, a non-conversation state, a Pydantic
+  or dataclass state and an `@entrypoint`'s return value are the answer; a string input goes
+  as it is to a graph whose input schema takes a string.
+- `HumanInTheLoopMiddleware(interrupt_mode="per_call")` is an approval of its call; the gate's
+  decision is governance's too (one question a call); an edit of a batch of several calls is
+  refused unless it gives one decision for each. `interrupt(response_schema=...)` is the
+  question's `expects`.
+- A tool `langchain.mcp` (or `langchain-mcp-adapters`) made of an MCP server's is governed by
+  the server's annotations (`metadata["mcp"]["tool"]["annotations"]`): a read-only one runs
+  unasked.
+- A model called in a graph's sync node is accounted and watched for stalls.
+
+### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
+
+- Deep Agents reads its async tasks' statuses itself and adds each outcome as a notification:
+  the harness treats a notification as a message the user did not type (the turn's question,
+  the transcript and memory record, the earlier-results and turn logic, the conversation's
+  earlier turns); the records it updates are carried with the task list; the extra model turn
+  after a final answer counts against `max_steps`, and past it the run keeps its answer
+  instead of LangChain's "Model call limits exceeded".
+- A task held by a server is read after 10 s at most, then less and less often (up to every
+  two minutes, with jitter): an idle chat is told how it ended, a task whose
+  run was cancelled from another server is cancelled on its server, and a follow-up to a task
+  that ended is a run of its own.
+- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
+- An empty task list is not carried.
+
+### Changed: the five task tools are governed one way, on a server or in the harness
+
+- `start_async_task`, `update_async_task` and `cancel_async_task` are writes wherever the task
+  runs, announced on the run's stream and not asked about; `check_async_task` and
+  `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
+  cancel of a harness task no longer pauses a chat for an approval.
+
+### Security: a background task belongs to the conversation that started it (SEC-R-1)
+
+- The task tools, the questions asked through a chat, each pull and each recorded
+  notification act on a task's run only when it is the conversation's: its tenant's and
+  user's, started by its agent in its chat thread, under the task's id
+  (`background.owned`; Deep Agents' tasks on a server: `bridges.async_tasks`). Any other is
+  answered as a task the conversation does not track.
+- A run's input names no task list: `async_tasks` in a mapping input is left out (the
+  conversation's list is the one the harness carries). A message a client of a chat surface
+  gives — AG-UI `state`, an A2A data part — keeps its role, content, name, id and tool calls;
+  `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
+  notification (`history.from_client`).
+
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
 
 Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
@@ -436,7 +526,8 @@ the next turn's `check_async_task` was refused its id.
   ended, or a worker's turn still running while another ends, each keep their tasks. (Two
   turns ending at the same moment could still lose one's: fixed above.) A turn
   that waits for an approval has its list kept as it pauses: the task it started is listed
-  by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
+  by the next turn meanwhile, and is still found, cancelled, when the turn is cancelled at the
+  approval.
 - **The five task tools say what they do** where the harness says it of Deep Agents' own
   tools: a status check and the list are reads; a start, an update and a cancel are writes,
   announced and not asked about (the tool catalog still comes first). A write's result is
@@ -445,9 +536,17 @@ the next turn's `check_async_task` was refused its id.
   which invited a second task; it is left as it was said, and a status check's is still
   marked.
 
+- **Each task is a child run of the turn that started it** (`bridges.async_tasks`): its
+  task's id, server and graph recorded, held in the run store while it runs (no polling), and
+  ended `SUCCESS`, `ERROR` or `CANCELLED` when a later check, list or cancel says how the task
+  ended, on any server that shares the run store.
+- **A cancelled turn cancels the tasks it started**, on their server through Deep Agents' own
+  `cancel_async_task` and as runs — cancelled while it works, at its approval, or taken over
+  by a newer message — where they ran on.
+
 Not in this release: nothing tells the chat when a task ends (the model checks in a later
-turn); cancelling a turn does not cancel its task; a graph with neither `middleware()` nor a
-checkpointer loses the task of a turn cancelled after its start. See
+turn); a graph with neither `middleware()` nor a checkpointer loses the task of a turn
+cancelled after its start (the task is cancelled with it). See
 [docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
 
 ### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
@@ -490,6 +589,14 @@ wrapped agent did not get what the SDK gives:
 - **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
   takes it with `--resume` only to fork), and options with `continue_conversation` failed at
   once (the SDK asked the journal's store for the latest session): both work.
+- **Workflows and messages to other agents.** The bundled CLI offers a dynamic workflow
+  (`Workflow`) with no server flag: one background task whose agents have no task of their
+  own, an agent's first tool call reaching the harness before any frame names it, so its
+  calls were taken for the main agent's (and the launch asked a person as an undeclared
+  tool). `SendMessage` resumed a finished background subagent as a new task no child run
+  held, or reached another Claude session. Both are disallowed, as the schedules are, with
+  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`; 2.1.283 has none and
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing of what it sends).
 
 Tested through the harness on the query path and in a live session: every hook event of the
 options' own, `can_use_tool` with its suggestions and permission updates, every option's

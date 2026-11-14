@@ -204,17 +204,16 @@ def test_a_declarative_sub_agent_is_given_the_loops_guards_and_a_routed_model() 
     assert spec["middleware"][0] is mine  # its own kept
     assert spec["middleware"][2].timeout == 5.0
     assert spec["middleware"][3].native is cached  # its own caching, for a routed model too
-    by_name = {t.name: t for t in spec["tools"]}
-    assert by_name["wire"].metadata["side_effects"] == "irreversible"  # the catalog's ask
-    assert "side_effects" not in (by_name["stock_lc"].metadata or {})
-    assert spec["interrupt_on"] == {"write_file": True}  # not its tool: Deep Agents' gate
+    # its approval gate is Deep Agents' own, as given: nothing of it becomes a catalog risk
+    assert spec["tools"] == [wire, stock_lc]
+    assert spec["interrupt_on"] == {"wire": True, "stock_lc": False, "write_file": True}
     plain = _native(
         {"name": "p", "description": "d", "interrupt_on": {"x": False}},
         call_timeout=None,
         max_steps=1,
         max_repeats=2,
     )
-    assert "interrupt_on" not in plain and "tools" not in plain
+    assert plain["interrupt_on"] == {"x": False} and "tools" not in plain
     compiled = {"name": "c", "description": "d", "runnable": object()}
     assert _native(dict(compiled), call_timeout=None, max_steps=1, max_repeats=2) == compiled
 
@@ -229,41 +228,62 @@ def stock_lc(sku: str) -> int:
     return 7
 
 
-def test_a_function_named_in_interrupt_on_becomes_a_tool_that_asks() -> None:
-    def refund(order: str) -> str:
-        """Refund an order.
-
-        Args:
-            order: The order.
-        """
-        return order
-
-    spec = _native(
-        {"name": "r", "description": "d", "tools": [refund], "interrupt_on": {"refund": True}},
-        call_timeout=None,
-        max_steps=1,
-        max_repeats=2,
-    )
-    assert spec["tools"][0].name == "refund"
-    assert spec["tools"][0].metadata["side_effects"] == "irreversible"
-
-
-async def test_a_sub_agents_tool_named_in_its_interrupt_on_asks_a_person(
-    harness: Harness,
-) -> None:
-    helper = ScriptedChatModel(turns=[("wire", {"amount": 5}), "wired 5"])
+def paying(gate: Any, amount: int = 5) -> tuple[Any, ScriptedChatModel]:
+    """A ``ReAct`` whose ``payer`` sub-agent wires ``amount`` behind its own ``interrupt_on``
+    for ``wire`` (``gate``), and the main agent's model."""
+    helper = ScriptedChatModel(turns=[("wire", {"amount": amount}), f"wired {amount}"])
     payer = {"name": "payer", "description": "Pays.", "model": helper, "tools": [wire]}
-    payer["interrupt_on"] = {"wire": True}
+    payer["interrupt_on"] = {"wire": gate}
     model = ScriptedChatModel(
-        turns=[("task", {"description": "pay 5", "subagent_type": "payer"}), "paid"]
+        turns=[("task", {"description": "pay", "subagent_type": "payer"}), "paid"]
     )
-    agent = harness.wrap(ReAct("s", model, subagents=[payer]), id="pays")
+    return ReAct("s", model, subagents=[payer]), model
+
+
+async def test_a_sub_agents_interrupt_on_is_its_own_gate_asked_once(harness: Harness) -> None:
+    """A sub-agent's ``interrupt_on`` is Deep Agents' own approval (LangChain's HITL in the
+    sub-agent), not a catalog risk: one question for the call — the gate's, which governance
+    takes for its own — and the approved call runs once."""
+    target, model = paying(True)
+    agent = harness.wrap(target, id="pays")
     paused = await agent.run("pay 5", user="u")
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
-    assert "wire" in paused.interrupt.question
+    assert paused.interrupt.question == "Approve wire?"
+    assert (paused.interrupt.payload or {})["action_requests"][0]["name"] == "wire"
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "paid", done.error
     assert "wired 5" in str(model.seen[-1][-1].content)
+
+
+async def test_a_sub_agents_gate_keeps_its_decisions_description_and_condition(
+    harness: Harness,
+) -> None:
+    """The gate is honoured as the sub-agent's spec gives it: its ``description`` is what
+    the reviewer is shown, a decision outside its ``allowed_decisions`` is refused with the
+    run still paused, and a call its ``when`` leaves out is not the gate's to ask about."""
+    gate = {
+        "allowed_decisions": ["approve", "reject"],
+        "description": "Wires leave the bank.",
+        "when": lambda request: request.tool_call["args"]["amount"] > 100,
+    }
+    target, _ = paying(gate, amount=500)
+    agent = harness.wrap(target, id="pays")
+    paused = await agent.run("pay 500", user="u")
+    assert paused.interrupt is not None, paused.error
+    request = paused.interrupt.payload or {}
+    assert request["action_requests"][0]["description"] == "Wires leave the bank."
+    assert request["review_configs"][0]["allowed_decisions"] == ["approve", "reject"]
+    with pytest.raises(ConfigurationError, match="does not allow the decision 'edit'"):
+        await agent.resume(
+            paused.interrupt.interrupt_id, "edit", answer={"amount": 1}, reviewer="r"
+        )
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="r")
+    assert done.status is RunStatus.SUCCESS, done.error
+
+    small, _ = paying(gate, amount=5)  # under the gate's condition: the library does not ask
+    result = await harness.wrap(small, id="pays-small").run("pay 5", user="u")
+    asked = result.interrupt.payload or {} if result.interrupt is not None else {}
+    assert "action_requests" not in asked
 
 
 def test_a_compiled_graph_is_a_sub_agent_with_its_name_and_description() -> None:

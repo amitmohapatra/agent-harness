@@ -45,6 +45,7 @@ from trellis.contracts import (
     safe_id,
 )
 from trellis.harness import (
+    background,
     compat,
     conversation,
     frontend,
@@ -616,7 +617,7 @@ class Agent:
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
             await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
             self._unwatched(run_id)
-        await cancel_children(runs, run_id, reason=reason, tenant=tenant)
+        await cancel_children(self, run_id, reason=reason, tenant=tenant)
         return record
 
     def stop(self, run_id: str, reason: str) -> asyncio.Future[Any] | None:
@@ -828,11 +829,13 @@ class Agent:
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
             await cancel_children(
-                self.harness.runs,
+                self,
                 record.run_id,
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
             )
+            # a background task's question, cancelled: the task with it
+            await background.abandoned(self, record.awaiting, reason_of(resolution))
             await sandbox.ended(self, journal.sandbox, record.run_id)
             self._unwatched(record.run_id)
         if resumed.status is not RunStatus.RUNNING:

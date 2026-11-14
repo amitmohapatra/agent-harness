@@ -12,23 +12,28 @@ from __future__ import annotations
 
 import asyncio
 import operator
-from typing import Annotated, Any, NotRequired, TypedDict
+import time
+from dataclasses import dataclass
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph, add_messages
 from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode, ToolRuntime, tools_condition
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import CachePolicy, Command, RetryPolicy, Send, TimeoutPolicy, interrupt
+from pydantic import BaseModel, TypeAdapter, field_validator
 
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, current, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, Interrupt, RunEventType, RunStatus
+from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.tools.bridge import MAX_REPEATS, STALLED
 
 ran: list[str] = []
@@ -75,6 +80,15 @@ def by_hand(model: Any, tools: list[Any], *, state: Any = MessagesState, **compi
 async def state_of(harness: Harness, graph: Any, thread: str) -> dict[str, Any]:
     key = await harness.conversation(user="u", thread=thread)
     return (await graph.aget_state({"configurable": {"thread_id": key}})).values
+
+
+def one_node(state: Any, node: Any, **compiled: Any) -> Any:
+    """A graph of ``state`` whose one node is ``node``, compiled (``compiled``: its options)."""
+    graph = StateGraph(state)
+    graph.add_node("node", node)
+    graph.add_edge(START, "node")
+    graph.add_edge("node", END)
+    return graph.compile(**compiled)
 
 
 # ------------------------------------------------------------------ a node's Command, Send
@@ -460,6 +474,288 @@ async def test_an_entrypoint_and_its_tasks_run_and_pause_as_a_graph_does(harness
     assert await state_of(harness, workflow, "t") == {"text": "about tides", "verdict": "yes"}
 
 
+# ------------------------------------------------------- the run's checkpoint, read back strictly
+class Finding(BaseModel):
+    """A type of the graph's own, kept in its state."""
+
+    topic: str
+    weight: int = 1
+
+
+class Research(TypedDict):
+    topics: list[str]
+    finding: NotRequired[Finding]
+    notes: NotRequired[Annotated[list[str], operator.add]]
+    messages: NotRequired[Annotated[list[AnyMessage], add_messages]]
+
+
+async def test_a_run_checkpointed_into_its_run_resumes_with_its_own_state_type(
+    harness: Harness,
+) -> None:
+    """SEC: the run's checkpoint is read back by a serializer that makes only LangGraph's and
+    LangChain's own types and the types the graph's state declares. A run paused after a
+    ``Command``, a ``Send`` fan-out and a message resumes where it stopped (no node runs
+    again), its state's own type still that type."""
+
+    reviewed: list[Any] = []
+
+    def plan(state: Research) -> Command[Any]:
+        ran.append("plan")
+        said = AIMessage(f"looking into {len(state['topics'])} topics")
+        return Command(
+            update={"finding": Finding(topic=state["topics"][0], weight=3), "messages": [said]},
+            goto=[Send("look", {"topic": t}) for t in state["topics"]],
+        )
+
+    def look(given: dict[str, str]) -> dict[str, Any]:  # what the plan's Send hands it
+        ran.append(f"look {given['topic']}")
+        return {"notes": [f"on {given['topic']}"]}
+
+    def review(state: Research) -> dict[str, Any]:
+        verdict = interrupt({"question": "Publish?"})
+        reviewed.append((verdict, state.get("finding"), state.get("notes")))
+        return {"notes": [verdict]}
+
+    graph = StateGraph(Research)
+    graph.add_node("plan", plan)
+    graph.add_node("look", cast(Any, look))  # its input is the Send's, not the state
+    graph.add_node("review", review)
+    graph.add_edge(START, "plan")
+    graph.add_edge("look", "review")
+    graph.add_edge("review", END)
+    agent = harness.wrap(graph.compile(checkpointer=RunCheckpointer()), id="research")
+    paused = await agent.run({"topics": ["tides", "moons"]}, user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert sorted(ran) == ["look moons", "look tides", "plan"]  # nothing ran again
+    # read back from the run's checkpoint: the state's own type is that type, not its data
+    assert reviewed == [("yes", Finding(topic="tides", weight=3), ["on tides", "on moons"])]
+    assert done.answer == "looking into 2 topics"
+
+
+# ---------------------------------------------------------------- an interrupt's answer schema
+class Verdict(BaseModel):
+    approved: bool
+    note: str
+
+    @field_validator("note")
+    @classmethod
+    def _said(cls, note: str) -> str:
+        if not note.strip():
+            raise ValueError("a note says something")
+        return note
+
+
+class Reviewed(TypedDict):
+    topic: str
+    verdict: NotRequired[dict[str, Any]]
+
+
+def reviewing() -> Any:
+    def review(state: Reviewed) -> dict[str, Any]:
+        given = interrupt({"question": "Approve the draft?"}, response_schema=Verdict)
+        return {"verdict": given.model_dump()}
+
+    return one_node(Reviewed, review, checkpointer=InMemorySaver())
+
+
+async def test_an_interrupts_response_schema_is_what_the_question_expects(
+    harness: Harness,
+) -> None:
+    """``interrupt(response_schema=...)``: the question says the answer's shape (its JSON
+    Schema, as LangGraph surfaces it), an answer that does not fit it is refused with the run
+    still paused, and one that fits reaches the node as LangGraph validated it."""
+    graph = reviewing()
+    agent = harness.wrap(graph, id="review")
+    paused = await agent.run({"topic": "tides"}, user="u", thread="t")
+    assert paused.interrupt is not None
+    assert paused.interrupt.expects == TypeAdapter(Verdict).json_schema()
+    with pytest.raises(ConfigurationError, match="does not fit"):
+        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    good = {"approved": True, "note": "ship it"}
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=good, reviewer="u")
+    assert done.status is RunStatus.SUCCESS
+    assert (await state_of(harness, graph, "t"))["verdict"] == good
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
+async def test_an_answer_its_schemas_own_check_refuses_is_asked_again(
+    harness: Harness, streamed: bool
+) -> None:
+    """An answer that fits the schema's JSON form but not a check of the schema's own (a
+    validator): LangGraph refuses it on the resume and saves nothing, so the question is asked
+    again — the run pauses on it once more — rather than the run failing."""
+    graph = reviewing()
+    agent = harness.wrap(graph, id="review")
+    paused = await agent.run({"topic": "tides"}, user="u", thread="t")
+    assert paused.interrupt is not None
+    blank = {"approved": True, "note": " "}
+    if streamed:  # resumed as a surface resumes it (AG-UI, A2A): streamed
+        record, resolution = await agent._resolution(
+            paused.interrupt.interrupt_id, "answer", blank, "u", tenant=LOCAL_TENANT
+        )
+        events = [
+            e
+            async for e in agent._events(lambda listen: agent._continue(record, resolution, listen))
+        ]
+        again = Interrupt.model_validate(events[-1].data["interrupt"])
+    else:
+        result = await agent.resume(
+            paused.interrupt.interrupt_id, "answer", answer=blank, reviewer="u"
+        )
+        assert result.status is RunStatus.PAUSED
+        again = result.interrupt
+    assert again is not None and again.question == "Approve the draft?"
+    good = {"approved": False, "note": "not yet"}
+    done = await agent.resume(again.interrupt_id, "answer", answer=good, reviewer="u")
+    assert done.status is RunStatus.SUCCESS
+    assert (await state_of(harness, graph, "t"))["verdict"] == good
+
+
+# ------------------------------------------------------------------------ what a graph returns
+async def test_an_entrypoint_typed_to_take_text_is_given_the_text_and_answers_with_its_return(
+    harness: Harness,
+) -> None:
+    """A ``@entrypoint`` typed to take a string is given the run's string input as it is, and
+    what it returns is the run's answer — a model it asks included."""
+    from langgraph.func import entrypoint
+
+    model = ScriptedChatModel(turns=["a summary of tides"])
+
+    @entrypoint()
+    async def summarize(topic: str) -> str:
+        ran.append(topic)
+        return (await model.ainvoke(f"summarize {topic}")).text
+
+    result = await harness.wrap(summarize, id="summarize").run("tides", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a summary of tides"
+    assert ran == ["tides"]
+
+
+class Summary(TypedDict):
+    topic: str
+    summary: NotRequired[str]
+
+
+async def test_a_graph_whose_model_writes_its_state_answers_with_that_state(
+    harness: Harness,
+) -> None:
+    """A graph whose state is not a conversation answers with the state it ended with, as
+    ``ainvoke`` returns it — though a model wrote it, and wrote no message."""
+    model = ScriptedChatModel(turns=["a summary"])
+
+    async def summarize(state: Summary) -> dict[str, Any]:
+        return {"summary": (await model.ainvoke(state["topic"])).text}
+
+    result = await harness.wrap(one_node(Summary, summarize), id="summary").run(
+        {"topic": "tides"}, user="u"
+    )
+    assert result.status is RunStatus.SUCCESS
+    assert result.answer == {"topic": "tides", "summary": "a summary"}
+
+
+class Chat(BaseModel):
+    messages: Annotated[list[AnyMessage], add_messages]
+    turns: int = 0
+
+
+async def test_a_graph_of_a_pydantic_state_answers_with_its_models_reply(
+    harness: Harness,
+) -> None:
+    """LangGraph gives a Pydantic state's graph its output as that model: its conversation is
+    read from it as from a dict's, and the model's reply is the answer."""
+    model = ScriptedChatModel(turns=["hello"])
+
+    async def think(state: Chat) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state.messages)], "turns": state.turns + 1}
+
+    result = await harness.wrap(one_node(Chat, think), id="pydantic").run("hi", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "hello"
+
+
+@dataclass
+class Notes:
+    topic: str
+    note: str = ""
+
+
+async def test_a_graph_of_a_dataclass_state_answers_with_that_state(harness: Harness) -> None:
+    """A dataclass state is the graph's output as LangGraph gives it (``version="v2"``: the
+    state's own type), and that is the answer — on the stream, as JSON."""
+
+    def note(state: Notes) -> dict[str, Any]:
+        return {"note": f"on {state.topic}"}
+
+    agent = harness.wrap(one_node(Notes, note), id="notes")
+    result = await agent.run({"topic": "tides"}, user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert result.answer == Notes(topic="tides", note="on tides")
+    events = [e async for e in agent.stream({"topic": "tides"}, user="u")]
+    assert events[-1].data["result"] == {"topic": "tides", "note": "on tides"}
+
+
+@pytest.mark.parametrize("harnessed", [False, True], ids=["create_agent", "middleware"])
+async def test_a_return_direct_tools_result_is_the_answer(
+    harness: Harness, harnessed: bool
+) -> None:
+    """``create_agent`` ends its loop on a ``return_direct`` tool's result, which its model
+    never reads: that result is the run's answer."""
+    from langchain.agents import create_agent
+
+    import trellis
+
+    @lc_tool(return_direct=True)
+    def lookup(sku: str) -> str:
+        """Look a SKU up; its result is the answer."""
+        return f"{sku}: 7 in stock"
+
+    lookup.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(turns=[("lookup", {"sku": "a"})])
+    graph = create_agent(
+        model, tools=[lookup], middleware=trellis.middleware() if harnessed else ()
+    )
+    result = await harness.wrap(graph, id="direct").run("a?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a: 7 in stock"
+    assert len(model.seen) == 1
+
+
+class SlowSync(ScriptedChatModel):
+    """A chat model called synchronously that takes ``stall`` seconds to answer."""
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        time.sleep(self.stall)
+        return super()._generate(messages, stop, run_manager, **kw)
+
+
+def asking(model: ScriptedChatModel) -> Any:
+    """A graph whose sync node calls ``model`` synchronously (LangGraph runs it in a thread)."""
+
+    def summarize(state: Summary) -> dict[str, Any]:
+        return {"summary": model.invoke(state["topic"]).text}
+
+    return one_node(Summary, summarize)
+
+
+async def test_a_model_called_in_a_sync_node_is_accounted_and_watched(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sync node's model call runs in LangGraph's thread: it is accounted to the run's
+    budget, and watched for a stall as an async one is — a call slower than the stall bound
+    ends the run with a timeout."""
+    from trellis.harness import runtime as runtime_module
+
+    agent = harness.wrap(asking(ScriptedChatModel(turns=["a summary"], spends=(5, 3))), id="s")
+    done = await agent.run({"topic": "tides"}, user="u")
+    assert done.status is RunStatus.SUCCESS and done.answer["summary"] == "a summary"
+    assert not [r for r in caplog.records if "UsageAccounting" in r.getMessage()]
+    monkeypatch.setattr(runtime_module, "STALL_SECONDS", 0.2)
+    slow = harness.wrap(asking(SlowSync(turns=["late"], stall=1.0)), id="slow")
+    stalled = await slow.run({"topic": "tides"}, user="u")
+    assert stalled.status is RunStatus.ERROR and stalled.error is not None
+    assert stalled.error.code == "MODEL_TIMEOUT"
+
+
 # ------------------------------------------------------------------------------ time travel
 async def test_a_checkpoint_of_the_thread_is_forked_and_run_on_from(harness: Harness) -> None:
     """LangGraph's time travel on the run's thread: its history is read with the conversation's
@@ -538,6 +834,34 @@ async def test_what_a_node_writes_to_the_custom_stream_is_a_custom_event_of_the_
     [shown] = [e for e in events if e.type is RunEventType.CUSTOM and e.data["value"] == 42]
     seen = translate(shown)
     assert seen is not None and (seen.name, seen.value) == ("custom", {"value": 42})
+
+
+async def test_the_stream_transformers_a_graph_is_compiled_with_shape_what_the_run_streams(
+    harness: Harness,
+) -> None:
+    """A graph's stream transformers (``create_agent(transformers=...)``, a middleware's, a
+    ``compile(transformers=...)``'s) see every event of a streamed run before the run does, as
+    they see ``astream_events(version="v3")``'s: what one changes or drops is what the run
+    streams."""
+    from langchain.agents import create_agent
+    from langgraph.stream import StreamTransformer
+
+    class Shouting(StreamTransformer):
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            if event["method"] == "messages":
+                payload = event["params"]["data"][0]
+                if isinstance(payload, dict) and payload.get("event") == "content-block-delta":
+                    payload["delta"]["text"] = payload["delta"]["text"].upper()
+            return True
+
+    model = StreamingChatModel(turns=["quiet words"], blocks=False, piece=6)
+    graph = create_agent(model, tools=[], transformers=[Shouting])
+    events = [e async for e in harness.wrap(graph, id="shouts").stream("hi", user="u")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert deltas == ["QUIET ", "WORDS"]
 
 
 async def test_a_run_not_streamed_has_the_custom_writes_among_its_events(harness: Harness) -> None:

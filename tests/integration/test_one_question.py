@@ -60,6 +60,7 @@ from agents import Agent, LocalShellTool, function_tool
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
@@ -455,6 +456,12 @@ async def test_one_question_a_call(
 GATES: Final = {"both": pay, "library": look}
 
 
+def always(decision: str) -> Callable[[Any], dict[str, Any]]:
+    """A person answering every question with ``decision`` (an edit: the amount 3)."""
+    edited = {"answer": {"amount": 3}} if decision == "edit" else {}
+    return lambda _interrupt: {"decision": decision, **edited}
+
+
 async def _gated(h: Harness, lib: str, fn: Any, plan: list[Call], saver: Any) -> Any:
 
     name = fn.spec.name
@@ -483,10 +490,6 @@ async def test_the_librarys_own_gate_is_the_one_question(
     decision = flow if flow in ("reject", "edit") else "approve"
     saver, watch, asked = InMemorySaver(), Watch(), Asked()
 
-    def answer(interrupt: Any) -> dict[str, Any]:
-        edited = {"answer": {"amount": 3}} if decision == "edit" else {}
-        return {"decision": decision, **edited}
-
     async with Harness(config=Settings(), memory=memory_service.client()) as h:
         graph = await _gated(h, lib, fn, plan, saver)
         agent = arm(h.wrap(graph, id=f"gated-{lib}", hooks=[watch]), [fn])
@@ -497,14 +500,56 @@ async def test_the_librarys_own_gate_is_the_one_question(
             ) as other:
                 again = await _gated(other, lib, fn, plan, saver)
                 resumer = arm(other.wrap(again, id=f"gated-{lib}", hooks=[watch]), [fn])
-                done = await settled(agent, first, asked, answer, resumer=resumer)
+                done = await settled(agent, first, asked, always(decision), resumer=resumer)
                 await other.writes.drain()
         else:
-            done = await settled(agent, first, asked, answer)
+            done = await settled(agent, first, asked, always(decision))
         assert done.status is RunStatus.SUCCESS, done
         ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
         await ledger(h, memory_service, watch, asked, name, questions=len(amounts), ran=len(ran))
     assert [a for t, a in RAN if t == name] == ran, RAN
+
+
+# The graph's own LangChain tool, gated by the middleware, which governance asks about too: it
+# declares nothing ("undeclared": every call asks), or that it writes. The cases above gate a
+# harness tool; one of the graph's own is governed in its tool node (``governed_call``), where
+# the gate's decision must be read as well. Batched and per call.
+
+
+def own_tool(side: str) -> Any:
+    @lc_tool
+    def wire(amount: int) -> str:
+        """Wire an amount."""
+        RAN.append(("wire", amount))
+        return f"wired {amount}"
+
+    if side != "undeclared":
+        wire.metadata = {"side_effects": side}
+    return wire
+
+
+@pytest.mark.parametrize("mode", ["batched", "per_call"])
+@pytest.mark.parametrize("side", ["undeclared", "write"])
+@pytest.mark.parametrize("flow", ["approve", "reject", "edit", "two-calls"])
+async def test_the_librarys_gate_on_a_tool_of_the_graphs_own_is_the_one_question(
+    memory_service: FakeMemoryService, mode: str, side: str, flow: str
+) -> None:
+    amounts = (5, 6) if flow == "two-calls" else (5,)
+    decision = flow if flow in ("reject", "edit") else "approve"
+    wire = own_tool(side)
+    model = PlannedChatModel(plan=[("wire", {"amount": a}) for a in amounts])
+    gate = HumanInTheLoopMiddleware(interrupt_on={"wire": True}, interrupt_mode=cast(Any, mode))
+    graph = create_agent(model, tools=[wire], middleware=[gate], checkpointer=InMemorySaver())
+    watch, asked = Watch(), Asked()
+
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        agent = h.wrap(graph, id=f"own-{mode}-{side}", hooks=[watch])
+        first = await agent.run("go", user="ada", thread=THREAD)
+        done = await settled(agent, first, asked, always(decision))
+        assert done.status is RunStatus.SUCCESS, done
+        ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
+        await ledger(h, memory_service, watch, asked, "wire", questions=len(amounts), ran=len(ran))
+    assert [a for t, a in RAN if t == "wire"] == ran, RAN
 
 
 # --------------------------------------------------------------------------- inside a sub-agent

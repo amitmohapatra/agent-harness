@@ -35,6 +35,7 @@ from trellis.harness.adapters.claude import (
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
+    UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
     configured_servers,
@@ -221,7 +222,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    assert sent.disallowed_tools == list(OUTLIVES_THE_QUERY)  # nothing narrowed: only these
+    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
     assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
     unchanged = {
         "hooks": None,
@@ -261,15 +262,22 @@ def test_the_answer_is_the_structured_response_or_the_last_ai_text() -> None:
 
 
 async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -> None:
-    class Graph:
-        checkpointer = None
+    from langgraph.config import get_stream_writer
+    from langgraph.graph import END, START, MessagesState, StateGraph
 
-        async def astream(self, *args: Any, **kwargs: Any) -> Any:
-            yield {"type": "messages", "data": (AIMessage(content="hel"), {})}
-            yield {"type": "messages", "data": (HumanMessage(content="not ours"), {})}
-            yield {"type": "custom", "data": "progress"}
-            yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
+    from tests.support.chat_model import StreamingChatModel
 
+    model = StreamingChatModel(turns=["hello"], blocks=False, piece=3)
+
+    async def say(state: MessagesState) -> dict[str, Any]:
+        get_stream_writer()("progress")
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("say", say)
+    builder.add_edge(START, "say")
+    builder.add_edge("say", END)
+    graph = builder.compile()
     written: list[tuple[str, dict[str, Any]]] = []
     runtime = SimpleNamespace(
         conversation="run_1",
@@ -278,14 +286,16 @@ async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -
         run_memory=None,
         attempt=1,
         pending=None,
+        cancelled=None,
         worker_id=None,
         events=SimpleNamespace(custom=lambda name, **data: written.append((name, data))),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
-    items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
-    assert items[0] == "hel" and len(items) == 2
+    asked = {"messages": [HumanMessage(content="hi", id="q")]}
+    items = [i async for i in LangGraphAdapter().stream(graph, asked, run)]
+    assert items[:-1] == ["hel", "lo"]  # the model's text as it streamed, not the question's
     assert written == [("custom", {"value": "progress"})]
-    assert items[1].value == GraphOutput(value={"messages": []}, interrupts=())
+    assert [m.text for m in items[-1].value.value["messages"]] == ["hi", "hello"]
 
 
 async def test_a_call_comes_from_the_graph_task_it_is_made_in_and_none_outside_one() -> None:
@@ -463,18 +473,19 @@ def test_a_middleware_request_is_recognised_by_its_shape() -> None:
 def test_each_harness_decision_is_one_middleware_decision_per_call() -> None:
     approve = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.APPROVE))
     assert approve == {"decisions": [{"type": "approve"}] * 2}
-    edit = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
-    assert edit["decisions"] == [
-        {"type": "edit", "edited_action": {"name": "a", "args": {"x": 2}}},
-        {"type": "approve"},
-    ]
+    one = {key: HITL_REQUEST[key][:1] for key in ("action_requests", "review_configs")}
+    edit = hitl_response(one, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
+    assert edit["decisions"] == [{"type": "edit", "edited_action": {"name": "a", "args": {"x": 2}}}]
+    # an edit's arguments are one call's: a batch of several takes a decision for each
+    with pytest.raises(ConfigurationError, match="one decision for each call"):
+        hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
     reject = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.REJECT, answer="why"))
     assert reject["decisions"] == [{"type": "reject", "message": "why"}] * 2
     respond = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.ANSWER, answer={"k": 1}))
     assert respond["decisions"] == [{"type": "respond", "message": '{"k": 1}'}] * 2
     raw = {"decisions": [{"type": "approve"}, {"type": "reject"}]}
     assert hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload=raw)) == raw
-    only_b = {**HITL_REQUEST, "review_configs": [HITL_REQUEST["review_configs"][1]] * 2}
+    only_b = {**one, "review_configs": HITL_REQUEST["review_configs"][1:]}
     with pytest.raises(ConfigurationError, match="does not allow the decision 'edit'"):
         hitl_response(only_b, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
 
@@ -590,9 +601,14 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
     own = create_agent(model, middleware=middleware(), checkpointer=InMemorySaver())
     off = create_agent(model, middleware=middleware(), checkpointer=False)
     plain = create_agent(model)  # not a middleware() graph: run as it was built
-    ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
-    for kept in (own, off, plain, ours, object()):
+    for kept in (own, off, plain, object()):
         assert checkpointing(kept) is kept
+    # a RunCheckpointer of its builder's stays the graph's, told the graph's own state types
+    ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
+    typed = checkpointing(ours)
+    assert isinstance(typed.checkpointer, RunCheckpointer) and run_scoped(typed)
+    assert isinstance(ours.checkpointer, RunCheckpointer)  # the builder's own, left as it was
+    assert typed.checkpointer.serde is not ours.checkpointer.serde
 
 
 def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> None:

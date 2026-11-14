@@ -60,8 +60,8 @@ def test_versions_compare_by_their_release_numbers() -> None:
     assert compat.tested("langgraph", "1.2")
     assert not compat.tested("langgraph", "1.3.0")
     assert not compat.tested("langgraph", "1.1.9")
-    assert compat.tested("deepagents", "0.7.19")
-    assert not compat.tested("deepagents", "0.7.18")
+    assert compat.tested("deepagents", "0.7.38")
+    assert not compat.tested("deepagents", "0.7.37")
     assert compat.tested("claude-agent-sdk", "0.2.999")
     assert compat.tested("not-a-framework", "9")  # not the harness's to judge
 

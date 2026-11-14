@@ -718,8 +718,7 @@ async def test_a_tools_calls_one_after_another_are_numbered_as_before(harness: H
 
 
 @pytest.mark.parametrize(
-    "framework",
-    ["react", "middleware", "langgraph", "deepagents", "openai_agents", "claude_agent_sdk", "kimi"],
+    "framework", ["react", "middleware", "openai_agents", "claude_agent_sdk", "kimi"]
 )
 async def test_every_framework_counts_a_table_read_whole_exactly(
     harness: Harness, framework: str, tmp_path: Path
@@ -732,3 +731,20 @@ async def test_every_framework_counts_a_table_read_whole_exactly(
     result = await arm(harness.wrap(target, id=f"lines-{framework}"), own).run("q", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     assert result.answer.endswith("41")
+
+
+@pytest.mark.parametrize("framework", ["langgraph", "graph", "deepagents"])
+async def test_a_graph_without_the_harnesss_middleware_reads_a_table_as_its_tool_returned_it(
+    harness: Harness, framework: str, tmp_path: Path
+) -> None:
+    """A LangGraph graph built without ``middleware()`` runs its own loop: its tool's result
+    reaches its model as the tool returned it — no table kept, no ``query_result`` note — and
+    the harness offers it no tool of its own to read results with."""
+    seen: list[Any] = []
+    plan: list[Call] = [("sales_lines", {})]
+    target, own = await BUILDERS[framework](harness, [sales_lines], tmp_path, plan, seen=seen)
+    result = await arm(harness.wrap(target, id=f"lines-{framework}"), own).run("q", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    [model] = seen
+    assert result.answer == f"Done. {LINES}"
+    assert all("query_result" not in str(r.get("tools")) for r in model.requests)

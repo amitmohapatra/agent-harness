@@ -31,6 +31,7 @@ from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
+from trellis.harness.background import Tasks
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
@@ -181,6 +182,8 @@ class Harness:
         self.followers = Followers(lambda: event_log(streams or self.runs))
         #: the runs this process executes, held in the run store while they do (``holding``)
         self.holds = Holds(lambda: self.runs, renewed=self._renewed, lost=self._lost)
+        #: the background tasks at work in this process (``background``): cut off on close
+        self.background = Tasks()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -455,6 +458,7 @@ class Harness:
             failed.extend(e for e in closed if isinstance(e, BaseException))
 
         await close(*(a.aclose() for a in self.agents.values()))
+        await close(self.background.aclose())
         self.holds.aclose()  # the runs held here: their agents ended them, or left them
         await close(self.writes.aclose())
         await close(telemetry.flush())

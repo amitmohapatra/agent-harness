@@ -76,8 +76,10 @@ from tests.integration.test_react_async_subagent import (
     USER,
     Model,
     StandIn,
+    asked_to_do,
     calls,
     chat,
+    only_read,
     reports_the_id,
     say,
     says_what_the_tool_said,
@@ -156,7 +158,8 @@ async def t1_and_t2(agent: Agent, server: StandIn) -> None:
     assert server.task_id in first.answer
     second = await say(agent, "what is 2+2?")
     assert second.answer == "4", second.error
-    assert server.status(server.task_id) == "running" and len(server.calls) == 2
+    assert server.status(server.task_id) == "running"
+    assert len(asked_to_do(server)) == 2 and only_read(server, since=2)  # statuses pulled
     server.release()
 
 
@@ -234,9 +237,9 @@ async def test_a_today_such_a_graphs_cancelled_turn_leaves_its_task_out_of_the_l
     harness: Harness, server: StandIn
 ) -> None:
     """Today: a graph with no checkpointer has its state read when its turn ends, and a turn
-    cancelled after the start has no end to read it from: the task runs on, and the next
-    turn's list does not have it (a graph with ``middleware()`` checkpoints each step into
-    its run, and keeps it: ``test_react_async_subagent``)."""
+    cancelled after the start has no end to read it from: the next turn's list does not have
+    the task (a graph with ``middleware()`` checkpoints each step into its run, and keeps it:
+    ``test_react_async_subagent``). The task itself is cancelled with its turn."""
     server.seconds = 60
     model = Model(turns=[START, "never said"], hold_from=1)
     agent = harness.wrap(create_deep_agent(model, subagents=[subagent(server)]), id="bg")
@@ -247,7 +250,7 @@ async def test_a_today_such_a_graphs_cancelled_turn_leaves_its_task_out_of_the_l
     [run_id] = agent.running
     await agent.cancel(run_id, reason="the user stopped the turn")
     assert (await turn).status is RunStatus.CANCELLED
-    assert server.status(server.task_id) == "running"
+    assert server.status(server.task_id) == "cancelled"
     model.hold_from = None
     model.turns = [("list_async_tasks", {}), says_what_the_tool_said]
     assert (await say(agent, "which tasks are there?")).answer == NO_TASKS
@@ -636,6 +639,7 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
         ),
         "function": harness.wrap(function, id="function"),
     }
+    asked = len(server.calls)
     for name, other in others.items():
         for question in ("is the optimization done?", "and now?"):  # a first turn, a later one
             done = await say(other, question)
@@ -643,7 +647,7 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
         assert other.results.state(KEY) == {}, name  # and it kept none for its next turn
     assert started == {"claude": [{}, {}], "openai": [{}, {}], "function": [{}, {}]}
     assert len({turn["pid"] for turn in served(tmp_path)}) == 1  # Claude's turns: one session
-    assert len(server.calls) == 2  # none of them reached the sub-agent's server
+    assert len(server.calls) == asked  # none of them reached the sub-agent's server
 
     model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
     mine = await say(deep, "which tasks are there?")

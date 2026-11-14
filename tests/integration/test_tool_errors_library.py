@@ -8,6 +8,8 @@ graph without the harness — unless the graph runs the harness's own middleware
 
 from __future__ import annotations
 
+import sys
+import types
 from collections.abc import Callable
 from typing import Any
 
@@ -31,7 +33,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
 from trellis import Budget, Harness, ReAct
-from trellis.contracts import RunEventType, RunStatus, ToolOutcome, ToolStatus
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolOutcome, ToolStatus
 from trellis.harness.hooks import Ask, Hooks
 from trellis.harness.tools import base
 from trellis.harness.tools.bridge import MAX_REPEATS
@@ -692,3 +694,32 @@ async def test_a_retry_of_an_approved_call_is_not_asked_about_again(harness: Har
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u")
     assert done.status is RunStatus.SUCCESS and done.answer == "charged twice"
     assert charged == ["charge 5 failed", "charge 5", "charge 5"]
+
+
+# ----------------------------------------------------- LangGraph's internals, read loudly (ARCH-6)
+def test_a_langgraph_whose_internals_moved_is_refused_not_read_as_no_retry_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether the graph itself runs a failed node again is read from LangGraph's own task.
+    Where that cannot be read — the task handed to a node's config is of another shape, or
+    the private names are gone — the harness says so, naming the releases it is tested with,
+    instead of taking it for "no policy" and trying the call again on top of the graph's own."""
+    from langchain_core.runnables import RunnableConfig
+
+    from trellis.harness import compat
+    from trellis.harness.middleware import _node_retries
+
+    low, high = compat.TESTED["langgraph"]
+    error = TimeoutError("slow")
+    # no graph runs the node (a tool node used on its own): no node, so no policy of a node's
+    assert _node_retries({"configurable": {"thread_id": "t"}}, error) is False
+    moved: RunnableConfig = {"configurable": {"__pregel_call": object(), "__pregel_task_id": "1"}}
+    with pytest.raises(ConfigurationError, match=f"langgraph.*{low}.*{high}"):
+        _node_retries(moved, error)
+    # a graph's task, its call kept elsewhere
+    renamed: RunnableConfig = {"configurable": {"__pregel_task_id": "1"}}
+    with pytest.raises(ConfigurationError, match="langgraph"):
+        _node_retries(renamed, error)
+    monkeypatch.setitem(sys.modules, "langgraph.pregel._retry", types.ModuleType("gone"))
+    with pytest.raises(ConfigurationError, match="langgraph"):
+        _node_retries(moved, error)

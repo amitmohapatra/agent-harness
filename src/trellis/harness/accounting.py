@@ -19,6 +19,7 @@ from typing import Any, Final
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.decisions import ClassifierResponse
 from langchain_core.messages import AIMessage
 from langchain_core.tracers.context import register_configure_hook
 
@@ -84,6 +85,24 @@ class UsageAccounting(BaseCallbackHandler):
             _STARTED.pop(str(run_id))
             if _status(error) == RATE_LIMITED:
                 admission.ADMISSION.throttled()
+
+    def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        """A decision model's answer (``langchain_core.decisions``: the classifier of
+        LangChain's ``AutoModeMiddleware`` and ``ModelRouterMiddleware``) is a model call the
+        run pays for: what it says it used is accounted as a reply's is. LangChain runs a
+        decision model as a runnable, so its end comes here, with its response."""
+        runtime = current()
+        if runtime is None or not isinstance(outputs, ClassifierResponse) or not outputs.usage:
+            return
+        used = outputs.usage
+        read = int((used.get("input_token_details") or {}).get("cache_read") or 0)
+        budget.account(
+            runtime,
+            model=outputs.model,
+            input_tokens=int(used.get("input_tokens") or 0),
+            output_tokens=int(used.get("output_tokens") or 0),
+            cached=read,
+        )
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
         runtime = current()

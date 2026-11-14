@@ -66,7 +66,7 @@ import contextlib
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
@@ -408,29 +408,30 @@ class Journal(BaseModel):
         self.saved(save)
         return save.checkpoint
 
-    def approved_in_framework(self, resolution: InterruptResolution) -> None:
+    def approved_in_framework(
+        self, resolution: InterruptResolution, gated: Sequence[tuple[str, Any]] | None = None
+    ) -> None:
         """The calls the open pause — a framework's own approval gate — approved by
-        ``resolution``, filed for governance (:attr:`approved`): every call it holds on an
-        approval, the first with its edited arguments on an edit."""
-        if self.pending is None or resolution.decision not in (
-            InterruptDecision.APPROVE,
-            InterruptDecision.EDIT,
-        ):
+        ``resolution``, filed for governance (:attr:`approved`), so a person answers once for
+        a call whichever gate asks. ``gated``: the calls a gate of several runs as decided,
+        each as approved or edited (LangChain's ``HumanInTheLoopMiddleware``, read by its
+        adapter); else the one call of the pause's own approval, with its edited arguments on
+        an edit."""
+        if self.pending is None:
             return
         interrupt = self.pending.interrupt
-        payload = interrupt.payload or {}
-        actions = payload.get("action_requests")
-        if isinstance(actions, list) and payload.get("review_configs") is not None:
-            calls = [(a.get("name"), a.get("args") or {}) for a in actions]
+        if gated is not None:
+            calls = list(gated)
+        elif resolution.decision not in (InterruptDecision.APPROVE, InterruptDecision.EDIT):
+            return
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
             if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
                 return  # governance's own question: its answer is read where the call asks
-            calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
+            edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
+            args = edited if isinstance(edited, dict) else interrupt.tool_call.args
+            calls = [(interrupt.tool_call.tool, args)]
         else:
             return  # the harness's own question: governance asked it
-        edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
-        if isinstance(edited, dict) and calls:
-            calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:

@@ -30,6 +30,7 @@ from deepagents.backends import (
 )
 from deepagents.middleware import create_summarization_tool_middleware
 from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
@@ -42,6 +43,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.middleware import RunCheckpointer
 
 ran: list[str] = []
 
@@ -228,31 +230,138 @@ async def test_files_on_a_store_go_to_the_memory_service_when_the_graph_has_no_s
     assert results_named(memory_service) == ["write_file", "read_file"]
 
 
-async def test_a_composite_backend_routes_each_path_to_its_backend(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """``CompositeBackend``: ``/kept/`` on a disk, the rest in the graph's state. The graph
-    keeps its ``files`` channel, so its file tools stay the graph's state tools (not the run's
-    tool calls), and each path lands where its route says."""
-    backend = CompositeBackend(
+def routed(tmp_path: Path) -> CompositeBackend:
+    """``/kept/`` on a disk, the rest in the graph's state."""
+    return CompositeBackend(
         default=StateBackend(),
         routes={"/kept/": FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)},
     )
+
+
+async def test_a_composite_backend_routes_each_path_to_its_backend(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SEC: ``CompositeBackend``, ``/kept/`` on a disk and the rest in the graph's state. Each
+    path lands where its route says, and each call is what its path makes it: a file in the
+    graph's state is the graph's scratch (no call of the run), a file on the disk is a write
+    of the run — governed, announced and recorded — though the graph has a ``files`` channel."""
     model = ScriptedChatModel(
         turns=[
             [
                 ("write_file", {"file_path": "/scratch.md", "content": "draft"}),
                 ("write_file", {"file_path": "/kept/final.md", "content": "final"}),
             ],
+            [
+                ("read_file", {"file_path": "/scratch.md"}),
+                ("read_file", {"file_path": "/kept/final.md"}),
+            ],
             "written",
         ]
     )
-    graph = create_deep_agent(model=model, backend=backend, checkpointer=InMemorySaver())
+    graph = create_deep_agent(model=model, backend=routed(tmp_path), checkpointer=InMemorySaver())
     events = [e async for e in harness.wrap(graph, id="deep").stream("w", user="u", thread="t")]
-    assert events[-1].data["result"] == "written" and results(events) == []
+    assert events[-1].data["result"] == "written"
+    assert results(events) == [("write_file", "ok"), ("read_file", "ok")]
+    said = [e.data for e in events if e.type is RunEventType.TOOL_CALL_ARGS]
+    assert all("/kept/final.md" in str(d) for d in said) and len(said) == 2
+    assert [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"] == ["write_file"]
     assert (tmp_path / "final.md").read_text() == "final"
     files = (await state_of(harness, graph, "t"))["files"]
     assert set(files) == {"/scratch.md"}
+
+
+@pytest.mark.parametrize(
+    ("call", "governed"),
+    [
+        (("ls", {"path": "/"}), True),  # lists the disk route's folder too
+        (("glob", {"pattern": "**/*.md", "path": "/"}), True),
+        (("grep", {"pattern": "final"}), True),  # no path: every route is searched
+        (("glob", {"pattern": "*.md", "path": "/kept/"}), True),
+        (("ls", {"path": "/notes/"}), False),  # a folder of the state alone
+        (
+            ("edit_file", {"file_path": "/kept/final.md", "old_string": "a", "new_string": "b"}),
+            True,
+        ),
+        (("edit_file", {"file_path": "/s.md", "old_string": "a", "new_string": "b"}), False),
+    ],
+)
+async def test_a_composite_backends_call_is_governed_when_it_reaches_past_the_state(
+    harness: Harness, tmp_path: Path, call: tuple[str, dict[str, Any]], governed: bool
+) -> None:
+    """SEC, the boundary: a search or a listing from a folder that holds a route outside the
+    state reads that route too, so it is the run's call; one within the state alone is not."""
+    (tmp_path / "final.md").write_text("a final")
+    model = ScriptedChatModel(turns=[call, "done"])
+    graph = create_deep_agent(model=model, backend=routed(tmp_path), checkpointer=InMemorySaver())
+    events = [e async for e in harness.wrap(graph, id="deep").stream("w", user="u", thread="t")]
+    assert events[-1].data["result"] == "done"
+    assert [tool for tool, _ in results(events)] == ([call[0]] if governed else [])
+
+
+async def test_a_composite_backends_write_past_the_state_waits_for_its_approval(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """SEC: the catalog's rule for a file tool holds on a composite's disk route as on a disk
+    alone — a write there that needs a person's approval does not run before it is given, and
+    never once rejected; a write to the state route is the graph's scratch, never asked."""
+    memory_service.catalog = {"write_file": {"side_effects": "irreversible"}}
+    model = ScriptedChatModel(
+        turns=[
+            ("write_file", {"file_path": "/scratch.md", "content": "draft"}),
+            ("write_file", {"file_path": "/kept/final.md", "content": "final"}),
+            "not written",
+        ]
+    )
+    graph = create_deep_agent(model=model, backend=routed(tmp_path), checkpointer=InMemorySaver())
+    agent = memory_harness.wrap(graph, id="deep")
+    paused = await agent.run("w", user="u", thread="t")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    asked = paused.interrupt.tool_call
+    assert asked is not None and asked.args["file_path"] == "/kept/final.md"
+    assert not (tmp_path / "final.md").exists()
+    done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and not (tmp_path / "final.md").exists()
+    assert set((await state_of(memory_harness, graph, "t"))["files"]) == {"/scratch.md"}
+
+
+@pytest.mark.parametrize("kept", ["no thread", "the run"])
+async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
+    harness: Harness, kept: str
+) -> None:
+    """CONV: a Deep Agents graph with no thread of its own (compiled without a checkpointer,
+    or checkpointing into its run) keeps its state files and its todos across the turns of
+    one conversation, as a thread of the graph's own would: a file one turn wrote is read by
+    the next, one a turn deleted stays deleted, and another conversation has none of them."""
+    turns: list[Any] = [
+        [
+            ("write_file", {"file_path": "/notes.md", "content": "tides at six"}),
+            ("write_file", {"file_path": "/draft.md", "content": "a draft"}),
+            ("write_todos", {"todos": [{"content": "check tides", "status": "pending"}]}),
+        ],
+        "noted",
+        [("read_file", {"file_path": "/notes.md"}), ("delete", {"file_path": "/draft.md"})],
+        "read",
+        [("read_file", {"file_path": "/notes.md"}), ("read_file", {"file_path": "/draft.md"})],
+        "again",
+        ("read_file", {"file_path": "/notes.md"}),
+        "elsewhere",
+    ]
+    model = ScriptedChatModel(turns=turns)
+    saver = RunCheckpointer() if kept == "the run" else None
+    graph = create_deep_agent(model=model, middleware=[TodoListMiddleware()], checkpointer=saver)
+    agent = harness.wrap(graph, id="deep")
+
+    def read(n: int) -> list[str]:
+        """What the model's ``n``-th call read of its tools, the latest results last."""
+        return [str(m.content) for m in model.seen[n] if isinstance(m, ToolMessage)]
+
+    for said in ("note it", "read it", "read both"):
+        assert (await agent.run(said, user="u", thread="t")).status is RunStatus.SUCCESS
+    assert "tides at six" in read(3)[-2]  # the second turn read the first turn's file
+    third = read(5)
+    assert "tides at six" in third[-2] and "not found" in third[-1]  # deleted stays deleted
+    assert (await agent.run("read it", user="u", thread="other")).answer == "elsewhere"
+    assert "not found" in read(7)[-1]  # another conversation's files are its own
 
 
 async def test_a_local_shell_backends_execute_runs_the_command_as_a_write_of_the_run(

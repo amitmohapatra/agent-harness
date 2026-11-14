@@ -111,6 +111,16 @@ the user Claude Code would ask:
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
   would send.
+* **Not offered: workflows and messages to other agents.** A dynamic workflow (`Workflow`)
+  runs its agents in the background as one task: none has a task of its own, and an agent's
+  first tool call can reach the harness before anything names that agent, so its calls
+  could only be taken for the main agent's. `SendMessage` resumes a finished background
+  subagent as a new task, or reaches another Claude session on the machine or in the cloud.
+  No run holds that work, so `Workflow`, `SendMessage` and the agent-teams tools older CLIs
+  have (`TeamCreate`, `TeamDelete`) are added to `disallowed_tools` too, whatever
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the bundled CLI's named agents are
+  background subagents, each a child run: below). A slash command that runs a workflow
+  (`/deep-research`) finds no `Workflow` tool to call.
 * **One call, one question.** A call whose approval a person answered before it ran
   (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
   about again when Claude Code asks too: it runs. Another question answered while the call
