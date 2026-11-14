@@ -683,8 +683,11 @@ A tool the provider runs itself, inside the model's step, is given as LangChain 
 `dict` in `tools=`, bound to the model as it is:
 
 ```python
-ReAct("You answer with sources.", "anthropic/claude-sonnet-4-5",
-      tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}])
+ReAct(
+    "You answer with sources.",
+    "anthropic/claude-sonnet-4-5",
+    tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+)
 ```
 
 `create_agent` binds it and runs none of it: the provider does, and its reply says what each
@@ -715,8 +718,10 @@ plan mode, from LangChain's pieces (`trellis.harness.plan_mode`):
 ```python
 from trellis.harness.plan_mode import PlanMode
 
-agent = h.wrap(ReAct("You handle refunds.", "gpt-4o", tools=[order, refund],
-                     middleware=[PlanMode()]), id="refunds")
+agent = h.wrap(
+    ReAct("You handle refunds.", "gpt-4o", tools=[order, refund], middleware=[PlanMode()]),
+    id="refunds",
+)
 await agent.run("refund o1", user="u", framework_options={"configurable": {"plan_mode": True}})
 ```
 
@@ -750,8 +755,8 @@ checkpoints are the opt-in one (`enable_file_checkpointing: bool = False`, which
 ```python
 graph = ReAct("...", model, tools=[...])
 config = {"configurable": {"thread_id": "t"}}
-states = [s async for s in graph.aget_state_history(config)]     # newest first
-await graph.ainvoke(None, states[3].config)                      # continue from an earlier one
+states = [s async for s in graph.aget_state_history(config)]  # newest first
+await graph.ainvoke(None, states[3].config)  # continue from an earlier one
 await graph.aupdate_state(states[3].config, {"messages": [...]})  # or fork it
 ```
 
@@ -850,7 +855,9 @@ class Fan(TypedDict, total=False):
 
 
 def items(state: Fan) -> list[Send]:  # one Send a line of the task
-    return [Send("work", {"item": line}) for line in str(state["messages"][-1].content).splitlines()]
+    return [
+        Send("work", {"item": line}) for line in str(state["messages"][-1].content).splitlines()
+    ]
 
 
 async def work(state: Fan) -> Fan:
@@ -869,11 +876,17 @@ builder.add_conditional_edges(START, items, ["work"])
 builder.add_edge("work", "gather")
 builder.add_edge("gather", END)
 
-lead = ReAct("You lead the research.", model, subagents=[{
-    "name": "fan_out",
-    "description": "Researches many items at once: give one item a line.",
-    "runnable": builder.compile(),
-}])
+lead = ReAct(
+    "You lead the research.",
+    model,
+    subagents=[
+        {
+            "name": "fan_out",
+            "description": "Researches many items at once: give one item a line.",
+            "runnable": builder.compile(),
+        }
+    ],
+)
 ```
 
 Tested in `tests/integration/test_react_fan_out.py`.
@@ -888,8 +901,9 @@ from deepagents.middleware.summarization import create_summarization_tool_middle
 from trellis.harness.automatic import JournalBackend
 
 backend = JournalBackend()
-ReAct("...", model, backend=backend,
-      middleware=[create_summarization_tool_middleware(model, backend)])
+ReAct(
+    "...", model, backend=backend, middleware=[create_summarization_tool_middleware(model, backend)]
+)
 ```
 
 The tool is the graph's own machinery — a summary in the history's place, the history kept in
@@ -908,10 +922,16 @@ always was.
 ```python
 from deepagents.middleware.rubric import RubricMiddleware
 
-agent = h.wrap(ReAct("You answer with units.", model, tools=[mast],
-                     middleware=[RubricMiddleware(model=grader)]), id="surveyor")
-await agent.run({"messages": [{"role": "user", "content": "how high is the mast?"}],
-                 "rubric": "Says the unit"}, user="u")
+agent = h.wrap(
+    ReAct(
+        "You answer with units.", model, tools=[mast], middleware=[RubricMiddleware(model=grader)]
+    ),
+    id="surveyor",
+)
+await agent.run(
+    {"messages": [{"role": "user", "content": "how high is the mast?"}], "rubric": "Says the unit"},
+    user="u",
+)
 ```
 
 It needs no harness code: the grader's calls count to the run's budget and spend as every
@@ -965,8 +985,11 @@ headers for the run (its MCP tools, its attribution), the run's budget:
 from langchain.agents.middleware import ModelFallbackMiddleware
 from trellis.harness.gateways import routed_chat_model
 
-ReAct("...", "anthropic/claude-sonnet-4-5",
-      middleware=[ModelFallbackMiddleware(routed_chat_model("openai/gpt-4o"))])
+ReAct(
+    "...",
+    "anthropic/claude-sonnet-4-5",
+    middleware=[ModelFallbackMiddleware(routed_chat_model("openai/gpt-4o"))],
+)
 ```
 
 (`tests/integration/test_react_routed_fallback.py`.)

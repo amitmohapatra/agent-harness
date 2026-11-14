@@ -13,10 +13,17 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import Runnable
 from pydantic import Field
 
-from tests.support.arm import declaring
+from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
-from trellis import Harness, ReAct
+from trellis import Harness, ReAct, tool
 from trellis.contracts import ConfigurationError, RunEventType
+
+
+@tool(side_effects="read")
+def today() -> str:
+    """Today's date."""
+    return "2026-11-14"
+
 
 SEARCH = {"type": "web_search_20250305", "name": "web_search", "max_uses": 2}
 EXECUTE = {"type": "code_execution_20250825", "name": "code_execution"}
@@ -113,16 +120,17 @@ async def test_the_catalogs_risk_decides_whether_a_provider_tool_is_offered(
     # declared read: offered; the catalog says irreversible: a person would have to approve a
     # call the provider makes inside its step, so it is held back, said on the run
     declaring(harness, web_search="irreversible")
-    model = ProviderChat(turns=["I cannot search."])
-    agent = harness.wrap(ReAct("s", model, tools=[SEARCH, EXECUTE]), id="web")
+    model = ProviderChat(turns=[("today", {}), "I cannot search."])
+    agent = arm(harness.wrap(ReAct("s", model, tools=[SEARCH, EXECUTE]), id="web"), [today])
     events = [e async for e in agent.stream("search", user="u")]
-    assert offered(model) == [["code_execution"]]  # a write it keeps to itself: announced
+    # code execution is a write the provider keeps to itself: announced, at each model call
+    assert offered(model) == [["code_execution"], ["code_execution"]]
     held = [
         e.data
         for e in events
         if e.type is RunEventType.CUSTOM and e.data.get("code") == "PROVIDER_TOOL_HELD"
     ]
-    assert len(held) == 1 and "web_search" in held[0]["message"]
+    assert len(held) == 1 and "web_search" in held[0]["message"]  # said once a run
 
 
 async def test_a_provider_tool_nobody_declared_is_held_until_the_catalog_does(
@@ -157,6 +165,11 @@ async def test_provider_tools_are_of_the_runs_tool_set(harness: Harness) -> None
 def test_a_dict_a_client_runs_is_refused(given: dict[str, Any]) -> None:
     with pytest.raises(ConfigurationError, match="a tool a client runs"):
         ReAct("s", ProviderChat(turns=[]), tools=[given])
+
+
+def test_a_dict_that_names_no_tool_is_refused() -> None:
+    with pytest.raises(ConfigurationError, match="has a type or a name"):
+        ReAct("s", ProviderChat(turns=[]), tools=[{"max_uses": 2}])
 
 
 async def test_outside_a_run_a_provider_tool_is_bound_as_langchain_binds_it() -> None:

@@ -28,7 +28,6 @@ executor in the graph: refused, saying what to give instead."""
 
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Final
@@ -42,8 +41,7 @@ from trellis.harness.adapters.base import builtin
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.runtime import current
 from trellis.harness.tools import bridge
-
-log = logging.getLogger("trellis.tools")
+from trellis.harness.tools.base import UNDECLARED
 
 #: What each provider tool does, by the name it is called by (a type's name before its
 #: version date: ``web_search_20250305`` is ``web_search``), where nobody declared it in the
@@ -94,11 +92,6 @@ OPAQUE: Final = frozenset({"encrypted_content", "encrypted_index"})
 _HELD_SAID: LRUSet[tuple[str, str]] = LRUSet(maxsize=SAID_ONCE)
 
 
-def provider_tool(given: Any) -> bool:
-    """Whether ``given`` is a tool given as a provider's ``dict`` (LangChain's built-in tools)."""
-    return isinstance(given, dict)
-
-
 def name_of(tool: Mapping[str, Any]) -> str:
     """A provider tool's name: its ``name``, else its type (OpenAI's ``{"type":
     "web_search"}``)."""
@@ -128,12 +121,10 @@ def checked(tools: Sequence[Mapping[str, Any]]) -> list[ToolSpec]:
             )
         if not name:
             raise ConfigurationError(f"a provider tool has a type or a name: {dict(tool)!r}")
-        declared = DECLARED.get(kind) or DECLARED.get(name)
         spec = ToolSpec(
             name=name,
             description=f"the provider's {kind}, run inside the model's step",
-            source="local",
-            **({"side_effects": declared} if declared else {}),
+            side_effects=DECLARED.get(kind, UNDECLARED),
         )
         specs.append(builtin(spec))
     return specs
@@ -193,9 +184,7 @@ class ProviderTools(AgentMiddleware):
 
     async def _recorded(self, runtime: Any, reply: ModelResponse[Any], started: float) -> None:
         """Each server call ``reply`` reports, with its result, as the run's tool call."""
-        for message in reply.result:
-            if not isinstance(message, AIMessage):
-                continue
+        for message in (m for m in reply.result if isinstance(m, AIMessage)):
             blocks = message.content_blocks
             found = {
                 str(b.get("tool_call_id")): b for b in blocks if b["type"] == "server_tool_result"
@@ -235,4 +224,4 @@ def _plain(output: Any) -> Any:
     return output
 
 
-__all__ = ["DECLARED", "ProviderTools", "checked", "provider_tool"]
+__all__ = ["DECLARED", "ProviderTools", "checked"]

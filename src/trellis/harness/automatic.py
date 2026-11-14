@@ -81,13 +81,9 @@ def long_task(request: ModelRequest[Any], window: int) -> bool:
 
 
 def plan_mode_asked() -> bool:
-    """Whether the graph run this is called in entered plan mode (:data:`PLAN_MODE`, in its
-    config); outside a graph run, no."""
-    try:
-        config = get_config()
-    except RuntimeError:  # no graph run: a middleware called on its own
-        return False
-    return bool((config.get("configurable") or {}).get(PLAN_MODE))
+    """Whether the graph run this is called in (a middleware's hook, a node) entered plan mode
+    (:data:`PLAN_MODE`, in its config)."""
+    return bool((get_config().get("configurable") or {}).get(PLAN_MODE))
 
 
 class _LongTasks:

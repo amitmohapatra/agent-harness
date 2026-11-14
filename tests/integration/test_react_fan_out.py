@@ -32,17 +32,17 @@ class Fan(TypedDict, total=False):
 def fan_out(worker: Any) -> Any:
     """The recipe: one ``Send`` an item (a line of the task), each a run of ``worker``."""
 
-    def items(state: Fan) -> list[Send]:
+    def items(state: Any) -> list[Send]:
         task = str(state["messages"][-1].content)
         return [Send("work", {"item": line}) for line in task.splitlines()]
 
-    async def work(state: Fan) -> Fan:
+    async def work(state: Any) -> dict[str, Any]:
         run = trellis.current()
         assert run is not None
         result = await worker.run(state["item"], user=run.user)  # the run's child
         return {"found": [str(result.answer)]}
 
-    def gather(state: Fan) -> Fan:
+    def gather(state: Any) -> dict[str, Any]:
         return {"messages": [AIMessage("\n".join(sorted(state["found"])))]}
 
     builder = StateGraph(Fan)
