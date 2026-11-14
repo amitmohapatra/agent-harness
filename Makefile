@@ -24,7 +24,11 @@ typings:  ## Link trellis.contracts, trellis.memory and trellis.runs where pyrig
 
 .PHONY: test
 test:  ## Every test except the benchmark and the live ones, at 100% line and branch coverage
-	$(PYTEST) -q -m "not performance and not live and not matrix" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
+	$(PYTEST) -q -m "not performance and not live and not matrix and not scenario" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
+
+.PHONY: test-scenarios
+test-scenarios:  ## User scenarios against a private stack of the real memory service and agent-runs (scripts/scenarios/stack.sh reset first)
+	scripts/scenarios/stack.sh test
 
 .PHONY: test-live
 test-live:  ## Opt-in tests against running services (LLM_BASE_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
