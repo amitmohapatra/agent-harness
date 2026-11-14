@@ -860,7 +860,7 @@ async def test_c_a_turn_that_started_no_task_keeps_nothing_in_the_file_store(
     assert kept_files(harness) == []
 
 
-@pytest.mark.parametrize("failing", ["read", "put"])
+@pytest.mark.parametrize("failing", ["files", "read", "put"])
 async def test_c_a_file_store_out_of_reach_leaves_the_list_in_the_process(
     harness: Harness,
     server: StandIn,
@@ -885,7 +885,7 @@ async def test_c_a_file_store_out_of_reach_leaves_the_list_in_the_process(
         done = await say(agent, "is the optimization done?")
     assert first.status is RunStatus.SUCCESS and RESULT in done.answer, done.answer
     assert "the bucket is out of reach" in caplog.text
-    assert bool(kept_files(harness)) is (failing == "read")  # written, where it can be
+    assert bool(kept_files(harness)) is (failing != "put")  # written, where it can be
 
 
 async def test_c_a_list_past_the_bound_is_kept_in_the_process_only(

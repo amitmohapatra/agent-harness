@@ -116,7 +116,7 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
 from langgraph.pregel._retry import _should_retry_on
-from langgraph.types import Command, RetryPolicy
+from langgraph.types import Command
 
 from trellis.contracts import (
     ConfigurationError,
@@ -164,7 +164,6 @@ from trellis.harness.tools.base import (
     data_of,
     failed_output,
     max_age,
-    may_pass,
     not_run,
 )
 from trellis.harness.tools.bridge import MAX_REPEATS
@@ -1085,9 +1084,7 @@ def govern_tool_nodes() -> None:
         async def handler(given: ToolCallRequest) -> Any:
             return await execute(self, given, input_type, config)
 
-        calling = _CALLING.get()
-        if calling is not None:  # the graph running the call: again, its own retry
-            calling.entries += 1
+        _under_way().entries += 1  # the graph running the call: again, its own retry
         return await governed_call(request, handler)
 
     run_one = ToolNode._arun_one
@@ -1165,8 +1162,6 @@ async def _again(
         return False
     if error is not None and _node_retries(config, error):
         return False
-    if not may_pass(owed[0]):  # the time left is shorter than the error says to wait
-        return False
     await asyncio.sleep(backoff(tries + 1, owed[0]))
     return True
 
@@ -1176,14 +1171,11 @@ def _node_retries(config: RunnableConfig, error: Exception) -> bool:
     the graph's) that retries it, as LangGraph reads them (its task, from the call it hands the
     node's config: ``CONFIG_KEY_CALL``)."""
     call = (config.get("configurable") or {}).get(CONFIG_KEY_CALL)
-    if not isinstance(call, functools.partial):
-        return False
-    referred = call.args[0] if call.args else None
+    referred = next(iter(getattr(call, "args", ())), None)  # a weak reference to the task
     task = referred() if isinstance(referred, weakref.ref) else None
-    policies = getattr(task, "retry_policy", None) or call.keywords.get("retry_policy")
-    if isinstance(policies, RetryPolicy):
-        policies = [policies]
-    return any(_should_retry_on(policy, error) for policy in policies or ())
+    graphs = getattr(call, "keywords", None) or {}
+    policies = getattr(task, "retry_policy", None) or graphs.get("retry_policy") or ()
+    return any(_should_retry_on(policy, error) for policy in policies)
 
 
 #: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
