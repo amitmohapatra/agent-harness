@@ -588,6 +588,42 @@ async def test_a_sub_agents_command_that_only_reads_runs_without_asking_a_person
     assert [p["answer"] for p in recorded(tmp_path)["permissions"]] == ["approve_once"]
 
 
+async def test_with_no_log_of_the_agent_a_sub_agents_call_is_asked_about_as_its_request_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An agent the harness reads no log of: a sub-agent's call is decided at once (nothing
+    is waited for) with what its request says, which is all there is."""
+    import dataclasses
+
+    script = [
+        {
+            "agent": {"prompt": "tidy"},
+            "asks": {"builtin": "Bash", "args": {"command": "rm a"}},
+            "result": "x",
+        },
+        {"text": "done"},
+    ]
+    plain = dataclasses.replace(KIMI, usage=None)
+    asked = await harness.wrap(fake(tmp_path, script, profile=plain), id="no-log").run(
+        "x", user="u1"
+    )
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == {"request": "Requesting approval to Running: rm a"}
+
+
+async def test_an_allow_rule_in_the_agents_own_configuration_stops_the_run_before_its_prompt(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """APR-01. Kimi applies its config's ``allow`` rules without asking (2.6): the run is not
+    started, and says which rules."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text('[[permission.allow]]\ntool = "Bash"\nmatch = "rm *"\n')
+    done = await harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="allows").run("x", user="u1")
+    assert done.status is RunStatus.ERROR and done.error is not None
+    assert "Bash(rm *)" in done.error.message and "prompts" not in recorded(tmp_path)
+
+
 async def test_a_failed_sub_agent_ends_its_child_run_failed(
     harness: Harness, tmp_path: Path
 ) -> None:

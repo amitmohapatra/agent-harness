@@ -166,9 +166,7 @@ def _shown(request: Mapping[str, Any]) -> dict[str, Any] | None:
     of its log's ``interaction.request``: a command whole with the folder it runs in, a file's
     path and content, a URL...), less what kind of display it is; ``None`` when it shows
     nothing."""
-    display = (request.get("request") or {}).get("display")
-    if not isinstance(display, dict):
-        return None
+    display = (request.get("request") or {}).get("display") or {}
     return {key: value for key, value in display.items() if key != "kind"} or None
 
 
@@ -628,11 +626,10 @@ class ACPSession(Keeper[Background]):
         return chosen(options, "reject_once")
 
     async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
-        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``), asked by
-        whoever answers for the call it is for (:meth:`_relayed`); with nobody, left
-        unfilled."""
-        found, _ = await self._asker(mode.tool_call_id)
-        answer = await self._relayed(found, lambda to: to.create_elicitation(message, mode))
+        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``: the main
+        agent's — its sub-agents have no such tool), asked by the turn being served; with
+        none, left unfilled."""
+        answer = await self._relayed(None, lambda to: to.create_elicitation(message, mode))
         return unfilled() if answer is OVER else answer
 
     async def _asker(self, call_id: str) -> tuple[Background | None, dict[str, Any] | None]:

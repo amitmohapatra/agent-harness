@@ -95,6 +95,16 @@ def test_the_allow_rules_of_kimis_own_configuration_are_found_wherever_kimi_read
     assert acp.kimi_allows(env, str(work)) == ["Write"]
 
 
+async def test_a_form_the_agent_sends_while_no_turn_is_served_is_left_unfilled() -> None:
+    """Nothing is there to ask a person: the agent's form is answered ``cancel``."""
+    from trellis.harness.bridges import acp_live
+    from trellis.harness.bridges.live import LiveSessions
+
+    session = acp_live.ACPSession("chat", "form", LiveSessions(), keeps=False, model="m")
+    answer = await session.create_elicitation("Which?", SimpleNamespace(tool_call_id="0:x"))
+    assert answer.action == "cancel"
+
+
 def test_a_version_outside_the_range_is_refused_saying_how_to_install() -> None:
     compat.require_binary("kimi-code", "2.6.2", command="kimi")
     compat.require_binary("kimi-code", "2.6.9", command="kimi")

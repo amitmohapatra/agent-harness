@@ -1635,8 +1635,7 @@ class Attempt:
     async def _question(self, options: list[Any], name: str, tool_call: Any) -> Any:
         """The agent's question to its user, asked as the run's (:func:`_asked`); the run
         paused on it, the agent stops here."""
-        known = self.calls.get(tool_call.tool_call_id)
-        args = known.args if known is not None else {}
+        args = self.calls[tool_call.tool_call_id].args  # its call's update came before it
         try:
             return await _asked(self.runtime, options, name, args, tool_call)
         except Paused:
@@ -1648,14 +1647,9 @@ class Attempt:
         of the call, a field each), asked as the run's question (:func:`_filled`) on behalf of
         the call it is for; the run paused on it, the agent stops here."""
         self._handles()
-        known = self.calls.get(mode.tool_call_id)
-        calling = (
-            contextlib.nullcontext()
-            if known is None
-            else self.runtime.asking_within(known.name, known.args)
-        )
+        known = self.calls[mode.tool_call_id]  # its call's update came before it
         try:
-            async with calling:
+            async with self.runtime.asking_within(known.name, known.args):
                 return await _filled(self.runtime, message, mode)
         except Paused:
             await self._stop()
@@ -2034,11 +2028,6 @@ class Deciding:
         name = tool_call.title or ""
         if name.startswith(HARNESS_PREFIX):
             return chosen(options, "allow_once")
-        if _offers_a_choice(options):
-            try:
-                return await _asked(self.runtime, options, name, {}, tool_call)
-            except Paused:
-                return WAITS
         args = _args(tool_call.raw_input, tool_call.content)
         spec = _spec(self.runtime, self.profile, name)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
@@ -2050,12 +2039,6 @@ class Deciding:
         if isinstance(decided, ToolOutcome) or decided.args != args:
             return chosen(options, "reject_once")
         return _let_through(self.runtime, name, options)
-
-    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
-        try:
-            return await _filled(self.runtime, message, mode)
-        except Paused:
-            return WAITS
 
 
 def _offers_a_choice(options: Sequence[Any]) -> bool:
