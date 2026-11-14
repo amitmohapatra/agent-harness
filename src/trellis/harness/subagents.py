@@ -302,10 +302,10 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
 async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tenant: str) -> None:
     """Cancel the children of ``agent``'s run ``run_id`` that have not ended, and theirs: a
     child paused for a person waits on nobody once its parent is cancelled, and the work its
-    framework keeps going for one outside any attempt stops (``Adapter.stopped``: a Deep Agents
-    async task, ``bridges.async_tasks``)."""
+    framework keeps going for one outside any attempt stops (the adapter's ``child_cancelled``:
+    a Deep Agents async task, ``bridges.async_tasks``)."""
     runs = agent.harness.runs
-    stop = getattr(agent.adapter, "stopped", None)
+    stop = getattr(agent.adapter, "child_cancelled", None)
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final:
             continue

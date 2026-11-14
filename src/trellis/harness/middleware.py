@@ -466,7 +466,12 @@ async def governed_call(
         tasks = getattr(runtime.agent.adapter, "tasks", None)
         if tasks is not None and call["name"] in ASYNC_TASKS and framework_made(own):
             # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
-            await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
+            try:
+                await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
+            except Exception as exc:  # the task's run is a record: the call's result stands
+                log.warning(
+                    "run %s: the run of a task of %s not kept: %s", runtime.run_id, own.name, exc
+                )
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))

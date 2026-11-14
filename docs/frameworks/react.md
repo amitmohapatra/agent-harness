@@ -581,7 +581,8 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   out of the list (with `middleware()` each step is kept, and it is in).
 * **What still does not hold** — nothing tells the chat when a task ends (its run ends when a
   later turn checks); a worker's turn cancelled from another server (agent-runs' cancel) ends
-  the task's run, not the task on its server; and
+  the task's run, not the task on its server; new instructions to a task whose run already
+  ended (`update_async_task` after its result) start no run of their own; and
   when two overlapping turns both change the same task, the record of the turn that ends last
   is the one kept.
 

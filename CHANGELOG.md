@@ -253,7 +253,8 @@ the next turn's `check_async_task` was refused its id.
   ended, or a worker's turn still running while another ends, each keep their tasks. (Two
   turns ending at the same moment could still lose one's: fixed above.) A turn
   that waits for an approval has its list kept as it pauses: the task it started is listed
-  by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
+  by the next turn meanwhile, and is still found, cancelled, when the turn is cancelled at the
+  approval.
 - **The five task tools say what they do** where the harness says it of Deep Agents' own
   tools: a status check and the list are reads; a start, an update and a cancel are writes,
   announced and not asked about (the tool catalog still comes first). A write's result is
@@ -262,9 +263,17 @@ the next turn's `check_async_task` was refused its id.
   which invited a second task; it is left as it was said, and a status check's is still
   marked.
 
+- **Each task is a child run of the turn that started it** (`bridges.async_tasks`): its
+  task's id, server and graph recorded, held in the run store while it runs (no polling), and
+  ended `SUCCESS`, `ERROR` or `CANCELLED` when a later check, list or cancel says how the task
+  ended, on any server that shares the run store.
+- **A cancelled turn cancels the tasks it started**, on their server through Deep Agents' own
+  `cancel_async_task` and as runs — cancelled while it works, at its approval, or taken over
+  by a newer message — where they ran on.
+
 Not in this release: nothing tells the chat when a task ends (the model checks in a later
-turn); cancelling a turn does not cancel its task; a graph with neither `middleware()` nor a
-checkpointer loses the task of a turn cancelled after its start. See
+turn); a graph with neither `middleware()` nor a checkpointer loses the task of a turn
+cancelled after its start (the task is cancelled with it). See
 [docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
 
 ### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
@@ -307,6 +316,14 @@ wrapped agent did not get what the SDK gives:
 - **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
   takes it with `--resume` only to fork), and options with `continue_conversation` failed at
   once (the SDK asked the journal's store for the latest session): both work.
+- **Workflows and messages to other agents.** The bundled CLI offers a dynamic workflow
+  (`Workflow`) with no server flag: one background task whose agents have no task of their
+  own, an agent's first tool call reaching the harness before any frame names it, so its
+  calls were taken for the main agent's (and the launch asked a person as an undeclared
+  tool). `SendMessage` resumed a finished background subagent as a new task no child run
+  held, or reached another Claude session. Both are disallowed, as the schedules are, with
+  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`; 2.1.283 has none and
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing of what it sends).
 
 Tested through the harness on the query path and in a live session: every hook event of the
 options' own, `can_use_tool` with its suggestions and permission updates, every option's

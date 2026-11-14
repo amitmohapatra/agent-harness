@@ -539,6 +539,28 @@ async def test_h_past_the_bound_the_oldest_task_is_let_go(
     assert not harness.holds.holds(first.run_id) and harness.holds.holds(second.run_id)
 
 
+async def test_h_a_task_run_that_cannot_be_kept_leaves_the_start_as_it_was(
+    harness: Harness,
+    server: StandIn,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The task's run is the harness's record of it: one that cannot be kept (the run store
+    out of reach) is said in the log, and the start's result — the task's id — reaches the
+    model and the task list as it would."""
+
+    async def unkept(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the run store is out of reach")
+
+    monkeypatch.setattr(async_tasks.AsyncTasks, "_started", unkept)
+    agent = chat(harness, server, Model(turns=[START, reports_the_id, *LISTING]))
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        first = await say(agent, "run the optimization")
+    assert first.status is RunStatus.SUCCESS and server.task_id in first.answer, first.error
+    assert "the run store is out of reach" in caplog.text and not await task_runs(harness)
+    assert f"task_id: {server.task_id}" in (await say(agent, "which tasks?")).answer
+
+
 def test_h_a_start_tool_laid_out_otherwise_records_the_task_id_alone() -> None:
     """The specs ``start_async_task`` starts tasks of are read from its code: a release laid
     out otherwise has none to read, and the task's run then records its id alone."""

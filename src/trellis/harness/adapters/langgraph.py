@@ -179,7 +179,7 @@ class LangGraphAdapter:
         #: process holds the runs of (``bridges.async_tasks``)
         self.tasks = AsyncTasks()
 
-    async def stopped(self, run_id: str, reason: str | None) -> None:
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
         """The run ``run_id`` was cancelled with the run that started it: an async task's
         that this process holds is cancelled on its server (``subagents.cancel_children``)."""
         await self.tasks.stopped(run_id, reason)
