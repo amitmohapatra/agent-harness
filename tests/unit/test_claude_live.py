@@ -24,6 +24,7 @@ from trellis.harness.bridges.claude_live import (
     LEFT,
     STOPPED,
     UNATTENDED,
+    WORKFLOW_AGENT,
     Background,
     Left,
     LiveSession,
@@ -31,6 +32,7 @@ from trellis.harness.bridges.claude_live import (
     Turn,
     gone,
 )
+from trellis.harness.bridges.helpers import Kind
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -467,3 +469,19 @@ def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> 
     assert first == listed()
     [update] = [schema for name, schema in first if name == "update_schedule"]
     assert '"enabled": {"description": "false pauses it, true resumes it."' in update
+
+
+async def test_a_workflow_agents_call_is_the_workflows_run_only_while_one_works() -> None:
+    """A call named by a workflow agent's kind (``workflow-subagent``) is the run of the one
+    workflow at work in the session — remembered by the agent's own id for its permission
+    request, which names the agent alone — and no background run's while none works (a
+    subagent's run is never taken for it)."""
+    session, found, store = await background()
+    assert session._working("a1", WORKFLOW_AGENT) is None  # t1 is a subagent's
+    found.kind = Kind.WORKFLOW
+    assert session._working("a1", WORKFLOW_AGENT) is found
+    assert session._working("a1") is found  # its permission request: the id alone
+    session._forget(found)
+    assert session._working("a1") is None and not session.background
+    session.background["t1"] = found
+    await ended(session, found, store)
