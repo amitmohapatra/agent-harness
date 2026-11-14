@@ -113,9 +113,19 @@ whichever replica each reaches.
   it for 300 s at most, and the refusal another holder gets does not name the holder. One
   suite of checks (`tests/support/store_contract.py`) runs against `LocalRuns`, the test
   suite's `FileRuns` and agent-runs.
+- A turn's place is the run store's: the line orders by `RunRecord.placed_at`, which agent-runs
+  decides under the key's lock, and no longer reads every answer of every run in the line to
+  recompute it. A store that sends no `placed_at` is a `ConfigurationError` naming the run,
+  never a guessed order. `LocalRuns` sets `placed_at` with the same meaning.
+- The line is listed by its own key (`concurrency_key=thread:<conversation>`), so another
+  user's turns on a thread with the same name are never read (they were, one `get` each, and
+  again whenever they moved). It lists the queued runs, then the running ones, so a queued
+  turn a worker claims in between is never missed. `RunStore.iterate` takes
+  `concurrency_key`, as `RunsClient.iterate` does.
 
-Needs the agent-runs of this release (runs of a key created in their place; same wire). No
-argument, signature, endpoint or schema changed. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
+Needs the agent-runs of this release (runs of a key created in their place, `placed_at` on the
+run record and summary, the `concurrency_key` listing filter) and `trellis-contracts` with
+`RunRecord.placed_at`. The two wire additions are optional and additive. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 

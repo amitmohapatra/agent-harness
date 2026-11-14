@@ -1,7 +1,8 @@
 """What every run store does the same way — ``LocalRuns``, ``FileRuns`` and agent-runs behind
 ``RunsClient`` — checked as behaviour, through ``RunStore``: the place a run of a
-``concurrency_key`` takes, a claim that respects it, a cancel of a run its process holds, and
-what a hold gives away. One suite, run against each store (``tests/integration/
+``concurrency_key`` takes (``placed_at``, on its record and its summary), the listing of exactly
+one key's runs in one tenant, a claim that respects the places, a cancel of a run its process
+holds, and what a hold gives away. One suite, run against each store (``tests/integration/
 test_store_contract.py`` in process; ``tests/live/test_live_chat_order.py`` on agent-runs)."""
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ from typing import Final
 import pytest
 
 from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution, RunStart, RunStatus
-from trellis.harness.line import placed
-from trellis.harness.runs import RunStore
-from trellis.runs import LeaseLostError
+from trellis.harness.runs import RunStore, place
+from trellis.runs import AuthorizationError, LeaseLostError
 
 TENANT: Final = "default"
+#: Another tenant.
+B: Final = "other-tenant"
 
 
 def starting(agent: str, key: str) -> RunStart:
@@ -32,7 +34,8 @@ async def runs_of_a_key_are_placed_in_the_order_they_took_their_place(runs: RunS
     key = f"key-{uuid.uuid4().hex}"
     first = await runs.start(starting("contract", key))
     second = await runs.start(starting("contract", key))
-    assert await placed(runs, first) < await placed(runs, second)
+    assert first.placed_at == first.created_at  # placed when it was started
+    assert place(first) < place(second)
     asked = Interrupt(tenant_id=TENANT, run_id=first.run_id, question="Go on?")
     await runs.pause(asked)
     answer = InterruptResolution(
@@ -40,7 +43,14 @@ async def runs_of_a_key_are_placed_in_the_order_they_took_their_place(runs: RunS
     )
     continued = await runs.resume(answer, tenant=TENANT)
     assert continued.created_at == first.created_at  # written once
-    assert await placed(runs, continued) > await placed(runs, second)
+    [entry] = (await runs.resolutions(first.run_id, tenant=TENANT)).items
+    assert continued.placed_at == entry.recorded_at  # placed again when it was answered
+    assert place(continued) > place(second)
+    read = await runs.get(first.run_id, tenant=TENANT)
+    assert read is not None and read.placed_at == continued.placed_at
+    keyless = await runs.start(RunStart(tenant_id=TENANT, agent_id="contract", user_id="ada"))
+    assert keyless.placed_at is None
+    await runs.finish(keyless.run_id, RunStatus.SUCCESS, tenant=TENANT)
     for run in (first, second):
         await runs.finish(run.run_id, RunStatus.SUCCESS, tenant=TENANT)
 
@@ -85,9 +95,40 @@ async def a_hold_is_short_and_a_refused_one_names_nobody(runs: RunStore) -> None
     await runs.finish(run.run_id, RunStatus.SUCCESS, tenant=TENANT)
 
 
+async def a_keys_line_is_listed_by_its_key_in_its_tenant_with_each_place(runs: RunStore) -> None:
+    """Listing by ``concurrency_key`` gives exactly that key's runs of the tenant asked for,
+    each summary with the record's ``placed_at``: a run of another key on the same thread
+    name, and another tenant's run of the same key, are not listed."""
+    key, thread = f"key-{uuid.uuid4().hex}", f"thread-{uuid.uuid4().hex}"
+    mine = await runs.start(starting("contract", key).model_copy(update={"thread_id": thread}))
+    other_key = starting("contract", f"{key}-other").model_copy(update={"thread_id": thread})
+    other = await runs.start(other_key)
+    listed = [
+        summary
+        async for summary in runs.iterate(
+            concurrency_key=key, status=RunStatus.RUNNING, tenant=TENANT
+        )
+    ]
+    assert [(s.run_id, s.placed_at) for s in listed] == [(mine.run_id, mine.placed_at)]
+    try:  # another tenant's run of the key: a key of this tenant may not start one there
+        theirs = await runs.start(starting("contract", key).model_copy(update={"tenant_id": B}))
+    except AuthorizationError:
+        theirs = None
+    if theirs is not None:
+        ours = [s.run_id async for s in runs.iterate(concurrency_key=key, tenant=TENANT)]
+        assert ours == [mine.run_id]
+        assert [s.run_id async for s in runs.iterate(concurrency_key=key, tenant=B)] == [
+            theirs.run_id
+        ]
+        await runs.finish(theirs.run_id, RunStatus.SUCCESS, tenant=B)
+    for run in (mine, other):
+        await runs.finish(run.run_id, RunStatus.SUCCESS, tenant=TENANT)
+
+
 #: The contract, each check by what it says.
 CHECKS: Final[tuple[Callable[[RunStore], Awaitable[None]], ...]] = (
     runs_of_a_key_are_placed_in_the_order_they_took_their_place,
+    a_keys_line_is_listed_by_its_key_in_its_tenant_with_each_place,
     a_queued_run_is_claimed_once_no_run_placed_before_it_runs,
     a_run_its_process_holds_is_cancelled_at_once,
     a_hold_is_short_and_a_refused_one_names_nobody,
