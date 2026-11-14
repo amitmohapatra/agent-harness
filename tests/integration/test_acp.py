@@ -36,6 +36,7 @@ from trellis.harness.agent import NARROW_FROM
 from trellis.harness.budget import Budget
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.sandbox import DELIVERS_HERE, sandbox
+from trellis.harness.tools import bridge
 
 #: What Kimi reads its swarm's concurrency from.
 SWARM_LIMIT = "KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"
@@ -1211,6 +1212,14 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
 ) -> None:
     sandboxes = FakeSandboxes()
     monkeypatch.setenv("FAKE_SECRET_TOKEN", "do-not-pass")
+    outputs: list[tuple[str, Any]] = []
+    observed = bridge.observed
+
+    async def recording(runtime: Any, spec: Any, args: Any, outcome: Any, **more: Any) -> None:
+        outputs.append((spec.name, outcome.output))
+        await observed(runtime, spec, args, outcome, **more)
+
+    monkeypatch.setattr(bridge, "observed", recording)
     script = [
         {"builtin": "Write", "args": {"path": "/w/notes.txt", "content": "a\nb\nc\n"}},
         {"builtin": "Read", "args": {"path": "/w/notes.txt", "line": 2, "limit": 1}},
@@ -1243,6 +1252,10 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     assert ran[0] == {"exit": 0, "signal": None, "output": "E=1", "truncated": True}
     assert ran[1]["signal"] == "SIGKILL"
     assert not Path(started["cwd"]).exists()  # noqa: ASYNC240  # the run's directories go with it
+    # a command run in the client's terminal is recorded with that terminal's output, whole
+    # (the agent's last update of the call names the terminal and carries none); a killed
+    # command said nothing
+    assert [output for name, output in outputs if name == "Bash"] == [" FAKE=1", ""]
 
 
 async def test_without_a_sandbox_the_agents_file_requests_are_refused(tmp_path: Path) -> None:

@@ -110,7 +110,7 @@ from trellis.harness.adapters.base import (
     unique,
 )
 from trellis.harness.adapters.claude import RESUMED, resumed_call
-from trellis.harness.bounded import SAID_ONCE, LRUSet
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.acp_live import (
     CANCEL_SECONDS,
@@ -156,6 +156,8 @@ SETTLE_SECONDS: Final = 2.0
 SETTLE_STEP: Final = 0.1
 #: The most MCP tools the agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
+#: The most terminals of a sandboxed run whose output is kept past their release.
+TERMINALS_KEPT: Final = 16
 #: The session modes the harness governs every call in: a mode that approves on its own
 #: (Kimi's ``auto``, ``yolo``) never asks, and governance would never see the calls.
 GOVERNED_MODES: Final = frozenset({"default", "plan"})
@@ -1146,6 +1148,8 @@ class _Call:
     refused: bool = False
     #: its arguments came as ``rawInput`` (final), not only as the text of its updates
     given: bool = False
+    #: the client's terminal it runs in (a sandboxed run's ``Bash``): its output is the call's
+    terminal: str | None = None
 
 
 class Attempt:
@@ -1442,6 +1446,9 @@ class Attempt:
     async def _ran(self, update: Any, call: _Call) -> None:
         failed = update.status == "failed"
         text = _output(update)
+        if not text and call.terminal is not None and self.boxed is not None:
+            # run in the client's terminal: the agent's last update names it and says nothing
+            text = self.boxed.said(call.terminal)
         await self._helpers_ended(update.tool_call_id, call, text, failed=failed)
         if call.refused or call.name.startswith(HARNESS_PREFIX):
             return  # not run; or a harness tool, which the bridge records
@@ -1522,6 +1529,11 @@ class Attempt:
             self.calls[update.tool_call_id] = _Call(name=update.title, args=args, given=given)
         elif isinstance(update, ToolCallProgress):
             known = self.calls.get(update.tool_call_id)
+            ran_in = next(
+                (b.terminal_id for b in update.content or () if b.type == "terminal"), None
+            )
+            if known is not None and ran_in is not None:
+                known.terminal = ran_in
             if known is not None and update.raw_input is not None:
                 known.args, known.given = _args(update.raw_input, None), True
             elif known is not None and not known.given and update.raw_output is None:
@@ -1802,6 +1814,9 @@ class Sandboxed:
         self.source = target.sandbox
         self.work = home.work
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
+        #: what the latest terminals the agent released said (:data:`TERMINALS_KEPT`): a
+        #: call's record reads it once the call ends, after its terminal went
+        self.released: LRU[str, str] = LRU(TERMINALS_KEPT)
         self._made = False
         runtime.added.append(self.source)  # its end (and its pause) find it
         _said_reads(runtime.agent_id)
@@ -1881,7 +1896,13 @@ class Sandboxed:
 
     def release(self, ident: str) -> None:
         task, _ = self.terminals.pop(ident)
+        self.released[ident] = _ran(task)[0] if task.done() else ""
         task.cancel()
+
+    def said(self, ident: str) -> str:
+        """The output of the command the terminal ``ident`` ran, once the agent released it
+        (it does before it ends the call that ran in it): what that call is recorded with."""
+        return self.released.get(ident) or ""
 
     async def stopped(self) -> None:
         """The attempt is ending: its commands still running are stopped."""

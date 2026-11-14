@@ -640,7 +640,10 @@ class FakeAgent:
         if "background" in step:  # a command run in the background: launched
             output = self.launch(session_id, "process", step["background"], call_id)
         if self.client is not None and self.client.terminal and name == "Bash":
+            # run in the client's terminal: Kimi's last update names it and carries no output
             output = await self.terminal(session_id, call_id, args["command"], step)
+            await self.progress(session_id, call_id, status="completed")
+            return output
         if self.client is not None and self.client.fs.write_text_file and name == "Write":
             await self.conn.write_text_file(
                 session_id=session_id, path=args["path"], content=args["content"]

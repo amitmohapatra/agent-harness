@@ -36,6 +36,7 @@ from trellis.harness.budget import Budget
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import sandbox
+from trellis.harness.tools import bridge
 from trellis.harness.tools.bridge import TURN_STALLED
 
 pytestmark = needs_kimi
@@ -938,8 +939,19 @@ async def test_kimi_through_bifrost_carries_the_runs_headers(tmp_path: Path) -> 
 
 
 async def test_a_sandboxed_kimi_runs_bash_and_writes_in_the_sandbox(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Its command runs in the client's terminal, so Kimi's last update of the call names the
+    terminal and carries no output: what the call is recorded with is that terminal's output,
+    the one Kimi's model read."""
+    recorded: dict[str, Any] = {}
+    observed = bridge.observed
+
+    async def recording(runtime: Any, spec: Any, args: Any, outcome: Any, **more: Any) -> None:
+        recorded[spec.name] = outcome.output
+        await observed(runtime, spec, args, outcome, **more)
+
+    monkeypatch.setattr(bridge, "observed", recording)
     sandboxes = FakeSandboxes()
     endpoint.plan = [
         ("Write", {"path": "/workspace/notes.txt", "content": "hello"}),
@@ -955,6 +967,7 @@ async def test_a_sandboxed_kimi_runs_bash_and_writes_in_the_sandbox(
     assert made not in sandboxes.boxes  # deleted with the run
     assert any("echo boxed" in c for c in sandboxes.commands)
     assert not (tmp_path / "kimi-work" / "notes.txt").exists()  # not on this machine
+    assert recorded["Bash"] and str(recorded["Bash"]).strip() in str(done.answer)
 
 
 async def test_kimi_reads_the_runs_skills(

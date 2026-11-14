@@ -16,6 +16,12 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Fixed: a sandboxed Kimi command is recorded with its output
+
+A sandboxed run's `Bash` runs in the client's terminal, and Kimi's last update of the call
+names the terminal and carries no output, so the call was recorded (journal, memory, events)
+with an empty result. It is recorded with what its terminal said.
+
 ### Changed: Kimi Code neither updates itself nor reports usage under the harness
 
 `KIMI_CODE_NO_AUTO_UPDATE=1` and `KIMI_DISABLE_TELEMETRY=1` are set for every run of
