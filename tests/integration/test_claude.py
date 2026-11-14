@@ -594,6 +594,51 @@ async def test_a_session_the_cli_no_longer_holds_is_run_again_from_its_prompt(
     assert started_with(tmp_path)["prompt"] == "refund o4"  # from the prompt, against the journal
 
 
+async def _rerun_from_its_prompt(harness: Harness, tmp_path: Path, script: list[Any]) -> list[str]:
+    """A run of ``script`` approved at each question, its last resume on a machine whose CLI
+    never held the session — the query runs again from its prompt, against the journal: the
+    built-in tools that ran, in order."""
+    # files checkpointed on this machine's disk: the session is not kept in the journal
+    target = options(tmp_path, script, enable_file_checkpointing=True)
+    agent = harness.wrap(target, id="again")
+    result = await agent.run("work", user="u1")
+    questions = sum("builtin" in step and step["builtin"] != "Read" for step in script)
+    for asked in range(questions):
+        assert result.status is RunStatus.PAUSED and result.interrupt is not None, result.error
+        if asked == questions - 1:
+            for kept in (tmp_path / "fake-claude").glob("*.json"):
+                kept.unlink()
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    return [call["tool"] for call in built_ins(tmp_path)]
+
+
+async def test_a_read_is_not_replayed_across_a_write_of_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A query run again from its prompt makes its calls again, and a call that already ran
+    is answered with what it returned then. A read that ran before a write of the run is not:
+    what it read may be what the write changed, so it runs again — the write itself, approved
+    once, still runs exactly once."""
+    read = {"builtin": "Read", "args": {"file_path": "notes.txt"}}
+    write = {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "new"}}
+    deploy = {"builtin": "Bash", "args": {"command": "make deploy"}}
+    ran = await _rerun_from_its_prompt(harness, tmp_path, [read, write, deploy, {"text": "ok"}])
+    # the first attempts: Read, Write; the query again: Read anew (Write ran since), then Bash
+    assert ran == ["Read", "Write", "Read", "Bash"]
+
+
+async def test_a_read_no_write_followed_is_answered_from_the_journal(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The neighbour: with no write since, a read made again is answered with what it
+    returned (it is not run twice), and so is a second, different read."""
+    reads = [{"builtin": "Read", "args": {"file_path": name}} for name in ("a.txt", "b.txt")]
+    deploy = {"builtin": "Bash", "args": {"command": "make deploy"}}
+    ran = await _rerun_from_its_prompt(harness, tmp_path, [*reads, deploy, {"text": "ok"}])
+    assert ran == ["Read", "Read", "Bash"]
+
+
 async def test_a_permission_prompt_tool_of_the_teams_own_is_refused(
     harness: Harness, tmp_path: Path
 ) -> None:

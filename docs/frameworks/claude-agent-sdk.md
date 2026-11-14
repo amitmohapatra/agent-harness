@@ -266,7 +266,10 @@ the call (the approved call runs once). Every decision works: `approve`, `reject
 **On failure.** The CLI keeps its sessions on its machine (or in your `session_store`). A run
 resumed where the CLI does not hold the session (another worker's machine) gets a `warning`
 event (`claude_session`) and runs the query again from its prompt, against the journal — the
-harness calls already made are not made again; the built-ins run again.
+harness calls already made are not made again, and a built-in that already ran is answered
+with what it returned: a write runs once. A read is answered so only until a write of the
+run: one made before a later write runs again, since what it read may be what the write
+changed.
 
 ## The run's own options
 

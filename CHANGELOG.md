@@ -330,6 +330,10 @@ cancelled after its start (the task is cancelled with it). See
   replaced: a turn in a process of its own counted the lower total as nothing spent, so the
   spend escaped the run's budget. One `SessionCost` owns the rule for a query and for a
   kept process: all of a total lower than the last seen is charged.
+- **A read is not answered across a write.** A query run again from its prompt (or a
+  subagent started again) made a `Read` again and was answered with what it had returned
+  before a later `Write` of the run. The journal drops the reads a framework ran itself when
+  a write of the run runs: such a read runs again; a write still runs once.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.
