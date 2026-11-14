@@ -27,7 +27,7 @@ import pytest
 
 from tests.scenarios.brains import SYSTEM, BrainChat, command, parse, token, wrapped
 from tests.scenarios.conftest import harness
-from tests.scenarios.kit import TOOLS, Served, eventually, free_port, record
+from tests.scenarios.kit import TOOLS, Served, calling, eventually, free_port, record, runs_of
 from tests.support.arm import arm
 from trellis import Budget, Harness, ReAct
 from trellis.contracts import RunEventType, RunStatus
@@ -55,8 +55,7 @@ async def test_a_turn_working_for_minutes_at_real_length(
             f"{token(uid, 1)} {command('wait', seconds=200)}", user=user, thread=f"long-{uid}"
         )
     )
-    await asyncio.sleep(3)
-    [summary] = [r async for r in h.runs.iterate(agent_id=agent.id)]
+    [summary] = await runs_of(h, agent.id, 1)
     seen: list[str] = []
     stop = asyncio.Event()
     watching = asyncio.create_task(_watch(h, summary.run_id, seen, stop))
@@ -65,7 +64,6 @@ async def test_a_turn_working_for_minutes_at_real_length(
             f"{token('o' + uid[:4], n)} hello", user=user, thread=f"other-{uid}"
         )
         assert other.status is RunStatus.SUCCESS, other.error
-        await asyncio.sleep(30)
     done = await long
     stop.set()
     await watching
@@ -114,7 +112,7 @@ async def test_a_turn_working_well_past_its_hold(adapter: str, uid: str, tmp_pat
             posting = asyncio.create_task(c.post(f"/agui/{agent_id}/run", json=body))
             seen: list[str] = []
             stop = asyncio.Event()
-            await asyncio.sleep(2)
+            await calling(h, run_id)
             watching = asyncio.create_task(_watch(h, run_id, seen, stop))
             chat = await c.post(
                 f"/agui/{agent_id}/run",

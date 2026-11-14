@@ -16,7 +16,6 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -24,34 +23,13 @@ from langgraph.types import RetryPolicy
 
 from tests.scenarios.brains import command, parse, token
 from tests.scenarios.conftest import harness
-from tests.scenarios.kit import TOOLS, Served, calling, eventually, free_port, record
+from tests.scenarios.kit import TOOLS, Chat, Served, calling, eventually, free_port, record
 from tests.support.arm import arm, native_tools
 from trellis import Harness, tool
 from trellis.contracts import RunStatus
-from trellis.harness.agui.sse import decode
 
 pytestmark = pytest.mark.timeout(900)
 SERVED = ["react", "langgraph", "openai_agents", "claude_agent_sdk", "kimi", "function"]
-
-
-class Chat:
-    """One user's chat with one agent over AG-UI, on whichever server ``port`` names."""
-
-    def __init__(self, agent_id: str, user: str, thread: str) -> None:
-        self.agent_id, self.thread = agent_id, thread
-        self.client = httpx.AsyncClient(headers={"x-user": user}, timeout=300)
-
-    async def post(self, port: int, **body: Any) -> list[tuple[int, dict[str, Any]]]:
-        sent = await self.client.post(
-            f"http://127.0.0.1:{port}/agui/{self.agent_id}/run",
-            json={"threadId": self.thread, **body},
-        )
-        assert sent.status_code == 200, sent.text
-        return decode(sent.text)
-
-    async def say(self, port: int, text: str, **more: Any) -> list[tuple[int, dict[str, Any]]]:
-        message = {"id": text[:16], "role": "user", "content": text}
-        return await self.post(port, messages=[message], **more)
 
 
 def _spec(adapter: str, agent_id: str, claude: list[dict[str, Any]]) -> dict[str, Any]:

@@ -55,7 +55,6 @@ async def test_a_pause_while_another_chat_works(  # noqa: PLR0917 - pytest's fix
     pause = asyncio.create_task(
         agent.run(f"{token('p' + uid[:4], 1)} pay {said}", user=user, thread=paying)
     )
-    await asyncio.sleep(0.5)  # the turn under way, the other chat works meanwhile
     talk = [
         await talker.run(f"{token('t' + uid[:4], n)} hello", user=user, thread=chatting)
         for n in range(1, 3)

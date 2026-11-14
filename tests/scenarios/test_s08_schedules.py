@@ -93,15 +93,18 @@ async def test_a_schedule_made_in_chat_fires_into_its_thread(
             # the open chat listens on its thread stream while the user keeps chatting
             heard: list[str] = []
 
+            connected = asyncio.Event()
+
             async def listen() -> None:
                 async with c.stream(
                     "GET", f"/agui/{agent_id}/threads/{open_thread}/events"
                 ) as stream:
+                    connected.set()
                     async for line in stream.aiter_lines():
                         heard.append(line)
 
             listening = asyncio.create_task(listen())
-            await asyncio.sleep(1)
+            await connected.wait()
             if how == "fire":
                 for s in schedules:
                     await h.runs.schedules.fire(s.schedule_id)

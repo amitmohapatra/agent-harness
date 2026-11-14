@@ -9,7 +9,6 @@ records and spending exact. (Claude Workflows: ``test_s05_background.py``, pendi
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -217,8 +216,7 @@ async def test_a_worker_killed_mid_workflow(
             return any(x.startswith("note:step1") for x in _book(tok, book))
 
         assert await eventually(in_its_slow_step, within=180), one.log.read_text()[-3000:]
-        await asyncio.sleep(2)
-        one.kill()
+        one.kill()  # after its first write, in or before its slow step
         two = await Served(_worker(adapter, agent_id), tmp_path, "w2").started()
         try:
             done = await handle.result(wait=300)
@@ -263,9 +261,8 @@ async def test_cancel_mid_workflow(
                 return (await record(h, handle.id)).status is RunStatus.CANCELLED
 
             assert await eventually(stopped, within=60)
-            await asyncio.sleep(10)  # past the slow step: nothing after the cancel runs
         finally:
-            one.stop()
+            one.stop()  # the worker lets its runs end before it goes: nothing runs after this
         ran = _book(tok, book)
         assert f"note:final {tok}" not in ran, ("a step after the cancel ran", ran)
         children = [r async for r in h.runs.iterate(parent_run_id=handle.id)]

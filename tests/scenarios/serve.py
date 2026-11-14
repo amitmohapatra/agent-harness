@@ -5,6 +5,7 @@
   :mod:`tests.scenarios.brains` (the same agents the test process wraps, by id);
 * ``mode``: ``worker`` (``h.worker(agents)``: claims queued runs, its lease ``lease`` seconds),
   ``agui`` (every agent's ``serve_chat`` and ``serve_a2a`` on uvicorn at ``port``), or both;
+* ``faults``: what goes wrong at this process's boundary (:mod:`tests.scenarios.faults`);
 * ``hold``: the seconds a run this process executes is held for (``holding.HOLD_SECONDS``, 60 in
   a deployment): short here, so a killed server's runs end within seconds, not a minute.
 
@@ -22,7 +23,7 @@ import signal
 import tempfile
 from pathlib import Path
 
-from tests.scenarios import brains, workflows  # noqa: F401 - the workflows' builders
+from tests.scenarios import brains, faults, workflows  # noqa: F401 - the workflows' builders
 from tests.scenarios.conftest import harness
 from tests.scenarios.kit import TOOLS
 from tests.support.arm import writes_unasked_here
@@ -33,6 +34,7 @@ from trellis.harness import holding
 async def main() -> None:
     spec = json.loads(os.environ["SCEN_SPEC"])
     writes_unasked_here(os.environ)
+    faults.install(spec.get("faults", {}))  # under the recorder: a cut request is not recorded
     record_in_process()
     holding.HOLD_SECONDS = spec.get("hold", holding.HOLD_SECONDS)  # type: ignore[misc]
     tmp = Path(spec.get("tmp") or tempfile.mkdtemp())

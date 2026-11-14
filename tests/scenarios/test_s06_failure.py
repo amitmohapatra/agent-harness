@@ -26,7 +26,16 @@ import httpx
 import pytest
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, calling, eventually, free_port, history, record
+from tests.scenarios.kit import (
+    TOOLS,
+    Served,
+    calling,
+    eventually,
+    free_port,
+    history,
+    record,
+    waiting,
+)
 from trellis import Budget, Harness
 from trellis.contracts import RunStatus
 from trellis.harness.agui.sse import decode
@@ -196,7 +205,7 @@ async def test_runs_service_slow_or_briefly_down_mid_turn(  # noqa: PLR0917 - py
             f"{token(uid, 1)} {command('wait', seconds=6)}", user=f"ada-{uid}", thread=f"t-{uid}"
         )
     )
-    await asyncio.sleep(2)
+    await waiting(f"t-{uid}")  # the turn is in its slow call
     pid = _pid("runs-api")
     if fault == "slow":
         os.kill(pid, signal.SIGSTOP)

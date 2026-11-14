@@ -72,21 +72,28 @@ async def waiting(thread: str, within: float = 120.0) -> None:
     assert await eventually(begun, within=within, every=0.05), f"no slow call began in {thread}"
 
 
-async def calling(h: Harness, run_id: str, tool: str = "wait", within: float = 180.0) -> None:
-    """Until run ``run_id`` — in whatever process — has begun a call of ``tool``, as agent-runs'
-    event log says."""
+async def reached(
+    h: Harness, run_id: str, kind: str, tool: str | None = None, within: float = 180.0
+) -> None:
+    """Until run ``run_id`` — in whatever process — has an event of ``kind`` (about ``tool``, when
+    named) in agent-runs' event log: a gate on what the run did."""
     url, key = os.environ["RUNS_URL"], h.settings.api_key or ""
 
-    async def begun() -> bool:
+    async def there() -> bool:
         async with httpx.AsyncClient(base_url=url, headers={"X-Api-Key": key}) as c:
             got = await c.get(f"/v1/runs/{run_id}/events", params={"limit": 500})
         return got.status_code == 200 and any(
-            p["event"]["type"] == "TOOL_CALL_START"
-            and (p["event"].get("data") or {}).get("tool") == tool
+            p["event"]["type"] == kind
+            and (tool is None or (p["event"].get("data") or {}).get("tool") == tool)
             for p in got.json()
         )
 
-    assert await eventually(begun, within=within, every=0.2), f"{run_id} never called {tool}"
+    assert await eventually(there, within=within, every=0.2), f"{run_id} never reached {kind}"
+
+
+async def calling(h: Harness, run_id: str, tool: str = "wait", within: float = 180.0) -> None:
+    """Until run ``run_id`` has begun a call of ``tool``."""
+    await reached(h, run_id, "TOOL_CALL_START", tool, within)
 
 
 async def runs_of(h: Harness, agent_id: str, count: int, within: float = 60.0) -> list[RunRecord]:
@@ -349,3 +356,25 @@ def chat_app(agent: Any) -> Any:
 
     agent.serve_chat(app, identity=user_of)
     return app
+
+
+class Chat:
+    """One user's chat with one agent over AG-UI, on whichever server ``port`` names."""
+
+    def __init__(self, agent_id: str, user: str, thread: str) -> None:
+        self.agent_id, self.thread = agent_id, thread
+        self.client = httpx.AsyncClient(headers={"x-user": user}, timeout=300)
+
+    async def post(self, port: int, **body: Any) -> list[tuple[int, dict[str, Any]]]:
+        sent = await self.client.post(
+            f"http://127.0.0.1:{port}/agui/{self.agent_id}/run",
+            json={"threadId": self.thread, **body},
+        )
+        assert sent.status_code == 200, sent.text
+        from trellis.harness.agui.sse import decode
+
+        return decode(sent.text)
+
+    async def say(self, port: int, text: str, **more: Any) -> list[tuple[int, dict[str, Any]]]:
+        message = {"id": text[:16], "role": "user", "content": text}
+        return await self.post(port, messages=[message], **more)

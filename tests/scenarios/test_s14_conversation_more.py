@@ -31,6 +31,8 @@ from tests.scenarios.kit import (
     calling,
     free_port,
     history,
+    reached,
+    runs_of,
 )
 from trellis import Harness
 from trellis.contracts import RunStatus
@@ -62,6 +64,7 @@ async def test_one_chat_on_two_servers_is_one_turn_at_a_time(uid: str, tmp_path:
                     f"http://127.0.0.1:{one.port}/agui/{agent_id}/run",
                     json={
                         "threadId": thread,
+                        "runId": f"run_{uid}one",
                         "messages": [
                             {
                                 "id": "m1",
@@ -72,7 +75,8 @@ async def test_one_chat_on_two_servers_is_one_turn_at_a_time(uid: str, tmp_path:
                     },
                 )
             )
-            await asyncio.sleep(2)
+            async with harness() as gate:
+                await calling(gate, f"run_{uid}one")  # the first turn works on server one
             second = await c.post(
                 f"http://127.0.0.1:{two.port}/agui/{agent_id}/run",
                 json={
@@ -105,7 +109,8 @@ async def test_a_steer_after_the_last_step_is_its_own_turn(
     )
     user, thread = f"ada-{uid}", f"chat-{uid}"
     first = asyncio.create_task(agent.run(f"{token(uid, 1)} slow:4", user=user, thread=thread))
-    await asyncio.sleep(2)
+    [working] = await runs_of(h, agent.id, 1)
+    await reached(h, working.run_id, "CONTEXT_LOADED")  # its context loaded: in its model call
     second = await agent.run(f"{token(uid, 2)} also this", user=user, thread=thread, mode="steer")
     done = await first
     assert done.status is RunStatus.SUCCESS and second.status is RunStatus.SUCCESS, (

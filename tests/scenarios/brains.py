@@ -64,7 +64,18 @@ SLOW: Final = re.compile(r"slow:([0-9.]+)")
 #: ``loop:<n>:<tool>``: that many calls of a tool, each with ``{"key": "k<i>"}`` (a long task)
 LOOP: Final = re.compile(r"loop:([0-9]+):([a-z_]+)")
 #: ``fail:model``: the model's provider fails the message's first call (a 500)
-FAIL: Final = "fail:model"
+FAIL: Final = re.compile(r"fail:(model|429|overflow)")
+#: what a provider's API answers each kind of ``fail:`` with (status, error type, message)
+PROVIDER_ERRORS: Final = {
+    "model": (500, "server_error", "scripted provider failure"),
+    "429": (429, "rate_limit_error", "Rate limit reached for requests. Try again in 20s."),
+    "overflow": (
+        400,
+        "invalid_request_error",
+        "This model's maximum context length is 8192 tokens. However, your messages resulted "
+        "in 9000 tokens. Please reduce the length of the messages.",
+    ),
+}
 UUID: Final = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 #: what the harness tells a model whose call a reviewer edited, where the framework cannot take
 #: the edited arguments in place (OpenAI Agents, ACP): make the call again with them — a model
@@ -114,7 +125,8 @@ class Turned:
     call: Any = None  # (tool, args), or a list of them made in one message
     answer: str = ""
     slow: float = 0.0
-    fail: bool = False
+    #: the kind of provider failure the message asks for (a key of :data:`PROVIDER_ERRORS`)
+    fail: str = ""
 
 
 def decide(messages: Sequence[tuple[str, str]]) -> Turned:
@@ -141,8 +153,9 @@ def decide(messages: Sequence[tuple[str, str]]) -> Turned:
         for name, args in commands
     ]
     slow = SLOW.search(asked)
-    if FAIL in asked and not results:
-        return Turned(fail=True)
+    failing = FAIL.search(asked)
+    if failing and not results:
+        return Turned(fail=failing[1])
     redo = REDO.search(results[-1]) if results else None
     if redo is not None:  # a reviewer's edit to make: the call again, with those arguments
         try:
@@ -282,12 +295,10 @@ class BrainChat(ScriptedChat):
             if turned.slow:
                 await asyncio.sleep(turned.slow)
             if turned.fail:
-                return httpx.Response(
-                    500,
-                    json={
-                        "error": {"message": "scripted provider failure", "type": "server_error"}
-                    },
-                )
+                status, kind, message = PROVIDER_ERRORS[turned.fail]
+                code = "context_length_exceeded" if turned.fail == "overflow" else None
+                error = {"message": message, "type": kind, "code": code}
+                return httpx.Response(status, json={"error": error})
             return script.handle(request)
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
@@ -544,22 +555,20 @@ async def _openai_agents(h: Harness, tools: list[Any], tmp: Path, claude: Any) -
     return Built(OpenAIAgent(name="helper", instructions=SYSTEM, model=model), tools, model)
 
 
-async def _claude(
-    h: Harness, tools: list[Any], tmp: Path, claude: list[dict[str, Any]] | None
-) -> Built:
+async def _claude(h: Harness, tools: list[Any], tmp: Path, claude: Any) -> Built:
     """The scripted CLI: ``claude`` is the steps of every turn before the answer (tool calls,
-    stalls); its answer is :data:`CLAUDE_ANSWER`."""
+    stalls), its answer :data:`CLAUDE_ANSWER` — or ``{"turns": [...]}``, a whole script for each
+    turn of the session."""
     record = tmp / f"cli-{uuid.uuid4().hex[:6]}.json"
-    script = [*(claude or []), {"text": CLAUDE_ANSWER}]
-    options = ClaudeAgentOptions(
-        cli_path=CLI,
-        system_prompt=SYSTEM,
-        env={
-            "FAKE_CLAUDE_SCRIPT": json.dumps(script),
-            "FAKE_CLAUDE_RECORD": str(record),
-            "FAKE_CLAUDE_SESSIONS": str(tmp / "claude-sessions"),
-        },
-    )
+    env = {
+        "FAKE_CLAUDE_RECORD": str(record),
+        "FAKE_CLAUDE_SESSIONS": str(tmp / "claude-sessions"),
+    }
+    if isinstance(claude, dict):  # {"turns": [...]}: a script per turn of the session
+        env["FAKE_CLAUDE_TURNS"] = json.dumps(claude["turns"])
+    else:
+        env["FAKE_CLAUDE_SCRIPT"] = json.dumps([*(claude or []), {"text": CLAUDE_ANSWER}])
+    options = ClaudeAgentOptions(cli_path=CLI, system_prompt=SYSTEM, env=env)
     return Built(options, tools, record)
 
 
@@ -597,7 +606,7 @@ async def wrapped(
     tmp: Path,
     *,
     id: str,
-    claude: list[dict[str, Any]] | None = None,
+    claude: Any = None,
     **wrap: Any,
 ) -> tuple[Agent, Built]:
     """``adapter``'s agent, wrapped by ``h`` as ``id``, with ``tools`` (``claude``: the scripted
