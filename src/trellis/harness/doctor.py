@@ -48,9 +48,6 @@ SECRETS: Final = frozenset(
         "llm_api_key",
         "api_key",
         "judge_virtual_key",
-        "langfuse_secret_key",
-        "langfuse_public_key",
-        "otlp_headers",
     }
 )
 #: How long each check waits for its service, in seconds.

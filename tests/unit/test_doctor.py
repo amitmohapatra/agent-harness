@@ -47,6 +47,7 @@ def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> Non
     assert doctor.shown("api_key", "short") == "set"
     assert doctor.shown("api_key", "8letters") == "set"  # its last 4 would be half of it
     assert doctor.shown("api_key", "9_letters") == "set (...ters)"
+    assert [n for n in doctor.SECRETS if n not in Settings.model_fields] == []  # no dead name
     secrets = [f for f in Settings.model_fields if f.endswith(("key", "secret", "headers"))]
     assert secrets == ["llm_api_key", "api_key", "judge_virtual_key"]
     for field in secrets:  # every key a setting holds: never in full
