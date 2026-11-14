@@ -3,7 +3,11 @@
 A write is queued and the run moves on; a few workers drain the queue. A write that fails is
 tried again — :data:`WRITE_ATTEMPTS` attempts in all, with full-jitter backoff — when the
 failure may pass (the service unavailable, a timeout; not a refusal the same request would get
-again). A write that still fails is never raised into the run, and never only a warning:
+again). While the memory client's circuit is open (``CircuitOpenError``: the service down, the
+call refused at once, nothing sent) a write spends no attempt: it waits the circuit's cool-down,
+queued, and is tried again with its attempts whole — however long the outage lasts, bounded by
+the queue (:data:`MAX_PENDING`; past it, a write is given up as a full queue's always is). A
+write that still fails is never raised into the run, and never only a warning:
 
 * counted (``trellis.writes.failed``, and ``trellis.writes.undelivered`` by outcome: kept in the
   spool or lost);
@@ -24,7 +28,9 @@ transcript, a tool record, an outcome, a decision, catalog entries: ``record=``)
 harness that starts writing with the same directory replays the file and removes it. Writes
 are idempotent, so a replayed write that had in fact landed is stored once. Without a spool
 directory — or for a write that is not data (a grounding check, the model key) — it is lost:
-logged, counted (``trellis.writes.undelivered``, ``outcome=lost``) and reported.
+logged, counted (``trellis.writes.undelivered``, ``outcome=lost``) and reported. The queue is in
+the process's memory: a process that dies without stopping (killed, out of memory) loses what
+waits in it, spool or not.
 
 Draining is automatic: when the event loop shuts down (``asyncio.run`` returning, a server
 stopping) it cancels the workers, and a cancelled worker finishes the queue first, bounded by
@@ -51,6 +57,7 @@ from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_aft
 from trellis.harness import telemetry
 from trellis.harness.events import RunEvents
 from trellis.harness.telemetry import metrics
+from trellis.memory.errors import CircuitOpenError
 
 log = logging.getLogger("trellis.writes")
 
@@ -212,20 +219,27 @@ class Writes:
         def wait(state: RetryCallState) -> float:  # full jitter, not a secret
             return random.uniform(0, WRITE_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
 
-        try:
-            async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(WRITE_ATTEMPTS),
-                retry=retry_if_exception(_passing),
-                wait=wait,
-                sleep=asyncio.sleep,
-                reraise=True,
-            ):
-                with attempt:
-                    await item.work()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._give_up(item, f"{type(exc).__name__}: {exc}", keep=_passing(exc))
+        while True:
+            try:
+                async for attempt in AsyncRetrying(
+                    stop=stop_after_attempt(WRITE_ATTEMPTS),
+                    retry=retry_if_exception(_passing_now),
+                    wait=wait,
+                    sleep=asyncio.sleep,
+                    reraise=True,
+                ):
+                    with attempt:
+                        await item.work()
+                return
+            except CircuitOpenError as down:
+                # the service is down (its client's circuit is open): nothing was sent, and the
+                # write waits it out, queued, its attempts whole for when the circuit lets it by
+                await asyncio.sleep(max(down.retry_after or 0.0, WRITE_BACKOFF_SECONDS))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._give_up(item, f"{type(exc).__name__}: {exc}", keep=_passing(exc))
+                return
 
     def _give_up(self, item: _Item, reason: str, *, keep: bool = True) -> None:
         """The write will not be delivered by this process: kept in the spool when it can be
@@ -331,3 +345,9 @@ def _passing(exc: BaseException) -> bool:
     """Whether a write's failure may pass (tried again, spooled when it does not): its own
     ``retryable``, else yes."""
     return isinstance(exc, Exception) and bool(getattr(exc, "retryable", True))
+
+
+def _passing_now(exc: BaseException) -> bool:
+    """Whether a write is tried again at once, an attempt spent: a failure that may pass, but
+    not an open circuit (:meth:`Writes._attempt` waits its cool-down, spending none)."""
+    return _passing(exc) and not isinstance(exc, CircuitOpenError)

@@ -16,7 +16,7 @@ from trellis.contracts import AgentExecutionContext, RunEvent
 from trellis.harness import writes as module
 from trellis.harness.events import RunEvents
 from trellis.harness.writes import SPOOL_FILE, Writes
-from trellis.memory.errors import DependencyUnavailableError, ValidationError
+from trellis.memory.errors import CircuitOpenError, DependencyUnavailableError, ValidationError
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +69,101 @@ async def test_a_write_that_may_pass_is_tried_again() -> None:
     await writes.submit("memory.transcript", flaky)
     await writes.drain()
     assert len(tries) == 3 and writes.failed == 0  # the third of 3 attempts
+    await writes.aclose()
+
+
+def circuit_open(retry_after: float) -> CircuitOpenError:
+    """What the memory client raises, sending nothing, while its circuit is open."""
+    return CircuitOpenError(
+        "memory service circuit open after 5 failed calls",
+        code="CIRCUIT_OPEN",
+        status=0,
+        retryable=True,
+        retry_after=retry_after,
+    )
+
+
+async def test_a_write_waits_out_an_open_circuit_spending_no_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SCN-6: the memory service down for longer than a write's attempts (its client's circuit
+    open, then open again after a probe that failed): the write waits each cool-down, queued,
+    and is delivered once the service is back — every wait is the circuit's, none an attempt."""
+    waits: list[float] = []
+    sleep = asyncio.sleep
+
+    async def waited(seconds: float) -> None:
+        waits.append(seconds)
+        await sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", waited)
+    monkeypatch.setattr(module, "WRITE_BACKOFF_SECONDS", 0.5)
+    monkeypatch.setattr(module.random, "uniform", lambda low, high: 0.0)
+    writes, tries = Writes(), []
+    down = [circuit_open(30.0), circuit_open(0.0)] * 3 + [
+        DependencyUnavailableError("the probe failed", retryable=True),
+        DependencyUnavailableError("the probe failed", retryable=True),
+        circuit_open(12.5),
+    ]
+
+    async def write() -> None:
+        tries.append(1)
+        if down:
+            raise down.pop(0)
+
+    await writes.submit("memory.transcript", write)
+    await writes.drain()
+    assert len(tries) == 10 and writes.failed == writes.spooled == 0
+    # the circuit's cool-down (none left: half a second, not at once), and the backoff after
+    # the two failed probes, its attempts whole again after each cool-down
+    assert waits == [30.0, 0.5] * 3 + [0.0, 0.0, 12.5], waits
+    await writes.aclose()
+
+
+async def test_a_write_failing_while_the_circuit_stays_closed_still_spends_its_attempts() -> None:
+    """Failures the circuit does not open for (a service that answers its other calls) spend
+    the write's attempts as before: given up after the third."""
+    writes, tries = Writes(), []
+
+    async def write() -> None:
+        tries.append(1)
+        raise DependencyUnavailableError("unavailable", retryable=True)
+
+    await writes.submit("memory.transcript", write)
+    await writes.drain()
+    assert len(tries) == module.WRITE_ATTEMPTS and writes.failed == 1
+    await writes.aclose()
+
+
+async def test_writes_held_by_an_open_circuit_fill_the_queue_and_overflow_as_ever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the circuit is open the writes wait in the queue, bounded by its size: one more
+    is given up as a full queue's always is (lost here, with no spool), and said."""
+    monkeypatch.setattr(module, "MAX_PENDING", 2)
+    monkeypatch.setattr(module, "WRITERS", 1)
+    writes, delivered = Writes(), []
+    events, seen = run_events()
+    back = asyncio.Event()
+
+    def write(name: str) -> Any:
+        async def work() -> None:
+            if not back.is_set():
+                raise circuit_open(0.0)
+            delivered.append(name)
+
+        return work
+
+    for name in ("a", "b", "c"):  # one waiting on the circuit, two queued
+        await writes.submit("memory.transcript", write(name))
+    await writes.submit("memory.transcript", write("d"), events=events)
+    assert writes.failed == 1
+    assert seen[0].data["message"] == (
+        "memory.transcript failed and is lost: the write queue stayed full"
+    )
+    back.set()
+    await writes.drain()
+    assert delivered == ["a", "b", "c"]
     await writes.aclose()
 
 

@@ -520,7 +520,8 @@ Every attempt (each `RUNNING` stretch) is one `invoke_agent` span in the run's o
 ## Background writes
 
 `writes.Writes`: a bounded queue (`MAX_PENDING` 10 000) drained by `WRITERS` (4) tasks. A
-write whose failure may pass is tried again (`WRITE_ATTEMPTS` 3, full-jitter backoff); a full
+write whose failure may pass is tried again (`WRITE_ATTEMPTS` 3, full-jitter backoff), and one
+the memory client's open circuit refused waits its cool-down, spending no attempt; a full
 queue makes the writer wait (`SUBMIT_WAIT_SECONDS` 5) instead of dropping the write. A write
 given up is logged, counted and emitted as a `warning` event to the run's listeners — or, with
 `TRELLIS_SPOOL_DIR`, appended to a JSONL spool that the next process replays. When the event

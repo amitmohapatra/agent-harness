@@ -142,6 +142,12 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
 * A write that fails is tried again — 3 attempts in all, full-jitter backoff from 0.5 s — when
   the failure may pass (the service unavailable, a timeout, a dropped connection); a refusal the
   same request would get again (a `4xx` the SDK marks not retryable) is not repeated.
+* While the memory client's circuit is open (the service down: after five calls in a row
+  failed for want of it, the client refuses calls at once, sending nothing, until its
+  cool-down has passed and one call probes), a write spends no attempt: it waits the
+  cool-down, queued, and is tried again with its attempts whole — however long the outage
+  lasts, bounded by the queue: past 10 000 waiting writes a write is given up as a full
+  queue's always is (below).
 * A full queue (10 000 writes) holds the run that writes, for up to 5 s, rather than dropping
   the write after the run was told it would happen.
 * A write still undelivered — its attempts spent, a queue that stayed full, the process
@@ -162,7 +168,13 @@ Every write above is queued and the run moves on (`writes.py`); four writers dra
   write waits in the spool, counting them by kind.
 
 So: delivered at least once while the process lives or, with a spool directory on a volume that
-outlives the process, after its next start; never silently dropped.
+outlives the process, after its next start; never silently dropped. What is still lost: the
+writes waiting in the queue when the process dies without stopping (killed, out of memory) —
+the queue is in its memory, spool or not; with no spool (a container, where none is found by
+default), also those a clean stop could not deliver in its 10 s — during an outage, every write
+held since it began. A write whose three attempts fail before the circuit opens (the service
+failing this call while it answers others, or the first calls of an outage in a process that
+makes no others) is given up as before: spooled, or lost.
 
 ## Documents
 

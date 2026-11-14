@@ -1,4 +1,4 @@
-"""The user-scenario suite's findings (SCN-2, SCN-3, SCN-4), each in its smallest form,
+"""The user-scenario suite's findings (SCN-2, SCN-3, SCN-4, SCN-6), each in its smallest form,
 in process (no service): a graph's run paused on one worker and continued on a worker of
 another harness on the same run store (``LoggedRuns``: agent-runs' event log in process), and a
 memory service that is slow or down (the in-process fake behind a transport that delays or
@@ -22,6 +22,7 @@ from tests.support.runlog import LoggedRuns
 from trellis import Harness, ReAct, Settings, tool
 from trellis.contracts import RunEvent, RunEventType, RunStatus
 from trellis.harness import agent as agent_module
+from trellis.harness import writes as writes_module
 from trellis.harness.agent import Agent
 from trellis.harness.agui.sse import decode
 from trellis.harness.middleware import RunCheckpointer
@@ -369,3 +370,48 @@ async def test_scn4_a_window_of_another_agents_turns_is_given_as_memory_gave_it(
         await second.run("Which codes?", user="ada", thread="t1")
         sent = str(model.requests[-1]["messages"])
         assert sent.count("The locker code is 4242.") == 1 and "9191" not in sent, sent
+
+
+async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SCN-6: the memory service goes down for a while (every call answered 503: the client's
+    circuit opens, refusing calls at once, and opens again after each probe that fails), then
+    comes back: the turn made meanwhile is kept once it is back, and once only (the write sent
+    again is the same write: the service keeps a message once by its id). Before, the write got
+    ``WRITE_ATTEMPTS`` (3) tries with a short backoff and, with no spool (none in a container:
+    ``settings.default_spool``), was given up — "failed and is lost: CircuitOpenError", as seen
+    on the real stack for transcripts, tool records and outcomes while memory answered 504s."""
+    monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.1)
+    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.05)
+    service = FakeMemoryService()
+    down = {"on": False}
+
+    async def flaky(request: httpx.Request) -> httpx.Response:
+        if down["on"]:
+            problem = {
+                "title": "unavailable",
+                "status": 503,
+                "code": "DEPENDENCY_UNAVAILABLE",
+                "retryable": True,
+            }
+            return httpx.Response(
+                503, json=problem, headers={"content-type": "application/problem+json"}
+            )
+        return service._checked(request)
+
+    client = _memory(flaky)
+    client._transport.breaker.open_seconds = 0.2  # its cool-down (30 s) within the test
+    async with Harness(config=Settings(), memory=client) as h:
+        model = ScriptedChat(["Hello.", "Noted."])
+        agent = h.wrap(ReAct(system_prompt="You help.", model=model), id="scn6")
+        await agent.run("Hi.", user="ada", thread="t1")
+        await h.writes.drain()
+        down["on"] = True
+        done = await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        assert done.status.value == "SUCCESS"
+        await asyncio.sleep(1.0)  # down for longer than the write's attempts
+        assert client._transport.breaker.state != "closed"
+        down["on"] = False
+        await h.writes.drain()
+        stored = [m for t in service.threads.values() for m in t if "4242" in m["content"]]
+        assert stored, "the turn made while the memory service was down is lost"
+        assert len(stored) == 1, stored  # sent again, kept once
