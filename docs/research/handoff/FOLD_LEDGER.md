@@ -275,3 +275,9 @@ Known on main: one hanging test in test_claude_background_session.py; uv.lock me
 harness#266 (Kimi merge 304b39f) and #267 (9bd7380, one corrected Kimi test) merged. The
 Kimi merge job's targeted run: 991 passed, 54 skipped, 1 deselected (the hanging test),
 1 failed and fixed. No coding job is running. Harness main still has no full CI result.
+
+## 23:30 UTC — at the owner's instruction: the security review is added to the repository
+`docs/research/handoff/REVIEW_security.md` (with a status note on top; supersedes the earlier
+ledger line saying it was kept out of the public repo). REMAINING.md gains "Two things only
+the owner can settle": the public security findings not confirmed fixed (SEC-R-3, 4, 6, 8)
+and the three rewind decisions.

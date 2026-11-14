@@ -1,4 +1,4 @@
-# What remains to be done (Trellis stack) — updated 2026-11-14 23:15 UTC
+# What remains to be done (Trellis stack) — updated 2026-11-14 23:30 UTC
 
 The owner asked for everything that is coded to go to main at once, without waiting for
 tests, and for this file to list everything that is done, left, found, and still to be
@@ -7,7 +7,7 @@ tested. Nothing known is left out. Where a status is not confirmed it says so.
 Companion files in this folder: `FOLD_LEDGER.md` (the running record: what merged when,
 each job's report), `DECISIONS.md` and `ARCHITECTURE_DECISIONS.md` (decisions taken),
 `ARCHITECT_BRIEF.md`, `ROUND3_NOTE.txt`, `GATES_NOTE.txt`, `WRAP_NOTE.txt` (the standard and
-rules the coding jobs worked to), `REVIEW_architecture.md`, `REVIEW_performance.md` (the
+rules the coding jobs worked to), `REVIEW_architecture.md`, `REVIEW_performance.md`, `REVIEW_security.md` (the
 full findings with file and line), `TEST_PLAN.md` (the test catalogue and the limitations
 table), `inventory/` (what each library can do, and the collision and ReAct-parity design).
 
@@ -34,6 +34,25 @@ coverage gate of `trellis.harness`, and the tests in section 4 that were never r
 4. The performance job (section 7).
 5. The cleanup refactor, last (section 8).
 6. The Haiku phase (section 10), when credit is added.
+
+**Two things only the owner can settle**
+
+1. **The security review is now in this repository** (`REVIEW_security.md`, added at the
+   owner's instruction). This repository is public, so the findings that are not confirmed
+   fixed (SEC-R-3, SEC-R-4, SEC-R-6, SEC-R-8; section 6) are publicly readable with their
+   scenarios. Either confirm and fix those four first, or move the file to a private place
+   and remove it here (it stays in the git history unless the history is rewritten).
+2. **Three rewind decisions** (section 11):
+   - Rewinding an ENDED run needs a small additive change in agent-runs: `finish` keeps the
+     run's checkpoint when asked (today it is cleared when the run ends; cancelled runs
+     need the same final save). Until then `Agent.rewind` and `Agent.checkpoints` work for
+     paused runs only. Approve the addition or leave rewind for paused runs only.
+   - Who may rewind: today only the run's own user (`reviewer` must be the run's user; a
+     lead rewinding someone else's run is refused), and `Agent.checkpoints` is tenant- and
+     agent-checked, not user-checked. Confirm or change.
+   - Whether an approval given at a library's own gate (LangChain's human-in-the-loop
+     middleware) counts as the person's approval when the same write repeats after a
+     rewind. Today it counts. Confirm or change.
 
 ---
 
@@ -299,9 +318,10 @@ tool results and a display in the sandbox); Redis and Dapr session backends unte
 
 ## 6. Security
 
-The full security review is not in this repository because the repository is public; it is
-on the build machine at `/var/tmp/cons/review/security.md` and must be saved privately
-before that machine is reclaimed. Titles and status only:
+The full security review is `REVIEW_security.md` in this folder (added at the owner's
+instruction; the repository is public, see "Two things only the owner can settle" above).
+It was written against the branches as they stood before the fixes; the status of each
+finding today is in this table:
 
 | ID | Severity | Finding (short) | Status |
 |---|---|---|---|
@@ -527,7 +547,6 @@ Memory (parked by the owner until this phase)
 Worktrees under `/var/tmp/cons/` (`stage2` = the fold, `fixround`, `nskills`, `bgclaude`,
 `bgkimi`, `memfix`, `co2-*`, `handoff`); private test stack `/var/tmp/cons/live57` (Postgres
 127.0.0.1:55957); model weights `/var/tmp/rx/models`; the Claude SDK 0.2.182 overlay
-`/var/tmp/cons/bgclaude-tmp/sdk182`. Not pushed anywhere and worth saving privately: the
-security review `/var/tmp/cons/review/security.md`; earlier experiment folders
+`/var/tmp/cons/bgclaude-tmp/sdk182`. Not pushed anywhere and worth saving privately: earlier experiment folders
 `/var/tmp/aa` (local branches with unpushed commits), `/var/tmp/cons/rw` (uncommitted
 changes), `/var/tmp/cons/r`, `a`, `g` (experiment results).
