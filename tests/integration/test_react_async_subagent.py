@@ -46,7 +46,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import httpx
 import pytest
@@ -64,10 +64,10 @@ from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.journals import journal_of
 from tests.support.openapi import runs_contract
-from trellis import Harness, ReAct, Settings, middleware, tool
+from trellis import Harness, ReAct, Runtime, Settings, middleware, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunOutcome, RunRecord, RunStatus
 from trellis.harness import pipeline
-from trellis.harness.adapters.langgraph import bound_tools, notified
+from trellis.harness.adapters.langgraph import LangGraphAdapter, bound_tools, notified
 from trellis.harness.agent import Agent
 from trellis.harness.agui import threads as threads_module
 from trellis.harness.agui.sse import decode
@@ -717,7 +717,8 @@ async def test_sec_r_1_a_task_tools_word_ends_only_a_run_of_its_conversation(
     )
     check = SimpleNamespace(name="check_async_task")
     said = json.dumps({"status": "success", "result": "TAKEN"})
-    await agent.adapter.tasks.said(theirs, check, args={}, done=done, told=said)
+    assert isinstance(agent.adapter, LangGraphAdapter)
+    await agent.adapter.tasks.said(cast("Runtime", theirs), check, args={}, done=done, told=said)
     assert await harness.runs.get(task.run_id) == task
     assert harness.holds.holds(task.run_id)
 
@@ -1960,7 +1961,9 @@ async def test_arch_19_a_task_whose_run_is_gone_from_the_store_is_held_no_more(
     server.hold()
     await say(agent, "run the optimization")
     [task] = await task_runs(harness)
+    assert isinstance(agent.adapter, LangGraphAdapter)
     watching = agent.adapter.tasks._kept[task.run_id].watching
+    assert watching is not None
     read = harness.runs.get
 
     async def gone(run_id: str, **more: Any) -> RunRecord | None:

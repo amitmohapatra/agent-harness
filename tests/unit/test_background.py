@@ -205,8 +205,8 @@ def test_the_turns_question_is_the_users_never_a_notification_after_it() -> None
 
 
 def test_a_conversation_carries_only_what_its_graph_holds_anything_in() -> None:
-    assert carried_of({"async_tasks": {}, "messages": []}) == {}
-    assert carried_of({"async_tasks": {"t": TASK}}) == {"async_tasks": {"t": TASK}}
+    assert carried_of({"async_tasks": {}, "messages": []}, {}) == {}
+    assert carried_of({"async_tasks": {"t": TASK}}, {}) == {"async_tasks": {"t": TASK}}
 
 
 # --------------------------------------------------------------------------- with a run store
