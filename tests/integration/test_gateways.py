@@ -131,6 +131,13 @@ def test_settings_that_fit_no_route_are_refused(settings: Settings, said: str) -
         ("mistral-large", "mistral", "mistral-large", None, "mistralai:mistral-large"),
         ("ollama/granite", "ollama", "granite", "ollama/granite", "ollama:granite"),
         ("granite", None, "granite", "granite", None),
+        # each prefix that tells a provider (OpenAI's, Mistral's, Cohere's), and Vertex
+        ("chatgpt-4o", "openai", "chatgpt-4o", "openai/chatgpt-4o", "openai:chatgpt-4o"),
+        ("o1-mini", "openai", "o1-mini", "openai/o1-mini", "openai:o1-mini"),
+        ("o4-mini", "openai", "o4-mini", "openai/o4-mini", "openai:o4-mini"),
+        ("codestral-2", "mistral", "codestral-2", None, "mistralai:codestral-2"),
+        ("command-r", "cohere", "command-r", "cohere/command-r", "cohere:command-r"),
+        ("vertex:gemini-pro", "vertex", "gemini-pro", None, "google_vertexai:gemini-pro"),
     ],
 )
 def test_a_name_is_mapped_to_the_routes_form(
@@ -333,6 +340,19 @@ def test_a_models_record_names_its_window_and_output_by_any_servers_field() -> N
         assert gateways._limits_said({field: 1000}) == (1000, None), field
     for field in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
         assert gateways._limits_said({field: 100}) == (None, 100), field
+
+
+def test_doctor_names_each_provider_key_a_provider_sdk_reads() -> None:
+    keys = (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+        "COHERE_API_KEY",
+        "GROQ_API_KEY",
+    )
+    assert gateways.provider_keys(dict.fromkeys(keys, "k")) == keys
 
 
 def _claude_runtime(gateway: Any) -> Any:
