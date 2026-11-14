@@ -476,6 +476,58 @@ async def test_pii_middleware_redacts_what_the_model_is_sent_and_blocks_as_it_sa
     assert "email" in refused.error.message.lower()
 
 
+async def test_pii_middleware_checks_the_memory_context_the_harness_adds_to_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """SEC: ``PIIMiddleware`` checks the user's message before the model call; the memory
+    context the harness sends with that message is checked by the same rule — redacted as the
+    question is, and with ``strategy="block"`` the run ends in error before any model call.
+    A middleware that does not check input leaves the context as it is."""
+    memory_service.context_text = "The user's address is ada@example.com."
+    model = ScriptedChatModel(turns=["noted"])
+    graph = create_agent(model, tools=[], middleware=[PIIMiddleware("email", strategy="redact")])
+    result = await memory_harness.wrap(graph, id="pii").run("where do I live?", user="u")
+    assert result.answer == "noted"
+    sent = "\n".join(text_of(m) for m in model.seen[0])
+    assert "ada@example.com" not in sent and "address is [REDACTED_EMAIL]" in sent
+
+    unread = ScriptedChatModel(turns=[])
+    blocking = create_agent(unread, tools=[], middleware=[PIIMiddleware("email", strategy="block")])
+    refused = await memory_harness.wrap(blocking, id="pii-block").run("where?", user="u")
+    assert refused.status is RunStatus.ERROR and refused.error is not None
+    assert "email" in refused.error.message.lower() and unread.seen == []
+
+    output_only = PIIMiddleware("email", apply_to_input=False, apply_to_output=True)
+    plain = ScriptedChatModel(turns=["noted"])
+    graph = create_agent(plain, tools=[], middleware=[output_only])
+    assert (await memory_harness.wrap(graph, id="pii-out").run("where?", user="u")).answer
+    assert "ada@example.com" in "\n".join(text_of(m) for m in plain.seen[0])
+
+
+async def test_the_question_is_recorded_as_pii_middleware_left_it(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """SEC: the turn the harness records in memory holds the question as the graph kept it —
+    redacted by ``PIIMiddleware`` — not the copy of the input it was given; without the
+    middleware the question is recorded as asked."""
+    graph = create_agent(
+        ScriptedChatModel(turns=["noted"]),
+        tools=[],
+        middleware=[PIIMiddleware("email", strategy="redact")],
+    )
+    await memory_harness.wrap(graph, id="pii").run("write to ada@example.com", user="u")
+    plain = create_agent(ScriptedChatModel(turns=["noted"]), tools=[])
+    await memory_harness.wrap(plain, id="plain").run("write to bob@example.com", user="u")
+    await memory_harness.writes.drain()
+    recorded = [
+        m["content"]
+        for call in memory_service.named("messages")
+        for m in call.body["messages"]
+        if m["role"] == "USER"
+    ]
+    assert recorded == ["write to [REDACTED_EMAIL]", "write to bob@example.com"]
+
+
 async def test_pii_middleware_redacts_the_streamed_answer_as_it_streams(harness: Harness) -> None:
     """``PIIMiddleware(apply_to_output=True)`` redacts the model's reply in the state and, by
     its stream transformer, on the wire: no streamed piece of the answer carries the address,

@@ -218,6 +218,8 @@ class LangGraphAdapter:
     ) -> Any:
         from langchain_core.messages import SystemMessage
 
+        # the context is sent with the user's message: checked as that message is
+        context = screened(target, context) if context else context
         system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
         system += [langchain_message(said) for said in history]
         if isinstance(input, str) and not takes_text(target):
@@ -348,14 +350,14 @@ class LangGraphAdapter:
             first = (ours or raised)[0]
             # calls made at once may each have asked: the pause names each one's interrupt
             ids = {i.value.get("interrupt_id"): i.id for i in ours}
-            schema = getattr(first, "response_schema", None)
+            schema = first.response_schema  # surfaced as its JSON Schema
             pause = NativePause(
                 value=first.value,
                 native_id=first.id,
                 ids=ids,
                 schema=schema if isinstance(schema, dict) else None,
             )
-        return Extracted(answer=answer, transcript=transcript, pause=pause)  # type: ignore[arg-type]
+        return Extracted(answer, transcript, pause, asked=asked(messages))  # type: ignore[arg-type]
 
     def resume_input(
         self,
@@ -1041,20 +1043,65 @@ def langchain_message(said: Said) -> Any:
     return SystemMessage(content=said.content)
 
 
-def added(messages: Sequence[Any]) -> list[Said]:
-    """What the run said after its question (the message marked :data:`ASKED`, else the last
-    user message neither steered into it nor added by the harness — ``notified``): each answer
-    with the tool calls it made, and their results, each message steered into it
-    (``middleware.STEERED``, with its id) and each notification it was given (``Said.notified``:
-    a background task's update); ``[]`` without a question."""
+def input_screens(target: Any) -> list[Any]:
+    """The ``PIIMiddleware`` instances of a ``create_agent`` graph that check the user's
+    message before each model call (``apply_to_input``), in the graph's order: read from the
+    ``before_model`` nodes ``create_agent`` made of them. ``[]`` for any other graph."""
+    from langchain.agents.middleware import PIIMiddleware
+
+    found: list[Any] = []
+    for node in (getattr(target, "nodes", None) or {}).values():
+        bound = getattr(node, "bound", None)
+        for hook in (getattr(bound, "func", None), getattr(bound, "afunc", None)):
+            owner = getattr(hook, "__self__", None)
+            screens = isinstance(owner, PIIMiddleware) and owner.apply_to_input
+            if screens and not any(owner is m for m in found):
+                found.append(owner)
+    return found
+
+
+def screened(target: Any, text: str) -> str:
+    """``text`` the harness sends with the user's message (the memory context), checked as the
+    graph checks that message: the rule of each of its ``PIIMiddleware`` instances applied
+    (:func:`input_screens`: its detector and strategy — redacted, masked or hashed; a
+    ``block`` raises the library's ``PIIDetectionError``, which ends the run as a blocked
+    question does). As it is for a graph that checks no input."""
+    from langchain.agents.middleware._redaction import apply_strategy
+
+    for screen in input_screens(target):
+        if matches := screen.detector(text):
+            text = apply_strategy(text, matches, screen.strategy)
+    return text
+
+
+def _asked_at(messages: Sequence[Any]) -> int | None:
+    """Where the run's question is in ``messages``: the message marked :data:`ASKED`, else the
+    last user message neither steered into the run nor added by the harness (``notified``)."""
     humans = [i for i, m in enumerate(messages) if getattr(m, "type", None) == "human"]
     marked = [i for i in humans if ASKED in (getattr(messages[i], "response_metadata", None) or {})]
     typed = [i for i in humans if not _steered(messages[i]) and notified(messages[i]) is None]
     found = marked or typed
-    if not found:
+    return found[-1] if found else None
+
+
+def asked(messages: Sequence[Any]) -> str | None:
+    """The run's question as the graph's conversation keeps it (:func:`_asked_at`): its text
+    after the graph's own middleware (``PIIMiddleware`` redacts it there); ``None`` without
+    one, or when it holds no text."""
+    at = _asked_at(messages)
+    return (_text(messages[at]) or None) if at is not None else None
+
+
+def added(messages: Sequence[Any]) -> list[Said]:
+    """What the run said after its question (:func:`_asked_at`): each answer
+    with the tool calls it made, and their results, each message steered into it
+    (``middleware.STEERED``, with its id) and each notification it was given (``Said.notified``:
+    a background task's update); ``[]`` without a question."""
+    at = _asked_at(messages)
+    if at is None:
         return []
     out: list[Said] = []
-    for m in messages[found[-1] + 1 :]:
+    for m in messages[at + 1 :]:
         kind = getattr(m, "type", None)
         if kind == "human" and (noted := notified(m)) is not None:
             out.append(Said(Speaker.USER, _text(m), id=m.id, notified=noted))

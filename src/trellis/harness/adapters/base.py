@@ -107,6 +107,9 @@ class Extracted:
     #: framework reports them - in order
     transcript: list[Said] = field(default_factory=list)
     pause: NativePause | None = None
+    #: the run's question as the framework's own conversation keeps it, when it holds one: what
+    #: the run records as asked (a graph's middleware may have changed it: redacted)
+    asked: str | None = None
 
 
 @dataclass(slots=True)

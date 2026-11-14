@@ -24,6 +24,10 @@ A library's feature works as the library does it; the harness governs, records a
   run (the catalog's rules, approvals, records) though another route keeps files in the graph's
   state. Before, one state route — the run's skills beside a sandbox,
   `create_deep_agent(**deep_agent(sandbox(), src))` — left every route ungoverned and unrecorded.
+- **Security.** With a `PIIMiddleware` that checks input, the memory context the harness
+  sends with the question passes the same rule (redacted, masked or hashed; `block` ends the
+  run before a model call), and the turn recorded in memory holds the question as the graph
+  kept it, not the raw input.
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks

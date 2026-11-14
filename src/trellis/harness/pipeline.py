@@ -1352,7 +1352,9 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
     said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
-    asked = [Said(Speaker.USER, runtime.task)] if runtime.task else []
+    # the question as the framework kept it (a graph's middleware may have redacted it)
+    task = (extracted.asked if extracted is not None else None) or runtime.task
+    asked = [Said(Speaker.USER, task)] if runtime.task else []
     if not asked and runtime.notification is not None:  # a notification it was given to say
         asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question
