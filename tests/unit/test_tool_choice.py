@@ -222,8 +222,65 @@ def test_too_many_tools_at_once() -> None:
 
 
 async def test_the_harness_own_tools_pass_the_check() -> None:
+    from trellis.harness.schedules import SPECS
+
     sandboxed = await sandbox().tools().resolve()
     assert lint([*CODE_MODE_TOOLS, *(t.spec for t in sandboxed)]) == []
+    others = [s for s in SPECS if s.name != "update_schedule"]
+    assert lint(others) == []  # the schedule tools: each parameter described
+
+    def typed(properties: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: (
+                schema.get("type"),
+                typed(schema["items"].get("properties", {}))
+                if schema.get("type") == "array" and schema.get("items", {}).get("type") == "object"
+                else schema.get("items", {}).get("type"),
+            )
+            for name, schema in properties.items()
+        }
+
+    shapes = {spec.name: typed((spec.input_schema or {})["properties"]) for spec in SPECS}
+    task = {"task": ("string", None), "when": ("string", None), "condition": ("string", None)}
+    assert shapes == {
+        "schedule_task": {
+            **task,
+            "once": ("boolean", None),
+            "in_minutes": ("number", None),
+            "choices": ("array", task),
+            "timezone": ("string", None),
+            "tools": ("array", "string"),
+        },
+        "list_schedules": {},
+        "update_schedule": {
+            "id": ("string", None),
+            "ids": ("array", "string"),
+            **task,
+            "enabled": ("boolean", None),
+        },
+        "cancel_schedule": {"id": ("string", None), "ids": ("array", "string")},
+    }
+    described = {
+        (spec.name, name)
+        for spec in SPECS
+        for name, schema in (spec.input_schema or {})["properties"].items()
+        if schema.get("description")
+    }
+    assert {("update_schedule", "id"), ("update_schedule", "when")} <= described
+    choice = SPECS[0].input_schema["properties"]["choices"]["items"]["properties"]  # type: ignore[index]
+    assert all(schema.get("description") for schema in choice.values())
+
+
+def test_today_update_schedule_leaves_three_parameters_undescribed() -> None:
+    """Today the harness's own update_schedule fails its own tool set check: task, condition
+    and enabled carry a type and no description (schedule_task describes task and condition).
+    Pinned, not fixed here: it changes what every model is sent with the schedule tools."""
+    from trellis.harness.schedules import SPECS
+
+    [update] = [s for s in SPECS if s.name == "update_schedule"]
+    [finding] = lint([update])
+    assert finding.code == "undescribed_parameter"
+    assert "task, condition, enabled" in finding.message
 
 
 async def test_the_toolbox_logs_what_the_check_found_when_its_tools_change(
