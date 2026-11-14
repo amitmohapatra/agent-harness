@@ -170,8 +170,6 @@ from trellis.harness.tools.results import READ_FILE
 
 log = logging.getLogger("trellis.run")
 
-#: Model calls one run may make (:func:`step_limit`: LangChain's ``ModelCallLimitMiddleware``).
-MAX_STEPS: Final = 12
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
 #: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
@@ -1893,9 +1891,7 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 
 
 # --------------------------------------------------------------------------- limits
-def step_limit(
-    max_steps: int = MAX_STEPS, *, scoped: bool = False
-) -> AgentMiddleware[Any, Any, Any]:
+def step_limit(max_steps: int, *, scoped: bool = False) -> AgentMiddleware[Any, Any, Any]:
     """At most ``max_steps`` model calls that may call tools, then one that answers
     (:class:`AnswerAtLimit`). ``scoped``: counted per thread (a ``ReAct`` graph's thread is its run,
     so a resume keeps the count), else per invocation (``middleware()`` in a graph whose thread
