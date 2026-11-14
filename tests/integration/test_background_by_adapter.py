@@ -296,7 +296,32 @@ async def test_a3_another_server_sharing_the_graphs_checkpointer_gets_the_result
 
 # --------------------------------------------------------------------------- B. OpenAI Agents
 #: The slow command, and what it prints when it ends.
-SLOW: Final = f"sleep {TASK_SECONDS}; echo '{RESULT}'"
+
+
+def slow(gate: Path) -> str:
+    """The command T1 starts: it waits until the test opens ``gate`` (a file it makes), then
+    prints the result and says it is done (``<gate>.done``) — so a turn that returns while the
+    gate is shut cannot have waited for it, whatever the time each took."""
+    return f"until [ -e {gate} ]; do sleep 0.05; done; echo '{RESULT}'; touch {gate}.done"
+
+
+def is_open(gate: Path, *, done: bool = False) -> bool:
+    """Whether the test opened ``gate`` (``done``: and the command is done)."""
+    return (gate.with_name(f"{gate.name}.done") if done else gate).exists()
+
+
+def open_gate(gate: Path) -> None:
+    gate.touch()
+
+
+async def opened(gate: Path) -> None:
+    """The gate opened, and the command done with what it prints."""
+    open_gate(gate)
+    async with asyncio.timeout(30):
+        while not is_open(gate, done=True):  # noqa: ASYNC110 - another process's file
+            await asyncio.sleep(0.02)
+
+
 #: How the SDK's ``exec_command`` names a process still running when it returns.
 _PROCESS: Final = re.compile(r"session (?:ID )?(\d+)")
 
@@ -334,9 +359,11 @@ def shell_chat(harness: Harness, model: Shelled, box: SandboxRunConfig) -> Agent
     return harness.wrap(target, id="bg", framework_options={"run_config": RunConfig(sandbox=box)})
 
 
-def shell_turns() -> list[Any]:
-    """T1: the command started, to return after a tenth of a second whatever it does."""
-    return [("exec_command", {"cmd": SLOW, "yield_time_ms": 100}), reports_the_process, "4"]
+def shell_turns(gate: Path) -> list[Any]:
+    """T1: the command started (:func:`slow`), to return after a tenth of a second whatever
+    it does."""
+    command = {"cmd": slow(gate), "yield_time_ms": 100}
+    return [("exec_command", command), reports_the_process, "4"]
 
 
 @pytest.fixture
@@ -350,29 +377,32 @@ async def session() -> AsyncIterator[Any]:
     await client.delete(found)
 
 
-async def shell_t1_and_t2(agent: Agent, model: Shelled) -> int:
-    """T1 and T2 with the SDK's shell; the id of the process T1 left running."""
-    first, took = await timed(say(agent, "run the optimization"))
+async def shell_t1_and_t2(agent: Agent, model: Shelled, gate: Path) -> int:
+    """T1 and T2 with the SDK's shell, both ended while the command's gate is still shut (so
+    neither waited for it: it cannot end before the gate opens); the id of the process T1
+    left running."""
+    first = await say(agent, "run the optimization")
     assert first.status is RunStatus.SUCCESS, first.error
     started = str(model.inputs[1][-1]["output"])  # what exec_command told the model
     assert "Process running with session ID" in started and RESULT not in started
-    assert took < AT_ONCE, took  # the turn did not wait for the command
-    second, took = await timed(say(agent, "what is 2+2?"))
-    assert second.answer == "4" and took < AT_ONCE, second.error
+    second = await say(agent, "what is 2+2?")
+    assert second.answer == "4", second.error
+    assert not is_open(gate)  # both turns ended with the command still waiting
     return process_in(first.answer)
 
 
 async def test_b_an_openai_sandbox_agents_shell_runs_a_command_across_the_turns_of_a_chat(
-    harness: Harness, session: Any
+    harness: Harness, session: Any, tmp_path: Path
 ) -> None:
     """The SDK's own provision, through the harness: with a sandbox session the app keeps, the
     process ``exec_command`` left running in T1 is still the session's in T3, where
     ``write_stdin`` reads what it printed and how it ended — the id read from the
     conversation's history (the first turn's answer; memory off, no tool result is in it)."""
-    model = Shelled(shell_turns())
+    gate = tmp_path / "gate"
+    model = Shelled(shell_turns(gate))
     agent = shell_chat(harness, model, SandboxRunConfig(session=session))
-    await shell_t1_and_t2(agent, model)
-    await asyncio.sleep(TASK_SECONDS)
+    await shell_t1_and_t2(agent, model, gate)
+    await opened(gate)
     model.turns += [polls, says_what_the_shell_said]
     third = await say(agent, "is the optimization done?")
     assert third.status is RunStatus.SUCCESS, third.error
@@ -381,16 +411,17 @@ async def test_b_an_openai_sandbox_agents_shell_runs_a_command_across_the_turns_
 
 
 async def test_b_today_with_a_sandbox_session_per_run_the_command_ends_with_its_turn(
-    harness: Harness,
+    harness: Harness, tmp_path: Path
 ) -> None:
     """Today: given a sandbox client and no session (as the docs' example wraps a
     ``SandboxAgent``), the SDK makes a session for each ``Runner.run`` and ends it, its
     processes too, when the run ends: T1 and T2 work, and T3 is told there is no such
     process."""
-    model = Shelled(shell_turns())
+    gate = tmp_path / "gate"
+    model = Shelled(shell_turns(gate))
     agent = shell_chat(harness, model, SandboxRunConfig(client=UnixLocalSandboxClient()))
-    process = await shell_t1_and_t2(agent, model)
-    await asyncio.sleep(TASK_SECONDS)
+    process = await shell_t1_and_t2(agent, model, gate)
+    open_gate(gate)  # nothing is left to open it for: the process ended with its session
     model.turns += [polls, says_what_the_shell_said]
     third = await say(agent, "is the optimization done?")
     assert f"write_stdin failed: PTY session not found: {process}" in third.answer
@@ -398,14 +429,15 @@ async def test_b_today_with_a_sandbox_session_per_run_the_command_ends_with_its_
 
 
 async def test_b_today_the_kept_session_is_every_users_and_its_shell_is_not_governed(
-    harness: Harness, session: Any
+    harness: Harness, session: Any, tmp_path: Path
 ) -> None:
     """Today: the session is the app's — a run option of the agent, one for all its runs — so
     another user's turn that names the process reads it. And the SDK's shell tools are made
     inside ``Runner.run`` (a ``SandboxAgent``'s capabilities): they are not of the run's tool
     set, their calls pass no governance (nothing says what ``exec_command`` does, and nobody is
     asked) and are not on the run's stream."""
-    model = Shelled(shell_turns()[:2])
+    gate = tmp_path / "gate"
+    model = Shelled(shell_turns(gate)[:2])
     agent = shell_chat(harness, model, SandboxRunConfig(session=session))
     assert await agent.adapter.native(agent.target) == []
     events = [e async for e in agent.stream("run the optimization", user=USER, thread=THREAD)]
@@ -413,7 +445,7 @@ async def test_b_today_the_kept_session_is_every_users_and_its_shell_is_not_gove
     assert events[-1].outcome is RunOutcome.SUCCESS  # it ran: nobody was asked
     assert not [e for e in events if e.type is RunEventType.TOOL_CALL_START]
     process = process_in(model.inputs[1])
-    await asyncio.sleep(TASK_SECONDS)
+    await opened(gate)
     model.turns += [
         ("write_stdin", {"session_id": process, "chars": "", "yield_time_ms": 500}),
         says_what_the_shell_said,
