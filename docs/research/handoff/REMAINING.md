@@ -1,4 +1,4 @@
-# What remains to be done (Trellis stack) — updated 2026-11-14 22:20 UTC
+# What remains to be done (Trellis stack) — updated 2026-11-14 22:50 UTC
 
 The owner asked for everything that is coded to go to main at once, without waiting for
 tests, and for this file to list everything that is done, left, found, and still to be
@@ -26,8 +26,9 @@ head. Expect red CI on harness main: cross-branch test failures, the 100% line+b
 coverage gate of `trellis.harness`, and the tests in section 4 that were never run.
 
 **Order of work next time**
-1. Finish the fold if it is not finished (section 2), then look at CI on harness main and
-   fix what is red. Fix SCN-13 (P0, section 5) if the fold job did not.
+1. Merge the Kimi branch if it is not yet on main (section 2), then look at CI on harness
+   main and fix what is red (start with `uv.lock`, which was merged as text and never
+   regenerated, and the test that hangs, section 4).
 2. The one full test pass (section 9).
 3. The open bugs and uncoded items (section 5), security first (section 6).
 4. The performance job (section 7).
@@ -44,7 +45,7 @@ coverage gate of `trellis.harness`, and the tests in section 4 that were never r
 | agent-runs | #35 (chat order on the server: place under the key's lock, holds, sweeps), #36 (`placed_at` on record and summary, `concurrency_key` list filter, date answers), #37 (one fixed set of enforced answer formats: date, email, ipv4, ipv6, regex, uuid) | CI green |
 | agent-memory-service | #115 (round 1), #116 (504 documented on 69 operations, a decision keeps arguments as the tool redacts them, two feature-suite fixes), #117 (admin key forgets in its tenant, extracted user facts ask first, inventory lists chat statements, redaction at intake) | #115, #116 green; #117 green on 3.12, 3.13 still running at merge |
 | agent-memory-service | #118 (a deleted thread leaves every read, profile lines follow their memories, migrations 0038 and 0039) | **no CI at merge**; item tests green, whole suite not run on the final head |
-| agent-harness | #257 (OpenAI Agents fixes and SDK 0.24, a conversation's turns in order, scenario fixes, LangChain 1.5 / Deep Agents 0.7.38, ReAct background tasks, the feature suite, the harness side of `placed_at`), #259 (Claude: SDK 0.2.182 and the Claude work up to the fold's head), #258 and #260 (these notes) | **not verified** (section 0) |
+| agent-harness | #257 (OpenAI Agents fixes and SDK 0.24, a conversation's turns in order, scenario fixes, LangChain 1.5 / Deep Agents 0.7.38, ReAct background tasks, the feature suite, the harness side of `placed_at`), #259 (Claude, SDK 0.2.182), #262 (Claude round 2, ReAct parity and rewind, the fix round, LangChain leftovers, the scenario suite), #263 (CHANGELOG conflict markers removed), #264 (native skills, the SCN-13 fix, the fold's final head); #258, #260, #261 and later (these notes) | **not verified** (section 0) |
 
 What those harness merges contain, by area (all **reported** unless noted):
 - OpenAI Agents: library features pass through as the SDK does them; tool order kept;
@@ -71,22 +72,30 @@ What those harness merges contain, by area (all **reported** unless noted):
 
 ---
 
-## 2. Coded and pushed, being folded into `claude/cool-maxwell-w5avo8-to-main-2`
+## 2. The fold: done except Kimi
 
-A fold job merges these final heads in this order; each push is merged to main. If the
-session ended first, unpushed merges are in the worktree `/var/tmp/cons/stage2` (ephemeral).
-Check each with `git merge-base --is-ancestor origin/<branch> origin/main`; anything that is
-not an ancestor still has to be merged.
+Every branch of the round is on harness main (fold head 76afbb3, PR #264) except one:
 
-| Branch `claude/cool-maxwell-w5avo8-…` | Final head | Holds |
+| Branch | Head | State |
 |---|---|---|
-| `-bg-claude-da` | 9b286c9 | Claude round 2: one `SessionCost` (a lower total is a reset, charged whole); replay rule (a write of the run drops the reads journaled before it); a team's own hooks between live turns run once; thinking (`reasoning` event) and server-tool blocks recorded |
-| `-react-parity` | da31ac9 | provider tools, plan mode, checkpoint history kept, `langgraph-swarm` handoffs, compaction tool read; `Agent.checkpoints` and `Agent.rewind` for paused runs, with a journal ledger so a write made past the checkpoint asks again |
-| `-fix-round` | d21c1ca | identical writes in one step asked once each and run once each; AutoMode recording keyed by call; carried state past 256 KiB drops files largest first, never the task list; deletion markers pruned; AG-UI event ids `(attempt-1)*2**32 + sequence`; docs fix (a run's user is whom `ask` asks; a tool approval is anyone's unless a hook names someone); H-ID proved already fixed |
-| `-langchain-fixes` | 9e89fb1 | no double model retry; the graph's own summary kept when the window guard drops turns; provider tool fields (`defer_loading`, `cache_control`) kept. Merge 9e89fb1 or later only |
-| `-bg-kimi` | 0802086 | Kimi 2.6.2 (2.1.x refused); asking mode set and confirmed before any prompt; plans reviewed by a person with every option; allow-for-conversation mapped to Kimi's allow-always; telemetry and auto-update off; a failed turn is ERROR with Kimi's reason; mode confirmation waits on the event up to 30 s; a Kimi home per tenant and user that turns team allow rules into ask rules |
-| `-scenarios` | 4df022b | `tests/scenarios` (live stack, INV-1..10 at every teardown), SCN-7, 9, 10, 14 fixes, the background and reliability cases, INV-4 and INV-10 corrections |
-| `-native-skills` | 9a24f76 | ReAct's general-purpose helper gets the run's skills; per-library tenant isolation tests; Claude `Skill` call recorded and governed; Kimi run home links AGENTS.md, plugins and own skills; `SANDBOX_TOOLS` deleted in favour of `governed_capability` |
+| `claude/cool-maxwell-w5avo8-bg-kimi` | 0802086 | **not on main.** It moves the kept-process ("live session") code that Claude used into a shared `bridges/live.py`, while the Claude work on main changed the same code in place in `claude_live.py` (`LiveSessions.open(owner=, among=)`, the process cap, `SessionCost`, hooks, thinking blocks): 12 conflict hunks, about 546 lines, plus `adapters/claude.py` (`asking_within`) and `tools/bridge.py` (`permitted/asked(kept=)`). A job is doing this merge on `claude/cool-maxwell-w5avo8-kimi-merge` (worktree `/var/tmp/cons/kimimerge`): keep bg-kimi's shared structure and carry every behaviour main added into it. If that branch is not an ancestor of main, this merge is still owed. |
+
+What the Kimi branch holds: Kimi 2.6.2 (2.1.x refused); asking mode set and confirmed before
+any prompt; plans reviewed by a person with every option; allow-for-conversation mapped to
+Kimi's allow-always; telemetry and auto-update off; a failed turn is ERROR with Kimi's
+reason; mode confirmation waits on the event up to 30 s; a Kimi home per tenant and user
+that turns team allow rules into ask rules; background work through a kept process.
+
+On main from the fold (reported by the fold job): Claude round 2 (one `SessionCost`; the
+replay rule; a team's own hooks between live turns; thinking and server-tool blocks); ReAct
+parity (provider tools, plan mode, checkpoint history, `langgraph-swarm` handoffs,
+`Agent.checkpoints` / `Agent.rewind` for paused runs); the fix round (identical writes,
+AutoMode recording, carried-state bounds, AG-UI event ids, the approvals doc fix); LangChain
+leftovers (no double model retry, the graph's own summary kept, provider tool fields kept);
+the scenario suite and its fixes; native skills; `Tasks._watch` deleted (`Holds(lost=)` is
+the one detector; `AsyncTasks._watch` keeps its remote read); a background task's runs get
+their conversation's `concurrency_key`; the three AG-UI hub tests moved to the new
+`publish(event, number)` signature; strict xfails removed for fixes now in the tree.
 
 Fold rules if it is redone by hand: `CARRIED` = async_tasks, files, todos, ACTIVE_AGENT;
 journal fields `called_by`, `rejected` (fix-round) and `reread` (Claude) all stay;
@@ -120,7 +129,7 @@ branches under the same prefix.
 | SCN-9, SCN-10 | AG-UI: same run id twice started two runs; an empty message started a failing run | done (`-scenarios`) |
 | SCN-11 | a LangGraph user's `RetryPolicy` never retries a failed harness read | **open** (section 5) |
 | SCN-12 | always-allow on Kimi tripped INV-4 | done: the invariant was wrong, fixed (`-scenarios`) |
-| SCN-13 | a run the store ended during a network cut keeps writing | **open, P0** (section 5) |
+| SCN-13 | a run the store ended during a network cut keeps writing | done (#264): `Harness._lost` stops the attempt on any ended status; its test passes |
 | SCN-14 | a failed upload left a half-written file when the store was full | done (`-scenarios`) |
 | C-1 | memory OpenAPI listed no 504 | done (memory #116) |
 | C-2 | `source: "system"` not in the contract's enum | done (contracts #20) |
@@ -137,7 +146,7 @@ branches under the same prefix.
 | ARCH-1 | children left RUNNING when a run ends ERROR after a stall | done |
 | ARCH-2 | a cancel from another process not honoured by the holder | **unconfirmed** (a parked branch `-chat-order-cancel` exists; check what main does) |
 | ARCH-3 | two cascades end a run's children with different rules | cleanup (section 8) |
-| ARCH-4 | four detectors of "ended elsewhere", four copies of "stop the attempt" | cleanup; `Tasks._watch` deletion at the fold **unconfirmed** |
+| ARCH-4 | four detectors of "ended elsewhere", four copies of "stop the attempt" | partly: `Tasks._watch` deleted at the fold; the four copies of "stop the attempt" are cleanup |
 | ARCH-5 | a turn recorded RUNNING but never held blocks its line (birth grace) | **unconfirmed** |
 | ARCH-6 | monkeypatch and private LangGraph imports to retry a graph's own tools | partly: fails loudly now; full removal is cleanup |
 | ARCH-7 | `Tasks._done` forgets the wrong attempt | reported done |
@@ -185,6 +194,13 @@ branches under the same prefix.
   memory-service load), WF-01..06, the stack-dependent `test_s06`, CONV-04 across servers
   (failed once in a combined run); LR-04/05 `function` variants not re-run. Whole-repo
   pyright not re-run after the last commit.
+- On main after the fold: `tests/integration/test_claude_background_session.py::test_a_background_run_cancelled_before_its_first_attempt_began_stops_its_task`
+  hangs (it also hung on the earlier base 0879e13); not fixed. `uv.lock` was merged as
+  text and never regenerated (`uv lock` needs the sibling checkouts): CI's install step is
+  its only check. After the fourth merge of the fold no pytest was run except
+  `test_agui.py` and the SCN-13 test. Left in place: an xfail in `tests/features/test_har_more.py`
+  (a mix that includes Kimi) and an `invariants.allow` line for SCN-13 in
+  `tests/scenarios/test_s18_faults.py` (remove it once the scenario passes on a live stack).
 - `-react-parity`: Claude and Kimi take the "rewind not supported" path untested.
 - `-langchain-fixes`: no integration suite and no coverage run; three pyright errors in
   `tests/integration/test_react_async_subagent.py` on that branch (fixed on the fold's line).
@@ -207,12 +223,8 @@ branches under the same prefix.
 ## 5. Open bugs and items not coded
 
 ### P0
-- **SCN-13**: a run that agent-runs ended `holder_lost` during a network cut keeps working
-  and makes later writes. Root cause `src/trellis/harness/harness.py` about line 490:
-  `Harness._lost` stops only CANCELLED runs. Fix: stop the attempt on any ended status,
-  writing nothing more (as `pipeline.py` about line 876). Failing test (strict xfail):
-  `tests/integration/test_scenario_findings.py::test_scn13_a_run_the_store_ended_stops_where_it_works`;
-  scenario in `tests/scenarios/test_s18_faults.py`. The fold job was asked to fix it last.
+- None open that is known. SCN-13 was fixed in #264 (one in-process test run green; the
+  network-partition scenario has not been re-run on a live stack).
 
 ### Harness, all adapters
 - SCN-11: a LangGraph user's own `RetryPolicy` never retries a failed harness read. Route:

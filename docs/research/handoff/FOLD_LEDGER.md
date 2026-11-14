@@ -259,3 +259,14 @@ langchain-fixes 9e89fb1, bg-kimi 0802086, scenarios 4df022b, native-skills 9a24f
 The fold job was also asked, as its last step, to fix SCN-13 (P0, Harness._lost stops only
 CANCELLED runs) and update three AG-UI id tests. Per-job done / never-run / not-done lists
 are in REMAINING.md sections 2–4.
+- 22:30 UTC: merged harness#262 (to-main-2 @ e9e9e33) and #261 (complete REMAINING.md).
+
+## 22:50 UTC — fold reported complete except bg-kimi; harness#263, #264 merged
+Fold head 76afbb3 on main (PR #264): native skills, SCN-13 fix (Harness._lost stops on any
+ended status; test green), Tasks._watch deleted, background task runs get the conversation's
+concurrency_key, AG-UI hub tests on the new signature, xfails removed.
+Not merged: bg-kimi 0802086 (12 conflict hunks / 546 lines in claude_live.py against the
+Claude work; plus claude.py and tools/bridge.py) → a merge job runs on
+`claude/cool-maxwell-w5avo8-kimi-merge` (worktree /var/tmp/cons/kimimerge), with a targeted
+test run of the Claude and Kimi kept-process files.
+Known on main: one hanging test in test_claude_background_session.py; uv.lock merged as text.
