@@ -204,14 +204,18 @@ async def test_a_queued_long_task_across_workers(
     book = tmp_path / "ledger"
     monkeypatch.setenv("SCEN_LEDGER", str(book))
     agent_id = f"s13w-{adapter}-{uid}"
+    # six unlike waits, 24 s in all: the same call over and over is what the repeated-call guard
+    # stops, and more steps than these end PARTIAL at the frameworks' own step limits (ReAct's
+    # ``max_steps`` 12, the OpenAI Agents SDK's ``max_turns`` 10)
+    waits = [4.0 + n / 1000 for n in range(6)]
     steps = [
         command("note", text=f"first {uid}"),
-        *[command("wait", seconds=1.0)] * 30,
+        *[command("wait", seconds=wait) for wait in waits],
         command("note", text=f"last {uid}"),
     ]
     claude = [
         {"tool": "note", "args": {"text": f"first {uid}"}},
-        *[{"tool": "wait", "args": {"seconds": 1.0}}] * 30,
+        *[{"tool": "wait", "args": {"seconds": wait}} for wait in waits],
         {"tool": "note", "args": {"text": f"last {uid}"}},
     ]
     spec = {

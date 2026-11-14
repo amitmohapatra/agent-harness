@@ -385,7 +385,7 @@ pass is the user's, once everything is merged).
 | LR-01 | written, passing | `test_s13::test_a_turn_working_for_minutes_at_real_length` (200 s, the product's own hold), `test_a_turn_working_well_past_its_hold` | |
 | LR-02 | written, passing | `test_s13::test_a_two_hundred_step_task`, `test_s06::test_a_step_limit…`, `test_s07` | |
 | LR-03 | written, passing | `test_s06` (time limit, budget), `test_s13` (budget, deadline queued and working) | |
-| LR-04, LR-05 | written | `test_s13::test_a_queued_long_task_across_workers` (graceful, killed) | not run after the pass was stopped by the machine's memory limit |
+| LR-04, LR-05 | written, passing in part | `test_s13::test_a_queued_long_task_across_workers` (graceful, killed) | run after two test faults were fixed (thirty alike waits tripped the repeated-call guard; thirty steps passed ReAct's `max_steps` 12 and the OpenAI SDK's `max_turns` 10): react, langgraph, openai_agents, claude_agent_sdk green, graceful and killed; `function` not re-run. INV-10 now lets the next attempt begin again a call an attempt cut short began |
 | LR-06 | written, passing | `test_s07::test_fifty_five_turns` | 6 adapters; spending exact on ReAct and Kimi |
 | REL | written | `test_s06`, `test_s16`, `test_s11` | SIGKILL while running / paused / resuming / mid-workflow; memory down; agent-runs slow or down; model error; not written: disk full, clock skew, network partition, duplicate webhook delivery (need fault injection the stack script does not have), model 429/overflow (the provider route's, features job) |
 | APR-01/02/03/05/07, MEM-08 | written, passing | `test_s04` | Kimi re-run after a fix of the test's scripted model: one open observation, SCN-12 |
@@ -393,10 +393,12 @@ pass is the user's, once everything is merged).
 | FS | written, passing | `test_s09` | sandbox provider is the in-process stand-in (no Docker daemon) |
 | CON, INV-7 | written, passing | `test_s10`, the invariants on every test | |
 
-Open observation, not diagnosed: **SCN-12** — `test_s04::test_always_allow_in_one_chat_applies_in_another[kimi]`
-passes its assertions and breaks INV-4 ("note ran though it was rejected") on the probe run it
-rejects: either Kimi made the rejected call again and it ran under the standing approval learned
-meanwhile, or the invariant misreads Kimi's events. Owner to decide: bg-kimi / scn-fixes.
+**SCN-12**, diagnosed: a false positive of the invariant, not a product fault.
+`test_s04::test_always_allow_in_one_chat_applies_in_another[kimi]` passes its assertions; the run
+it rejects holds no tool-call event at all (its record: decision `REJECT`, no `TOOL_CALL_START`).
+INV-4 looked for the asked call in the test's other runs too (right for an approved call a
+background run made) and found the other user's own approved `note` with the same arguments.
+Fixed in `tests/support/invariants.py`: a rejected call is looked for in its own run only.
 
 ### Round 3 findings (scenarios job)
 

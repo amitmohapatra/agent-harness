@@ -595,9 +595,10 @@ class Invariants:
                 starts = _starts(
                     events.get(run_id, []), call.get("tool"), call.get("idempotency_key")
                 )
-                if not starts:
+                if not starts and decision != "REJECT":
                     # a question a background run's call needed, asked in its chat's turn: the
-                    # call ran in that other run of the test
+                    # approved call ran in that other run of the test (a rejected one is looked
+                    # for in its own run only: another run's same call is not this one)
                     others = [ev for r, evs in events.items() if r != run_id for ev in evs]
                     ran = _starts(others, call.get("tool"), None)
                     starts = [a for a in ran if a == call.get("args")]
@@ -698,7 +699,7 @@ class Invariants:
     def secrets_in(self, text: str) -> bool:
         return any(s in text for s in getattr(self, "_secrets", self.secrets))
 
-    def _inv10(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:  # noqa: PLR0912
+    def _inv10(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:
         out = []
         for run_id, evs in events.items():
             by_attempt: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -706,7 +707,6 @@ class Invariants:
                 ev = p.get("event", p)
                 by_attempt[int(ev.get("attempt") or 1)].append(ev)
             starts: Counter[str] = Counter()
-            ends: Counter[str] = Counter()
             for attempt, evs_a in sorted(by_attempt.items()):
                 if evs_a[0].get("type") != "RUN_STARTED":
                     out.append(
@@ -726,14 +726,18 @@ class Invariants:
                 for n, ev in enumerate(evs_a):
                     if ev.get("type") == "RUN_ERROR" and n + 2 < len(evs_a):
                         out.append(f"INV-10 run {run_id} attempt {attempt}: events after RUN_ERROR")
-                for ev in evs_a:
-                    if ev.get("type") == "TOOL_CALL_START":
-                        starts[str(ev.get("tool_call_id"))] += 1
-                    if ev.get("type") == "TOOL_CALL_END":
-                        ends[str(ev.get("tool_call_id"))] += 1
-            # a call begun again after an attempt that never finished it (a crash, a lapsed
-            # lease) is the same logical call begun again: only a finished one may not be
-            twice = [c for c, n in starts.items() if n > 1 and ends[c] > 1]
+                # a call counts where its attempt ended (a pause, an ending): one an attempt cut
+                # short began (a crash, a worker that handed the run back) is begun again by the
+                # next, the same logical call — unless it began twice in that one attempt
+                here = Counter(
+                    str(ev.get("tool_call_id"))
+                    for ev in evs_a
+                    if ev.get("type") == "TOOL_CALL_START"
+                )
+                starts.update({call: begun - 1 for call, begun in here.items()})
+                if finished or attempt == max(by_attempt):
+                    starts.update(here.keys())
+            twice = [c for c, n in starts.items() if n > 1]
             if twice:
                 out.append(f"INV-10 run {run_id}: tool calls started more than once: {twice[:3]}")
         return out
