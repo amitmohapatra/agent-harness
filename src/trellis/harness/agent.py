@@ -44,6 +44,7 @@ from trellis.contracts import (
     safe_id,
 )
 from trellis.harness import (
+    background,
     compat,
     conversation,
     frontend,
@@ -816,6 +817,8 @@ class Agent:
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
             )
+            # a background task's question, cancelled: the task with it
+            await background.abandoned(self, record.awaiting, reason_of(resolution))
             await sandbox.ended(self, journal.sandbox, record.run_id)
             self._unwatched(record.run_id)
         if resumed.status is not RunStatus.RUNNING:

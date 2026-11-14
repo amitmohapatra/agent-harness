@@ -24,7 +24,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from tests.integration.test_react_async_subagent import Model
 from tests.support.arm import arm
 from trellis import Harness, ReAct, Runtime, Settings, tool
-from trellis.contracts import RunStatus
+from trellis.contracts import (
+    ConfigurationError,
+    InterruptDecision,
+    InterruptResolution,
+    RunStatus,
+)
 from trellis.harness import background, pipeline, schedules
 from trellis.harness.adapters.langgraph import notified
 from trellis.harness.agent import Agent
@@ -267,8 +272,20 @@ async def test_an_outcome_a_turn_already_told_is_quiet_when_a_turn_of_its_own_te
     update = background.update_of({"task_id": task.thread_id, "agent_name": "research"}, ended)
     assert update is not None
     calls, origin = len(model.seen), ended.metadata[background.BACKGROUND]
-    for _ in range(2):
-        await background.notify(agent, ended, update, user=USER, thread=THREAD, origin=origin)
+    told = [
+        background.notify(agent, ended, update, user=USER, thread=THREAD, origin=origin)
+        for _ in range(2)
+    ]
+    read = harness.runs.get
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:  # a store across the network: both read
+        found = await read(*args, **kwargs)
+        await asyncio.sleep(0.01)  # before either starts it
+        return found
+
+    monkeypatch.setattr(harness.runs, "get", slow)
+    await asyncio.gather(*told)  # at once: one starts it, the other finds it at work
+    monkeypatch.setattr(harness.runs, "get", read)
     await until(lambda: _all_final(harness))
     assert await _own_turns(harness) == 1
     [own] = [
@@ -715,3 +732,183 @@ async def test_the_harness_closing_cuts_a_task_at_work_off(gate: Gate) -> None:
         background.UNFINISHED_CODE,
         background.CUT_OFF,
     )
+
+
+# --------------------------------------------------------------------------- more of its life
+async def test_a_turn_out_of_time_leaves_its_tasks_working(harness: Harness, gate: Gate) -> None:
+    """A turn's clock is not its tasks': a turn that runs out of time ends the children in its
+    call, not the tasks it started in the background."""
+    model = Model(turns=[START, "never said"], hold_from=1)
+    research = harness.wrap(gate.researcher, id="research")
+    target = ReAct("You help.", model, subagents=[research])
+    agent = harness.wrap(target, id="chat", run_timeout=0.5)
+    turn = await chatted(agent, "research lighthouses")
+    assert turn.status is RunStatus.TIMEOUT
+    task = await task_run(harness, turn.run_id)
+    assert task.status is RunStatus.RUNNING
+    gate.opened.set()
+    await until(lambda: _final(harness, task.run_id))
+
+
+async def test_a_tasks_run_ended_elsewhere_stops_its_attempt_here(
+    harness: Harness, gate: Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task's run cancelled where its attempt is not (another replica's cancel) is seen
+    here within a read (``background.WATCH_SECONDS``): its attempt stops."""
+    monkeypatch.setattr(background, "WATCH_SECONDS", 0.05)
+    agent = chat(harness, gate, Model(turns=[START, "Started."]))
+    first = await chatted(agent, "research lighthouses")
+    task = await task_run(harness, first.run_id)
+    await until(lambda: gate.started)
+    await harness.runs.cancel(task.run_id, reason="on another replica")
+    await until(lambda: not harness.background.at_work(task.run_id))
+
+
+async def test_cancel_as_the_answer_to_the_tasks_question_cancels_it(harness: Harness) -> None:
+    model = Model(turns=[PUBLISH, "Started.", *["Noted."] * 4])
+    agent = publishing(harness, model)
+    first = await chatted(agent, "publish the tides report")
+    task = await task_run(harness, first.run_id)
+    asking = await asked_in_the_chat(harness)
+    done = await agent.resume(asking.awaiting.interrupt_id, "cancel", reviewer=USER)
+    assert done.status is RunStatus.CANCELLED
+    ended = await harness.runs.get(task.run_id)
+    assert ended is not None and ended.status is RunStatus.CANCELLED
+
+
+async def test_new_instructions_from_another_server_replace_the_tasks_run_there(
+    workers: tuple[Harness, Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``update_async_task`` (``interrupt``) on a server where the task's run is not at work:
+    that run is cancelled in the run store — the server it works on stops it at its next read
+    — and the follow-up goes on as the task, here."""
+    monkeypatch.setattr(background, "WATCH_SECONDS", 0.05)
+    first_h, second_h = workers
+    gates = (Gate(), Gate())
+    turns = [START, reports_the_task, with_task("update_async_task", message="tides"), "Sent."]
+    model = Model(turns=turns)
+    here, there = (chat(h, g, model) for h, g in zip(workers, gates, strict=True))
+    first = await chatted(here, "research lighthouses")
+    task = await task_run(first_h, first.run_id)
+    await until(lambda: gates[0].started)
+    updated = await chatted(there, "research tides instead")
+    assert updated.status is RunStatus.SUCCESS, updated.error
+    stopped = await second_h.runs.get(task.run_id)
+    assert stopped is not None and stopped.status is RunStatus.CANCELLED
+    await until(lambda: not first_h.background._at_work)  # stopped where it worked
+    await until(lambda: gates[1].started == ["tides"])  # the follow-up, on this server
+    for g in gates:
+        g.opened.set()
+
+
+async def _paused(harness: Harness, run_id: str) -> bool:
+    found = await harness.runs.get(run_id)
+    return found is not None and found.status is RunStatus.PAUSED
+
+
+async def test_what_breaks_the_harness_around_a_task_is_logged_not_raised(
+    harness: Harness, gate: Gate, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the harness broke")
+
+    gate.opened.set()
+    agent = chat(harness, gate, Model(turns=[START, "Started.", START, "Again."]))
+    monkeypatch.setattr(background, "delivered", broken)
+    first = await chatted(agent, "research lighthouses")
+    task = await task_run(harness, first.run_id)
+    await until(lambda: _final(harness, task.run_id))
+    await until(lambda: not harness.background._at_work)
+    assert "its outcome not delivered" in caplog.text
+    monkeypatch.setattr(pipeline, "attempt", broken)
+    record = await harness.runs.get(task.run_id)
+    assert record is not None
+    harness.background.run(agent, record)
+    await until(lambda: not harness.background._at_work)
+    assert f"background task {task.run_id}" in caplog.text
+
+
+async def test_two_tasks_of_one_deep_agents_sub_agent_run_as_one_agent(harness: Harness) -> None:
+    notes = {
+        "name": "notes",
+        "description": "Takes notes on a topic.",
+        "system_prompt": "You take notes.",
+        "model": Model(turns=["NOTES: a", "NOTES: b"]),
+        "tools": [],
+    }
+    both = [
+        ("start_async_task", {"description": "a", "subagent_type": "notes"}),
+        ("start_async_task", {"description": "b", "subagent_type": "notes"}),
+    ]
+    agent = harness.wrap(
+        ReAct("You help.", Model(turns=[both, "Started.", *["ok"] * 4]), subagents=[notes]),
+        id="chat",
+    )
+    first = await chatted(agent, "take notes")
+    tasks = [c async for c in harness.runs.iterate(parent_run_id=first.run_id)]
+    assert {t.agent_id for t in tasks} == {"chat.notes"} and len(tasks) == 2
+    await until(lambda: _all_ended(harness, [t.run_id for t in tasks]))
+
+
+async def test_outside_a_harness_run_the_tasks_middleware_steps_aside(gate: Gate) -> None:
+    from trellis.harness.bridges.background_tasks import BackgroundTasks
+
+    tasks = BackgroundTasks({"research": None}, described={"research": "Research."})
+    assert await tasks.abefore_agent({"messages": []}, None) is None
+    assert await tasks.abefore_model({"messages": []}, None) is None
+    assert await tasks.aafter_model({"messages": []}, None) is None
+
+
+def test_an_update_strategy_is_deep_agents_own() -> None:
+    spec = {"name": "notes", "description": "Notes.", "update_strategy": "later"}
+    with pytest.raises(ConfigurationError, match="notes: update_strategy is 'interrupt' or"):
+        ReAct("You help.", Model(turns=[]), subagents=[spec])
+
+
+async def test_cancelling_a_paused_parent_with_no_framework_work_cancels_its_child(
+    harness: Harness,
+) -> None:
+    """``subagents.cancel_children`` on an agent whose framework keeps nothing going for a
+    child (a function's: no ``child_cancelled``): the child's run is cancelled all the same."""
+
+    async def asks(input: str, agent: Runtime) -> str:
+        """Ask which."""
+        return str(await agent.ask("Which one?", options=["a", "b"]))
+
+    child = harness.wrap(asks, id="asker")
+
+    async def boss(input: str, agent: Runtime) -> str:
+        return str((await child.run("which?", user=agent.user)).answer)
+
+    parent = harness.wrap(boss, id="boss")
+    paused = await parent.run("go", user=USER)
+    assert paused.status is RunStatus.PAUSED
+    await parent.cancel(paused.run_id, reason="enough")
+    [kid] = [c async for c in harness.runs.iterate(parent_run_id=paused.run_id)]
+    assert kid.status is RunStatus.CANCELLED
+
+
+async def test_an_answer_handed_to_a_task_no_longer_waiting_on_it_is_left(harness: Harness) -> None:
+    """The task's question answered twice (asked in two turns), or cancelled by its answer:
+    the second answer, and a cancel, start no attempt of it."""
+    model = Model(turns=[PUBLISH, "Started.", *["Noted."] * 4])
+    agent = publishing(harness, model)
+    first = await chatted(agent, "publish the tides report")
+    task = await task_run(harness, first.run_id)
+    asking = await asked_in_the_chat(harness)
+    waiting = await harness.runs.get(task.run_id)
+    assert waiting is not None and waiting.awaiting is not None
+    publisher = harness.agents["publisher"]
+    cancel = InterruptResolution(
+        interrupt_id=waiting.awaiting.interrupt_id,
+        run_id=task.run_id,
+        decision=InterruptDecision.CANCEL,
+        reviewer=USER,
+    )
+    await background.answered(agent, publisher, waiting, cancel)
+    ended = await harness.runs.get(task.run_id)
+    assert ended is not None and ended.status is RunStatus.CANCELLED
+    assert not harness.background.at_work(task.run_id)
+    await background.answered(agent, publisher, waiting, cancel)  # waits on nothing now
+    assert not harness.background.at_work(task.run_id)
+    del asking

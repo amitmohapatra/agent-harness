@@ -1750,6 +1750,7 @@ async def test_i_an_idle_chat_is_told_how_its_task_ended(
     agent = chat(harness, server, model)
     server.hold()
     await say(agent, "run the optimization")
+    await asyncio.sleep(0.2)  # a read or two while it works: nothing to tell
     server.release()
     [task] = await task_runs(harness)
 
@@ -1816,4 +1817,48 @@ async def test_i_an_update_after_the_task_ended_starts_a_run_of_it(
     first, second = await task_runs(harness)
     assert first.run_id == ended.run_id and second.parent_run_id == again.run_id
     assert second.status is RunStatus.RUNNING and harness.holds.holds(second.run_id)
+    server.release()
+
+
+@pytest.mark.parametrize(
+    ("ended", "status"), [("error", RunStatus.ERROR), ("cancelled", RunStatus.CANCELLED)]
+)
+async def test_i_a_task_that_failed_or_was_cancelled_on_its_server_ends_its_run_so(
+    harness: Harness,
+    server: StandIn,
+    monkeypatch: pytest.MonkeyPatch,
+    ended: str,
+    status: RunStatus,
+) -> None:
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    model = Model(turns=[START, reports_the_id, "Noted."])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    server.runs[server.task_id]["status"] = ended
+    [task] = await task_runs(harness)
+    async with asyncio.timeout(10):
+        while (found := await harness.runs.get(task.run_id)) is None or not found.final:  # noqa: ASYNC110
+            await asyncio.sleep(0.05)
+    assert found.status is status and not harness.holds.holds(task.run_id)
+    async with asyncio.timeout(10):  # the idle chat told
+        while len(model.seen) < 3:  # noqa: ASYNC110
+            await asyncio.sleep(0.05)
+    told = notified(model.seen[2][-1]) or {}
+    assert told["data"]["status"] == ended
+
+
+async def test_i_a_tasks_run_another_server_ended_is_held_here_no_more(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check on another server ended the task's run: the process holding it lets go."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    agent = chat(harness, server, Model(turns=[START, reports_the_id]))
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    await harness.runs.finish(task.run_id, RunStatus.SUCCESS, output=RESULT)
+    async with asyncio.timeout(10):
+        while harness.holds.holds(task.run_id):  # noqa: ASYNC110 - the keeper's read
+            await asyncio.sleep(0.05)
     server.release()

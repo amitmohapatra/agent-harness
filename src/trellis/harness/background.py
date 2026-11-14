@@ -94,6 +94,7 @@ STATUS: Final[Mapping[RunStatus, str]] = {
     RunStatus.ERROR: "error",
     RunStatus.TIMEOUT: "timeout",
     RunStatus.CANCELLED: "cancelled",
+    RunStatus.REJECTED: "error",  # refused (its policy, a rule): it failed, as Deep Agents says
 }
 #: The statuses that can still change: what a pull reads again.
 UNFINISHED: Final = frozenset({"pending", "running", "waiting"})
@@ -254,8 +255,7 @@ def _interrupts(record: RunRecord) -> list[dict[str, Any]]:
     asked = record.awaiting
     if asked is None:
         return []
-    value = asked.question or (asked.tool_call.tool if asked.tool_call is not None else None)
-    return [{"id": asked.interrupt_id, "value": value}]
+    return [{"id": asked.interrupt_id, "value": asked.question}]
 
 
 def notification(update: Mapping[str, Any]) -> Any:
@@ -321,9 +321,9 @@ class Tasks:
         task.add_done_callback(lambda _: self._done(record.run_id, task))
 
     def _done(self, run_id: str, task: asyncio.Task[None]) -> None:
-        if self._at_work.get(run_id) is task:
-            del self._at_work[run_id]
-            del self._agents[run_id]
+        # its run's next attempt starts once this one ended (after the person's answer)
+        self._at_work.pop(run_id, None)
+        self._agents.pop(run_id, None)
 
     async def _work(
         self,
@@ -404,8 +404,7 @@ async def start(runtime: Runtime, agent: Agent, name: str, description: str) -> 
     thread = stable_id(place, BACKGROUND, name, prefix="task_")
     run_id = stable_id(place, BACKGROUND, name, prefix="run_")
     origin = {"name": name, "agent": runtime.agent_id, "thread": runtime.identity.thread}
-    if runtime.frontend is not None:
-        origin[FRONTEND] = runtime.frontend.kept()
+    origin |= {FRONTEND: runtime.frontend.kept()} if runtime.frontend is not None else {}
     record = await _started(
         runtime, agent, description, run_id=run_id, thread=thread, origin=origin
     )
@@ -490,12 +489,9 @@ def _go(parent: Agent, agent: Agent, record: RunRecord, *, mode: Mode = Mode.QUE
 async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any]) -> None:
     """``task`` cancelled: its latest run, and the earlier ones a queued follow-up left behind
     it that still work (newest first, so cancelling one does not let the next begin)."""
-    runs, tenant = runtime.agent.harness.runs, runtime.tenant
+    tenant = runtime.tenant
     for run_id in [task["run_id"], *reversed(task.get("superseded_run_ids", []))]:
-        found = await runs.get(run_id, tenant=tenant)
-        if found is None or found.final:
-            continue
-        with contextlib.suppress(ConflictError):  # it ended meanwhile
+        with contextlib.suppress(ConflictError):  # it ended already
             await agent.cancel(
                 run_id, reason="cancelled by the agent that started it", tenant=tenant
             )
@@ -553,8 +549,7 @@ async def origin_of(parent: Agent, record: RunRecord) -> dict[str, Any] | None:
         "agent": above.agent_id,
         "task_id": str(helper.get("task_id") or record.run_id),
     }
-    if FRONTEND in above.metadata:
-        found[FRONTEND] = above.metadata[FRONTEND]
+    found |= {FRONTEND: above.metadata[FRONTEND]} if FRONTEND in above.metadata else {}
     return found
 
 
@@ -725,6 +720,21 @@ async def ask(runtime: Runtime, record: RunRecord) -> InterruptResolution | None
         **{name: getattr(asked, name) for name in ASKED},
     )
     return answered.model_copy(update={"interrupt_id": asked.interrupt_id, "run_id": record.run_id})
+
+
+async def abandoned(parent: Agent, asked: Interrupt | None, reason: str | None) -> None:
+    """The question a chat's turn asked for a task (:func:`ask`, ``asked``) answered with a
+    cancel: the task's run is cancelled with the turn, as a sub-agent's is when its question,
+    asked through its parent, is."""
+    from trellis.harness.subagents import asked_by  # noqa: PLC0415 - it imports this
+
+    named = asked_by(asked) if asked is not None else None
+    if asked is None or not named or not named.get("background"):
+        return
+    run_id = str(named["run_id"])
+    with contextlib.suppress(ConflictError):  # it ended meanwhile
+        await parent.harness.runs.cancel(run_id, reason=reason, tenant=asked.tenant_id)
+    parent.harness.background.stop(run_id, reason or "its question was cancelled")
 
 
 async def answered(

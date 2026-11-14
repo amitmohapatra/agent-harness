@@ -175,15 +175,18 @@ class AsyncTasks:
         elsewhere (cancelled with its turn from another server) cancels the task on its server;
         the task ended on its server ends its run, and the chat is told how
         (``background.delivered``: a turn of its own when it is idle)."""
-        while (kept := self._kept.get(run_id)) is not None:
+        while True:
             await asyncio.sleep(WATCH_SECONDS)
-            if self._kept.get(run_id) is not kept:
+            kept = self._kept.get(run_id)
+            if kept is None:
                 return
-            runs = kept.agent.harness.runs
-            record = await runs.get(run_id, tenant=kept.tenant)
-            if record is None or record.status.final:
-                stopped = record is not None and record.status is RunStatus.CANCELLED
-                await (self.stopped(run_id, CANCELLED_WITH) if stopped else self._let(run_id))
+            record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
+            assert record is not None  # its turn started it
+            if record.status is RunStatus.CANCELLED:  # with its turn, on another server
+                await self.stopped(run_id, CANCELLED_WITH)
+                return
+            if record.status.final:  # a check on another server ended it: held no more
+                await self._closed(run_id, kept, record.status, "")
                 return
             with contextlib.suppress(Exception):  # the server out of reach: read again later
                 await self._read(run_id, kept)
@@ -197,36 +200,30 @@ class AsyncTasks:
         done = await _tool(kept.agent.target, CHECK).ainvoke(
             {"task_id": task_id, "runtime": _tool_runtime(kept.task, CHECK)}
         )
-        update = getattr(done, "update", None)
-        if not isinstance(update, Mapping):
-            return  # Deep Agents' word of a check that failed: read again later
-        found = update.get("async_tasks", {}).get(task_id)
-        status = ENDED.get(str((found or {}).get("status")))
-        if found is None or status is None:
-            return
+        # a ``Command`` with the task's record; a check that failed is Deep Agents' word alone
+        update: Mapping[str, Any] = getattr(done, "update", None) or {"async_tasks": {}}
+        found = update["async_tasks"].get(task_id) or {}
+        status = ENDED.get(str(found.get("status")))
+        if status is None:
+            return  # it works (or could not be read): read again later
         told = text_of(update["messages"][-1])
         said = _checked(told)
-        await self._closed(run_id, status, str(said.get("error") or said.get("result") or ""))
+        await self._closed(
+            run_id, kept, status, str(said.get("error") or said.get("result") or "")
+        )
         event = {k: found[k] for k in ("task_id", "agent_name", "status", "run_id")}
         if "result" in said:
             event["result"] = said["result"]
         elif status is not RunStatus.SUCCESS and status is not RunStatus.CANCELLED:
             event["error"] = background.FAILED
         record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
-        if record is not None:
-            await background.delivered(kept.agent, record, update=event)
+        assert record is not None  # its turn started it
+        await background.delivered(kept.agent, record, update=event)
 
-    async def _let(self, run_id: str) -> None:
-        kept = self._kept.pop(run_id, None)
-        if kept is not None:
-            self._released(kept)
-
-    async def _closed(self, run_id: str, status: RunStatus, said: str) -> None:
-        """The task's run held here ended ``status`` outside any attempt (``said``: its result,
-        or why it ended), held and read no more."""
-        kept = self._kept.pop(run_id, None)
-        if kept is None:
-            return
+    async def _closed(self, run_id: str, kept: Kept, status: RunStatus, said: str) -> None:
+        """The task's run held here (``kept``) ended ``status`` outside any attempt (``said``:
+        its result, or why it ended), held and read no more."""
+        self._kept.pop(run_id, None)
         self._released(kept)
         runs, tenant = kept.agent.harness.runs, kept.tenant
         with contextlib.suppress(ConflictError, LeaseLostError):  # ended meanwhile
