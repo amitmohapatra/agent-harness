@@ -198,3 +198,23 @@ Not coded by decision (library limits, documented only): MCP elicitation on Clau
 user's same-named middleware (needs a new argument); swarm per-message attribution
 (needs `ReAct(name=)`); computer use; Redis/Dapr session-backend tests (packages absent).
 Excluded by the user for now: performance job, cleanup refactor.
+- 20:52 UTC: memory#117 CI failed on both Python versions (1 of 714: test_reflection_progress, an agent forgetting a user's own statement in setup; BUG-M1 rule stays, test setup to change) → sent to the memory job to fix first on `-memory-fixes`. agent-runs#37 opened (answer formats: ANSWER_FORMATS = date, email, ipv4, ipv6, regex, uuid; head 0d1df68), subscribed.
+- 20:56 UTC: agent-runs#37 MERGED (aff63a2). harness#256 CI still running after 75 min.
+
+## 21:05 UTC — Kimi reported (b4caa8d); round 2 sent to the same job; bg-kimi queued for the fold
+User confirmed (21:00): one CI run for everything on the combined branch `-to-main-2`
+(not merge-first); "Do all asap".
+Kimi done: asking mode always set and confirmed; plans reviewed by a person with every option
+(B3); allow-for-conversation → Kimi allow_always (B4); Kimi 2.6.2 (>=2.6.2,<2.7; 2.1.x now
+refused); A3 telemetry/auto-update off; failed turn → ERROR with Kimi's reason; sandboxed
+Bash output recorded; swarm: `AgentSwarm` is refused by Kimi itself over ACP (library limit).
+Kimi round 2 (running): mode-confirmation wait (5 s fixed → event bounded by session-open
+limit; test failed twice under load), per tenant+user Kimi home as a config overlay so team
+allow rules do not skip governance, D1 PARTIAL at Kimi's step limit, session cleanup,
+2.6.2 probes (session lock, MCP reconnect, duplicate notifications, Read cap),
+RAN_BEFORE note for the bridge, SCN-12.
+Not coded by decision: compaction-notice filtering (would need wording rules), tool name
+from title (no failing case), goal mode (Kimi's own turns unseen over ACP: documented),
+thinking / usage_update / session title (no contract event).
+Fold instructions sent: first pass + bg-kimi, then a second pass over every branch that moved
+(fix-round → langchain-fixes → bg-claude-da → react-parity → bg-kimi → native-skills → scenarios).
