@@ -5,6 +5,7 @@ reads a message the user did not type (``history``, ``adapters.langgraph``)."""
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -693,3 +694,41 @@ async def test_perf_4_the_list_reads_only_the_unfinished_tasks() -> None:
     listed, _ = await offered.call("list_async_tasks", runtime(runs), tasks, {})
     assert listed.startswith("20 tracked task(s):")
     assert sorted(runs.read) == sorted(f"run_{n}" for n in range(15, 20))
+
+
+# --------------------------------------------------------------------------- PERF-5: the list
+def at(second: int) -> str:
+    return f"2026-11-14T{second // 3600:02d}:{second // 60 % 60:02d}:{second % 60:02d}Z"
+
+
+def carried(n: int, status: str, second: int) -> dict[str, Any]:
+    task = {**TASK, "task_id": f"task_{n}", "run_id": f"run_{n}", "status": status}
+    return {"async_tasks": {f"task_{n}": {**task, "last_updated_at": at(second)}}}
+
+
+def test_perf_5_the_carried_task_list_keeps_the_unfinished_and_the_last_fifty_that_ended() -> None:
+    """A thousand tasks started and ended in one conversation, and two still at work: the list
+    it carries holds the unfinished ones and the 50 that ended last — not every task ever —
+    and stays far under the 256 KiB kept for it."""
+    from trellis.harness.tools.results import merged
+
+    kept: dict[str, Any] = {}
+    for n in (1000, 1001):  # started first, never ended: older than every ended one
+        kept = merged(kept, carried(n, "running", 0))
+    for n in range(1000):
+        kept = merged(kept, carried(n, "running", 2 * n + 1))
+        kept = merged(kept, carried(n, "success", 2 * n + 2))
+    tasks = kept["async_tasks"]
+    assert sorted(tasks, key=lambda i: int(i[5:])) == [
+        *(f"task_{n}" for n in range(950, 1000)),
+        "task_1000",
+        "task_1001",
+    ]
+    assert len(json.dumps(kept).encode()) < 256 * 1024
+    # at the bound: fifty ended are all kept, the fifty-first drops the one that ended first
+    few: dict[str, Any] = {}
+    for n in range(50):
+        few = merged(few, carried(n, "success", n))
+    assert len(few["async_tasks"]) == 50
+    more = merged(few, carried(50, "error", 50))
+    assert len(more["async_tasks"]) == 50 and "task_0" not in more["async_tasks"]

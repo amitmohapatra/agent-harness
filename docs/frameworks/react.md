@@ -567,6 +567,9 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   cancel one. A task's outcome that reaches an idle chat may start or update a task three
   times in a row with no message from the user between; the fourth is refused, so a result
   cannot keep work going by itself. A process keeps at most 1,024 attempts at work.
+* **The list** — the conversation carries its unfinished tasks and the 50 that ended last
+  (a task's record says it ended once the conversation was told); an older one is no longer
+  tracked.
 * **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
   the agent and the chat thread. The tools, the questions asked through the chat and each
   read act on a task's run only then; a task id from another conversation is answered as one

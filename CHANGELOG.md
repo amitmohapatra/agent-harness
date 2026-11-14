@@ -44,6 +44,13 @@ chat's own on its thread stream when it is idle; its questions asked through the
   there is known ended, and the others are read one per model call, the one read longest ago
   first. `list_async_tasks` reads only the unfinished tasks.
 
+### Performance: the carried task list keeps the unfinished tasks and the last 50 that ended (PERF-5)
+
+- A conversation's task list no longer holds every task it ever started (it stopped being
+  kept at about 700 tasks, past the 256 KiB bound): the ended tasks past the 50 updated last
+  are dropped when the list is kept for the next turn. `check_async_task` of a task dropped
+  answers that it is not tracked.
+
 ### Security: background tasks are bounded (SEC-R-2)
 
 - A chat has at most as many unfinished background tasks as a run may have children working
