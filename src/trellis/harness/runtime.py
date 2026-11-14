@@ -209,8 +209,9 @@ class Runtime:
     cut_off: bool = False
     #: the latest harness tool call (its key), how many times in a row it was made
     #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
-    #: not run again) and the decision that made it last (:attr:`deciding`)
-    repeating: tuple[str, int, Hashable | None] = ("", 0, None)
+    #: not run again), the decision that made it last (:attr:`deciding`) and the framework's
+    #: step it was made in (``Replay.here``)
+    repeating: tuple[str, int, Hashable | None, str | None] = ("", 0, None, None)
     #: set by an adapter whose framework says which decision a call comes from, the same for
     #: each execution its framework makes of that decision (a LangGraph task, run again by its
     #: ``RetryPolicy``): the call made again by the same decision is no repeat of it

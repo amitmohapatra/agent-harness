@@ -140,7 +140,6 @@ from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import (
     ASKED,
     CONTEXT_MESSAGE_ID,
-    HITL,
     TASK_TOOL,
     carried_plain,
     notified,
@@ -1322,15 +1321,15 @@ async def _refused_by_graph(
     failed call the model reads: on the run's stream, traced and in the memory service
     (``bridge.observed``; nothing is run, journaled or counted against the budget). A call
     the wrapper answered well (a cache, an emulator) is the wrapper's answer, not a refusal;
-    the harness's own tools are the bridge's. In a run where a person answered the library's
-    own approval gate (:data:`HITL`), a refusal may be that person's rejection — recorded as
-    their decision, never as a call — so none is recorded as one there."""
+    the harness's own tools are the bridge's. A call a person rejected at the library's own
+    approval gate is their decision, recorded as such, never as a failed call
+    (``Journal.rejected_by_person``: by what the call is)."""
     name = str(call["name"])
     tool = node.tools_by_name.get(name)
     refused = isinstance(done, ToolMessage) and done.status == "error" and not calling.entries
     if not refused or tool is None or converted.made(tool) or name in runtime.toolbox:
         return
-    if runtime.replay.journal.answers.get(HITL):
+    if runtime.replay.journal.rejected_by_person(name, dict(call["args"])):
         return
     outcome = ToolOutcome(tool=name, status=ToolStatus.ERROR, output=text_of(done.content))
     spec = runtime.native.get(name) or spec_of(tool)

@@ -970,18 +970,38 @@ def hitl_approved(
     each call its decision approves, as the model made it, or edits, as edited
     (:func:`hitl_response`); a rejected or answered call runs nothing, and a cancel decides
     none."""
-    if resolution.decision is InterruptDecision.CANCEL:
-        return []
-    sent = hitl_response(dict(request), resolution)
-    decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
     approved: list[tuple[str, Any]] = []
-    for (name, args), decision in zip(hitl_calls(request), decisions, strict=False):
+    for (name, args), decision in _hitl_decided(request, resolution):
         if decision.get("type") == "approve":
             approved.append((name, args))
         elif decision.get("type") == "edit":
             edited = decision.get("edited_action") or {}
             approved.append((str(edited.get("name", name)), edited.get("args") or {}))
     return approved
+
+
+def hitl_rejected(
+    request: Mapping[str, Any], resolution: InterruptResolution
+) -> list[tuple[str, dict[str, Any]]]:
+    """The calls a ``HumanInTheLoopMiddleware`` request's resume rejects as a person decided,
+    each as the model made it: a decision on each, not a failed call of the run."""
+    return [
+        call
+        for call, decision in _hitl_decided(request, resolution)
+        if decision.get("type") == "reject"
+    ]
+
+
+def _hitl_decided(
+    request: Mapping[str, Any], resolution: InterruptResolution
+) -> list[tuple[tuple[str, dict[str, Any]], dict[str, Any]]]:
+    """Each call a ``HumanInTheLoopMiddleware`` request holds, with the decision its resume
+    sends for it (:func:`hitl_response`); none on a cancel, which decides none."""
+    if resolution.decision is InterruptDecision.CANCEL:
+        return []
+    sent = hitl_response(dict(request), resolution)
+    decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
+    return list(zip(hitl_calls(request), decisions, strict=False))
 
 
 def _allowed(request: Mapping[str, Any], decision: Any) -> None:
