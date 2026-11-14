@@ -575,7 +575,7 @@ asks them: the stricter decision wins. `h.wrap` logs each tool both gate, once.
 **OpenAI Agents `function_tool(needs_approval=...)`.** The SDK pauses with its `RunState`,
 which the pause keeps as the run's checkpoint, and the resume continues that state. The SDK
 approves or rejects a call, with a `rejection_message` the model reads — it takes neither
-edited arguments nor an answer in place of the result (verified against `openai-agents` 0.22:
+edited arguments nor an answer in place of the result (verified against `openai-agents` 0.24:
 `RunState.approve(item)`, `RunState.reject(item, rejection_message=)`), so:
 
 | `resume(...)` | On the `RunState` |

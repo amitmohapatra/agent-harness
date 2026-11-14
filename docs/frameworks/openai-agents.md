@@ -64,9 +64,11 @@ agent = h.wrap(triage, id="support")
 **Arguments that are not JSON.** The SDK hands a tool the arguments as the model wrote them. A
 harness tool called with text that is not a JSON object does not run: the model reads "`<tool>`
 was not run: its arguments are not valid JSON (...). Call it again with arguments that fit its
-schema." as the tool's output and the run goes on, as with the SDK's own `function_tool`s (and
-`ReAct`). An SDK `needs_approval` tool pauses before its arguments are read: the person sees
-them as written (`{"arguments": "<the text>"}`).
+schema." as the tool's output and the run goes on, as in `ReAct`. The SDK's own
+`function_tool`s go on too, the model reading their failure text (from openai-agents 0.23 the
+fixed sentence, which does not say the arguments were not JSON). An SDK `needs_approval` tool
+pauses before its arguments are read: the person sees them as written
+(`{"arguments": "<the text>"}`).
 
 **`Runner.run` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 Outside a harness run, a harness tool refuses to run (`ToolError`: "runs inside a Harness run"),
@@ -133,7 +135,7 @@ record).
 | | Where |
 |---|---|
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
-| Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[Shell(), src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`; the default capabilities' `apply_patch` is a hosted tool a chat completions model refuses: [skills.md](../skills.md#the-openai-agents-sdks-sandboxagent)). A plain `Agent` has no skills slot (openai-agents 0.22): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
+| Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[Shell(), src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`; the default capabilities' `apply_patch` is a hosted tool a chat completions model refuses: [skills.md](../skills.md#the-openai-agents-sdks-sandboxagent)). A plain `Agent` has no skills slot (openai-agents 0.24): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`), or the run's `RunHooks` (`framework_options={"hooks": ...}`: every event the SDK reports, beside the harness's own) |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends with one last answer — the last agent called once more, told the limit is reached and given no tool, as `ReAct` at `max_steps` (the SDK's own `max_turns` error handler; your `error_handlers=` replaces it); a model looping on one call is told to answer (`bridge.STALLED`) and offered no tool on the turn after, so its reply ends the run before that limit |
 
@@ -210,9 +212,15 @@ after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
 
 * A resume after a harness approval re-runs the conversation: the model is asked again for the
   steps before the pause (their tool calls replay from the journal).
+* No background agents: openai-agents 0.24 has no background run, no background agent tool or
+  handoff, and no polling of a Responses `background` request (one given as `extra_args` comes
+  back `queued` and the run takes it for the model's whole reply). `Runner.run` returns once
+  every tool call, agent tool and handoff of the run has ended, so the child run an agent tool
+  starts ends within its turn. What goes on after a turn is a `SandboxAgent` shell's process,
+  in a sandbox session you keep (`SandboxRunConfig(session=)`).
 * The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`), as are `conversation_id`, `previous_response_id` and `auto_previous_response_id` (OpenAI's servers keep the thread): with a durable one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. A `SQLiteSession(":memory:")` is kept in RAM only and lost on a restart: memory's window stays on, and a warning says so once (`trellis.harness.history`). Long-term memory stays the memory service's.
 * Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent or the run has hooks of its own.
-* A tool's failure policy is the SDK's: a `function_tool` that raises is told to the model as the SDK formats it (its default text, or the tool's `failure_error_function`) and recorded as a failed call; with `failure_error_function=None` (a function tool's or an MCP server's) the run ends with the error, as without the harness. An agent called as a tool follows its own policy the same way: its failure ends its child run as failed, the calling model reads the SDK's default text, and with `failure_error_function=None` the run ends. A tool's own `timeout=` is the SDK's (its text to the model, or `ToolTimeoutError` with `timeout_behavior="raise_exception"`), and the call is recorded as that tool's call that timed out — counted from when the SDK made the call, as the SDK counts it, however late its task began. The run's `after_tool` hooks have the last word on what the model reads: a failure a hook rewords is told in its words (the SDK's policy still decides whether the run goes on), and a failure a hook makes a result is that result — for a function tool, an MCP server's tool and a tool the SDK runs here alike.
+* A tool's failure policy is the SDK's: a `function_tool` that raises is told to the model as the SDK formats it (its default text — from openai-agents 0.23 a fixed sentence naming nothing of the error —, the run's own `RunConfig.tool_error_formatter` for its `tool_exception` kind, or the tool's `failure_error_function`) and recorded as a failed call, the error itself on the stream and in the tool records; with `failure_error_function=None` (a function tool's or an MCP server's) the run ends with the error, as without the harness. An agent called as a tool follows its own policy the same way: its failure ends its child run as failed, the calling model reads the SDK's default text, and with `failure_error_function=None` the run ends. A tool's own `timeout=` is the SDK's (its text to the model, or `ToolTimeoutError` with `timeout_behavior="raise_exception"`), and the call is recorded as that tool's call that timed out — counted from when the SDK made the call, as the SDK counts it, however late its task began. The run's `after_tool` hooks have the last word on what the model reads: a failure a hook rewords is told in its words (the SDK's policy still decides whether the run goes on), and a failure a hook makes a result is that result — for a function tool, an MCP server's tool and a tool the SDK runs here alike.
 * A computer call is governed one action at a time (the click, then the screenshot the SDK takes after it), its actions one decision of the model: a batch pressing the same key three times presses it three times, and the same computer call made step after step is stopped as a stall. An action that may not run is skipped — the model sees the screen as it is (the SDK tells it of a computer call by its screenshot only) — and is told why in its next model call. Give the computer its risk in the catalog, or approve it for the conversation, so each screenshot is not asked about.
 * A `RunConfig` object given to one in-process run (`run`/`stream`) is not kept with its record:
   a resume runs with the agent's (put it on `h.wrap`, or give it as a dict).

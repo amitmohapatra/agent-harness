@@ -28,7 +28,7 @@ TESTED: Final[Mapping[str, tuple[str, str]]] = {
     "langchain-core": ("1.6", "1.7"),
     "langchain-openai": ("1.6", "1.7"),
     "deepagents": ("0.7.19", "0.8"),
-    "openai-agents": ("0.22.3", "0.23"),
+    "openai-agents": ("0.24", "0.25"),
     "claude-agent-sdk": ("0.2.160", "0.3"),
     "a2a-sdk": ("1.1", "1.2"),
     "agent-client-protocol": ("0.12.1", "0.13"),
