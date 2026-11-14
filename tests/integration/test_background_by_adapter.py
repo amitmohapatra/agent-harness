@@ -72,8 +72,10 @@ from tests.integration.test_react_async_subagent import (
     USER,
     Model,
     StandIn,
+    asked_to_do,
     calls,
     chat,
+    only_read,
     reports_the_id,
     say,
     says_what_the_tool_said,
@@ -151,7 +153,8 @@ async def t1_and_t2(agent: Agent, server: StandIn) -> None:
     assert server.task_id in first.answer
     second = await say(agent, "what is 2+2?")
     assert second.answer == "4", second.error
-    assert server.status(server.task_id) == "running" and len(server.calls) == 2
+    assert server.status(server.task_id) == "running"
+    assert len(asked_to_do(server)) == 2 and only_read(server, since=2)  # statuses pulled
     server.release()
 
 
@@ -582,6 +585,7 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
         ),
         "function": harness.wrap(function, id="function"),
     }
+    asked = len(server.calls)
     for name, other in others.items():
         for question in ("is the optimization done?", "and now?"):  # a first turn, a later one
             done = await say(other, question)
@@ -589,7 +593,7 @@ async def test_e_the_task_list_a_deep_agent_carries_is_handed_to_no_other_adapte
         assert other.results.state(KEY) == {}, name  # and it kept none for its next turn
     assert started == {"claude": [{}, {}], "openai": [{}, {}], "function": [{}, {}]}
     assert len({turn["pid"] for turn in served(tmp_path)}) == 1  # Claude's turns: one session
-    assert len(server.calls) == 2  # none of them reached the sub-agent's server
+    assert len(server.calls) == asked  # none of them reached the sub-agent's server
 
     model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
     mine = await say(deep, "which tasks are there?")

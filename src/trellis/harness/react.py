@@ -348,9 +348,11 @@ def ReAct(
     else:
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     own, run = _split(tools)
+    strategies = _strategies(subagents)
     native, helpers = _subagents(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
+    tasks = _background(native, helpers, strategies, max_steps=max_steps)
     # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
     # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's
     general = _native(
@@ -417,7 +419,12 @@ def ReAct(
         system_prompt=instructions,
         # Deep Agents' summarization stands after the harness's narrowing, which it counts;
         # the prompt cache in its own caching middleware's place
-        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cached],
+        middleware=[
+            _nothing(SUMMARIZATION),
+            *([tasks] if tasks is not None else []),
+            *stacked(defaults, middleware),
+            cached,
+        ],
         # Deep Agents' own dicts, as given, and its general-purpose helper unless one is named
         subagents=cast(Any, native if general["name"] in own_helpers else [general, *native]),
         skills=skills,
@@ -431,8 +438,73 @@ def ReAct(
         cache=cache,
         name="react",
     )
-    _declared(graph, backend=graph_backend, outside=outside, helper_only=not native, kept=not asked)
+    _declared(
+        graph,
+        backend=graph_backend,
+        outside=outside,
+        helper_only=not native,
+        kept=not asked,
+        forks=any(s.get("mode") == "fork" for s in native if "graph_id" in s),
+    )
+    if tasks is not None:
+        tasks.compiled(_compiled(graph))
     return _described(graph, named, window, instructions, [*run, *helpers])
+
+
+def _strategies(subagents: Sequence[Any]) -> dict[str, str]:
+    """Each Deep Agents sub-agent's ``update_strategy`` (Deep Agents' ``AsyncSubAgent`` key,
+    taken by one that runs in the harness too, for its tasks' follow-ups), out of its spec: an
+    ``AsyncSubAgent`` keeps its own, which Deep Agents reads."""
+    found: dict[str, str] = {}
+    for given in subagents:
+        if isinstance(given, dict) and "update_strategy" in given and "graph_id" not in given:
+            strategy = given.pop("update_strategy")
+            if strategy not in ("interrupt", "enqueue"):
+                raise ConfigurationError(
+                    f"{given.get('name')}: update_strategy is 'interrupt' or 'enqueue', "
+                    f"not {strategy!r}"
+                )
+            found[str(given["name"])] = strategy
+    return found
+
+
+def _background(
+    native: Sequence[Mapping[str, Any]],
+    helpers: Sequence[Any],
+    strategies: Mapping[str, str],
+    *,
+    max_steps: int,
+) -> Any:
+    """Background tasks for ``ReAct``'s own sub-agents — its wrapped agents and the Deep Agents
+    sub-agents that run in the harness — with Deep Agents' async sub-agent tools
+    (``bridges.background_tasks.BackgroundTasks``); none without such a sub-agent, nor with a
+    remote one (an ``AsyncSubAgent``, ``graph_id``): its tasks are Deep Agents' own, on its
+    server, with the same tools, and the two are not mixed."""
+    from trellis.harness.agent import Agent
+
+    agents = [h for h in helpers if isinstance(h, Agent)]
+    if any("graph_id" in s for s in native) or not (native or agents):
+        return None
+    from trellis.harness.bridges.background_tasks import BackgroundTasks
+    from trellis.harness.subagents import described
+
+    found: dict[str, Agent | None] = {str(s["name"]): None for s in native}
+    found |= {a.id: a for a in agents}
+    said = {str(s["name"]): str(s["description"]) for s in native} | {
+        a.id: described(a) for a in agents
+    }
+    return BackgroundTasks(found, described=said, strategies=strategies, max_steps=max_steps)
+
+
+def _compiled(graph: Any) -> dict[str, Any]:
+    """The compiled graphs of ``graph``'s Deep Agents sub-agents, by name (its ``task`` tool's)."""
+    from trellis.harness.adapters.langgraph import TASK_TOOL, bound_tools, named_subagent_graphs
+
+    found: dict[str, Any] = {}
+    for tool in bound_tools(graph):
+        if getattr(tool, "name", None) == TASK_TOOL:
+            found |= named_subagent_graphs(tool)
+    return found
 
 
 def _deep(
@@ -553,7 +625,9 @@ def _native(
     Agents gives it the main agent's: ``ReAct``'s are offered per model call
     (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
     its own tools has exactly those."""
-    if "runnable" in spec or "graph_id" in spec:
+    if "graph_id" in spec:  # an async sub-agent on a server: what it is told to call
+        return _remote(spec)
+    if "runnable" in spec:
         return spec
     from trellis.harness import middleware as ours
 
@@ -580,6 +654,20 @@ def _native(
     return spec
 
 
+def _remote(spec: dict[str, Any]) -> dict[str, Any]:
+    """A Deep Agents async sub-agent (``AsyncSubAgent``) as it is: its ``webhook`` — the URL its
+    server is told to call with each run's outcome — checked as every URL the harness hands on
+    is (``outbound.validate_url``: https, public); a refused one is refused here."""
+    from trellis.harness.outbound import TargetRefused, validate_url
+
+    if spec.get("webhook"):
+        try:
+            validate_url(str(spec["webhook"]))
+        except TargetRefused as exc:
+            raise ConfigurationError(f"{spec.get('name')}: its webhook: {exc}") from exc
+    return spec
+
+
 def _name_of(tool: Any) -> str | None:
     name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
     return name if isinstance(name, str) else None
@@ -597,7 +685,13 @@ def _asking(tool: Any) -> Any:
 
 
 def _declared(
-    graph: Any, *, backend: Any, outside: bool, helper_only: bool, kept: bool = False
+    graph: Any,
+    *,
+    backend: Any,
+    outside: bool,
+    helper_only: bool,
+    kept: bool = False,
+    forks: bool = False,
 ) -> None:
     """What the harness reads of Deep Agents' tools — the agent's and its sub-agents' — set on
     them: on a ``backend`` outside the graph's state (``outside``) the file tools are governed
@@ -608,7 +702,10 @@ def _declared(
     hands to: the hand-over is a read (``adapters.base.helper`` — each call the helper then
     makes is governed on its own). Left out of the run's set as machinery, it had said
     nothing, and a call of a tool that says nothing asks a person: every task handed to the
-    general-purpose helper paused for an approval of nothing."""
+    general-purpose helper paused for an approval of nothing. With an async sub-agent that
+    forks (``mode="fork"``: its server is sent the conversation at launch), a start sends what
+    cannot be taken back: ``start_async_task`` is ``irreversible`` (a person approves, unless
+    the catalog says otherwise)."""
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.base import helper
@@ -618,6 +715,7 @@ def _declared(
         KEPT_BY_RUN,
         MACHINERY,
         READ_FILE,
+        START_ASYNC_TASK,
         framework_made,
         outside_state,
         spec_of,
@@ -637,6 +735,8 @@ def _declared(
             marks = {MACHINERY: True}
         elif kept and tool.name == READ_FILE:
             marks = {KEPT_BY_RUN: True}
+        elif forks and tool.name == START_ASYNC_TASK:
+            marks = {"side_effects": "irreversible"}
         if marks:
             tool.metadata = {**(tool.metadata or {}), **marks}
 

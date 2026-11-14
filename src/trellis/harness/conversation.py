@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Final
 from trellis.contracts import InterruptDecision, RunStatus
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import Said, Speaker, notification_in
 
 if TYPE_CHECKING:
     from trellis.harness.runtime import Runtime
@@ -231,7 +231,12 @@ async def earlier(
             turns.append(list(transcript))
             previous = record
             continue
-        asked = Said(Speaker.USER, _text(record.input), id=question_id(conversation, record.run_id))
+        # a turn of the chat's own for a background task's outcome asked its notification
+        told = notification_in(record.input)
+        asked = dataclasses.replace(
+            told or Said(Speaker.USER, _text(record.input)),
+            id=question_id(conversation, record.run_id),
+        )
         answer = record.output if record.status in ANSWERED else None
         if (
             previous is not None

@@ -613,7 +613,9 @@ class Agent:
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
             await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
             self._unwatched(run_id)
-        await cancel_children(runs, run_id, reason=reason, tenant=tenant)
+        await cancel_children(
+            runs, run_id, reason=reason, tenant=tenant, background=self.harness.background
+        )
         return record
 
     async def resume(
@@ -815,6 +817,7 @@ class Agent:
                 record.run_id,
                 reason=reason_of(resolution),
                 tenant=record.tenant_id,
+                background=self.harness.background,
             )
             await sandbox.ended(self, journal.sandbox, record.run_id)
             self._unwatched(record.run_id)

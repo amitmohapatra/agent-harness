@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Final, cast
 from trellis.contracts import RunEvent, RunEventType, RunRecord, RunStatus
 from trellis.harness.agui.events import AGUIEvent, AGUIEventType, Outcome, OutcomeType
 from trellis.harness.agui.translate import translate
+from trellis.harness.background import NOTIFIED
 from trellis.harness.bounded import LRU
 from trellis.harness.identity import Identity
 from trellis.harness.runlog import event_log
@@ -139,7 +140,8 @@ class Threads:
 
     async def _run(self, record: RunRecord, after: int) -> AsyncGenerator[str]:
         """One run's events numbered above ``after``; a scheduled run's held until it ends."""
-        fired = Fired.of(record.metadata) is not None
+        # a turn of the chat's own for a background task's outcome is delivered as one
+        fired = Fired.of(record.metadata) is not None or NOTIFIED in record.metadata
         async with (
             contextlib.aclosing(self._events(record)) as events,
             contextlib.aclosing(_delivered(record, events, after, fired=fired)) as chunks,

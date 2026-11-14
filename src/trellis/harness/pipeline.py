@@ -51,7 +51,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox, schedules, skills, snapshots
+from trellis.harness import background, budget, conversation, sandbox, schedules, skills, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -80,7 +80,7 @@ from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
 from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import Said, Speaker, notification_in
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
 from trellis.harness.result import Result
@@ -377,6 +377,11 @@ async def _attempt(
         continued=continued,
         frontend=Frontend.of(record.metadata),
         scheduled=None if parent is not None else Fired.of(record.metadata),
+        notification=(
+            notification_in(input)
+            if parent is None and background.NOTIFIED in record.metadata
+            else None
+        ),
     )
     events.trace_run = runtime.trace_run
     await _earlier_results(agent, runtime)
@@ -526,7 +531,8 @@ async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result
     (``Runtime.carried``), kept for its later turns (:func:`_earlier_results`) — the state in
     the file store too (:func:`_keep_carried`). A paused turn keeps its results in its journal
     until it ends; its state is kept as it pauses: what it holds of the world outside (a
-    background task it started) is so whether the turn is ever approved or not."""
+    background task it started) is so whether the turn is ever approved or not. Then an outcome
+    its background tasks reached after it last read them is told (``background.left``)."""
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     if runtime.carried:
@@ -534,6 +540,8 @@ async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result
         await _keep_carried(agent, runtime)
     if journal.results and result.status is not RunStatus.PAUSED:
         agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
+    # an outcome its background tasks reached since it last read them, told by a turn of its own
+    await background.left(agent, runtime, result)
 
 
 #: Where the file store (``harness.files``) keeps what a conversation carries from turn to
@@ -680,6 +688,8 @@ async def _worked(
     await agent.hooks.started(runtime)
     if (cancelled := await schedules.stale(runtime)) is not None:
         return Extracted(answer=cancelled), pushed
+    if await background.stale(runtime):  # told already: nothing to deliver
+        return Extracted(answer=schedules.NO_REPORT), pushed
     extracted = await _invoked(
         agent,
         runtime,
@@ -762,6 +772,8 @@ async def _children_ended(
                 await runs.finish(child.run_id, status, error=error, tenant=tenant)
             else:
                 await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        # a background task at work here, apart from the run's call, stops with it
+        agent.harness.background.stop(child.run_id, reason or "its parent ended")
         await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
 
 
@@ -861,7 +873,8 @@ async def _concluded(
             runtime.run_id,
             runtime.tenant,
             RunStatus.TIMEOUT,
-            kept=journal.handed_on,
+            # its background tasks go on: the turn's clock is not theirs
+            kept=[*journal.handed_on, *background.of_turn(runtime)],
             error=timed_out,
         )
     elif error is not None:
@@ -1237,8 +1250,9 @@ async def _succeeded(
     answer = extracted.answer
     if runtime.budget_spent is not None:
         return await _partial(agent, runtime, extracted)
-    # a scheduled run with nothing to report (or reported already) is not delivered
-    if quiet := schedules.quiet(runtime, answer):
+    # a scheduled run with nothing to report (or reported already) is not delivered, and
+    # neither is a background task's outcome a turn of the conversation told already
+    if quiet := schedules.quiet(runtime, answer) or background.quiet(runtime, answer):
         answer = schedules.NO_REPORT
     await runtime.events.settle(
         lambda: runtime.events.finished(
@@ -1324,6 +1338,8 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
     asked = [Said(Speaker.USER, runtime.task)] if runtime.task else []
+    if not asked and runtime.notification is not None:  # a notification it was given to say
+        asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question
     reported = {s.id for s in said}
     steered = [

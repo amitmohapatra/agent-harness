@@ -14,6 +14,9 @@ server). Each hold lasts :data:`HOLD_SECONDS`.
   the subagent works on in the conversation's live session;
 * ``idle``: a Claude agent's turn that ended with nothing in the background (its live session
   kept, idle);
+* ``react_background``: a ``ReAct`` chat turn (a front end's, as ``serve_chat`` starts it) that
+  started a task of its sub-agent in the background (``trellis.harness.background``) and
+  ended; the task works on, for ever;
 * ``asked``: as ``background``, then the subagent's call asks a person (its run pauses) and the
   conversation's next turn asks it (that turn pauses on it): ``ready`` holds, as JSON, the
   subagent's run, the turn's run and the turn's interrupt.
@@ -30,17 +33,26 @@ from typing import Any, Final
 from claude_agent_sdk import ClaudeAgentOptions
 
 from tests.support.arm import arm
+from tests.support.chat_model import ScriptedChatModel
 from tests.support.shared_runs import FileRuns
-from trellis import Harness, Runtime, Settings, tool
+from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunStatus
-from trellis.harness import holding
+from trellis.harness import holding, pipeline
+from trellis.harness.frontend import Frontend
 
 CLI: Final = str(Path(__file__).resolve().parent / "fake_claude_cli.py")
 AGENT_ID: Final = "chat"
 #: How long one heartbeat holds a run here (renewed each third of it).
 HOLD_SECONDS: Final = 1
 #: How many of the scenario's runs are ``RUNNING`` once its work is under way.
-RUNNING: Final = {"turn": 1, "subagent": 2, "helper": 2, "background": 1, "idle": 0}
+RUNNING: Final = {
+    "turn": 1,
+    "subagent": 2,
+    "helper": 2,
+    "background": 1,
+    "idle": 0,
+    "react_background": 1,
+}
 BACKGROUND: Final = {"background": {"id": "t1", "agent": "researcher", "prompt": "research"}}
 #: a subagent in the foreground whose tool call never ends
 FOREGROUND: Final = {
@@ -105,6 +117,15 @@ async def asked(harness: Harness, store: FileRuns, folder: Path) -> None:
     ready(folder, [json.dumps(said)])
 
 
+async def turn(agent: Any, scenario: str) -> Any:
+    """The scenario's turn: a chat turn as ``serve_chat`` starts one (a front end's) for a
+    ``ReAct`` whose sub-agents work in the background, else ``agent.run``."""
+    if scenario != "react_background":
+        return await agent.run("research the market", user="u1", thread="t1")
+    record = await agent._opened("dig", user="u1", thread="t1", tenant=None, app=Frontend())
+    return await pipeline.attempt(agent, record, "dig")
+
+
 async def running(store: FileRuns) -> list[str]:
     with store.synced():
         return [r.run_id async for r in store.iterate(status=RunStatus.RUNNING)]
@@ -131,12 +152,17 @@ async def main(store_path: Path, folder: Path, scenario: str) -> None:
             agent = arm(harness.wrap(target, id=AGENT_ID), [look_up])
         elif scenario == "idle":
             agent = harness.wrap(claude(folder, [{"text": "hello"}]), id=AGENT_ID)
+        elif scenario == "react_background":
+            worker = harness.wrap(forever, id="worker")
+            start = ("start_async_task", {"description": "dig", "subagent_type": "worker"})
+            model = ScriptedChatModel(turns=[start, "started it"])
+            agent = harness.wrap(ReAct("You help.", model, subagents=[worker]), id=AGENT_ID)
         else:
             script = [BACKGROUND, {"text": "started it"}]
             agent = harness.wrap(claude(folder, script), id=AGENT_ID)
-        work = asyncio.create_task(agent.run("research the market", user="u1", thread="t1"))
+        work = asyncio.create_task(turn(agent, scenario))
         while len(found := await running(store)) < RUNNING[scenario] or (  # noqa: ASYNC110
-            scenario in ("background", "idle") and not work.done()
+            scenario in ("background", "idle", "react_background") and not work.done()
         ):
             await asyncio.sleep(0.05)
         await asyncio.sleep(HOLD_SECONDS)  # a heartbeat's rhythm, and more

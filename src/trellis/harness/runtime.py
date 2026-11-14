@@ -309,6 +309,9 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: the run is a turn of a chat's own for a background task's outcome
+    #: (``background.notify``): its input, the notification it gives the model
+    notification: Said | None = None
     #: what the person allowed for this conversation in its runs (``conversation.allowed``),
     #: once read in this attempt
     allowed: frozenset[str] | None = field(default=None, repr=False)

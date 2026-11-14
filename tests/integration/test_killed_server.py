@@ -1,6 +1,7 @@
 """A server killed (``SIGKILL``: nothing closed — a crash, a restart) while runs it executes in its
 own process are under way: an ordinary turn, a sub-agent's child run, a helper a framework
-spawned in the foreground, a Claude subagent working in the background. Nothing else can run
+spawned in the foreground, a Claude subagent working in the background, a ``ReAct`` sub-agent's
+task in the background (``trellis.harness.background``). Nothing else can run
 them, and none has a deadline. The server held each in the run store while it executed it
 (``holding``): its holds stop, and once the last lapses the store ends every one ``ERROR``,
 saying its holder stopped — agent-runs' ticker (``end_abandoned``), here the in-process store
@@ -72,7 +73,9 @@ async def killed(folder: Path, scenario: str, *, leave: bool = False) -> list[st
     return ready(folder)
 
 
-@pytest.mark.parametrize("scenario", ["turn", "subagent", "helper", "background"])
+@pytest.mark.parametrize(
+    "scenario", ["turn", "subagent", "helper", "background", "react_background"]
+)
 async def test_the_runs_a_killed_server_executed_end_once_their_holds_lapse(
     tmp_path: Path, scenario: str
 ) -> None:

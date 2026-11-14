@@ -133,7 +133,13 @@ from trellis.harness import (
     snapshots,
 )
 from trellis.harness.adapters.base import FIT_SHARE
-from trellis.harness.adapters.langgraph import CARRIED, CONTEXT_MESSAGE_ID, TASK_TOOL
+from trellis.harness.adapters.langgraph import (
+    ASKED,
+    CONTEXT_MESSAGE_ID,
+    TASK_TOOL,
+    carried_of,
+    notified,
+)
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.clients.memory import TOOL_SEARCH
@@ -255,11 +261,13 @@ FILES_CHANNEL: Final = "files"
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
+#: Deep Agents' tool that starts a background task of an async sub-agent.
+START_ASYNC_TASK: Final = "start_async_task"
 #: Deep Agents' tools for the background tasks of its async sub-agents
 #: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
 #: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
 ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
-    "start_async_task": "write",
+    START_ASYNC_TASK: "write",
     "update_async_task": "write",
     "cancel_async_task": "write",
     "check_async_task": "read",
@@ -756,7 +764,7 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
     already stamped (a memory window's replay), or of a tool whose value stays current a while
     (its age is not known here) or for good, is left as it is; and so is the result of a call
     that failed or was stopped before it came back: it returned no value to be out of date."""
-    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    asked = max((n for n, m in enumerate(messages) if typed(m)), default=-1)
     called = {
         c["id"]: c["name"]
         for m in messages[:asked]
@@ -1755,11 +1763,7 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     # a summary kept in the state (LangChain's) ends what is looked at
     state = list(itertools.takewhile(lambda m: not _summary(m), request.state.get("messages", [])))
     asked = next(
-        (
-            m
-            for m in reversed(state)
-            if isinstance(m, HumanMessage) and STEERED not in m.response_metadata
-        ),
+        (m for m in reversed(state) if typed(m) and STEERED not in m.response_metadata),
         None,
     )
     if asked is None:
@@ -1798,7 +1802,7 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
         (
             n
             for n in range(len(messages) - 1, at, -1)
-            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+            if typed(messages[n]) and messages[n].id in kept
         ),
         None,
     )
@@ -1831,7 +1835,7 @@ def history_marked(request: ModelRequest[Any]) -> ModelRequest[Any]:
         (
             n
             for n in range(len(messages) - 1, 0, -1)
-            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+            if typed(messages[n]) and messages[n].id in kept
         ),
         None,
     )
@@ -1920,6 +1924,17 @@ def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
         return answer
     parts[texts[-1]] = {**parts[texts[-1]], "cache_control": marker}
     return answer.model_copy(update={"content": parts})
+
+
+def typed(message: Any) -> bool:
+    """Whether ``message`` is one the user sent: a human message the harness or a framework did
+    not add (``adapters.langgraph.notified``: a background task's update, a summary of earlier
+    turns) — or a run's input marked as its question (``adapters.langgraph.ASKED``: a
+    notification run's). The turn's question is the last such message, never a notification
+    after it."""
+    return isinstance(message, HumanMessage) and (
+        ASKED in message.response_metadata or notified(message) is None
+    )
 
 
 def _summary(message: BaseMessage) -> bool:
@@ -2033,9 +2048,12 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
     ``max_steps`` of them makes one more — the model told the limit is reached
     (``budget.LIMIT``) and offered no tool, as :class:`StallGuard` does on a stall
     (:func:`_answer_now`) — so the run ends with an answer saying what was found and what is
-    left, not LangChain's "Model call limits exceeded" message. LangChain's limit, one call
-    past ``max_steps``, stays the backstop (its ``exit_behavior="end"``). Named as LangChain's
-    (a ``ReAct(middleware=)`` of that name is refused, naming ``max_steps=``)."""
+    left, not LangChain's "Model call limits exceeded" message. A model turn asked for after
+    that answer (a background task's outcome, after a final answer: Deep Agents' async
+    sub-agents, the harness's own tasks) counts as any call, and past the limit it is not made:
+    the run ends with the answer it has, where LangChain's limit, one call past ``max_steps``,
+    would put its message in the answer's place. Named as LangChain's (a ``ReAct(middleware=)``
+    of that name is refused, naming ``max_steps=``)."""
 
     def __init__(self, max_steps: int, *, scoped: bool) -> None:
         self.max_steps = max_steps
@@ -2046,6 +2064,10 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
     @property
     def name(self) -> str:
         return ModelCallLimitMiddleware.__name__
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return {"jump_to": "end"} if state.get(self.counted, 0) > self.max_steps else None
 
     async def awrap_model_call(
         self,
@@ -2196,7 +2218,7 @@ def _turn_back(history: Sequence[AnyMessage]) -> Iterator[AnyMessage]:
     the end, as far as the caller reads."""
     for n in range(len(history) - 1, -1, -1):
         message = history[n]
-        if isinstance(message, HumanMessage):
+        if typed(message):
             return
         yield message
 
@@ -2372,7 +2394,7 @@ class ThisTurnsResults(ClearToolUsesEdit):
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
         start = next(
-            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+            (i for i in range(len(messages) - 1, -1, -1) if typed(messages[i])),
             0,
         )
         turn = messages[start:]
@@ -2782,7 +2804,7 @@ def _size(request: ModelRequest[Any]) -> int:
 
 def _bare(request: ModelRequest[Any]) -> ModelRequest[Any]:
     """The request with only its instructions and the user's latest message, no tools."""
-    asked = next((m for m in reversed(request.messages) if isinstance(m, HumanMessage)), None)
+    asked = next((m for m in reversed(request.messages) if typed(m)), None)
     return request.override(messages=[asked] if asked is not None else [], tools=[])
 
 
@@ -2817,7 +2839,7 @@ def _narrowed(
     must = set(runtime.used) if runtime is not None else set()
     must |= {*STATE_TOOLS, TOOL_SEARCH, *(SAVING if _saved(request.state) else ())}
     hinted = (runtime.offered or set()) if runtime is not None else set()
-    asked = next((m.text for m in reversed(request.messages) if isinstance(m, HumanMessage)), "")
+    asked = next((m.text for m in reversed(request.messages) if typed(m)), "")
     words = set(_WORD.findall(asked.lower()))
 
     def rank(item: tuple[int, BaseTool | dict[str, Any]]) -> tuple[int, int, int]:
@@ -2926,11 +2948,7 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
     asked = max(
-        (
-            n
-            for n, m in enumerate(messages)
-            if isinstance(m, HumanMessage) and (id(m) in said or m.id in named)
-        ),
+        (n for n, m in enumerate(messages) if typed(m) and (id(m) in said or m.id in named)),
         default=None,
     )
     return None if asked is None or asked <= lead else asked
@@ -2956,7 +2974,7 @@ def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     over = _size(request) - budget
     gone: set[int] = set()
     for n, message in enumerate(messages[: asked or 0]):
-        if over <= 0 and isinstance(message, HumanMessage):
+        if over <= 0 and typed(message):
             break  # the next turn: its calls and results stay
         if isinstance(message, ToolMessage) or (
             isinstance(message, AIMessage) and message.tool_calls
@@ -3241,7 +3259,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             runtime.replay.passed(parent)  # the steps it follows are done: not made again
             # what the run's conversation carries to its next turn, as the graph now holds it
             values = checkpoint["channel_values"]
-            runtime.carried = {name: values[name] for name in CARRIED if name in values}
+            runtime.carried = carried_of(values)
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(

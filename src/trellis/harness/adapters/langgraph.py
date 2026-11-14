@@ -110,6 +110,10 @@ MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 RUN_ARGUMENTS: Final = ("context", "durability")
 #: Deep Agents' tool that runs a sub-agent.
 TASK_TOOL: Final = "task"
+#: The ``response_metadata`` key marking a run's input message as its question although the
+#: user did not type it (a notification run's: ``background.notify``): what the run says comes
+#: after it (:func:`added`).
+ASKED: Final = "trellis_asked"
 #: The checkpoint metadata key a graph with a checkpointer of its own has its run's checkpoints
 #: marked with (the run's id, from the run's config ``metadata``).
 RUN_METADATA: Final = "trellis_run_id"
@@ -556,7 +560,14 @@ def _ended_with(target: Any, runtime: Any, values: Any) -> None:
     state a graph compiled without a checkpointer ended its turn with (``values``): it has
     no checkpoint to read it from (``RunCheckpointer.put``)."""
     if not _checkpointed(target) and isinstance(values, Mapping):
-        runtime.carried = {name: values[name] for name in CARRIED if name in values}
+        runtime.carried = carried_of(values)
+
+
+def carried_of(values: Mapping[str, Any]) -> dict[str, Any]:
+    """The channels of a graph's state its conversation carries (:data:`CARRIED`): those it
+    holds anything in — Deep Agents sets its list of tasks, empty, on every turn, and a turn
+    that started none carries nothing."""
+    return {name: values[name] for name in CARRIED if values.get(name)}
 
 
 def checkpointing(target: Any) -> Any:
@@ -768,13 +779,20 @@ def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:
 
 
 def subagent_graphs(task: Any) -> list[Any]:
-    """The sub-agent graphs a Deep Agents ``task`` tool runs, as its code holds them (the
-    graphs its sub-agents were compiled to, by name); ``[]`` when they cannot be read (a
-    release laid out otherwise: its sub-agents' tools are then left out of the run's set)."""
+    """The sub-agent graphs a Deep Agents ``task`` tool runs (:func:`named_subagent_graphs`),
+    each once."""
+    return list({id(g): g for g in named_subagent_graphs(task).values()}.values())
+
+
+def named_subagent_graphs(task: Any) -> dict[str, Any]:
+    """The sub-agent graphs a Deep Agents ``task`` tool runs, by name, as its code holds them
+    (the graphs its sub-agents were compiled to); ``{}`` when they cannot be read (a release
+    laid out otherwise: its sub-agents' tools are then left out of the run's set, and it has no
+    background tasks)."""
     from langgraph.pregel import Pregel
 
     seen: set[int] = set()
-    graphs: dict[int, Any] = {}
+    graphs: dict[str, Any] = {}
     pending = [getattr(task, "coroutine", None), getattr(task, "func", None)]
     while pending:
         fn = pending.pop()
@@ -787,10 +805,10 @@ def subagent_graphs(task: Any) -> list[Any]:
             except ValueError:  # an empty cell
                 continue
             if isinstance(value, dict):
-                graphs.update((id(v), v) for v in value.values() if isinstance(v, Pregel))
+                graphs.update((k, v) for k, v in value.items() if isinstance(v, Pregel))
             elif callable(value) and hasattr(value, "__closure__"):
                 pending.append(value)
-    return list(graphs.values())
+    return graphs
 
 
 def _checkpointed(target: Any) -> bool:
@@ -801,9 +819,22 @@ def _checkpointed(target: Any) -> bool:
 
 def langchain_message(said: Said) -> Any:
     """``said`` as LangChain's own message: an assistant's with its tool calls, a tool's with
-    the call it answers."""
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    the call it answers, a notification marked as one (``add_notification_metadata``)."""
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+        add_notification_metadata,
+    )
 
+    if said.role is Speaker.USER and said.notified:
+        data = said.notified.get("data")
+        return add_notification_metadata(
+            HumanMessage(content=said.content),
+            source=str(said.notified.get("source")),
+            data=data if isinstance(data, dict) else None,
+        )
     if said.role is Speaker.USER:
         return HumanMessage(content=said.content)
     if said.role is Speaker.ASSISTANT:
@@ -818,23 +849,23 @@ def langchain_message(said: Said) -> Any:
 
 
 def added(messages: Sequence[Any]) -> list[Said]:
-    """What the run said after its question (the last user message not steered into it): each
-    answer with the tool calls it made, and their results, and each message steered into it
-    (``middleware.STEERED``, with its id); ``[]`` without a question."""
-    asked = next(
-        (
-            i
-            for i in range(len(messages) - 1, -1, -1)
-            if getattr(messages[i], "type", None) == "human" and not _steered(messages[i])
-        ),
-        None,
-    )
-    if asked is None:
+    """What the run said after its question (the message marked :data:`ASKED`, else the last
+    user message neither steered into it nor added by the harness — ``notified``): each answer
+    with the tool calls it made, and their results, each message steered into it
+    (``middleware.STEERED``, with its id) and each notification it was given (``Said.notified``:
+    a background task's update); ``[]`` without a question."""
+    humans = [i for i, m in enumerate(messages) if getattr(m, "type", None) == "human"]
+    marked = [i for i in humans if ASKED in (getattr(messages[i], "response_metadata", None) or {})]
+    typed = [i for i in humans if not _steered(messages[i]) and notified(messages[i]) is None]
+    found = marked or typed
+    if not found:
         return []
     out: list[Said] = []
-    for m in messages[asked + 1 :]:
+    for m in messages[found[-1] + 1 :]:
         kind = getattr(m, "type", None)
-        if kind == "human":  # steered into the run
+        if kind == "human" and (noted := notified(m)) is not None:
+            out.append(Said(Speaker.USER, _text(m), id=m.id, notified=noted))
+        elif kind == "human":  # steered into the run
             out.append(Said(Speaker.USER, _text(m), id=m.id))
         elif kind == "ai":
             calls = tuple(
@@ -846,6 +877,18 @@ def added(messages: Sequence[Any]) -> list[Said]:
         elif kind == "tool":
             out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
     return out
+
+
+def notified(message: Any) -> dict[str, Any] | None:
+    """The notification metadata of a message the harness or a framework added, which the user
+    did not type — a background task's update, a summary of earlier turns (langchain-core's
+    ``get_notification_metadata``); ``None`` for any other message."""
+    from langchain_core.messages import BaseMessage, get_notification_metadata
+
+    if not isinstance(message, BaseMessage):
+        return None
+    found = get_notification_metadata(message)
+    return None if found is None else dict(found)
 
 
 def _steered(message: Any) -> bool:
