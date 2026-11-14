@@ -414,7 +414,7 @@ async def test_arch15_a_line_is_ordered_by_the_stores_places_reading_no_answers(
     runs.answers_read.clear()
     line = Line(runs, mine, LRU(), Followers(lambda: None))
     assert await line.ahead() == [waited.run_id, answered.run_id]
-    assert runs.answers_read == []  # (it read 3 pages of answers before)
+    assert runs.answers_read == []  # (before: every page of its answers)
     ended = await runs.finish(mine.run_id, RunStatus.SUCCESS)
     assert await Line(runs, ended, LRU(), Followers(lambda: None)).ahead() is None  # it left
     await runs.aclose()
