@@ -453,6 +453,9 @@ def test_the_schema_check_knows_the_basic_json_types() -> None:
     assert arguments_problem(schema, {"either": None, "odd": "1.0", "extra": 1}) is None
     assert arguments_problem(schema, {"n": True}) == "n must be of type integer"
     assert arguments_problem(schema, {"x": "1"}) == "x must be of type number"
+    typed = {"properties": {t: {"type": t} for t in ("integer", "array", "object", "null")}}
+    for name, wrong in (("integer", 1.5), ("array", "x"), ("object", [1]), ("null", 0)):
+        assert arguments_problem(typed, {name: wrong}) == f"{name} must be of type {name}"
     assert arguments_problem(schema, {"flag": 1}) == "flag must be of type boolean"
     assert arguments_problem({}, {"a": 1}) is None
 
