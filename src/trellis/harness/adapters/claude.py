@@ -194,6 +194,17 @@ CLAUDE_CODE: Final = "Claude Code"
 #: answer reaches nobody. So they stay disallowed (with the tools that list and delete the
 #: schedules): offered, Claude promised a schedule that nothing keeps.
 OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+#: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
+#: too. A dynamic workflow (``Workflow``, alias ``RunWorkflow``) is one background task whose
+#: agents have none of their own: the stream names each only in that task's progress, and an
+#: agent's first tool call can come before any frame names it (the bundled CLI, 2.1.283,
+#: driven against a scripted model), so its calls cannot be told apart from the main agent's.
+#: ``SendMessage`` resumes a finished background subagent as a new task, whose messages carry
+#: the call that first started it, or reaches another Claude session on the machine or in the
+#: cloud. The agent-teams tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS``
+#: (``TeamCreate``, ``TeamDelete``; 2.1.283 has none, its named agents are background
+#: subagents) are left out with them, whatever the team's own environment says.
+UNHELD_AGENTS: Final = ("Workflow", "SendMessage", "TeamCreate", "TeamDelete")
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -1257,13 +1268,14 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
 
 def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
-    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), and those the tool hints
-    narrow away (Claude's built-ins and MCP tools too, for the whole query)."""
+    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), those that start agents
+    no run holds (:data:`UNHELD_AGENTS`), and those the tool hints narrow away (Claude's
+    built-ins and MCP tools too, for the whole query)."""
     given = list(denied or ())
     narrowed = (
         [n for n in runtime.native if not runtime.offers(n)] if runtime.offered is not None else []
     )
-    hidden = [n for n in (*OUTLIVES_THE_QUERY, *narrowed) if n not in given]
+    hidden = [n for n in (*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, *narrowed) if n not in given]
     return [*given, *dict.fromkeys(hidden)]
 
 

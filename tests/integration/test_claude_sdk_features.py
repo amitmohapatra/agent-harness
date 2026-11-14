@@ -37,7 +37,12 @@ from tests.support.catalog import FakeCatalog
 from tests.support.memory import FakeMemoryService
 from trellis import Ask, Harness, Hooks, Rewrite, Settings, current, tool
 from trellis.contracts import RunEventType, RunStatus, ToolCall
-from trellis.harness.adapters.claude import BUILTIN_SIDE_EFFECTS, OUTLIVES_THE_QUERY, ClaudeAdapter
+from trellis.harness.adapters.claude import (
+    BUILTIN_SIDE_EFFECTS,
+    OUTLIVES_THE_QUERY,
+    UNHELD_AGENTS,
+    ClaudeAdapter,
+)
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.sandbox import DELIVERS_HERE
@@ -177,7 +182,9 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
     assert all(name in argv for name in (*switches, "--strict-mcp-config"))
     assert "--system-prompt" not in argv  # the preset stays Claude Code's own prompt
     # the team's, then the tools whose work outlives a query
-    assert flag(argv, "--disallowedTools") == ",".join(["WebFetch", *OUTLIVES_THE_QUERY])
+    assert flag(argv, "--disallowedTools") == ",".join(
+        ["WebFetch", *OUTLIVES_THE_QUERY, *UNHELD_AGENTS]
+    )
     servers = json.loads(cli["mcp_config"])["mcpServers"]
     assert servers["erp"] == {"type": "http", "url": "http://127.0.0.1:9/mcp"}
     sent = cli["initialize"]
