@@ -590,7 +590,8 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   with the task's id; the next messages are answered while it runs. Deep Agents reads the
   task's status itself (0.7.27 on) when a turn starts, before each model call and after a
   final answer (then giving the model another turn, a model call as any: against `max_steps`
-  and the budget; past `max_steps` the run ends with the answer it had): each new outcome is a
+  and the budget; past `max_steps` the run ends with the answer it had, and the outcome read
+  for that turn is not marked read — the next turn is told it, memory on or off): each new outcome is a
   notification after the conversation's messages — a user-role message the user did not type,
   marked with langchain-core's notification metadata, which the harness treats so (below). When
   no turn works, the server holding the task's run reads it every 10 s: ended, its run ends

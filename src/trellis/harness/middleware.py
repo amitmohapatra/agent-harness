@@ -92,6 +92,7 @@ from langchain_core.messages import (
     AnyMessage,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
     convert_to_messages,
@@ -2074,7 +2075,9 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
 
     @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return {"jump_to": "end"} if state.get(self.counted, 0) > self.max_steps else None
+        if state.get(self.counted, 0) <= self.max_steps:
+            return None
+        return {"jump_to": "end", **_unread(state)}
 
     async def awrap_model_call(
         self,
@@ -2090,6 +2093,30 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
             f"stopped: the step limit ({self.max_steps}) was reached",
             warning="step_limit",
         )
+
+
+def _unread(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The background tasks' outcomes read after the final answer (Deep Agents' async
+    sub-agents' notifications) for a model turn the step limit does not make: not read after
+    all — their notifications leave the turn, and their tasks' records say they still work, so
+    the conversation's next turn reads and tells them again."""
+    messages = state.get("messages") or []
+    answered = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
+    told = [
+        m for m in messages[answered + 1 :] if (notified(m) or {}).get("source") == ASYNC_SUBAGENT
+    ]
+    if not told:
+        return {}
+    tasks = state.get("async_tasks") or {}
+    ids = {str(((notified(m) or {}).get("data") or {}).get("task_id")) for m in told}
+    return {
+        "messages": [RemoveMessage(id=str(m.id)) for m in told],
+        "async_tasks": {t: {**tasks[t], "status": "running"} for t in ids if t in tasks},
+    }
+
+
+#: The notification source of a background task's outcome (Deep Agents' ``lc_source``).
+ASYNC_SUBAGENT: Final = "async_subagent"
 
 
 class StallGuard(AgentMiddleware):

@@ -370,7 +370,12 @@ def test_two_overlapping_turns_changing_one_task_lose_neither_update() -> None:
     assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": same}}) == {
         "async_tasks": {"task_1": ended}
     }
-    again = {**TASK, "run_id": "run_2", "status": "running", "last_updated_at": "2026-11-14T00:00:09Z"}
+    again = {
+        **TASK,
+        "run_id": "run_2",
+        "status": "running",
+        "last_updated_at": "2026-11-14T00:00:09Z",
+    }
     assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": again}}) == {
         "async_tasks": {"task_1": again}  # a follow-up after its end: updated later
     }
