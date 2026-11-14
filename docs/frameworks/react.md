@@ -951,6 +951,25 @@ model reads that the request was refused — and every tool call made before an 
 stays recorded. For a policy model as the guard, LangChain's `OpenAIModerationMiddleware` and
 `PIIMiddleware` go in `middleware=` the same way (`tests/integration/test_react_guardrails.py`).
 
+### Model fallback and routing, through the gateway
+
+LangChain's `ModelFallbackMiddleware` and `ModelRouterMiddleware` take chat models; a name
+given to them as text is LangChain's to make (`init_chat_model`: the provider's own SDK and
+key, past the gateway). Give them the harness's routed chat model of the name — what `ReAct`
+makes of its own `model` name — and the fallback, or the model the router picks, goes through
+the gateway as the main model does: the route's form of the name, its key, the gateway's
+headers for the run (its MCP tools, its attribution), the run's budget:
+
+```python
+from langchain.agents.middleware import ModelFallbackMiddleware
+from trellis.harness.gateways import routed_chat_model
+
+ReAct("...", "anthropic/claude-sonnet-4-5",
+      middleware=[ModelFallbackMiddleware(routed_chat_model("openai/gpt-4o"))])
+```
+
+(`tests/integration/test_react_routed_fallback.py`.)
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
