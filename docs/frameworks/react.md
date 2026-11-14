@@ -971,6 +971,44 @@ ReAct("...", "anthropic/claude-sonnet-4-5",
 
 (`tests/integration/test_react_routed_fallback.py`.)
 
+### The capabilities, against the other libraries
+
+What each library has, and where `ReAct` gets it. Columns: C = Claude Agent SDK / Claude Code,
+K = Kimi Code, O = OpenAI Agents, L = LangChain / LangGraph / Deep Agents. The source of each
+row is the library's own class or tool and, for `ReAct`, the code and its test.
+
+| Capability | C | K | O | L | `ReAct` | Source |
+|---|---|---|---|---|---|---|
+| Function tools, governed | yes | yes | yes | yes | yes: `tools=` | `react._split`; `test_react.py` |
+| MCP tools, resources, elicitation | yes | yes | yes | yes | yes: `mcp(...)`, the gateway's | [tools.md](../tools.md); `test_mcp_resources.py`, `test_mcp_elicitation.py` |
+| File tools | `Read`/`Write`/`Edit` | `Read`/`Write` | sandbox | Deep Agents `FilesystemMiddleware` | yes: Deep Agents', held until a long task | `automatic.LongTaskTools`; `test_react_long_tasks.py` |
+| Shell / code in a sandbox | `Bash` | `Bash` | `ShellTool`, sandbox | Deep Agents `execute` | yes: `backend=sandbox()` | `sandbox.backend`; `test_sandbox_backend.py` |
+| Provider tools: web search, web fetch, code execution | `WebSearch`, `WebFetch` | `WebSearch`, `FetchURL` | `WebSearchTool`, `CodeInterpreterTool` | provider `dict` tools | yes: `tools=[{...}]`, governed and recorded | `provider_tools.py`; `test_react_provider_tools.py` |
+| Computer use | Chrome | no | `ComputerTool` | no executor (the tool is only formatted) | no: refused, saying to give a function | `provider_tools.CLIENT_RUN`; `test_react_provider_tools.py` |
+| Sub-agents | `Agent` | `Agent` | agent tools | Deep Agents `task` | yes: `subagents=`, each a child run | `react._subagents`; `test_react_helpers.py` |
+| Background sub-agents | yes | yes | no | Deep Agents async sub-agents | yes: Deep Agents' five task tools | `bridges.background_tasks`; `test_react_background.py` |
+| Many sub-agents at once | `Workflow` | `AgentSwarm` | no | `Send` | yes: the `Send` recipe, each a child run | [above](#fan-out-many-sub-agents-at-once-a-recipe); `test_react_fan_out.py` |
+| Handoffs | no | no | `handoffs=` | `langgraph-swarm` | yes: `create_handoff_tool` | `middleware._hands_off`, `adapters.langgraph.ACTIVE_AGENT`; `test_react_handoffs.py` |
+| Planning (a todo list) | `TodoWrite` | `TodoList` | no | `TodoListMiddleware` | yes: on a long task | `automatic.Planning`; `test_react_long_tasks.py` |
+| Plan mode | `permission_mode="plan"`, on request | `mode=plan`, on request | no | no | yes: `PlanMode()`, on request | `plan_mode.py`; `test_react_plan_mode.py` |
+| Skills | yes | yes | sandbox | Deep Agents `SkillsMiddleware` | yes: `skills=`, the helper too | `skills.py`; `test_skills.py` |
+| Memory files (`AGENTS.md`) | `CLAUDE.md` | `AGENTS.md` | no | Deep Agents `MemoryMiddleware` | yes: `memory_files=` | `react.ReAct`; `test_react_deep_agents.py` |
+| Long-term memory | auto memory | no | sandbox memory | store | yes: the memory service | [memory.md](../memory.md); `test_memory_pipeline.py` |
+| Summarization near the window's end | yes | yes | Responses compaction | `SummarizationMiddleware` | yes: Deep Agents', with a capability; `FitWindow` alone | `react._middleware`; `test_react_context.py`, `test_fit_window.py` |
+| Compaction on request | `/compact` | `/compact` | no | Deep Agents `SummarizationToolMiddleware` | yes: opt-in, asks nobody | `middleware.COMPACT`; `test_react_compaction_tool.py` |
+| Approvals | `can_use_tool` | permission requests | `needs_approval` | `HumanInTheLoopMiddleware` | yes: the catalog, one question | [governance.md](../governance.md); `test_approvals.py`, `test_hitl_middleware.py` |
+| Ask the user | `AskUserQuestion` | `AskUserQuestion` | no | `interrupt` | yes: `ask_user` | `tools.ask`; `test_ask_user.py` |
+| Guardrails | hooks | hooks | input/output guardrails | `@before_agent`/`@after_agent`, `jump_to` | yes: the recipe, the blocked turn recorded | [above](#guardrails-input-and-output-a-recipe); `test_react_guardrails.py` |
+| Goal loop / self-evaluation | `/loop` | goal mode | no | Deep Agents `RubricMiddleware` | yes: opt-in | [above](#a-goal-loop-the-answer-graded-and-revised-a-recipe); `test_react_rubric.py` |
+| Model fallback and routing | `fallback_model` | no | no | `ModelFallbackMiddleware`, `ModelRouterMiddleware` | yes: routed through the gateway | `gateways.routed_chat_model`; `test_react_routed_fallback.py` |
+| Structured output | yes | no | `output_type` | `response_format` | yes: `response_format=` | `react.ReAct`; `test_react.py` |
+| Checkpoint history / time travel | `rewind_files` (opt-in), `fork_session` | `session/fork` | no | `get_state_history`, `update_state` | history kept and read; a run is not rewound yet | `middleware.RunCheckpointer`; `test_react_rewind.py` |
+| Steering a running turn | yes | TUI only | no | no | yes: `mode="steer"` | `middleware.HarnessTools`; `test_inbox.py` |
+| Step limit, stall guard, budget | `max_turns`, `max_budget_usd` | repeat breaker | `max_turns` | `ModelCallLimitMiddleware` | yes: `max_steps`, `max_repeats`, `budget=` | `middleware.AnswerAtLimit`, `StallGuard`; `test_react.py`, `test_budget.py` |
+| Prompt caching | yes | yes | yes | `AnthropicPromptCachingMiddleware` | yes: `PromptCache` | `middleware.PromptCache`; `test_react_spending.py` |
+| Scheduling | cron | cron | no | no | yes: the harness's schedule tools | `schedules.py`; `test_schedules.py` |
+| Slash commands, agent teams, realtime voice | yes | yes | realtime | no | no: text dispatch is a way past approvals; teams and voice have no LangChain piece to borrow | [claude-agent-sdk.md](claude-agent-sdk.md), [kimi.md](kimi.md) |
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
