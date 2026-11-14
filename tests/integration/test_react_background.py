@@ -286,6 +286,7 @@ async def test_an_outcome_a_turn_already_told_is_quiet_when_a_turn_of_its_own_te
     monkeypatch.setattr(harness.runs, "get", slow)
     await asyncio.gather(*told)  # at once: one starts it, the other finds it at work
     monkeypatch.setattr(harness.runs, "get", read)
+    await background.notify(agent, ended, update, user=USER, thread=THREAD, origin=origin)
     await until(lambda: _all_final(harness))
     assert await _own_turns(harness) == 1
     [own] = [
@@ -760,6 +761,7 @@ async def test_a_tasks_run_ended_elsewhere_stops_its_attempt_here(
     first = await chatted(agent, "research lighthouses")
     task = await task_run(harness, first.run_id)
     await until(lambda: gate.started)
+    await asyncio.sleep(0.2)  # a read or two while it works
     await harness.runs.cancel(task.run_id, reason="on another replica")
     await until(lambda: not harness.background.at_work(task.run_id))
 
@@ -860,6 +862,10 @@ async def test_outside_a_harness_run_the_tasks_middleware_steps_aside(gate: Gate
 
 
 def test_an_update_strategy_is_deep_agents_own() -> None:
+    queued = {"name": "notes", "description": "Notes.", "update_strategy": "enqueue"}
+    graph = ReAct("You help.", Model(turns=[]), subagents=[queued])
+    assert _found_in(graph).offered.strategies == {"notes": "enqueue"}
+    assert "update_strategy" not in queued  # Deep Agents is given its own spec
     spec = {"name": "notes", "description": "Notes.", "update_strategy": "later"}
     with pytest.raises(ConfigurationError, match="notes: update_strategy is 'interrupt' or"):
         ReAct("You help.", Model(turns=[]), subagents=[spec])
