@@ -740,6 +740,7 @@ class ClaudeAdapter:
                         spending.ended(message, live)
                     elif isinstance(message, AssistantMessage):
                         spending.replied(message)
+                    await _provided(steps, message)
                     yield message
                     if runtime.pending is not None:
                         # the run paused: stop here; a process of its own goes with it
@@ -1010,6 +1011,50 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
             await helpers.settled(found.task_id, failed=failed, said=said, final=False)
 
 
+async def _provided(steps: Steps, message: Any) -> None:
+    """What the provider did inside the main agent's model step, in ``message``. Its reasoning
+    (a ``thinking`` block) is on the run's stream as a ``reasoning`` event — the text only:
+    the block's signature goes nowhere, and none of it to memory or a log. A tool the API
+    ran itself (``server_tool_use``: web search, code execution, the advisor) is a call of
+    the run (:func:`_served`): recorded with its result where the stream carries one (the
+    SDK parses the advisor's), and with none at the turn's result."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ResultMessage,
+        ServerToolResultBlock,
+        ServerToolUseBlock,
+        ThinkingBlock,
+    )
+
+    if isinstance(message, ResultMessage):
+        for ref in list(steps.served):
+            await _served(steps, ref, None)
+    elif isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+        for block in message.content:
+            if isinstance(block, ThinkingBlock) and block.thinking:
+                steps.runtime.events.custom("reasoning", text=block.thinking)
+            elif isinstance(block, ServerToolUseBlock):
+                steps.served[block.id] = (block.name, dict(block.input), time.time())
+            elif isinstance(block, ServerToolResultBlock) and block.tool_use_id in steps.served:
+                await _served(steps, block.tool_use_id, block.content)
+
+
+async def _served(steps: Steps, ref: str, content: Mapping[str, Any] | None) -> None:
+    """A tool the API ran itself for the model (its use ``ref``), recorded as the run's call
+    (``bridge.observed``) with what it returned (``content``; ``None``: not on the SDK's
+    stream): a read, and nobody's to approve — the provider already ran it."""
+    name, args, started = steps.served.pop(ref)
+    failed = content is not None and "error_code" in content
+    outcome = ToolOutcome(
+        tool=name,
+        status=ToolStatus.ERROR if failed else ToolStatus.OK,
+        output=content,
+        error_class="ServerToolError" if failed else None,
+    )
+    spec = ToolSpec(name=name, side_effects="read")
+    await bridge.observed(steps.runtime, spec, args, outcome, ref=ref, started=started)
+
+
 def _noticed(runtime: Runtime, message: Any) -> None:
     """What ``message`` says beside the model's replies, as a warning of the run: Claude's
     rate limit near or reached (one that is fine says nothing), a frame of
@@ -1229,7 +1274,7 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime")
+    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime", "served")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1241,6 +1286,9 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
+        #: the tools the API ran itself whose result has not come, by Claude's id of the use:
+        #: their name, arguments and when they were seen (:func:`_provided`)
+        self.served: dict[str, tuple[str, dict[str, Any], float]] = {}
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)

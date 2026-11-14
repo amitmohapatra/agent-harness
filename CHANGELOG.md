@@ -338,6 +338,9 @@ cancelled after its start (the task is cancelled with it). See
   hook of the team's own was answered for it and never run: `Stop` and `UserPromptSubmit`
   of the turn the session runs by itself, a `SubagentStop` whose run had ended, the
   `PreToolUse` of a call nobody could decide. They run as Claude Code runs them, once.
+- **Claude's reasoning and the tools the API ran are on the stream and recorded**: a
+  `thinking` block is a `reasoning` event (its text; never its signature, nothing to
+  memory), and a server tool's use is a call of the run, recorded as a read.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.
