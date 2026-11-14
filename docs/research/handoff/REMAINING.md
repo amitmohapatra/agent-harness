@@ -542,11 +542,18 @@ Memory (parked by the owner until this phase)
 
 ---
 
-## 13. Build machine (ephemeral: anything here is lost when the session is reclaimed)
+## 13. Build machine (ephemeral) and where everything was saved
 
-Worktrees under `/var/tmp/cons/` (`stage2` = the fold, `fixround`, `nskills`, `bgclaude`,
-`bgkimi`, `memfix`, `co2-*`, `handoff`); private test stack `/var/tmp/cons/live57` (Postgres
-127.0.0.1:55957); model weights `/var/tmp/rx/models`; the Claude SDK 0.2.182 overlay
-`/var/tmp/cons/bgclaude-tmp/sdk182`. Not pushed anywhere and worth saving privately: earlier experiment folders
-`/var/tmp/aa` (local branches with unpushed commits), `/var/tmp/cons/rw` (uncommitted
-changes), `/var/tmp/cons/r`, `a`, `g` (experiment results).
+Nothing that is a note, a decision, a review or a plan exists only on the build machine any
+more: all of it is in this folder (`earlier/README.md` lists the older material: two
+reports, the Confluence documentation set as an archive, and earlier memory-experiment
+notes). Code that existed only there is on backup branches named in `earlier/README.md`.
+
+Still only on the build machine, by choice (data, not notes): raw experiment outputs, test
+result files, benchmark databases, the private test stack `/var/tmp/cons/live57` (Postgres
+127.0.0.1:55957), model weights, virtual environments, the Claude SDK 0.2.182 overlay. All
+can be rebuilt; none is needed to continue.
+
+Worktrees of this round, for reference if the machine is still up: under `/var/tmp/cons/`
+(`stage2` = the fold, `kimimerge`, `fixround`, `nskills`, `bgclaude`, `bgkimi`, `memfix`,
+`co2-*`, `handoff`). Every one is clean and pushed.
