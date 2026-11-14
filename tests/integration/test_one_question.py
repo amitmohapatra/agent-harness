@@ -996,10 +996,6 @@ class Confirming(Hooks):
             await runtime.ask("Which environment?", options=["staging", "production"])
 
 
-@pytest.mark.xfail(
-    reason="fixed on review-fixes-claude (a hook's own question counted as the call's approval)",
-    strict=True,
-)
 @pytest.mark.parametrize("path", ["query", "live"])
 async def test_a_hooks_own_question_is_not_the_approval_of_the_call(
     memory_service: FakeMemoryService, tmp_path: Path, path: str

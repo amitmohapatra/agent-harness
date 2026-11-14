@@ -46,7 +46,14 @@ from trellis.harness.files import EVENT as FILE_EVENT
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Made, Pending, Replay, calling_ident, content_key
+from trellis.harness.journal import (
+    Made,
+    Pending,
+    Replay,
+    approval_read,
+    calling_ident,
+    content_key,
+)
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
@@ -714,7 +721,7 @@ class Runtime:
         from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
 
         said = SAID.get(tuple(choices))
-        return await self.interrupt(
+        resolution = await self.interrupt(
             content_key("approve", call.tool, call.args),
             # a helper's call: the payload names the helper, whose run recorded it
             payload=named(self),
@@ -727,6 +734,8 @@ class Runtime:
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
         )
+        approval_read(call)  # answered (a pause raises): for ``journal.approvals_read``
+        return resolution
 
     def files_folder(self) -> str:
         """Where this run's files are kept in the store: its tenant, user, conversation and run

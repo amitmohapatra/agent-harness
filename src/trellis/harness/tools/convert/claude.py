@@ -63,11 +63,13 @@ def _server(served: list[Any]) -> McpSdkServerConfig:
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 
 
-def listing(server: McpSdkServerConfig) -> tuple[tuple[str, str, str], ...]:
-    """What ``server`` (one :func:`convert` made) lists: each tool's name, description and
-    input schema (as JSON) — what a CLI process that lists it once has for good."""
+def listing(server: McpSdkServerConfig) -> tuple[tuple[str, str], ...]:
+    """What ``server`` (one :func:`convert` made) offers: each tool's name and input schema
+    (as JSON) — what a CLI process that lists it once must have for good to serve a later
+    turn. Not the descriptions: a tool's wording may change from one turn to the next (the
+    hour ``schedule_task`` says it is), and the process keeps the wording it listed."""
     return tuple(
-        (t.name, t.description, json.dumps(t.input_schema, sort_keys=True, default=str))
+        (t.name, json.dumps(t.input_schema, sort_keys=True, default=str))
         for t in _SERVED[server["instance"]]
     )
 
@@ -76,6 +78,16 @@ def handler(server: McpSdkServerConfig, name: str) -> Handler:
     """The handler of ``server``'s tool ``name``."""
     [found] = [t.handler for t in _SERVED[server["instance"]] if t.name == name]
     return cast("Handler", found)
+
+
+def lists(server: McpSdkServerConfig | None, name: str) -> bool:
+    """Whether ``server`` (none: no harness tool) lists the tool ``name``."""
+    return server is not None and any(t.name == name for t in _SERVED[server["instance"]])
+
+
+def tool_handler(tool: Tool) -> Handler:
+    """The handler a server :func:`convert` makes gives ``tool``, made alone."""
+    return cast("Handler", _one(tool).handler)
 
 
 def relayed(

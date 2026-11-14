@@ -42,6 +42,70 @@ not hold:
   `needs_approval` inside `Agent.as_tool` names the agent tool's child run, which records the
   call, as governance's approvals of a helper's call do.
 
+### Fixed: Claude Agent SDK approvals, spending and live sessions
+
+- **A question a run hook asks is no approval.** A call Claude Code asks about was let
+  through without its question when any recorded answer was read while the call was
+  decided: a `before_tool` hook that asked a person something else
+  (`trellis.current().ask(...)`: a ticket number) let a shell write run unapproved. Only the
+  answer to the approval of that call (governance's question, whatever made it ask) spares
+  it Claude Code's own question now (`journal.approvals_read`).
+- **Closing the harness ends every CLI and every part.** A live session ended its
+  background runs (one that waits for a person is cancelled in the run store) before its
+  CLI: a run store that failed then left the CLI process running, and `Harness.aclose`
+  stopped there — the queued writes, the spans, the MCP sources and the clients were never
+  closed. Each session's process now ends whatever its runs' ends meet, and `Harness.aclose`
+  closes every part before it raises the first error (any other is logged).
+- **A team's own hooks keep their timeout in a live session.** A live session told the CLI
+  to wait 24 hours for every hook with no timeout, the team's own too (a hook that hung held
+  a turn for a day): only the harness's own hooks, which may wait for a person's answer
+  about a background subagent's call, are; a team's keep what they set (none: Claude Code's
+  default), as in a process of their own.
+- **A paused or cancelled turn is charged its own spending.** A turn that paused before its
+  first result and was resumed on another worker was charged the conversation's earlier
+  turns again: the session's cost was kept in the first worker's memory only (it is in the
+  run's journal from the turn's start now). In a live session, the attempt a pause left lost
+  its tokens and model call (its result came after the attempt stopped reading), and what
+  a cancelled turn spent was charged to the conversation's next turn: a left turn's result,
+  which comes at once when it is interrupted, is its own run's now.
+- **The turn limit no longer ends a conversation's background work.** The one last answer
+  at `max_turns` ran in a process of its own and closed the conversation's live session
+  first, stopping the background subagent the same turn had started (its run `ERROR`). It
+  is the session's next turn now, told the limit is reached and its tool calls refused
+  (Claude Code's process answers the next prompt after its `error_max_turns` result, seen
+  driving the bundled CLI); a turn in a process of its own answers as before.
+- **A resume on another worker leaves a background subagent at work.** A turn that started
+  a background subagent (kept going by worker 1's live session) and paused was resumed on
+  worker 2, which ended the subagent's run `ERROR` ("not taken up again") while it was still
+  at work, and started a second CLI process resuming the session worker 1's still held. What
+  was handed on is in the run's journal now (`Journal.handed_on`, replacing a set in one
+  process's memory): no later attempt ends it on any worker, and a session another worker's
+  live session holds is forked (`fork_session`) — the turn goes on on worker 2, the subagent
+  on worker 1.
+- **A background subagent's harness tool calls are its own in two more cases.** A team's own
+  `PreToolUse` hook that rewrote such a call (`updatedInput`) left the call unknown when it
+  came with the rewritten arguments: refused for want of a run, or run in the turn being
+  answered then. And a tool the process lists that the subagent's run was not offered (the
+  hints narrow each run by its own task) failed in the relay ("not enough values to
+  unpack"): the subagent is offered what the process lists, so it runs, in its run.
+- **A conversation's turn is never served by a stale process.** A worker that served a
+  turn kept its session (and its live process) for the conversation's next turn, even when
+  another worker had served a later turn meanwhile: that turn was then answered by a process
+  that never saw it. A kept session is dropped now when the run store has a turn of the
+  conversation started after the last one this process served (`pipeline._served_elsewhere`):
+  the stale process is ended and the turn runs as on a worker that kept none — a new session,
+  the conversation's turns given as context.
+- **The hour turning no longer ends a conversation's live session.** `schedule_task`'s
+  description says the hour it is, and a live session served only a turn whose tools were
+  listed in the same words: the first turn after the hour turned closed the process and
+  stopped its background work (a background subagent's run `ERROR`). A later turn must bring
+  the same tools with the same schemas now (`convert.listing`), not the same wording; the
+  process keeps the wording it listed as it started. So that a session living for hours or
+  days does not tell the model a stale hour (a wrong today-or-tomorrow for "at 9"), each turn
+  it serves is told the day and the hour it is with its prompt (`schedules.now_said`, in the
+  context the `UserPromptSubmit` hook adds): Claude Code itself says the date once a session
+  and again only when the day changes (its `date_change` reminder), never the hour.
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries

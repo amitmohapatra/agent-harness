@@ -46,6 +46,7 @@ from trellis.contracts import (
 )
 from trellis.harness import budget
 from trellis.harness.adapters.claude import (
+    AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
@@ -59,6 +60,7 @@ from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.identity import conversation_key
+from trellis.harness.runs import LocalRuns
 from trellis.harness.subagents import SUBAGENT
 
 CLI = str(Path(__file__).resolve().parents[1] / "support" / "fake_claude_cli.py")
@@ -460,6 +462,129 @@ async def test_a_live_session_that_resumes_a_session_charges_its_first_turn_its_
     assert costs == [1.0, 0.5, 0.5]
 
 
+async def _charged_for_a_paused_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, elsewhere: bool
+) -> list[float]:
+    """A conversation's first turn, then a second that pauses for an approval before any
+    result, resumed on the same worker or (``elsewhere``) another sharing the run store:
+    what the second turn's run is charged."""
+    costs: list[tuple[str, float | None]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget,
+        "account",
+        lambda run, **kw: (costs.append((run.run_id, kw["cost"])), account(run, **kw)),
+    )
+    refunds.clear()
+    scripts = [[{"text": "hi"}], [{"tool": "refund", "args": {"order": "o1"}}, {"text": "done"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = arm(one.wrap(target, id="chat"), [refund])
+        second = arm(two.wrap(target, id="chat"), [refund])
+        await first.run("hi", user="u1", thread="t1")
+        paused = await first.run("refund o1", user="u1", thread="t1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        resumer = second if elsewhere else first
+        done = await resumer.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert refunds == ["o1"]
+        return [cost or 0.0 for run_id, cost in costs if run_id == paused.run_id]
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
+async def test_a_turn_resumed_on_another_worker_is_charged_its_own_cost_not_the_earlier_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed session's result carries the session's running cost, the conversation's
+    earlier turns included. A turn that paused before its first result is charged what the
+    cost grew by since then wherever it is resumed: the cost already charged for the
+    session is in its journal from the turn's start, not only in the memory of the worker
+    that served the turn before."""
+    (tmp_path / "same").mkdir()
+    same = await _charged_for_a_paused_turn(tmp_path / "same", monkeypatch, elsewhere=False)
+    (tmp_path / "elsewhere").mkdir()
+    elsewhere = await _charged_for_a_paused_turn(
+        tmp_path / "elsewhere", monkeypatch, elsewhere=True
+    )
+    assert sum(elsewhere) == pytest.approx(sum(same)) == pytest.approx(1.5), (same, elsewhere)
+
+
+async def _spent_by_a_paused_run(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, thread: str | None
+) -> tuple[int, int, float]:
+    """A run that pauses for an approval after a step, then is approved: the tokens, model
+    calls and cost it is charged."""
+    counted: list[tuple[str, int, int, float]] = []
+    account = budget.account
+
+    def count(run: Any, **kw: Any) -> None:
+        tokens = kw["input_tokens"] + kw["output_tokens"]
+        counted.append((run.run_id, tokens, kw.get("calls", 1), kw["cost"] or 0.0))
+        account(run, **kw)
+
+    monkeypatch.setattr(budget, "account", count)
+    refunds.clear()
+    scripts = [[{"tool": "refund", "args": {"order": "o1"}}, {"text": "done"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = arm(harness.wrap(target, id=f"spent-{thread}"), [refund])
+    paused = await agent.run("refund o1", user="u1", thread=thread)
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    mine = [(t, c, cost) for run_id, t, c, cost in counted if run_id == paused.run_id]
+    return sum(t for t, _, _ in mine), sum(c for _, c, _ in mine), sum(c for _, _, c in mine)
+
+
+async def test_a_live_turn_that_paused_is_charged_the_tokens_and_calls_of_its_paused_attempt(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attempt that paused made a model call, whose tokens are the run's: in a live
+    session as in a process of its own (a run with no conversation) — though the result of
+    the CLI's turn it left comes after the attempt stopped reading."""
+    (tmp_path / "alone").mkdir()
+    (tmp_path / "live").mkdir()
+    alone = await _spent_by_a_paused_run(harness, tmp_path / "alone", monkeypatch, thread=None)
+    live = await _spent_by_a_paused_run(harness, tmp_path / "live", monkeypatch, thread="t1")
+    assert live[:2] == alone[:2] and live[2] == pytest.approx(alone[2]), (alone, live)
+
+
+async def test_a_cancelled_live_turn_is_charged_its_own_spending_and_the_next_turn_its_own(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live turn cancelled mid-turn is interrupted: the result of the CLI's turn comes after
+    the run stopped reading, and what it spent until then is the cancelled run's — not the
+    conversation's next turn's, the next result the session charges."""
+    costs: list[tuple[str, float | None]] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget,
+        "account",
+        lambda run, **kw: (costs.append((run.run_id, kw["cost"])), account(run, **kw)),
+    )
+    reads = [{"builtin": "Read", "args": {"file_path": name}} for name in ("x", "y")]
+    scripts = [[{"text": "a"}], [*reads, {"stall": 30}, {"text": "never"}], [{"text": "z"}]]
+    target = options(tmp_path, scripts, model="m", env={"FAKE_CLAUDE_COST": "0.5"})
+    agent = harness.wrap(target, id="cancelled")
+    await agent.run("one", user="u1", thread="t1")
+    slow = asyncio.create_task(agent.run("two", user="u1", thread="t1"))
+    await until(lambda: len(built_ins(tmp_path)) == 2)  # its two reads ran
+    await asyncio.sleep(0.5)  # and its third step began: it stalls now
+    await agent.cancel(turn_running(agent))
+    cancelled = await slow
+    assert cancelled.status is RunStatus.CANCELLED
+    third = await agent.run("three", user="u1", thread="t1")
+    assert third.answer == "z"
+    _, two, three = served(tmp_path)
+    assert three["pid"] == two["pid"]  # the same live process served it
+    charged = {run_id: sum(c or 0.0 for r, c in costs if r == run_id) for run_id, _ in costs}
+    assert charged[third.run_id] == pytest.approx(0.5), costs  # its one step
+    assert charged[cancelled.run_id] == pytest.approx(1.5), costs  # its three steps
+
+
 # --------------------------------------------------------------------------- no live session
 async def test_a_run_with_no_conversation_runs_in_a_process_of_its_own_as_before(
     harness: Harness, tmp_path: Path
@@ -633,7 +758,6 @@ async def test_today_a_background_subagents_run_a_restart_left_open_stays_runnin
     session still runs, so it cannot end the run either. What a user needs: a run nothing
     works on is ended saying so — the run store would need to know who holds it."""
     from trellis.contracts import RunStart
-    from trellis.harness.runs import LocalRuns
 
     store = LocalRuns()
     async with Harness(config=Settings(), runs=store) as before:
@@ -761,24 +885,143 @@ async def test_a_session_the_options_keep_themselves_is_served_live_too(
     assert two["pid"] == one["pid"] and open_sessions(agent) == 1
 
 
-async def test_at_its_turn_limit_a_conversations_turn_gets_its_last_answer_from_a_new_process(
+async def test_at_its_turn_limit_a_conversations_turn_gets_its_last_answer_from_its_session(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The one last answer at the turn limit is a query of other options (no tool, one
-    turn): it runs in a process of its own, the live session closed first — two processes do
-    not hold one session."""
-    script = [
-        {"builtin": "Read", "args": {"file_path": "a.txt"}},
-        {"builtin": "Read", "args": {"file_path": "b.txt"}},
-        {"text": "both read"},
-    ]
-    agent = harness.wrap(options(tmp_path, [script], max_turns=1), id="limited")
-    result = await agent.run("read both", user="u1", thread="t1")
-    assert result.status is RunStatus.SUCCESS and result.answer == "What I found before the limit."
+    """The one last answer at the turn limit is asked in the conversation's live session, as
+    its next turn — the session and the background work the turn started there go on (a
+    process of its own would be a second process on the session, and closing the live one
+    first would stop that work): told the limit is reached, its tool calls are refused, and
+    its answer is the run's."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    target = options(tmp_path, [[BACKGROUND, *reads, {"text": "never"}]], max_turns=3)
+    agent = harness.wrap(target, id="limited")
+    result = await agent.run("research, then read", user="u1", thread="t1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert result.answer == "What I found before the limit."
     one, two = served(tmp_path)
-    assert two["pid"] != one["pid"] and two["resume"] == one["session"]
-    await until(lambda: not alive(one["pid"]) and not alive(two["pid"]))
-    assert open_sessions(agent) == 0
+    assert two["pid"] == one["pid"] and alive(one["pid"])  # the live session's own process
+    child = await child_of(harness, result.run_id)
+    live = live_of(agent)
+    assert child.status is RunStatus.RUNNING, (child.status, child.error)
+    assert live is not None and not live.closed and list(live.working) == ["t1"]
+    assert open_sessions(agent) == 1
+
+
+async def test_a_tool_call_in_the_last_answer_at_the_turn_limit_is_refused(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The last answer's turn in a live session has the process's tools (a live process keeps
+    the ones it started with): a call the model makes in it anyway is refused, not run, and
+    the answer it gives then is the run's."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    target = options(tmp_path, [[*reads, {"text": "never"}]], max_turns=2)
+    target.env["FAKE_CLAUDE_AT_LIMIT_CALLS"] = json.dumps(
+        {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "x"}}
+    )
+    agent = harness.wrap(target, id="limited-calls")
+    result = await agent.run("read both", user="u1", thread="t1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert [c["tool"] for c in built_ins(tmp_path)] == ["Read", "Read"]  # the Write did not run
+    assert result.answer == AT_LIMIT
+
+
+async def test_a_turn_after_the_hour_turned_is_served_by_the_same_session(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``schedule_task``'s description says the hour it is: a turn after the hour turned
+    brings the same tools with another description. The session keeps serving the
+    conversation — its process and the background work in it go on: what a later turn must
+    bring the same is its tools and their schemas, not their wording of the moment."""
+    from datetime import UTC, datetime
+
+    from trellis.harness import snapshots
+
+    clock = [datetime(2026, 11, 13, 10, 59, 50, tzinfo=UTC)]
+    monkeypatch.setattr(snapshots, "now", lambda: clock[0])
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "still here"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="hourly")
+    await agent.run("research the market", user="u1", thread="t1")
+    live = live_of(agent)
+    assert live is not None and list(live.working) == ["t1"]
+    clock[0] = datetime(2026, 11, 13, 11, 0, 10, tzinfo=UTC)  # the hour turned
+    second = await agent.run("how is it going?", user="u1", thread="t1")
+    assert second.status is RunStatus.SUCCESS and second.answer == "still here"
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"] and live_of(agent) is live and not live.closed
+    assert list(live.working) == ["t1"]  # the background work goes on
+
+
+async def test_each_turn_of_a_live_session_is_told_the_day_and_hour_it_is(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live process keeps the tools' wording it listed as it started — ``schedule_task``
+    says the hour of the process's first turn — and Claude Code says the date once per
+    session (and again only when the day changes). So each turn the session serves is told
+    the day and the hour it is with its prompt: a turn 26 hours later reads its own, and
+    the same process serves it."""
+    from datetime import UTC, datetime
+
+    from trellis.harness import snapshots
+
+    clock = [datetime(2026, 11, 13, 10, 15, tzinfo=UTC)]
+    monkeypatch.setattr(snapshots, "now", lambda: clock[0])
+    scripts = [[{"text": "one"}], [{"text": "two"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="dated")
+    await agent.run("remind me at 9", user="u1", thread="t1")
+    clock[0] = datetime(2026, 11, 14, 12, 40, tzinfo=UTC)  # 26 hours later
+    await agent.run("and at 9 again", user="u1", thread="t1")
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"]  # the same process
+    assert "It is now Fri 2026-11-13, 10:00-10:59" in one["context"]
+    assert "It is now Sat 2026-11-14, 12:00-12:59" in two["context"]
+    assert "2026-11-13" not in two["context"]
+
+
+async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_stale(
+    tmp_path: Path,
+) -> None:
+    """Worker 2 served turn 1 and keeps its process; worker 1 served turn 2 (worker 2's
+    process never saw it). Turn 3 on worker 2 is not answered by that stale process, which
+    holds the conversation as it was after turn 1: the process is ended and the turn runs as
+    any turn another worker served the last of — a new session, the conversation's turns
+    given as context (the run store's)."""
+    scripts = [[{"text": "turn {heard}"}]]
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = one.wrap(options(tmp_path, scripts), id="chat")
+        second = two.wrap(options(tmp_path, scripts), id="chat")
+        await second.run("the code is 4242", user="u1", thread="t1")
+        stale = live_of(second)
+        assert stale is not None
+        await first.run("the code is now 9999", user="u1", thread="t1")
+        third = await second.run("what is the code?", user="u1", thread="t1")
+        assert third.status is RunStatus.SUCCESS, third.error
+        held, _, fresh = served(tmp_path)
+        assert fresh["pid"] != held["pid"] and fresh["resume"] is None  # not the stale one
+        assert fresh["session"] != held["session"]
+        await until(lambda: not alive(held["pid"]))
+        assert stale.closed and live_of(second) is not stale
+        assert "the code is now 9999" in fresh["context"]  # turn 2, from the run store
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
+async def test_a_kept_session_whose_last_turn_the_run_store_no_longer_has_is_served(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The last turn this process served is gone from the run store (pruned): nothing says
+    another worker went past the session kept here, which serves the next turn."""
+    scripts = [[{"text": "noted"}], [{"text": "you told me: {heard}"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="pruned")
+    await agent.run("the code is 4242", user="u1", thread="t1")
+    agent.turned[conversation_key("default", "u1", "t1")] = "run_pruned"
+    again = await agent.run("what is it?", user="u1", thread="t1")
+    assert again.answer == "you told me: the code is 4242 | what is it?"
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"]
 
 
 async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_starts_another(
@@ -1158,6 +1401,83 @@ async def test_a_background_subagents_harness_tool_asks_a_person_and_runs_once(
     assert called == {"result": "refunded o9", "ok": True} and refunds == ["o9"]
 
 
+async def test_a_background_subagents_harness_tool_call_a_hook_rewrote_is_its_runs(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A team's own ``PreToolUse`` hook that rewrites a background subagent's harness tool
+    call (``updatedInput``): the call Claude Code makes, with the rewritten arguments, is
+    still known as that subagent's, and runs in its run — not refused for want of one, nor
+    run in a turn being answered meanwhile."""
+
+    @tool(side_effects="read")
+    def echo(x: str) -> str:
+        """Say which run this call is made in, and what it was given."""
+        runtime = current()
+        assert runtime is not None
+        return f"{runtime.run_id}:{x}"
+
+    async def rewrite(given: Any, tool_use_id: Any, hook: Any) -> Any:
+        if given.get("tool_name") != "mcp__trellis__echo":
+            return {}
+        decided = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+        return {"hookSpecificOutput": {**decided, "updatedInput": {"x": "rewritten"}}}
+
+    from claude_agent_sdk import HookMatcher
+
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    target = options(tmp_path, scripts, hooks={"PreToolUse": [HookMatcher(hooks=[rewrite])]})
+    agent = arm(harness.wrap(target, id="bg-rewritten"), [echo])
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    said = await calls(tmp_path, {"tool": "echo", "args": {"x": "given"}})
+    assert said == {"result": f"{child.run_id}:rewritten", "ok": True}
+
+
+async def test_a_background_subagents_call_of_a_tool_its_own_run_was_not_offered(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    tmp_path: Path,
+    narrowing: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hints narrow each run's tools by its own task: the process lists the tools the
+    turn that started it was offered, and the background subagent's run may be offered
+    others. The subagent is offered what the process lists, so its call of a tool its own
+    run was not offered runs, in its run (``read_file`` and such are offered to any)."""
+
+    def lookup(i: int) -> Any:
+        def find(key: str) -> str:
+            runtime = current()
+            assert runtime is not None
+            return f"t{i}:{key}:{runtime.run_id}"
+
+        return tool(find, name=f"t{i}", side_effects="read")
+
+    hinted = iter([["t0"]])  # the turn's, then the subagent's own (its task: "dig")
+    monkeypatch.setattr(memory_service, "_candidates", lambda task, available: next(hinted, ["t1"]))
+    dig = {"background": {"id": "t1", "agent": "researcher", "prompt": "dig"}}
+    scripts = [[dig, {"text": "started it"}], [{"text": "ok"}]]
+    agent = arm(memory_harness.wrap(options(tmp_path, scripts), id="bg-narrowed"),
+                [lookup(i) for i in range(3)])  # fmt: skip
+    first = await agent.run("research the market", user="u1", thread="t1")
+    [listed] = served(tmp_path)
+    assert "t0" in listed["tools"] and "t1" not in listed["tools"]
+    child = await child_of(memory_harness, first.run_id, None)
+    said = await calls(tmp_path, {"tool": "t0", "args": {"key": "k"}})
+    assert said == {"result": f"t0:k:{child.run_id}", "ok": True}
+
+
+async def test_a_background_subagents_call_of_a_tool_its_run_does_not_have_is_refused() -> None:
+    """A tool the process lists that the subagent's run has not at all (another tool set)
+    is refused, saying so: it never runs outside a run."""
+    import contextvars
+    from types import SimpleNamespace
+
+    at = claude_live.Turn(SimpleNamespace(toolbox={}), None, None, contextvars.copy_context())
+    answer = await claude_live._handler(at, "gone")({})
+    assert answer["is_error"] and "gone is not a tool of this run" in answer["content"][0]["text"]
+
+
 async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_task(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1184,6 +1504,33 @@ async def test_a_question_nobody_answers_ends_the_background_run_and_stops_its_t
     assert {m.timeout for matchers in hooks.values() for m in matchers} == {
         claude_live.HOOK_SECONDS
     }
+
+
+async def test_a_teams_own_hooks_keep_their_timeout_in_a_live_session(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Only the harness's own hooks, which may wait for a person's answer about a background
+    subagent's call, are given the long timeout in a live session: a team's own hook keeps
+    what it set — none, Claude Code's own default, as in a process of its own; a time of its
+    own, that time."""
+    from claude_agent_sdk import HookMatcher
+
+    async def own(given: Any, tool_use_id: Any, hook: Any) -> Any:
+        return {}
+
+    hooks = {
+        "Stop": [HookMatcher(hooks=[own])],
+        "PreToolUse": [HookMatcher(hooks=[own], timeout=7)],
+    }
+    agent = harness.wrap(options(tmp_path, [[{"text": "ok"}]], hooks=hooks), id="own-hooks")
+    await agent.run("hi", user="u1", thread="t1")
+    live = live_of(agent)
+    assert live is not None
+    given = live.client.options.hooks
+    [stop] = given["Stop"]
+    team, *ours = given["PreToolUse"]
+    assert (stop.timeout, team.timeout) == (None, 7)
+    assert ours and {m.timeout for m in ours} == {claude_live.HOOK_SECONDS}
 
 
 async def test_cancelling_a_background_subagents_run_stops_that_subagent_only(
@@ -1378,6 +1725,106 @@ async def test_a_turn_resumed_after_its_own_pause_leaves_its_background_run_open
     )
 
 
+async def test_a_turn_resumed_after_its_background_subagent_ended_goes_on_in_its_session(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A background subagent the turn handed on has ended by the time the turn is resumed:
+    nothing holds the session elsewhere, and the resumed attempt is sent into the live
+    session, as any resume (no fork)."""
+    refunds.clear()
+    script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    agent = arm(harness.wrap(options(tmp_path, [script]), id="ended-bg"), [refund])
+    paused = await agent.run("research, then refund o9", user="u1", thread="t1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    child = await child_of(harness, paused.run_id)
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and refunds == ["o9"]
+    pids = {turn["pid"] for turn in served(tmp_path)}
+    assert len(pids) == 1 and all("--fork-session" not in t["argv"] for t in served(tmp_path))
+
+
+async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
+    """``LiveSession.outcome``: the result of a turn left and interrupted, past the messages
+    that came before it; none when the process ended first (and the turn is no longer the
+    one whose result is owed)."""
+    import contextvars
+
+    from claude_agent_sdk import AssistantMessage, TextBlock
+
+    session = LiveSession("k", None, claude_live.LiveSessions())
+    turn = claude_live.Turn(None, None, None, contextvars.copy_context(), stopped=True)
+    said = AssistantMessage(content=[TextBlock("…")], model="m")
+    ended = ResultMessage("success", 1, 1, False, 1, "s")
+    for message in (said, ended):
+        turn.queue.put_nowait(message)
+    assert await session.outcome(turn) is ended
+    session.left = turn
+    turn.queue.put_nowait(None)  # the process ended
+    assert await session.outcome(turn) is None and session.left is None
+    turn.queue.put_nowait(None)  # and another's result is the one owed now
+    session.left = other = claude_live.Turn(None, None, None, contextvars.copy_context())
+    assert await session.outcome(turn) is None and session.left is other
+
+
+async def test_a_background_run_wakes_only_the_requests_still_waiting_for_an_attempt() -> None:
+    """A request that stopped waiting for its run's next attempt (cancelled with the
+    session's close) is passed over when the run wakes those that wait."""
+    from types import SimpleNamespace
+
+    loop = asyncio.get_running_loop()
+    gone, waiting = loop.create_future(), loop.create_future()
+    gone.cancel()
+    found: Any = SimpleNamespace(_waiting=[gone, waiting])
+    claude_live.Background._woken(found)
+    assert waiting.result() is None and found._waiting == []
+
+
+async def test_a_turn_resumed_on_another_worker_leaves_the_first_its_background_subagent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The turn that started a background subagent (kept going by worker 1's live session)
+    paused, and is resumed on worker 2, which shares the run store: the turn's own work goes
+    on there, in a process of its own that forks the session (``fork_session``) — never a
+    second process on the session worker 1's still holds — and the subagent stays with worker
+    1, its run open: worker 2 does not end it as one the earlier attempt left open, whatever
+    its own process knows (the run's journal says it was handed on)."""
+    from trellis.harness.bridges import helpers
+
+    refunds.clear()
+    script = [BACKGROUND, {"tool": "refund", "args": {"order": "o9"}}, {"text": "done"}]
+    target = options(tmp_path, [script])
+    store = LocalRuns()
+    one, two = Harness(config=Settings(), runs=store), Harness(config=Settings(), runs=store)
+    try:
+        first = arm(one.wrap(target, id="bg"), [refund])
+        second = arm(two.wrap(target, id="bg"), [refund])
+        paused = await first.run("research, then refund o9", user="u1", thread="t1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        live = live_of(first)
+        assert live is not None and list(live.working) == ["t1"]  # at work on worker 1
+        # worker 2 is another process: nothing worker 1 keeps in memory is known there
+        monkeypatch.setattr(helpers, "_DETACHED", set(), raising=False)
+        done = await second.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+        assert refunds == ["o9"]
+        held, resumed = served(tmp_path)
+        assert resumed["pid"] != held["pid"] and alive(held["pid"])
+        assert (
+            resumed["started_resuming"] == held["session"] and "--fork-session" in resumed["argv"]
+        )
+        assert resumed["session"] != held["session"]  # a fork: worker 1's session is its own
+        assert list(live.working) == ["t1"] and not live.closed  # still at work on worker 1
+        child = await child_of(one, paused.run_id)
+        assert child.status is RunStatus.RUNNING, (child.status, child.error)
+        (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+        assert (await when(one, child.run_id, RunStatus.SUCCESS)).output == "the market is growing"
+    finally:
+        await one.aclose()
+        await two.aclose()
+
+
 async def test_the_main_agents_own_call_with_no_turn_is_still_refused(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -1495,6 +1942,52 @@ async def test_closing_the_harness_closes_every_session_and_its_process(tmp_path
     assert open_sessions(agent) == 0
     assert all(s is not None and s.closed and s.client._query is None for s in sessions)
     assert not any(alive(pid) for pid in pids)  # no process is left behind
+
+
+async def test_closing_the_harness_ends_every_process_and_part_even_when_the_run_store_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A session's close ends the background run that waits for a person (cancelled in the
+    run store) before it ends its CLI: a run store that fails then (agent-runs unreachable)
+    still leaves no process behind, and the harness still closes every other part — the
+    queued writes, the spans, the MCP sources, its clients — before it raises that error
+    (the first; any other is logged)."""
+    from trellis.harness import telemetry
+
+    store = LocalRuns()
+    harness = Harness(config=Settings(), runs=store)
+    scripts = [[BACKGROUND, {"text": "started it"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="closing")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    (tmp_path / "tasks" / "t1.call").write_text(json.dumps(touch))
+    await when(harness, child.run_id, RunStatus.PAUSED)  # its call waits for a person
+    [one] = served(tmp_path)
+
+    async def unreachable(*args: Any, **kwargs: Any) -> Any:
+        raise ConnectionError("agent-runs is unreachable")
+
+    monkeypatch.setattr(store, "cancel", unreachable)
+    closed: list[str] = []
+    writes = harness.writes.aclose
+    monkeypatch.setattr(harness.writes, "aclose", lambda: (closed.append("writes"), writes())[1])
+
+    async def unexported() -> None:
+        closed.append("spans")
+        raise RuntimeError("the collector is gone")
+
+    monkeypatch.setattr(telemetry, "flush", unexported)
+    try:
+        with pytest.raises(ConnectionError, match="unreachable"):
+            await harness.aclose()
+        assert closed == ["writes", "spans"]  # the rest was closed all the same
+        assert "closing the harness: the collector is gone" in caplog.text
+        await until(lambda: not alive(one["pid"]))
+        assert open_sessions(agent) == 0
+    finally:
+        if alive(one["pid"]):
+            os.kill(one["pid"], signal.SIGKILL)
 
 
 async def test_another_users_thread_of_the_same_name_has_a_session_of_its_own(

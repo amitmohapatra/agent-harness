@@ -144,8 +144,9 @@ class Save(BaseModel):
     dumped: dict[str, Any]
 
 
-#: The keys of the recorded answers read in this context, while :func:`answers_read` watches.
-_READ: ContextVar[list[str] | None] = ContextVar("trellis_answers_read", default=None)
+#: The tool calls whose approval a person answered, read in this context while
+#: :func:`approvals_read` watches.
+_APPROVED: ContextVar[list[ToolCall] | None] = ContextVar("trellis_approvals_read", default=None)
 #: The call the code running now decides or runs (its key): :meth:`Replay.calling`.
 _CALLING: ContextVar[str | None] = ContextVar("trellis_calling", default=None)
 #: That call's identity, as its framework names it (its call id): :meth:`Replay.calling`.
@@ -159,17 +160,27 @@ def calling_ident() -> str | None:
 
 
 @contextlib.contextmanager
-def answers_read() -> Iterator[list[str]]:
-    """The keys of the recorded answers (:meth:`Replay.answer`) the code it holds reads,
-    tasks it starts included: whether a person was answered about what that code decided —
-    whatever asked them (a catalog rule, a hook's ``Ask``, a rule about the arguments a hook
-    rewrote), however the question's key was made."""
-    read: list[str] = []
-    token = _READ.set(read)
+def approvals_read() -> Iterator[list[ToolCall]]:
+    """The tool calls whose approval (``Runtime.approve``: governance's question about a call)
+    the code it holds read a person's recorded answer to, tasks it starts included: whether a
+    person approved — or denied — the call that code decided, whatever made governance ask (a
+    catalog rule, a hook's ``Ask``, a rule about the arguments a hook rewrote), the call as
+    asked about. Any other question answered meanwhile (a hook's own ``ask``, ``ask_user``, a
+    form) is no answer about a call, and is not among them."""
+    read: list[ToolCall] = []
+    token = _APPROVED.set(read)
     try:
         yield read
     finally:
-        _READ.reset(token)
+        _APPROVED.reset(token)
+
+
+def approval_read(call: ToolCall) -> None:
+    """A person's recorded answer to the approval of ``call`` was read: for
+    :func:`approvals_read`."""
+    watching = _APPROVED.get()
+    if watching is not None:
+        watching.append(call)
 
 
 def content_key(kind: str, *parts: Any) -> str:
@@ -277,6 +288,11 @@ class Journal(BaseModel):
     started: dict[str, int] = Field(default_factory=dict)
     #: the journals of the sub-agents' runs working inside the run's tool calls now, by run id
     children: dict[str, Journal] = Field(default_factory=dict)
+    #: the runs of the helpers handed on past the attempt that started them (a Claude subagent
+    #: its conversation's live session keeps at work in the background:
+    #: ``bridges.helpers.Helpers.detached``): whoever keeps each going ends it, never a later
+    #: attempt — on any worker
+    handed_on: list[str] = Field(default_factory=list)
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
@@ -568,9 +584,6 @@ class Replay:
             self._moved(f"a:{key}")
             self._seen[f"a:{key}"] = index + 1
             self._mark("a", key, index, self._here())
-            watching = _READ.get()
-            if watching is not None:  # :func:`answers_read`
-                watching.append(key)
             return InterruptResolution.model_validate(recorded[index])
         return None
 

@@ -41,6 +41,8 @@ it (``client.query``) instead of into a new process that resumes the session.
   own: a prompt is sent only once the result of the one before came, and no turn of the
   session's own is seen under way (:meth:`LiveSession.settled`).
 * **Spending.** A result's cost is the process's running total; its usage is the turn's own.
+  A turn left before its result is charged that result when it comes at once (interrupted:
+  :meth:`LiveSession.outcome`); never the conversation's next turn.
   What the cost grew by since the last result charged (:meth:`LiveSession.charged`) is
   shared by the tokens each used: the turn the result ends its own usage, each background
   run what its subagent's replies used since (the share of a turn the session injected
@@ -73,8 +75,7 @@ from trellis.contracts import Interrupt, InterruptResolution, RunStatus
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges import helpers
-from trellis.harness.bridges.claude import JournalSessions
+from trellis.harness.bridges.claude import JournalSessions, ours
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
 
@@ -155,6 +156,8 @@ class Turn:
     listening: bool = False
     #: its own result came
     answered: bool = False
+    #: it was left before its result and the CLI's turn interrupted: its result comes at once
+    stopped: bool = False
     calls: set[asyncio.Task[Any]] = dataclasses.field(default_factory=set)
 
     async def within[T](self, work: Coroutine[Any, Any, T]) -> T:
@@ -325,10 +328,14 @@ class Background:
         if self.turn is not None:
             self.turn.queue.put_nowait(None)
         elif self._answer is not None and not self._answer.done():
-            with contextlib.suppress(ConflictError):  # it ended meanwhile
-                await self.agent.harness.runs.cancel(self.run_id, reason=why, tenant=self.tenant)
-            if self._answer is not None and not self._answer.done():
-                self._answer.set_result(None)
+            try:
+                with contextlib.suppress(ConflictError):  # it ended meanwhile
+                    await self.agent.harness.runs.cancel(
+                        self.run_id, reason=why, tenant=self.tenant
+                    )
+            finally:  # it waits no more, whether or not the run store took the cancel
+                if self._answer is not None and not self._answer.done():
+                    self._answer.set_result(None)
 
     def cancel(self, reason: str) -> None:
         """The run cancelled with the run that started it: its attempt under way as
@@ -574,6 +581,9 @@ class LiveSession:
         self.error: BaseException | None = None
         #: the process's running cost as the last charged result carried it
         self.billed = 0.0
+        #: the turn left before its own result (paused, cancelled): the result that comes
+        #: next is its own, what it spent its run's — never the conversation's next turn's
+        self.left: Turn | None = None
         #: where the conversation's session is kept for a turn with no live one
         #: (``Agent.sessions``), once a turn was served
         self.kept_in: LRU[str, Any] | None = None
@@ -621,8 +631,9 @@ class LiveSession:
                 dataclasses.replace(
                     matcher,
                     hooks=[self._hook(event, m, c) for c in range(len(matcher.hooks))],
-                    # a background run's call may wait for a person in its hook
-                    timeout=matcher.timeout or HOOK_SECONDS,
+                    # a background run's call may wait for a person in the harness's hooks;
+                    # a team's keep what they set (none: Claude Code's own default)
+                    timeout=HOOK_SECONDS if ours(matcher) else matcher.timeout,
                 )
                 for m, matcher in enumerate(matchers)
             ]
@@ -670,18 +681,22 @@ class LiveSession:
 
     def _noted(self, event: str, given: Any, answer: Any, found: Background) -> None:
         """Whose a harness tool's call is, once its hook let it through (the call itself
-        comes with no word of who makes it: :meth:`_call`); forgotten when a hook refused
-        it, and once it ran."""
+        comes with no word of who makes it: :meth:`_call`), with the arguments Claude Code
+        makes it with — a hook's ``updatedInput`` over those it was given; forgotten when a
+        hook refused it, and once it ran."""
         from trellis.harness.tools.convert.claude import SERVER
 
         name, ref = str(given.get("tool_name") or ""), str(given.get("tool_use_id") or "")
         if not name.startswith(f"mcp__{SERVER}__"):
             return
-        said = answer.get("hookSpecificOutput") if isinstance(answer, dict) else None
-        decided = (said or {}).get("permissionDecision")
+        said = (answer.get("hookSpecificOutput") if isinstance(answer, dict) else None) or {}
+        decided = said.get("permissionDecision")
         if event == "PreToolUse" and decided == "allow":
-            args = dict(given.get("tool_input") or {})
-            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), args, found)
+            kept = self._calling.get(ref)
+            args = said.get("updatedInput") or (
+                kept[1] if kept is not None else dict(given.get("tool_input") or {})
+            )
+            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), dict(args), found)
         elif event != "PreToolUse" or decided == "deny":
             self._calling.pop(ref, None)
 
@@ -717,7 +732,7 @@ class LiveSession:
         if found is not None:
 
             async def made(at: Turn) -> dict[str, Any]:
-                return await convert.handler(at.tools, name)(args)
+                return await _handler(at, name)(args)
 
             answer = await found.asked(made)
             if answer is not _OVER:
@@ -779,6 +794,10 @@ class LiveSession:
             turn.answered = result
             charged = self.charged(message, own=own, taken=True) if result else message
             turn.queue.put_nowait(charged)
+        elif result and own and self.left is not None:  # the result of the turn left
+            left, self.left = self.left, None
+            left.answered = True
+            left.queue.put_nowait(self.charged(message, own=own, taken=True))
         else:
             if result:
                 self.charged(message, own=own, taken=False)
@@ -835,7 +854,6 @@ class LiveSession:
         (an interrupt would stop every task of the session), and what it asks until it ends
         is refused."""
         self.sessions.attended.pop(found.run_id, None)
-        helpers.released(found.run_id)
         if found.ended is not None:
             self.background.pop(found.task_id, None)
         elif not self.closed:
@@ -903,8 +921,14 @@ class LiveSession:
             self._detach(turn)
             # an interrupt stops the background work too (the CLI's own rule): with any
             # under way, the turn ends at its next tool call instead (:meth:`_ends`)
-            if left and not self.closed and not self.working:
+            turn.stopped = left and not self.closed and not self.working
+            if turn.stopped:
                 self._aside_run(self._interrupt())
+            # its result, when it comes, is its own (:meth:`outcome`); one that comes after
+            # its run went on with a pause is the resumed attempt's, as a process's that
+            # resumes the session
+            if left and not self.closed and (turn.stopped or turn.runtime.pending is None):
+                self.left = turn
             # the calls it left under way end with it (cancelled above), as a query's own
             # process ends its calls when it is closed: what one says as it ends (a helper's
             # run: ``helper_finished``) is on the run's stream before the run's end
@@ -913,6 +937,7 @@ class LiveSession:
 
     def _attach(self, turn: Turn) -> None:
         self.turn = turn
+        self.left = None  # its result came (:meth:`settled`), or never will
         self.kept_in = turn.runtime.agent.sessions
         if self._timer is not None:
             self._timer.cancel()
@@ -944,6 +969,27 @@ class LiveSession:
         if not self.closed:
             self._rested = asyncio.get_running_loop().time()
             self._rest()
+
+    async def outcome(self, turn: Turn) -> Any:
+        """The result of the CLI's turn ``turn`` left before it, charged to it
+        (:meth:`charged`), when it comes at once: it came already, or the turn was
+        interrupted (:attr:`Turn.stopped`) — waited for :data:`SETTLE_SECONDS` at most.
+        ``None`` otherwise: with background work under way the CLI's turn ends at its next
+        tool call, after the run went on (a pause: its resumed attempt is charged it, as a
+        process's that resumes the session is) or ended (cancelled: no run is charged what
+        it spent past then — the run's record is final — and the next turn is not)."""
+        from claude_agent_sdk import ResultMessage
+
+        if not (turn.answered or turn.stopped):
+            return None
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(SETTLE_SECONDS):
+                while (message := await turn.queue.get()) is not None:
+                    if isinstance(message, ResultMessage):
+                        return message
+        if self.left is turn:
+            self.left = None
+        return None
 
     async def settled(self) -> bool:
         """Whether the session can take a prompt: the result of the one before came, and no
@@ -1027,7 +1073,8 @@ class LiveSession:
     async def close(self) -> None:
         """The process ended (its stdin closed; stopped if it does not end) and its reader
         with it; the conversation's session kept, with all that was mirrored, for a turn that
-        resumes it."""
+        resumes it. The process ends whatever its background runs' ends meet (a run store
+        that cannot be reached): the first such error is raised once it has."""
         if self.closed:
             return
         self.closed = True
@@ -1035,25 +1082,32 @@ class LiveSession:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        turn = self.turn
-        if turn is not None:
-            turn.queue.put_nowait(None)
+        for turn in (self.turn, self.left):
+            if turn is not None:
+                turn.queue.put_nowait(None)
         runs = list(self.background.values())
-        for found in runs:  # each ends saying why
-            await found.abandoned(LOST.format(why=self.why))
-        kept = None if self.kept_in is None else self.kept_in.get(self.key)
-        if self.mirror is not None and kept is not None and kept[0] == self.session_id:
-            assert self.kept_in is not None
-            self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts))
-        current = asyncio.current_task()
-        for task in (self._reader, *self._aside):
-            if task is not None and task is not current:
-                task.cancel()
-        if self.client is not None:
-            with contextlib.suppress(Exception):
-                await self.client.disconnect()
+        try:  # each ends saying why
+            ended = await asyncio.gather(
+                *(found.abandoned(LOST.format(why=self.why)) for found in runs),
+                return_exceptions=True,
+            )
+        finally:
+            kept = None if self.kept_in is None else self.kept_in.get(self.key)
+            if self.mirror is not None and kept is not None and kept[0] == self.session_id:
+                assert self.kept_in is not None
+                self.kept_in[self.key] = (kept[0], dict(self.mirror.transcripts))
+            current = asyncio.current_task()
+            for task in (self._reader, *self._aside):
+                if task is not None and task is not current:
+                    task.cancel()
+            if self.client is not None:
+                with contextlib.suppress(Exception):
+                    await self.client.disconnect()
         if runs:
             await asyncio.wait({found.task for found in runs})
+        failed = next((e for e in ended if isinstance(e, BaseException)), None)
+        if failed is not None:
+            raise failed
 
 
 class LiveSessions:
@@ -1116,9 +1170,39 @@ class LiveSessions:
             await session.close()
 
     async def aclose(self) -> None:
-        """Every session closed: the harness is closing."""
+        """Every session closed: the harness is closing. Each is closed whatever another's
+        close meets; the first error is raised once all are."""
         sessions, self._open = list(self._open.values()), {}
-        await asyncio.gather(*(s.close() for s in sessions))
+        closed = await asyncio.gather(*(s.close() for s in sessions), return_exceptions=True)
+        failed = next((e for e in closed if isinstance(e, BaseException)), None)
+        if failed is not None:
+            raise failed
+
+
+def _handler(at: Turn, name: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """The harness tool ``name`` a background subagent's call runs in ``at``, its run's
+    attempt: the one its run's own server lists — or, one the process lists that its run was
+    not offered (the hints narrow each run by its own task), made of its run's tool set and
+    offered to it now: the subagent was offered what the process lists."""
+    from trellis.harness.tools.convert import claude as convert
+
+    if convert.lists(at.tools, name):
+        return convert.handler(at.tools, name)
+    found = at.runtime.toolbox.get(name)
+    if found is None:
+        return _unknown(name)
+    at.runtime.offer([name])
+    return convert.tool_handler(found)
+
+
+def _unknown(name: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
+    """What a call of a tool its run does not have is answered."""
+
+    async def refused(args: dict[str, Any]) -> dict[str, Any]:
+        said = f"{name} is not a tool of this run: it was not run"
+        return {"content": [{"type": "text", "text": said}], "is_error": True}
+
+    return refused
 
 
 async def _apart[T](work: Awaitable[T]) -> T:

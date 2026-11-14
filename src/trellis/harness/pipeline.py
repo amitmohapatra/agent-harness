@@ -303,7 +303,7 @@ async def _attempt(
         remaining = job.remaining_seconds
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
-    continued = _continued_session(agent, identity, journal, record.attempt, parent)
+    continued = await _continued_session(agent, identity, journal, record.attempt, parent)
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
     events = _emitter(agent, identity, record.attempt, listener, job)
@@ -392,22 +392,56 @@ async def _attempt(
     return result
 
 
-def _continued_session(
+async def _continued_session(
     agent: Agent, identity: Identity, journal: Journal, attempt: int, parent: Runtime | None
 ) -> bool:
     """A conversation's turn on a target that keeps a session of its own (``Adapter.sessions``:
     the Claude Agent SDK's, an ACP agent's) continues the one its framework kept for the
     conversation's last turn in this process (``Agent.sessions``): its first attempt starts
     with that session in its journal — the journal's own session path, as a resume after a
-    pause takes it. Whether it does."""
-    if not agent.adapter.sessions or parent is not None or attempt != 1 or journal.session:
+    pause takes it — unless another worker served a turn of the conversation since
+    (:func:`_served_elsewhere`): the session kept here, which never saw that turn, is
+    dropped, and the turn starts a new one, as on a worker that kept none. Whether it does."""
+    if not agent.adapter.sessions or parent is not None or identity.conversation == identity.run_id:
         return False
-    kept = agent.sessions.get(identity.conversation)
+    conversation, mine = identity.conversation, agent.turned.get(identity.conversation)
+    agent.turned[conversation] = identity.run_id  # the latest turn this process served
+    if attempt != 1 or journal.session:
+        return False
+    kept = agent.sessions.get(conversation)
     if kept is None:
+        return False
+    if mine is not None and await _served_elsewhere(agent, identity, mine):
+        agent.sessions.pop(conversation)
         return False
     journal.session, transcripts = kept
     journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}
     return True
+
+
+async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool:
+    """Whether a turn of the conversation was started after ``mine`` — the latest this
+    process served — and not here: by another worker, whose framework session this
+    process's never saw (the run store's turns of the thread, of this user and agent; a
+    queued one has not started yet)."""
+    runs, tenant = agent.harness.runs, identity.tenant
+    served = await runs.get(mine, tenant=tenant)
+    if served is None:
+        return False
+    async for summary in runs.iterate(
+        thread_id=identity.thread, agent_id=identity.agent_id, tenant=tenant, max_pages=1
+    ):
+        if summary.run_id in (mine, identity.run_id) or summary.status is RunStatus.QUEUED:
+            continue
+        turn = await runs.get(summary.run_id, tenant=tenant)
+        if (
+            turn is not None
+            and turn.parent_run_id is None
+            and turn.user_id == identity.user
+            and turn.created_at > served.created_at
+        ):
+            return True
+    return False
 
 
 def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:

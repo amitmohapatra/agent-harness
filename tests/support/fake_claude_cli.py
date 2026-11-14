@@ -88,6 +88,7 @@ were seen from the bundled CLI driven against a scripted model; no real model wa
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -106,7 +107,8 @@ SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir())
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
 #: How the harness begins the prompt that asks for one last answer at the turn limit
-#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool.
+#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool
+#: — unless ``FAKE_CLAUDE_AT_LIMIT_CALLS`` is a step it makes first (its answer: that call's result).
 LIMIT_PROMPT = "This turn has reached its limit"
 #: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
 #: without asking, and the turn's result carries what it was given (``structured_output``).
@@ -152,6 +154,27 @@ def argument(name: str) -> str | None:
     args = sys.argv[1:]
     joined = [a.split("=", 1)[1] for a in args if a.startswith(f"{name}=")]
     return joined[0] if joined else args[args.index(name) + 1] if name in args else None
+
+
+def replaced(path: str, data: Any) -> None:
+    """``path`` holds ``data`` (JSON) whole: written beside it, then put in its place — a
+    test, or another process of the stand-in, never reads it half written."""
+    part = f"{path}.{os.getpid()}.part"
+    with open(part, "w") as handle:
+        json.dump(data, handle)
+    os.replace(part, path)
+
+
+def appended(path: str, data: Any) -> None:
+    """``data`` (JSON) a line of ``path``, under a lock on it: the stand-in's processes that
+    run at once (a matrix cell's runs) each write whole lines."""
+    with open(path, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            handle.write(json.dumps(data) + "\n")
+            handle.flush()
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def plugins() -> dict[str, dict[str, str]]:
@@ -200,6 +223,8 @@ class Cli:
         self.in_turn = False
         #: how many of those steps subagents took: a result's usage is the main thread's own
         self.helped = 0
+        #: what the process exits with when its input ends: 1 once a turn ended at a limit
+        self.status = 0
         #: the structured answer the turn under way gave (:data:`STRUCTURED`)
         self.structured: dict[str, Any] | None = None
         #: the steps the session took before this process resumed it: a result's cost is
@@ -526,8 +551,7 @@ class Cli:
                 added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
                 record = os.environ.get("FAKE_CLAUDE_RECORD")
                 if added and record:
-                    with open(f"{record}.added", "a") as handle:
-                        handle.write(json.dumps(added) + "\n")
+                    appended(f"{record}.added", added)
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -626,8 +650,7 @@ class Cli:
         )
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:  # what the SDK answered, as the CLI reads it
-            with open(f"{record}.permissions", "a") as handle:
-                handle.write(json.dumps({"tool": name, "answer": answered}) + "\n")
+            appended(f"{record}.permissions", {"tool": name, "answer": answered})
         return answered
 
     def resumes(self) -> str | None:
@@ -682,10 +705,7 @@ class Cli:
         state = json.loads(kept.read_text())
         done, turn = state["done"], state.get("turn", 0)
         if str(prompt).startswith(LIMIT_PROMPT):  # one last answer, no tool
-            said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
-            self.steps += 1
-            send(assistant(session, [{"type": "text", "text": said}]))
-            send(self.ended(session, last=said, turns=1))
+            self.at_limit(session, turn, context)
             return
         if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
             done, turn = 0, turn + 1  # the conversation's next turn, in the same session
@@ -702,6 +722,19 @@ class Cli:
             send(self.ended(session, "Request interrupted by user"))
         finally:
             self.in_turn = self.stopping = False
+
+    def at_limit(self, session: str, turn: int, context: str) -> None:
+        """The one last answer at the turn limit: ``FAKE_CLAUDE_AT_LIMIT``, no tool — or a
+        "model" that calls ``FAKE_CLAUDE_AT_LIMIT_CALLS`` all the same, then says what it
+        was told."""
+        called = os.environ.get("FAKE_CLAUDE_AT_LIMIT_CALLS")
+        if called:
+            self.played(session, [json.loads(called), {"text": "{last}"}], 0, turn, context)
+            return
+        said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
+        self.steps += 1
+        send(assistant(session, [{"type": "text", "text": said}]))
+        send(self.ended(session, last=said, turns=1))
 
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""
@@ -731,37 +764,33 @@ class Cli:
         record = os.environ.get("FAKE_CLAUDE_RECORD")
         if record:
             servers = json.loads(argument("--mcp-config") or "{}").get("mcpServers", {})
-            with open(record, "w") as handle:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "session": session,
-                        "started_resuming": argument("--resume"),
-                        "system_prompt": argument("--system-prompt"),
-                        "allowed_tools": argument("--allowedTools"),
-                        "mcp_config": argument("--mcp-config"),
-                        "tools": self.listed() if SERVER in servers else [],
-                        "permission_prompt_tool": argument("--permission-prompt-tool"),
-                        "resume": argument("--resume") if first else None,
-                        "prompt": prompt,
-                        "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
-                        "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
-                        "context": context,
-                        "materialised": mirrored(session) is not None,
-                        "earlier": earlier,
-                        "disallowed_tools": argument("--disallowedTools"),
-                        "builtins": argument("--tools"),
-                        "max_turns": argument("--max-turns"),
-                        "plugins": plugins(),
-                        "argv": sys.argv[1:],
-                        "cwd": os.getcwd(),
-                        "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
-                        "initialize": self.initialized,
-                    },
-                    handle,
-                )
-            with open(record) as written, open(f"{record}.turns", "a") as turns:
-                turns.write(json.dumps(json.load(written)) + "\n")
+            said = {
+                "pid": os.getpid(),
+                "session": session,
+                "started_resuming": argument("--resume"),
+                "system_prompt": argument("--system-prompt"),
+                "allowed_tools": argument("--allowedTools"),
+                "mcp_config": argument("--mcp-config"),
+                "tools": self.listed() if SERVER in servers else [],
+                "permission_prompt_tool": argument("--permission-prompt-tool"),
+                "resume": argument("--resume") if first else None,
+                "prompt": prompt,
+                "custom_headers": os.environ.get("ANTHROPIC_CUSTOM_HEADERS"),
+                "max_mcp_output_tokens": os.environ.get("MAX_MCP_OUTPUT_TOKENS"),
+                "context": context,
+                "materialised": mirrored(session) is not None,
+                "earlier": earlier,
+                "disallowed_tools": argument("--disallowedTools"),
+                "builtins": argument("--tools"),
+                "max_turns": argument("--max-turns"),
+                "plugins": plugins(),
+                "argv": sys.argv[1:],
+                "cwd": os.getcwd(),
+                "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
+                "initialize": self.initialized,
+            }
+            replaced(record, said)
+            appended(f"{record}.turns", said)
 
     def played(
         self, session: str, script: list[dict[str, Any]], done: int, turn: int, context: str
@@ -776,11 +805,10 @@ class Cli:
             ended = stopped(turns, self.steps, limit, cap)
             if ended is not None:  # what the real CLI ends with
                 send(self.ended(session, ended[0], subtype=ended[1]))
-                if ended[1] in (
-                    "error_max_turns",
-                    "error_max_budget_usd",
-                ):  # and exits 1, as it does
-                    sys.exit(1)
+                # and exits 1 once its input ends, as it does; a process kept for more turns
+                # (the SDK's client: its input stays open) goes on, its next prompt answered (the
+                # bundled CLI, driven against a scripted model)
+                self.status = 1
                 return
             self.steps += 1
             self.denied = False
@@ -867,8 +895,7 @@ class Cli:
             given = permission.get("updatedInput", args)
             briefs = os.environ.get("FAKE_CLAUDE_BRIEFS")
             if briefs:  # what the subagent was given, the hooks' updates included
-                with open(briefs, "a") as log:
-                    log.write(json.dumps({"agent": one["agent"], "prompt": given["prompt"]}) + "\n")
+                appended(briefs, {"agent": one["agent"], "prompt": given["prompt"]})
             who = {"agent_id": f"agent_{tool_id}", "agent_type": one["agent"]}
             subs.append({"item": one, "tool_id": tool_id, "who": who, "args": given, "last": ""})
         if not subs:
@@ -1011,8 +1038,7 @@ class Cli:
         if allowed and builtin == STRUCTURED:
             self.structured = ran
         if allowed and builtin:
-            with open(os.environ["FAKE_CLAUDE_BUILTINS"], "a") as log:
-                log.write(json.dumps({"tool": builtin, "args": ran}) + "\n")
+            appended(os.environ["FAKE_CLAUDE_BUILTINS"], {"tool": builtin, "args": ran})
             failure = item.get("fails")
             error = failure is not None
             text = f"{builtin} failed: {failure}" if error else f"{builtin} ran"
@@ -1257,7 +1283,7 @@ def main() -> None:
             continue
         message = read(timeout=0.02 if cli.tasks else None)
         if message is None:
-            return
+            sys.exit(cli.status)
         if message is NOTHING:
             cli.triggers()
             continue

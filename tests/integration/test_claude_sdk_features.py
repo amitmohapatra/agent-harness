@@ -560,6 +560,37 @@ async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_i
 
 
 @pytest.mark.parametrize("path", PATHS)
+async def test_a_question_a_hook_asks_while_a_call_is_decided_is_no_approval_of_that_call(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Only a person's answer to the approval of the call itself spares it Claude Code's own
+    question (one call, one question). A run hook that asks a person something else while
+    the call is decided (``trellis.current().ask``: a ticket number) approves nothing: the
+    write Claude Code asks about is still asked about, and does not run until approved."""
+
+    class Ticket(Hooks):
+        async def before_tool(self, call: ToolCall) -> None:
+            runtime = current()
+            if call.tool == "Bash" and runtime is not None:
+                await runtime.ask("Which ticket is this change for?")
+
+    touch = {"builtin": "Bash", "args": {"command": "touch notes.txt"}}
+    agent = harness.wrap(options(tmp_path, [touch, {"text": "{last}"}]), id="ticketed",
+                         hooks=[Ticket()])  # fmt: skip
+    asked = await agent.run("touch it", user="u1", thread=conversation(path))
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.tool_call is None  # the hook's question
+    approval = await agent.resume(asked.interrupt.interrupt_id, "approve", answer="T-1",
+                                  reviewer="u1")  # fmt: skip
+    assert lines(tmp_path / "builtins.jsonl") == [], "Bash ran without anyone approving it"
+    assert approval.status is RunStatus.PAUSED and approval.interrupt is not None
+    assert "Claude Code asks" in approval.interrupt.question  # its own question, asked
+    done = await agent.resume(approval.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Bash ran"
+    assert [c["args"] for c in lines(tmp_path / "builtins.jsonl")] == [touch["args"]]
+
+
+@pytest.mark.parametrize("path", PATHS)
 async def test_claudes_own_bookkeeping_and_its_structured_answer_ask_nobody(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:

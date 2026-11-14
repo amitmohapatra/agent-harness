@@ -111,8 +111,11 @@ the user Claude Code would ask:
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
   would send.
-* **One call, one question.** A call a person answered about before it ran (governance's
-  question, a hook's `Ask`) is not asked about again when Claude Code asks too: it runs.
+* **One call, one question.** A call whose approval a person answered before it ran
+  (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
+  about again when Claude Code asks too: it runs. Another question answered while the call
+  was decided (a hook's own `trellis.current().ask(...)`, `ask_user`, a form) approves
+  nothing: Claude Code's own question about the call is still asked.
 * **Your own `can_use_tool`** answers what Claude Code asks, as without the harness: it is
   asked when Claude Code would ask its user, after your hooks and governance, with the
   arguments as they were decided (a call a hook rewrote is asked about as rewritten) and
@@ -134,7 +137,7 @@ the user Claude Code would ask:
 | Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it the run answers once more (its session resumed, told the limit is reached, one turn and no tool), as `ReAct` does at `max_steps` (a `step_limit` warning) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it the run answers once more (its session resumed, told the limit is reached, one turn and no tool; in a conversation's live session, a turn of that session whose tool calls are refused), as `ReAct` does at `max_steps` (a `step_limit` warning) |
 
 ## Native or ours: skills, prompts, sandbox
 
@@ -278,8 +281,9 @@ turn the session runs by itself (a finished task's notification) is never a user
   its answer goes on to the subagent's run — approved or edited the call runs once,
   rejected the subagent reads why — then the turn's prompt is sent. A question nobody
   answers in 12 hours ends the run `CANCELLED` and stops the task (the CLI is told to
-  wait 24 hours for a hook, so it never gives the call up first: a hook it gives up on
-  fails the call, it does not run it).
+  wait 24 hours for the harness's own hooks, so it never gives the call up first: a hook
+  it gives up on fails the call, it does not run it). Your own hooks keep the timeout you
+  gave them — none, Claude Code's own default — as in a process of their own.
 * **Its limits** are the agent's own `run_timeout` and `budget`, as for a run nothing
   else bounds (the turn that started it has ended): its replies' tokens count as they
   come. Past either, and when the run is cancelled (`agent.cancel(child_run_id)`, the
@@ -292,7 +296,14 @@ turn the session runs by itself (a finished task's notification) is never a user
   work between two turns is charged to its run, and the next turn its own. The turn the
   session runs for a finished task is charged to that task's run, which waits for it (30
   seconds at most) before it ends. The shares are exact when every reply costs the same
-  per token, an estimate otherwise (another model, cached tokens).
+  per token, an estimate otherwise (another model, cached tokens). A turn left before its
+  result — paused, or cancelled — is charged what it spent until it stopped: interrupted
+  (nothing in the background) its result comes at once and is its own; with background
+  work under way the CLI's turn goes on to its next tool call, so the replies' tokens are
+  its own and the cost that result says is its resumed attempt's after a pause, and no
+  run's after a cancel (the run has ended) — never the conversation's next turn's. The
+  session's cost charged so far is in the run's journal from the turn's start, so an
+  attempt resumed on another worker is charged its own cost only.
 * Any other call made between two turns has no run, so nothing can check it (your hooks,
   governance, an approval, the budget) or record it: the main agent's own, in the turn
   the session runs for a finished task, is refused, and the conversation's next run says
@@ -312,6 +323,22 @@ turn the session runs by itself (a finished task's notification) is never a user
   too. With work under way the run ends at once and the CLI's turn at its next tool call
   (refused with the hook's `continue: false`, which leaves the work). The next message waits
   for that turn's result, 30 seconds at most; past that the process is replaced.
+* A turn that started a background subagent, paused, and is resumed on another worker goes
+  on there in a process of its own that forks the session (`fork_session`): the first
+  worker's process still holds the session, and the subagent works on in it, its run open —
+  the second worker does not end it as one the earlier attempt left open (the run's journal
+  says it was handed on).
+* A process kept for a conversation another worker has since served a turn of (the run
+  store has a later turn than the last one this server served) never answers its next turn:
+  it holds the conversation as it was. It is ended, and the turn starts a new session with
+  the conversation's turns as context, as on a server that kept none.
+* A later turn is served by the process when it brings the same options, hooks and tools
+  with the same schemas — not the same wording: a tool's description may change between
+  turns (`schedule_task` says the hour it is), and the process keeps the wording it listed
+  as it started (so `schedule_task` says the hour that process started in). Claude Code says
+  the date once a session (and again when the day changes), so each turn the process serves
+  is told the day and the hour it is with its prompt (the context hook's text, after
+  memory's), whatever time has passed since its first.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 per agent. It closes
@@ -321,8 +348,12 @@ turn the session runs by itself (a finished task's notification) is never a user
   (`Harness.aclose`). Background work that ends with it is said in the conversation's next
   run (`claude_session`), and a background subagent's run ends saying so; a restart loses
   it.
-* Not kept: a run with no `thread`, a sub-agent's run, the last answer at the turn limit, and
-  options with a `ClaudeSkills` plugin, an in-process MCP server of your own
+* The last answer at the turn limit of a turn the session served is asked in the session,
+  as its next turn (the process, its session and its background work go on: Claude Code's
+  process answers the next prompt after its `error_max_turns` result): told the limit is
+  reached, and every tool call it makes refused, since a live process keeps the tools it
+  started with.
+* Not kept: a run with no `thread`, a sub-agent's run, and options with a `ClaudeSkills` plugin, an in-process MCP server of your own
   (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn)
   or a budget of their own (`max_budget_usd`: Claude Code counts it for a process — in one
   that serves several turns the turn that passes it ends `error_max_budget_usd` and so does
