@@ -80,3 +80,31 @@ def test_a_run_not_yet_timed_records_no_seconds() -> None:
     said = [Said(Speaker.USER, "q"), Said(Speaker.ASSISTANT, "a")]
     out = pipeline._with_facts(said, runtime, RunStatus.SUCCESS)  # type: ignore[arg-type]
     assert out[-1].facts == {"status": "SUCCESS", "approvals": "none"}
+
+
+def test_each_decision_a_person_made_is_said_in_the_run_record() -> None:
+    from types import SimpleNamespace
+
+    from trellis.contracts import InterruptDecision as D
+    from trellis.contracts import RunStatus
+    from trellis.harness import pipeline
+    from trellis.harness.journal import Journal
+
+    journal = Journal()
+    journal.answers = {
+        "k1": [{"decision": D.APPROVE.value}, {"decision": D.EDIT.value}],
+        "k2": [{"decision": D.REJECT.value}, {"decision": D.ANSWER.value}],  # no decision
+        "k3": [{"decision": D.CANCEL.value}],
+    }
+    journal.approved = ["a"]
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=journal), started_at=None, fetched={}, toolbox={}, native={}
+    )
+    said = [Said(Speaker.USER, "q"), Said(Speaker.ASSISTANT, "a")]
+    out = pipeline._with_facts(said, runtime, RunStatus.CANCELLED)  # type: ignore[arg-type]
+    assert out[-1].facts == {
+        "status": "CANCELLED",
+        "approvals": "a tool call approved; a tool call approved with edits; "
+        "a tool call rejected; the run abandoned at a question; "
+        "a tool call approved in the framework's own gate",
+    }
