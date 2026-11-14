@@ -481,7 +481,9 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool
     async for summary in runs.iterate(
         thread_id=identity.thread, agent_id=identity.agent_id, tenant=tenant, max_pages=1
     ):
-        if summary.run_id in (mine, identity.run_id) or summary.status is RunStatus.QUEUED:
+        if summary.run_id == mine or summary.updated_at < served.created_at:
+            break
+        if summary.run_id == identity.run_id or summary.status is RunStatus.QUEUED:
             continue
         turn = await runs.get(summary.run_id, tenant=tenant)
         if (

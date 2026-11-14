@@ -34,6 +34,7 @@ import contextlib
 import dataclasses
 import functools
 import hashlib
+import itertools
 import logging
 from collections.abc import AsyncIterator, Sequence, Set
 from dataclasses import dataclass, field
@@ -205,9 +206,10 @@ async def earlier(
     figures behind its answer — for a follow-up ("why was that?", "redo it with X").
     ``budget``: the tokens they may take (``Agent.conversation_budget``), spent as the memory
     service spends its window's (:func:`_fitted`). ``held``: the message ids the caller has
-    of the conversation already (memory's window: ``Agent.caught_up``) — when the newest turn
-    is among them it lacks none, and none is read (the one listing, no run). A run with no
-    conversation of its own, or a child run, has none."""
+    of the conversation already (memory's window: ``Agent.caught_up``) — only the turns after
+    the newest one among them are read (one run each) and given, none when the newest is, or
+    when none of the listed turns is among them (nothing says where they would go). A run
+    with no conversation of its own, or a child run, has none."""
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
@@ -224,10 +226,11 @@ async def earlier(
         if summary.run_id != runtime.run_id and summary.status in ASKED
     ]
     conversation = runtime.conversation
-    if listed and not held.isdisjoint(
-        (question_id(conversation, listed[0]), answer_id(conversation, listed[0]))
-    ):
-        return []  # the newest turn (the listing's first) is one the caller holds
+    if held:  # newest first: the turns before the first one the caller holds are the newer
+        newer = list(
+            itertools.takewhile(lambda run_id: _lacking(held, conversation, run_id), listed)
+        )
+        listed = newer if len(newer) < len(listed) else []
     records = []
     for run_id in listed:
         record = await runs.get(run_id, tenant=tenant)
@@ -261,6 +264,11 @@ async def earlier(
             )
         previous = record if answer not in (None, "") else None
     return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
+
+
+def _lacking(held: Set[str], conversation: str, run_id: str) -> bool:
+    """Whether ``held`` has neither the question nor the answer of the turn ``run_id``."""
+    return held.isdisjoint((question_id(conversation, run_id), answer_id(conversation, run_id)))
 
 
 def _fitted(turns: Sequence[Sequence[Said]], budget: int) -> list[Sequence[Said]]:

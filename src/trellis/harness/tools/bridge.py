@@ -71,7 +71,7 @@ from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.clients.memory import Permissions, grants
 from trellis.harness.conversation import allowed, result_id
-from trellis.harness.events import DECISION, NOTICE
+from trellis.harness.events import DECISION, NOTICE, preview
 from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
 from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
@@ -318,7 +318,11 @@ async def observed(
     OpenAI agent's file search, web search, code interpreter: run inside the model's step),
     Claude Code's built-ins (after its ``PreToolUse`` decision, ``permitted``): on the run's
     stream, counted, traced with its duration (``started``: ``time.time()`` when it began) and
-    recorded in the memory service, as a harness call is. Nothing is run or journaled here."""
+    recorded in the memory service, as a harness call is. Nothing is run here. A call that
+    ended well is journaled, so that made again it is not run twice (:func:`permitted`): whole
+    while a subagent works in the foreground (``Helpers.begun_again``: started again after a
+    pause, it makes its calls again and reads their results), else as the stream previews it
+    (``events.preview``: bounded) — the transcript has the rest."""
     call = ToolCall(
         tool=spec.name, args=args, task=runtime.task, step=runtime.next_step(), idempotency_key=ref
     )
@@ -332,8 +336,12 @@ async def observed(
             span.set_status(StatusCode.ERROR, str(outcome.status.value))
     runtime.used.add(spec.name)
     if outcome.ok:  # made again (its framework begins that work again), it is not run twice
-        key = content_key("call", spec.name, args)
-        runtime.replay.record_call(key, journal_record(outcome), scope=key)
+        key, helpers = call_key(spec.name, args), runtime.helpers
+        replays = helpers is not None and helpers.begun_again() is not None
+        kept = (
+            outcome if replays else outcome.model_copy(update={"output": preview(outcome.output)})
+        )
+        runtime.replay.record_call(key, journal_record(kept), scope=key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)

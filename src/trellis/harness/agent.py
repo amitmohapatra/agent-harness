@@ -1202,24 +1202,19 @@ class Agent:
         returned (past :data:`TURN_WRITE_SECONDS`, queued), on whichever process ran it.
         Matched by message id — the window gives each chat message's back
         (``history.from_window``) — so a turn memory holds is never said twice: only the turns
-        after the newest one it holds are added (all the run store gives when the window is
-        empty), and none when the window names no turn the run store has (written before the
-        window gave ids back, another agent's). One listing of the run store a turn; its runs
-        are read only when its newest turn is not memory's newest. A run store that cannot be
-        read is a warning, and the window is as memory gave it."""
+        after the newest one it holds are read and added (all the run store gives when the
+        window is empty), and none when the window names no turn the run store has (written
+        before the window gave ids back, another agent's). One listing of the run store a
+        turn, and one run read for each turn memory lacks. A run store that cannot be read is
+        a warning, and the window is as memory gave it."""
         known = {s.id for s in window if s.id is not None}
         if window and not known:
             return window
         try:
-            turns = await conversation.earlier(runtime, budget=budget, held=known)
+            return [*window, *await conversation.earlier(runtime, budget=budget, held=known)]
         except Exception as exc:
             runtime.events.warning("earlier_turns", f"the conversation's earlier turns: {exc}")
             return window
-        held = [n for n, s in enumerate(turns) if s.id in known]
-        if window and not held:
-            return window
-        after = held[-1] + 1 if held else 0
-        return [*window, *(s for s in turns[after:] if s.id not in known)]
 
     def conversation_budget(self, runtime: Runtime) -> int | None:
         """The tokens the conversation memory replays may take: what the run's next request

@@ -336,18 +336,23 @@ async def test_scn4_the_turn_before_is_said_once_when_memory_has_caught_up(
 
 
 async def test_scn4_only_the_turns_memory_lacks_are_added_after_its_window(
-    kept: asyncio.Event,
+    kept: asyncio.Event, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Memory holds the first turn and not the second (its write still on its way): the third
     turn's window is memory's first turn, then the second from the run store — in the order
-    said, each once."""
+    said, each once — and only the second is read from the run store."""
     kept.set()
     async with Harness(config=Settings(), memory=_holding(FakeMemoryService(), kept)) as h:
         agent, model = _react(h, ["Noted.", "Fine.", "4242 and 9191."], "scn4c")
-        await agent.run("The locker code is 4242.", user="ada", thread="t1")
+        held = await agent.run("The locker code is 4242.", user="ada", thread="t1")
         kept.clear()
-        await agent.run("The gate code is 9191.", user="ada", thread="t1")
+        lacking = await agent.run("The gate code is 9191.", user="ada", thread="t1")
+        read = Mock(wraps=h.runs.get)
+        monkeypatch.setattr(h.runs, "get", read)
         await agent.run("Which codes?", user="ada", thread="t1")
+        turns_read = [call.args[0] for call in read.call_args_list]
+        # one run read for the turn memory lacks, none for the one it holds
+        assert turns_read.count(lacking.run_id) == 1 and held.run_id not in turns_read
         said = [m["content"] for m in model.requests[-1]["messages"][1:]]
         kept.set()
         assert [text for text in said if isinstance(text, str)][:4] == [

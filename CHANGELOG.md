@@ -209,6 +209,19 @@ cancelled ("the run that started it ended first") when it answered without them.
 on to its conversation's session (a Claude subagent working in the background) still goes on.
 One listing of the run's children at the end of every run.
 
+### Changed: what a turn costs the run store and the journal does not grow with the conversation
+
+- A call its framework ran itself (Claude Code's built-in tools, a provider's hosted tools, an
+  ACP agent's) is journaled as the stream previews its result (2,000 characters), not whole:
+  200 calls of 10 KB kept 2 MB in the journal and every pause checkpoint. Whole still while a
+  subagent works in the foreground — started again after a pause, it reads its calls' results
+  again (performance review, PERF-8).
+- Whether another server served a turn of the conversation since this one's last is read from
+  the newest runs only: two requests whatever the conversation's length, not one for each of
+  up to 50 turns (PERF-6).
+- The turns memory does not hold yet are read from the run store one run each; the turns it
+  holds are not read.
+
 ### Fixed: two failures a busy machine showed
 
 - **A wide table can be queried.** Typing a saved result asks every column whether a cell
