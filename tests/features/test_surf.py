@@ -179,7 +179,6 @@ async def test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_o
             done = decode(resumed.text)
             assert done[-1][1]["outcome"] == {"type": "success"}
             assert done[-1][1]["result"] == "Booked for friday."
-            # (its numbering starts again on this replica: H-AGUI, the strict xfail below)
             ended = await c.post(f"{one.url}/agui/runs/{run_id}/cancel", headers=identity(user))
             assert ended.status_code == 409  # it ended
     assert (await record(run_id)).status is RunStatus.SUCCESS
@@ -331,21 +330,7 @@ def test_doctor_finds_the_services_and_says_the_keys_tenant_and_role() -> None:
     assert (API_KEY or "x") not in said  # the key itself never
 
 
-#: H-AGUI (agent-harness, P2): the replica that serves an AG-UI run numbers its events itself
-#: (from 0, the interrupt folded into the finishing event), while a reconnect on another replica
-#: numbers them by agent-runs' log positions (from 1, the interrupt counted): after
-#: ``Last-Event-ID: 1`` the other replica sends again an event the client already has, and the
-#: ids of one run differ by replica, and an attempt resumed on another replica starts its
-#: numbering again — against docs/surfaces.md ("any replica resumes a
-#: stream", ids "those of the run's events").
-H_AGUI = (
-    "H-AGUI: AG-UI event ids differ between the serving replica and a reconnect on another "
-    "(own numbering from 0 vs agent-runs log positions)"
-)
-
-
 @pytest.mark.plan("SURF", "F62", "RUN-06")
-@pytest.mark.xfail(strict=True, reason=H_AGUI)
 async def test_agui_event_ids_are_the_same_on_every_replica(uid: str) -> None:
     agent_id, user, thread, run_id = f"ids-{uid}", f"hal-{uid}", f"t-{uid}", f"run_{uid}ids1"
     async with harness() as h1, harness() as h2:

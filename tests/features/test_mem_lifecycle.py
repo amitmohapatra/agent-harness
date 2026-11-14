@@ -118,29 +118,11 @@ async def test_a_fact_said_in_three_chats_is_one_fact_and_a_correction_replaces_
     assert "Rotterdam" not in memories or "earlier" in memories, memories
 
 
-#: BUG-M1 (agent-memory-service): a fact the rules read out of a user's own turn, relayed by
-#: the harness, is owned by ``agent:<user>/<agent>`` and ``said_by_a_person``
-#: (modules/memory/pipeline.py:358) only knows a ``user:`` owner or a ``said`` turn, so
-#: ``_require_owner`` (modules/memory/service.py:276) lets the agent forget or rewrite it:
-#: ``memory_forget`` runs unasked, against docs/memory.md ("what the user said ... after a
-#: person approves it").
-BUG_M1 = (
-    "BUG-M1: the user's extracted facts are not recognised as their own words "
-    "(memory-service pipeline.py:358); the agent forgets them without asking"
-)
 #: BUG-M2 (agent-memory-service, fixed on its branch claude/cool-maxwell-w5avo8-features): the
 #: user an agent acts for was refused forgetting what that agent relayed for them —
 #: ``_require_owner`` (modules/memory/service.py:288) accepted only the owner principal or
 #: ``user:<id>``, the owner being ``agent:<user>/<agent>`` (USAGE §4: "the memory's owner, the
 #: user an agent acts for, or a tenant admin"). These tests need that fix in the service.
-#: BUG-M3 (agent-memory-service): the inventory (GET /v1/memories, "what do we hold about
-#: this user?") lists memories anchored at the user's scope only, while ADR 0036 anchors a
-#: user's statements at their thread with USER visibility: list_memories
-#: (modules/memory/service.py:322-396) never lists them without the thread's id.
-BUG_M3 = (
-    "BUG-M3: the user's inventory misses every statement anchored in a thread "
-    "(memory-service service.py:340)"
-)
 
 
 async def _forget_by_the_agent(
@@ -193,7 +175,6 @@ async def test_forgetting_the_users_words_asks_then_they_are_gone(
 
 
 @pytest.mark.plan("MEM-05")
-@pytest.mark.xfail(strict=True, reason=BUG_M1)
 async def test_forgetting_a_fact_read_from_the_users_words_asks_first(
     tmp_path: Path, uid: str
 ) -> None:
@@ -214,7 +195,6 @@ async def test_the_user_may_forget_what_an_agent_relayed_for_them(tmp_path: Path
 
 
 @pytest.mark.plan("MEM-03")
-@pytest.mark.xfail(strict=True, reason=BUG_M3)
 async def test_the_users_inventory_lists_what_they_said_in_a_chat(tmp_path: Path, uid: str) -> None:
     user = f"hep-{uid}"
     await tell("react", tmp_path, f"inv-{uid}", user, "chat-1", "My locker code is 5528.")
@@ -228,19 +208,7 @@ async def _facts(user: str) -> list[dict]:
     return [r for r in live_facts(user) if r["memory_type"] != "OBSERVATION"]
 
 
-#: BUG-M4 (agent-memory-service): the tenant's admin key cannot forget a user's memory:
-#: ``is_tenant_admin`` (modules/authz/service.py:170) checks only an authorization tuple of the
-#: acting principal (``user:<id>`` admin of the tenant, written by ``grant_membership``), never
-#: the key's own ``admin`` role, so with BUG-M2 nothing but the relaying agent itself can erase
-#: what a user said through the harness (USAGE §4: "or a tenant admin").
-BUG_M4 = (
-    "BUG-M4: the tenant's admin key is refused forgetting a user's memory "
-    "(memory-service authz/service.py:170)"
-)
-
-
 @pytest.mark.plan("MEM-05", "INV-5")
-@pytest.mark.xfail(strict=True, reason=BUG_M4)
 async def test_erasing_a_user_leaves_nothing_any_read_returns(tmp_path: Path, uid: str) -> None:
     """The tenant's administrator erases a user — every memory forgotten, the conversation
     deleted: no recall (of any kind), no history and no next context holds what they said,
