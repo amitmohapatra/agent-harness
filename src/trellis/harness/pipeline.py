@@ -240,11 +240,13 @@ async def _turned(
 ) -> Result:
     """The attempt (:func:`attempt`): the conversation's turn taken — or what a run sent
     while another holds it does instead — then :func:`_attempt`."""
+    line: Line | None = None  # a worker's run and a sub-agent's wait in none
     if job is not None or parent is not None:
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:
         key = Identity.of(record).conversation
-        line = None if record.concurrency_key is None else Line(agent.harness.runs, record)
+        runs, seen = agent.harness.runs, agent.turns.seen
+        line = None if record.concurrency_key is None else Line(runs, record, seen)
         live = agent.turns.live(key)
         if live is not None and mode is not Mode.QUEUE:
             answered = await _arrived(agent, record, input, live, mode=mode, listener=listener)
@@ -255,6 +257,8 @@ async def _turned(
         steers = agent.adapter.steers(agent.target)
         turn = agent.turns.taken(key, record.run_id, steers=steers, line=line)
     async with turn as live:
+        if live is None and line is not None:
+            return await _left_the_line(agent, record, listener)
         result = await _attempt(
             agent,
             record,
@@ -302,6 +306,30 @@ async def _arrived(
     if not taken or answered is None or answered.status not in conversation.ANSWERED:
         return None  # it ended first, or without an answer: the message takes its own turn
     return await _answered_by(agent, record, answered, listener)
+
+
+async def _left_the_line(
+    agent: Agent, record: RunRecord, listener: Callable[[RunEvent], None] | None
+) -> Result:
+    """A run that left the conversation's line before its turn came — cancelled while it
+    waited, here or on another process — runs nothing: it ends as the run store says, its
+    stream with its start and that ending."""
+    found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
+    ended = (
+        Result.of(found)
+        if found is not None
+        else Result(run_id=record.run_id, status=RunStatus.CANCELLED)
+    )
+    outcome = RunOutcome.from_status(ended.status)
+    events = _emitter(agent, Identity.of(record), record.attempt, listener, None)
+    events.emit(RunEventType.RUN_STARTED, data={"agent_id": agent.id})
+
+    async def written() -> None:
+        return None
+
+    await events.settle(lambda: events.finished(outcome, error=ended.error), written)
+    metrics.run_finished(agent.id, outcome.value)
+    return ended
 
 
 async def _elsewhere(agent: Agent, record: RunRecord, line: Line, *, mode: Mode) -> None:

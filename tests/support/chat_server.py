@@ -15,7 +15,8 @@ that claims their queued runs. Each agent (``chat-<adapter>``, the same id on ev
 Routes (JSON): ``POST /run {adapter, input, user, thread, mode, stream}`` runs a turn
 (``agent.run``, or ``agent.stream`` read to its end) and answers its result; ``POST /resume
 {adapter, interrupt_id}`` approves; ``POST /start {adapter, input, user, thread}`` queues one;
-``POST /close`` ends what the agents keep between turns; ``GET /ready``; and the function agent's AG-UI routes (``serve_chat``) at ``/agui``.
+``POST /cancel {adapter, run_id}`` cancels a run; ``POST /close`` ends what the agents keep
+between turns; ``GET /ready``; and the function agent's AG-UI routes (``serve_chat``) at ``/agui``.
 """
 
 from __future__ import annotations
@@ -122,6 +123,11 @@ def serving(runs_url: str, api_key: str, folder: Path) -> tuple[FastAPI, Harness
             body["interrupt_id"], InterruptDecision.APPROVE, reviewer="lead"
         )
         return result.model_dump(mode="json")
+
+    @app.post("/cancel")
+    async def cancel(body: dict[str, Any]) -> dict[str, Any]:
+        record = await agents[body["adapter"]].cancel(body["run_id"], reason="from the test")
+        return {"status": record.status}
 
     @app.post("/close")
     async def close() -> dict[str, Any]:

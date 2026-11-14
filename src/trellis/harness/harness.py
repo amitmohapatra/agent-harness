@@ -473,7 +473,8 @@ class Harness:
         """A run held here whose heartbeat or event the run store refused: when it was
         cancelled — ``agent.cancel`` on another process, a newer message of its conversation
         sent there with ``mode="interrupt"`` among them — its attempt under way here stops and
-        ends ``CANCELLED``, as one cancelled here does (``agent.cancel``)."""
+        ends ``CANCELLED``, as one cancelled here does (``agent.cancel``), and one waiting its
+        turn here takes none."""
         try:
             record = await self.runs.get(run_id, tenant=tenant)
         except RunsError as exc:
@@ -482,6 +483,7 @@ class Harness:
         if record is None or record.status is not RunStatus.CANCELLED:
             return
         for agent in self.agents.values():
+            agent.turns.wake(run_id)  # waiting its turn here: it takes none
             runtime = agent.running.get(run_id)
             if runtime is not None and runtime.cancelled is None and runtime.running_in:
                 runtime.cancelled = CANCELLED_ELSEWHERE

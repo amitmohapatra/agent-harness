@@ -384,7 +384,7 @@ async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nob
     ended = await runs.finish(record.run_id, RunStatus.SUCCESS)
     same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
     assert same.status is RunStatus.RUNNING
-    assert await Line(runs, ended).ahead() == []  # it no longer runs: nothing is ahead of it
+    assert await Line(runs, ended).ahead() is None  # it no longer runs: it left the line
 
 
 async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
@@ -408,3 +408,103 @@ async def test_a_log_whose_run_ended_takes_nothing_more_whoever_listens() -> Non
     log(RunEvent(tenant_id="t", run_id="run_x", type=RunEventType.RUN_STARTED, sequence=1))
     await log.flush()
     assert log.closed
+
+
+async def keep_claiming(h: Harness, agent: Agent) -> None:
+    """A worker of ``h`` claiming ``agent``'s queued runs as they come."""
+    worker = h.worker([agent])
+    while True:
+        if not await worker.run_once():
+            await asyncio.sleep(0.02)
+
+
+async def thread_run(runs: Any, question: str) -> str:
+    """The id of the run of :data:`THREAD` asked ``question``, once the store has it."""
+    async with asyncio.timeout(10):
+        while True:
+            async for summary in runs.iterate(thread_id=THREAD):
+                record = await runs.get(summary.run_id)
+                if record is not None and record.input == question:
+                    return record.run_id
+            await asyncio.sleep(0.01)
+
+
+async def test_a_queued_turn_holds_its_place_before_the_messages_sent_after_it(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """A turn queued for a worker while another works is answered before the messages sent
+    after it: a stream of messages cannot keep it waiting."""
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a, b = (chat(h, log, gates) for h in servers)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    await a.start("queued two", user="ada", thread=THREAD)
+    third = asyncio.create_task(b.run("three", user="ada", thread=THREAD))
+    await thread_run(servers[1].runs, "three")
+    claiming = asyncio.create_task(keep_claiming(servers[0], a))
+    try:
+        gates["one"].set()
+        results = await asyncio.wait_for(asyncio.gather(first, third), 20)
+        async with asyncio.timeout(10):
+            while not any(e[:2] == ("end", "queued two") for e in log):  # noqa: ASYNC110
+                await asyncio.sleep(0.02)
+    finally:
+        claiming.cancel()
+    assert all(r.status is RunStatus.SUCCESS for r in results)
+    assert [e[1] for e in log if e[0] == "start"] == ["one", "queued two", "three"]
+
+
+@pytest.mark.parametrize("where", ["here", "elsewhere"])
+async def test_a_run_cancelled_while_it_waits_its_turn_never_runs(
+    servers: tuple[Harness, Harness], where: str
+) -> None:
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    a, b = (chat(h, log, gates) for h in servers)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    await started(log, "one")
+    second = asyncio.create_task(a.run("two", user="ada", thread=THREAD))
+    waiting = await thread_run(servers[0].runs, "two")
+    await (a if where == "here" else b).cancel(waiting, reason="not needed")
+    ended = await asyncio.wait_for(second, 5)  # at once, not when the turn ahead ends
+    assert ended.status is RunStatus.CANCELLED and ended.run_id == waiting
+    gates["one"].set()
+    assert (await first).status is RunStatus.SUCCESS
+    assert [e[1] for e in log if e[0] == "start"] == ["one"]  # it never ran
+
+
+async def test_a_run_waiting_behind_another_servers_run_follows_its_events_not_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behind a run another server works on, a run waits on that run's event log (it says
+    when the run ends or pauses) instead of reading the line again and again."""
+    runs = LoggedRuns()
+    listed: list[str] = []
+    iterate = runs.iterate
+
+    def counted(**kwargs: Any) -> Any:
+        listed.append(str(kwargs.get("status")))
+        return iterate(**kwargs)
+
+    monkeypatch.setattr(runs, "iterate", counted)
+    log: Log = []
+    gates = {"one": asyncio.Event()}
+    async with (
+        Harness(config=Settings(), runs=runs) as h1,
+        Harness(config=Settings(), runs=runs) as h2,
+    ):
+        a, b = chat(h1, log, gates), chat(h2, log, gates)
+        first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+        await started(log, "one")
+        second = asyncio.create_task(b.run("two", user="ada", thread=THREAD))
+        await thread_run(runs, "two")
+        await asyncio.sleep(0.2)
+        before = len(listed)
+        await asyncio.sleep(2)  # the turn ahead works on
+        during = len(listed) - before
+        gates["one"].set()
+        results = await asyncio.wait_for(asyncio.gather(first, second), 10)
+    assert [r.answer for r in results] == ["re: one", "re: two"]
+    assert during == 0, f"{during} listings of the line while it waited"
+    await runs.aclose()

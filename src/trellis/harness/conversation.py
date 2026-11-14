@@ -41,13 +41,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import InterruptDecision, RunStatus
-from trellis.harness.bounded import SAID_ONCE
+from trellis.contracts import InterruptDecision, RunRecord, RunStatus
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
 
 if TYPE_CHECKING:
-    from trellis.harness.line import Line
+    from trellis.harness.line import Cache, Line
     from trellis.harness.runtime import Runtime
     from trellis.runs import ResolutionEntry
 
@@ -207,14 +207,16 @@ async def earlier(
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
-    runs, tenant = runtime.agent.harness.runs, runtime.tenant
+    runs, tenant, ended = runtime.agent.harness.runs, runtime.tenant, runtime.agent.turns.ended
     records = []
     async for summary in runs.iterate(
         agent_id=runtime.agent_id, thread_id=thread, tenant=tenant, limit=EARLIER_RUNS
     ):
         if summary.run_id == runtime.run_id or summary.status not in ASKED:
             continue  # (the turns sent after it wait their turn: not earlier, not answered)
-        record = await runs.get(summary.run_id, tenant=tenant)
+        record = ended.get(summary.run_id) or await runs.get(summary.run_id, tenant=tenant)
+        if record is not None:
+            ended[record.run_id] = record  # it ended: read once
         if record is not None and record.user_id == runtime.user and not record.parent_run_id:
             records.append(record)
             if len(records) == EARLIER_RUNS:
@@ -335,18 +337,24 @@ class Live:
 class Turns:
     """One run of a conversation at a time: the others wait their turn, in order
     (``pipeline.attempt``) — in the run store's line (``line``), across processes, then in
-    this process. The run holding each turn here is :class:`Live`, which a message sent with
+    this process; a run that left the line first takes no turn (:meth:`taken` gives
+    ``None``). The run holding each turn here is :class:`Live`, which a message sent with
     ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches."""
 
     def __init__(self) -> None:
         self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
-        #: set as a run of the conversation leaves its line here: the runs behind it look again
-        self._ended: dict[str, asyncio.Event] = {}
-        #: the runs of each conversation waiting for, or holding, its turn here
-        self._here: dict[str, set[str]] = {}
+        #: each run waiting for, or holding, its conversation's turn here: set as it leaves
+        #: the line (the run behind it looks again)
+        self._leaving: dict[str, asyncio.Event] = {}
+        #: each run waiting its turn here: set when it should look at the line again (:meth:`wake`)
+        self._poked: dict[str, asyncio.Event] = {}
         #: the messages of a conversation being recorded here, one at a time (:meth:`accepting`)
         self._accepting: dict[str, tuple[asyncio.Lock, int]] = {}
+        #: what the lines of this process read of the runs in them (each run read once)
+        self.seen: Cache = LRU()
+        #: the conversations' ended turns read here (``earlier``): an ended run is read once
+        self.ended: LRU[str, RunRecord] = LRU()
 
     @contextlib.asynccontextmanager
     async def accepting(self, key: str) -> AsyncIterator[None]:
@@ -372,12 +380,16 @@ class Turns:
     ) -> AsyncIterator[Live | None]:
         lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
         self._held[key] = (lock, waiting + 1)
-        here = self._here.setdefault(key, set())
         if run_id is not None:
-            here.add(run_id)
+            self._leaving[run_id], self._poked[run_id] = asyncio.Event(), asyncio.Event()
         try:
-            if line is not None:
-                await line.turn(lambda: self._ended.setdefault(key, asyncio.Event()), here)
+            if (
+                line is not None
+                and run_id is not None
+                and not await line.turn(self._leaving, self._poked[run_id])
+            ):
+                yield None  # it left the line before its turn came: it takes none
+                return
             async with lock:
                 if run_id is None:
                     yield None
@@ -389,14 +401,20 @@ class Turns:
                     del self._live[key]
                     live.ended.set()
         finally:
-            here.discard(run_id or "")
-            if (ended := self._ended.pop(key, None)) is not None:
-                ended.set()  # a run left the line here: the ones behind it look again
+            if run_id is not None:  # it left the line here: the run behind it looks again
+                self._leaving.pop(run_id).set()
+                del self._poked[run_id]
             lock, waiting = self._held[key]
             if waiting == 1:
-                del self._held[key], self._here[key]
+                del self._held[key]
             else:
                 self._held[key] = (lock, waiting - 1)
+
+    def wake(self, run_id: str) -> None:
+        """Run ``run_id``, waiting its turn here, looks at the line again (it may have left it:
+        cancelled)."""
+        if (poked := self._poked.get(run_id)) is not None:
+            poked.set()
 
     def live(self, key: str) -> Live | None:
         """The run holding ``key``'s turn in this process, if one does."""

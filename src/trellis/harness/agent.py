@@ -614,6 +614,7 @@ class Agent:
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
             await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
             self._unwatched(run_id)
+            self.turns.wake(run_id)  # waiting its turn here: it takes none
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
 

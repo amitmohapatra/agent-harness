@@ -37,6 +37,7 @@ import httpx
 import pytest
 
 from tests.support.invariants import Invariants, invariants  # noqa: F401 - an autouse fixture
+from trellis.contracts import RunStatus
 from trellis.harness.conversation import EARLIER_RUNS
 from trellis.runs import RunsClient
 
@@ -292,18 +293,34 @@ async def test_two_messages_on_two_servers_are_answered_one_at_a_time(
 
 @pytest.mark.parametrize("count", [5, 20])
 async def test_a_burst_over_two_servers_is_answered_one_at_a_time_in_order(
-    stack: Stack, http: httpx.AsyncClient, count: int
+    stack: Stack,
+    http: httpx.AsyncClient,
+    count: int,
+    invariants: Invariants,  # noqa: F811
 ) -> None:
     thread = chat()
     questions = [f"{thread} message {n}" for n in range(count)]
+    assert stack.traffic is not None
+    servers_before = len(stack.traffic.read_text().splitlines())
+    mine_before = len(invariants.traffic.exchanges)
+    began = time.monotonic()
     stack.hold(questions[0])
     sending = asyncio.create_task(burst(http, stack, questions, thread))
     await started(stack, questions[0])
     stack.release(questions[0])
     results = await sending
+    took = time.monotonic() - began
     assert all(r["status"] == "SUCCESS" for r in results), results
     assert len({t["server"] for t in of(stack, questions)}) == SERVERS
     one_at_a_time_in_order(stack, questions)
+    # what it asked of agent-runs (the servers' calls and the test's own), per minute: the
+    # turns waiting elsewhere follow the event log of the run ahead, not the line, again and
+    # again — well under the tenant's 3000 a minute
+    asked = len(stack.traffic.read_text().splitlines()) - servers_before
+    asked += len(invariants.traffic.exchanges) - mine_before
+    per_minute = asked / max(took, 60.0) * 60
+    print(f"{count} messages: {asked} calls to agent-runs in {took:.1f} s")
+    assert per_minute < 1000, f"{asked} calls in {took:.1f} s"
 
 
 # --------------------------------------------------------------------------- modes
@@ -382,6 +399,45 @@ async def test_queued_turns_and_the_servers_turns_take_turns(
         while len([t for t in of(stack, questions) if t["event"] == "end"]) < 3:  # noqa: ASYNC110
             await asyncio.sleep(0.1)
     one_at_a_time_in_order(stack, questions)
+
+
+async def test_a_queued_turn_holds_its_place_before_the_messages_sent_after_it(
+    stack: Stack, http: httpx.AsyncClient
+) -> None:
+    thread = chat()
+    stack.hold("direct one")
+    first = asyncio.create_task(send(http, stack.servers[0], "direct one", thread))
+    await started(stack, "direct one")
+    body = {"adapter": "function", "user": "ada", "thread": thread, "input": "queued two"}
+    await http.post(f"{stack.servers[0]}/start", json=body)
+    await _accepted(stack, thread, 2)
+    third = asyncio.create_task(send(http, stack.servers[1], "direct three", thread))
+    await _accepted(stack, thread, 3)
+    stack.release("direct one")
+    assert [r["status"] for r in await asyncio.gather(first, third)] == ["SUCCESS", "SUCCESS"]
+    one_at_a_time_in_order(stack, ["direct one", "queued two", "direct three"])
+
+
+async def test_a_turn_cancelled_from_another_server_while_it_waits_never_runs(
+    stack: Stack, http: httpx.AsyncClient
+) -> None:
+    thread = chat()
+    stack.hold("working")
+    first = asyncio.create_task(send(http, stack.servers[0], "working", thread))
+    await started(stack, "working")
+    waiting = asyncio.create_task(send(http, stack.servers[0], "never", thread))
+    await _accepted(stack, thread, 2)
+    async with RunsClient(stack.runs_url, api_key=KEY) as runs:
+        found = [s async for s in runs.iterate(thread_id=thread, status=RunStatus.RUNNING)]
+        records = [await runs.get(s.run_id) for s in found]
+    [never] = [r.run_id for r in records if r is not None and r.input == "never"]
+    body = {"adapter": "function", "run_id": never}
+    assert (await http.post(f"{stack.servers[1]}/cancel", json=body)).status_code == 200
+    ended = await asyncio.wait_for(waiting, 30)  # its server hears at its next heartbeat
+    assert ended["status"] == "CANCELLED"
+    stack.release("working")
+    assert (await first)["status"] == "SUCCESS"
+    assert not [t for t in stack.turns() if t.get("question") == "never"]  # it never ran
 
 
 # --------------------------------------------------------------------------- side by side

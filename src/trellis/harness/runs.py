@@ -385,14 +385,23 @@ class LocalRuns:
 
     def _room(self, record: RunRecord) -> bool:
         """Whether a queued run may run now: no run of its tenant sharing its
-        ``concurrency_key`` is running (agent-runs' default limit, one)."""
+        ``concurrency_key`` holds it (agent-runs' default limit, one) — one a worker runs, or
+        one running in its caller's process placed before it (``line.placed``): a run placed
+        after it waits for it there."""
         key = record.concurrency_key
+        mine = (self._place(record), record.run_id)
         return key is None or not any(
             r.status is RunStatus.RUNNING
             and r.concurrency_key == key
             and r.tenant_id == record.tenant_id
+            and (r.run_id in self._leases or (self._place(r), r.run_id) < mine)
             for r in self._runs.values()
         )
+
+    def _place(self, record: RunRecord) -> datetime:
+        """When the run took its place among its key's runs: its start, or its latest answer."""
+        answered = [entry.recorded_at for entry in self._resolutions.get(record.run_id, ())]
+        return max([record.created_at, *answered])
 
     async def heartbeat(
         self,
