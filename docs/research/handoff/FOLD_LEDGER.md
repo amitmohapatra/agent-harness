@@ -218,3 +218,44 @@ from title (no failing case), goal mode (Kimi's own turns unseen over ACP: docum
 thinking / usage_update / session title (no contract event).
 Fold instructions sent: first pass + bg-kimi, then a second pass over every branch that moved
 (fix-round → langchain-fixes → bg-claude-da → react-parity → bg-kimi → native-skills → scenarios).
+
+## 21:20 UTC — on main: harness#257 (combined part 1, merged WITHOUT a finished CI run, by the
+## owner's instruction), harness#258 (handoff docs, REMAINING.md), memory#117 (3.12 green, 3.13 running at merge)
+## 21:25 UTC — langchain leftovers reported (9e89fb1), for the fold's second pass
+Done: no double model retry (a model failure that outlasted the library's retries is not
+re-run by a worker), the graph's own summary kept when FitWindow drops older turns, provider
+tool fields (defer_loading, cache_control) kept when a request is fitted; tests for sync-only
+middleware and tracing callbacks (no code needed).
+Not done → REMAINING: (4) memory cache_control for routed Anthropic names (Deep Agents'
+MemoryMiddleware runs inside PromptCache with the routed model; needs the resolved model
+handed to the model node — attribution/routing impact unverified); G10 the memory context
+and the run's question after LangChain's own summarization (gone from graph state);
+mcp_elicitation mapping once fastmcp is a dependency (langchain-mcp-adapters not installed);
+a client's own max_retries on a graph built without ModelHooks.
+Warning from the job: its branch was broken between e70d8e0 and 9e89fb1 (a wrong commit,
+undone); merge only 9e89fb1 or later.
+Rewind (react-parity da31ac9): paused runs only; ended runs need agent-runs `finish` to keep
+the checkpoint (additive) — owner decision.
+
+## 21:35 UTC — owner: push everything now, no more testing; all jobs told to wrap up
+## (/var/tmp/cons/review/WRAP_NOTE.txt); fold merges with lint + import + pyright only.
+native-skills reported (9a24f76; merged with to-main-2, imports, ruff/pyright/docs clean;
+156 tests green on test_skills/test_acp/test_claude/test_kimi; the rest unverified, one
+pytest timeout in an unknown test). Done: ReAct general-purpose helper gets the run's
+skills; per-library tenant isolation tests (ReAct, Claude plugin, OpenAI load_skill, Kimi
+skills folder); Claude `Skill` call recorded and governed; Kimi run home links AGENTS.md,
+plugins and own skills; `SANDBOX_TOOLS` deleted. NOT done: Kimi `Skill` call cannot be made
+to ask (needs Kimi approval config in the run home); a SKILL.md read through the /skills/
+route is not a recorded call (Deep Agents / ReAct); OpenAI load_skill / exec_command ask on
+every call unless the catalog declares their risk; compaction: Claude `compact_boundary`
+not recorded, Kimi notices not filtered; no `h.wrap(skills=)` (each library's own field
+already carries skills).
+
+## 22:00 UTC — all coding jobs stopped and reported; merged to main without tests by the
+## owner's instruction: harness#259 (to-main-2 @ f63d6c1, incl. Claude), memory#118
+## (memory-fixes-2 @ 29fa82c). contracts#20 opened (FeedbackSource.SYSTEM, C-2).
+Final heads for the fold: bg-claude-da 9b286c9, react-parity da31ac9, fix-round d21c1ca,
+langchain-fixes 9e89fb1, bg-kimi 0802086, scenarios 4df022b, native-skills 9a24f76.
+The fold job was also asked, as its last step, to fix SCN-13 (P0, Harness._lost stops only
+CANCELLED runs) and update three AG-UI id tests. Per-job done / never-run / not-done lists
+are in REMAINING.md sections 2–4.

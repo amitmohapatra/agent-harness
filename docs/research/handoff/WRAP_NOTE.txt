@@ -1,0 +1,17 @@
+WRAP UP NOW (architect, 21:30 UTC) — the owner's instruction: everything that is coded goes
+to main as soon as possible; no more test runs are needed first.
+
+1. Stop starting new items. Finish only the edit you are in the middle of (minutes, not more).
+2. Do NOT start any more pytest runs, stacks or probes. Stop the ones you have running, stop
+   any service you started, drop your test databases, release the memory-service lock dir if
+   you hold it.
+3. Make the tree importable and lint-clean (ruff check + ruff format on the files you
+   touched; nothing else). Code and its tests are committed together. A test you wrote but
+   could not get green is committed with `xfail(strict=True, reason="<what is missing>")`
+   ONLY if the product code for it is not finished; never mark a test that guards finished
+   code.
+4. Commit everything and `git push` your branch NOW (retry network errors up to 4 times).
+   Nothing may be left only on this machine.
+5. Report in at most 15 lines, then stop: pushed head; items DONE (code + test written; say
+   for each whether its test was actually run green, run red, or never run); items NOT DONE
+   or half done (one line each: what is missing); anything you know is broken on your head.
