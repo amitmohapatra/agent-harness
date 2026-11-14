@@ -3,6 +3,8 @@ sent with a fixed id the client may retry and the service stores once."""
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -59,6 +61,43 @@ async def test_each_decision_on_a_tool_call_is_feedback_once_with_a_fixed_id(
     assert sent.body["metadata"]["decision_seconds"] >= 0
     assert sent.body.get("correction") == (answer if decision == "edit" else None)
     assert memory_harness.writes.failed == 0
+
+
+@tool(side_effects="irreversible")
+def deploy(plan: dict[str, Any], hosts: list[str]) -> str:
+    """Deploy a plan to hosts."""
+    return f"deployed to {len(hosts)} hosts"
+
+
+async def _deploys(input: str, agent: Runtime) -> Any:
+    plan = {"service": "api", "steps": [{"run": "migrate", "env": {"DRY": "0"}}]}
+    return await agent.tools.call("deploy", plan=plan, hosts=["a", "b"])
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_a_decision_on_a_call_with_nested_arguments_reaches_memory(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    decision: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A function tool taking an object and a list: the decision on its call is feedback the
+    memory service takes, the arguments unchanged, nothing failed or logged. Memory refused
+    metadata nested past two levels, so such a decision was lost."""
+    agent = arm(memory_harness.wrap(_deploys, id="ops"), [deploy])
+    paused = await agent.run("deploy", user="u")
+    assert paused.interrupt is not None
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        await agent.resume(paused.interrupt.interrupt_id, decision, reviewer="boss")
+        await memory_harness.writes.drain()
+    [decided] = _decided(memory_service)
+    assert decided["verdict"] == decision and decided["metadata"]["tool"] == "deploy"
+    assert decided["metadata"]["args"] == {
+        "plan": {"service": "api", "steps": [{"run": "migrate", "env": {"DRY": "0"}}]},
+        "hosts": ["a", "b"],
+    }
+    assert memory_harness.writes.failed == 0
+    assert [r.getMessage() for r in caplog.records if r.name == "trellis.writes"] == []
 
 
 @pytest.mark.parametrize("decision", ["answer", "cancel"])
@@ -142,16 +181,29 @@ async def test_a_brief_memory_outage_is_retried_and_counted_once(
     assert stored["verdict"] == "approve"
 
 
-async def test_a_lasting_memory_outage_is_reported_and_the_run_still_continues(
-    memory_harness: Harness, memory_service: FakeMemoryService
+async def test_a_lasting_memory_outage_holds_its_writes_and_the_run_still_continues(
+    memory_service: FakeMemoryService,
 ) -> None:
+    """The decision's feedback and the run's outcome both go to a route that is down: the run
+    goes on, and the writes are not given up while the outage lasts (SCN-6: they were "failed
+    and is lost" after three tries) — the client's circuit opens, they wait its cool-down, and
+    they are delivered, once, when the route answers again."""
     memory_service.fail.add("feedback")
-    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
-    paused = await agent.run("wipe d1", user="u")
-    assert paused.interrupt is not None
-    result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
-    await memory_harness.writes.drain()
-    assert result.status is RunStatus.SUCCESS and result.answer == "wiped d1"
-    # the decision's feedback and the run's outcome both went to the downed route
-    assert memory_harness.writes.failed == 2
-    assert _decided(memory_service) == []
+    client = memory_service.client()
+    breaker = client._transport.breaker
+    breaker.open_seconds = 0.05  # its cool-down (30 s) within the test
+    async with Harness(config=Settings(), memory=client) as h:
+        agent = arm(h.wrap(_wipes, id="ops"), [wipe])
+        paused = await agent.run("wipe d1", user="u")
+        assert paused.interrupt is not None
+        result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
+        assert result.status is RunStatus.SUCCESS and result.answer == "wiped d1"
+        async with asyncio.timeout(30):
+            while breaker.state == "closed":  # noqa: ASYNC110 - the circuit's state
+                await asyncio.sleep(0.01)
+        assert h.writes.failed == 0 and _decided(memory_service) == []
+        memory_service.fail.clear()
+        await h.writes.drain()
+        assert h.writes.failed == 0
+    [stored] = _decided(memory_service)
+    assert stored["verdict"] == "approve"

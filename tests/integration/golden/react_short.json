@@ -224,14 +224,16 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition, or pause or resume it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {
               "condition": {
+                "description": "Report only when this holds.",
                 "type": "string"
               },
               "enabled": {
+                "description": "false pauses it, true resumes it.",
                 "type": "boolean"
               },
               "id": {
@@ -246,6 +248,7 @@
                 "type": "array"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "when": {
@@ -508,14 +511,16 @@
       },
       {
         "function": {
-          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition; enabled=false pauses it, true resumes it.",
+          "description": "Change one of the user's scheduled tasks (an id from list_schedules): its time, task or condition, or pause or resume it.",
           "name": "update_schedule",
           "parameters": {
             "properties": {
               "condition": {
+                "description": "Report only when this holds.",
                 "type": "string"
               },
               "enabled": {
+                "description": "false pauses it, true resumes it.",
                 "type": "boolean"
               },
               "id": {
@@ -530,6 +535,7 @@
                 "type": "array"
               },
               "task": {
+                "description": "What to do, as the user said it.",
                 "type": "string"
               },
               "when": {

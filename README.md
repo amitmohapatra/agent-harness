@@ -269,6 +269,7 @@ make matrix        # the generated feature matrix (build/matrix.md)
 make docs-check    # links, anchors, and every snippet against the real API
 make bench         # the overhead benchmark against benchmark-results.json
 make test-live     # opt-in tests against LLM_BASE_URL / MEMORY_URL / RUNS_URL / TRELLIS_API_KEY
+make test-features # every feature's purpose, end to end against the real memory service and agent-runs
 ```
 
 `make test-live` reads the deployment environment and skips whatever is unset or unreachable;
@@ -276,4 +277,7 @@ make test-live     # opt-in tests against LLM_BASE_URL / MEMORY_URL / RUNS_URL /
 service in the tests is an in-process fake behind the real SDK, and every request and answer
 is checked against the service's committed `docs/openapi.json`; `tests/contract` does the same
 for agent-runs. The documents are read from the sibling checkouts, or from
-`TRELLIS_MEMORY_OPENAPI` / `TRELLIS_RUNS_OPENAPI`.
+`TRELLIS_MEMORY_OPENAPI` / `TRELLIS_RUNS_OPENAPI`. `make test-features` (`tests/features`) proves
+each documented feature's purpose against the real services, models scripted, reading their
+databases back; [docs/research/FEATURE_COVERAGE.md](docs/research/FEATURE_COVERAGE.md) maps every
+feature to the tests that prove it.

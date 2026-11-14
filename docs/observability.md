@@ -159,7 +159,8 @@ memory search and recall see the real data. Masking of your own is a hook:
 `TEXT_MESSAGE_*`, `TOOL_CALL_*`, `CUSTOM` (`tool_notice`, `log` from `current().log(...)`,
 `warning`, `decision` — the person's decision an attempt goes on with: `decision`, `reviewer`,
 `comment`, `remember`; or a call approved because what a person allowed covers it — for this
-conversation, always, or by the schedule that fired the run: `remembered: true` —),
+conversation, always, or by the schedule that fired the run: `remembered: true` —; `custom`,
+what a LangGraph graph's node wrote to its `custom` stream mode, in `value`),
 `INTERRUPT`, `RUN_ERROR`, `RUN_FINISHED`. Every `RUN_FINISHED` (whatever its outcome) says
 what the run spent in `data.spent`: `tokens` (input and output), `cached_tokens`, `cost` (US
 dollars, as the gateway reported them), `model_calls` and `tool_calls`, its sub-agents' runs
@@ -188,6 +189,13 @@ why:
 | the run's time limit (`timeout=`, `deadline=`) | `timeout` | `<tool> was cut short: the run ran out of time` |
 
 A paused call runs again in the attempt that resumes the run: a new `TOOL_CALL_START` there.
+A call's `tool_call_id` is its framework's id of it, else — a call a graph's node makes itself,
+with no model call id — the run's id, a digest of the call (its tool and arguments) and which
+time the run makes it: the same call has the same id in every attempt, and two calls never
+share one, whichever attempt makes them (and so does its result's `result:<call>` message). A
+call an attempt run again from its input replays from the journal (it ran before the pause:
+not run again) is not announced again: its events are in the earlier attempt's part of the
+run's log, where a reconnecting client, a thread's replay and `agent.events` read it once.
 A call its framework still runs when the attempt ends (one run in a task of the framework's
 own, as Claude's in-process MCP server does, stopped only later) is ended then, before
 `RUN_FINISHED`, the same way; its later stop adds nothing to the stream.

@@ -9,34 +9,46 @@ is not a JSON object is what the model reads back (:func:`arguments_of`), as the
 ``@function_tool`` does it — the call is not run, and the run goes on — rather than an
 exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises).
 
-A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
-preview naming where; ``read_file`` (with them, enabled once the run keeps one) pages it.
-
-A call repeating an earlier one of its model reply (the same tool, the same arguments:
-``Runtime.repeats``) does not run: the model reads that its result is the earlier call's
-(``tools.bridge.same``)."""
+A harness tool's result longer than ``tools.results.MAX_CHARS`` is kept in the run and the
+model reads a preview naming where; ``read_file`` (with them, enabled once the run keeps one)
+pages it. A harness tool's call repeating an earlier one of its model reply (the same tool, the
+same arguments: ``Runtime.repeats``) does not run: the model reads that its result is the
+earlier call's (``tools.bridge.same``). An agent's own ``FunctionTool`` is neither: its result
+is what its function returned, as the SDK hands it on, and each call it is asked runs
+(:func:`governed`)."""
 
 from __future__ import annotations
 
-import dataclasses
+import asyncio
+import copy
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from agents import FunctionTool
 from agents.tool_context import ToolContext
 
-from trellis.contracts import ToolOutcome, ToolSpec
+from trellis.contracts import AgentPaused, ToolOutcome, ToolSpec
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
-from trellis.harness.runtime import Paused, current
+from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
+from trellis.harness.tools.convert.openai_local import Carried, run_here, spec_of, with_fields
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
-__all__ = ["FIX_ARGUMENTS", "arguments_of", "asked_again", "convert", "governed", "held"]
+__all__ = [
+    "FIX_ARGUMENTS",
+    "WaitsInside",
+    "arguments_of",
+    "asked_again",
+    "convert",
+    "governed",
+    "held",
+    "waits_inside",
+]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
 #: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
@@ -47,6 +59,24 @@ AGENT_TOOL: Final = "_is_agent_tool"
 AGENT_OF_TOOL: Final = "_agent_instance"
 #: The attribute marking a ``needs_approval`` policy :func:`held` made (governance's gate).
 HELD: Final = "_trellis_held"
+#: A ``FunctionTool``'s invoke: the call's context and its arguments as the model wrote them.
+Invoke = Callable[[ToolContext[Any], str], Awaitable[Any]]
+#: Where the invoke of a tool ``function_tool`` built keeps the tool's own function: under the
+#: SDK's failure policy for it (the invoke turns what the function raises into what the model
+#: reads, or raises it: ``failure_error_function``).
+FUNCTION: Final = "_invoke_tool_impl"
+
+
+class WaitsInside(AgentPaused):
+    """An agent tool's call whose own run the SDK holds paused on an approval of its own (a
+    ``needs_approval`` tool of the agent it runs): the call is not over — the SDK pauses the
+    calling run on that approval and, approved or rejected, makes the call again to continue
+    the run inside. To the bridge it is a pause (nothing journaled, nothing recorded: the
+    call made again runs); to the SDK, ``answer`` is what the call returned."""
+
+    def __init__(self, tool: str, answer: Any) -> None:
+        super().__init__(f"{tool} waits on an approval inside the agent it runs")
+        self.answer = answer
 
 
 def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
@@ -62,39 +92,170 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     does, so without one each call asks), a person when it asks, the journal (a resume does
     not run a call again), its time and its trace — and offered per turn only while the run
     offers it (the tool hints' narrowing), as a copy: the
-    agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
-    is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
-    else is returned as it is."""
-    if not isinstance(tool, FunctionTool) or getattr(tool.on_invoke_tool, MADE, False):
+    agent's own tool is not changed. Its result is what its function returned, unchanged — an
+    image or a file the model sees, a typed result the SDK hands its ``tool_use_behavior``,
+    output guardrails and hooks — the record keeping its readable form; a call the journal
+    already answered (a call made before a pause) returns the journal's result. An agent
+    called as a tool (``Agent.as_tool``) is, with ``helpers``, a native helper of the run for
+    each call (:func:`_helped`). Anything else is returned as it is.
+
+    What the tool's own function raises is the call's failure — recorded as one — and then
+    the SDK's to tell, as without the harness (:func:`_told`): the model reads what the tool's
+    ``failure_error_function`` makes of it (the SDK's default text when it names none), and
+    with ``failure_error_function=None``, or a ``FunctionTool`` whose invoke raises, the run
+    ends with the error. The run's ``after_tool`` hooks have the last word on what the model
+    reads (``bridge.hooked``): a failure they reword is told in their words, the SDK's policy
+    deciding whether the run goes on; one they make a result is that result. A call past the
+    tool's own ``timeout`` is recorded as timed out
+    (:func:`_own_time_is_up`) and is then the SDK's timeout (its text, or its
+    ``ToolTimeoutError``). An agent called as a tool is no different: its failure ends its
+    child run as failed, and is then told as its own ``failure_error_function`` says (the SDK's
+    default text; ``None`` ends the run).
+
+    A tool the SDK runs on this machine (a shell, a patch editor, a computer, a custom tool)
+    has each call go through the bridge where the SDK hands it to the tool's own code
+    (``tools.convert.openai_local.run_here``)."""
+    if not isinstance(tool, FunctionTool):
+        return run_here(tool)
+    if getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
+    function = getattr(original, FUNCTION, None)
+    ran = cast("Invoke", function) if callable(function) else original
     if helpers is not None and getattr(tool, AGENT_TOOL, False):
-        original = _helped(tool, original, helpers)
+        ran = _helped(tool, ran, helpers)
 
-    async def invoke(context: ToolContext[Any], arguments: str) -> Any:
-        args = arguments_of(arguments)
-        runtime = current()
-        if isinstance(args, str) or runtime is None:
-            return await original(context, arguments)
-        repeat = _repeat(context, arguments, args)
-        if repeat is not None:
-            return results.readable(repeat.output, tool.name)
-
-        async def run(given: dict[str, Any]) -> Any:
-            return await original(context, json.dumps(given))
-
-        # as the run's tool set has it (an agent tool: a helper, read), else undeclared
-        spec = runtime.native.get(tool.name) or ToolSpec(
-            name=tool.name,
-            description=tool.description or tool.name,
-            input_schema=tool.params_json_schema,
-        )
-        outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
-        return results.readable(outcome.output, tool.name)
+    def invoke(context: ToolContext[Any], arguments: str) -> Awaitable[Any]:
+        # called in the step in which the SDK starts its own clock for the call (its
+        # ``asyncio.wait_for`` around what this returns, for a tool with a ``timeout``): the
+        # call is due then, however late the SDK's task for it begins (:func:`_own_time_is_up`)
+        return _invoked(tool, original, ran, context, arguments, due=_due(tool))
 
     setattr(invoke, MADE, True)
-    enabled = _narrowed(tool.name, tool.is_enabled)
-    return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+    return with_fields(
+        tool, on_invoke_tool=invoke, is_enabled=_narrowed(tool.name, tool.is_enabled)
+    )
+
+
+async def _invoked(
+    tool: FunctionTool,
+    original: Invoke,
+    ran: Invoke,
+    context: ToolContext[Any],
+    arguments: str,
+    *,
+    due: float | None,
+) -> Any:
+    """One call of a governed ``FunctionTool`` (:func:`governed`): through the bridge, then
+    handed to the SDK as the tool itself would (:func:`_handed_on`). Arguments that are not a
+    JSON object, and a call outside a run, are the tool's own to deal with (``original``)."""
+    args = arguments_of(arguments)
+    runtime = current()
+    if isinstance(args, str) or runtime is None:
+        return await original(context, arguments)
+
+    async def run(given: dict[str, Any]) -> Any:
+        try:
+            answer = await ran(context, json.dumps(given))
+        except asyncio.CancelledError as cut:
+            if not _own_time_is_up(runtime, due):
+                raise
+            raise PastItsOwnLimit(tool.name) from cut
+        if waits_inside(context):
+            raise WaitsInside(tool.name, answer)
+        return answer
+
+    carried = Carried(run)
+    try:
+        outcome = await bridge.call(
+            Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
+        )
+    except WaitsInside as waiting:
+        return waiting.answer
+    return await _handed_on(carried, outcome, original, context, arguments)
+
+
+async def _handed_on(
+    carried: Carried, outcome: ToolOutcome, original: Invoke, context: Any, arguments: str
+) -> Any:
+    """What the SDK is handed of a governed function tool's call: what the tool returned, as
+    the SDK takes it from the tool itself — an image or a file the model sees, a typed result
+    its ``tool_use_behavior``, guardrails and hooks are handed (the record keeps its readable
+    form); a failure of the tool's own, told as the SDK tells it (:func:`_told`); else what the
+    bridge says (the journal's result of a call made before a pause, the hooks' word,
+    governance's)."""
+    hooked = bridge.hooked(outcome)
+    if carried.raised and not outcome.ok:
+        error = carried.raised[-1]
+        said = text_of(outcome.output) if hooked else None
+        # a call the SDK cut at the tool's own limit: its cancellation, the SDK's to act on
+        cut = error.__cause__ if isinstance(error, PastItsOwnLimit) else None
+        return await _told(original, cut or error, context, arguments, said=said)
+    return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
+
+
+def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
+    """An agent's own ``FunctionTool`` as the run's tool set has it (an agent tool: a helper,
+    read), else undeclared (``openai_local.spec_of``): what the tool says of itself."""
+    return spec_of(
+        runtime,
+        tool.name,
+        description=tool.description or tool.name,
+        input_schema=tool.params_json_schema,
+    )
+
+
+class PastItsOwnLimit(TimeoutError):
+    """A call the SDK cut at its tool's own time limit (``function_tool(timeout=...)``): to
+    the bridge a call out of time (recorded so, a write's effect unknown), not tried again —
+    the SDK has stopped waiting for it."""
+
+    retryable = False
+
+
+def _due(tool: FunctionTool) -> float | None:
+    """When the SDK stops waiting for a call of ``tool`` starting now, on the event loop's clock
+    — as the SDK sets it: ``asyncio.wait_for(task, timeout=tool.timeout_seconds)`` in the step
+    that makes the call's coroutine — or ``None`` for a tool with no time limit of its own."""
+    limit = tool.timeout_seconds
+    return None if limit is None else asyncio.get_running_loop().time() + limit
+
+
+def _own_time_is_up(runtime: Runtime, due: float | None) -> bool:
+    """Whether a call cut short while it ran was cut by the SDK at the tool's own time limit
+    (``function_tool(timeout=...)``: the SDK cancels the call's task when its ``wait_for``
+    runs out, at ``due`` — :func:`_due`, from the moment the SDK made the call, not from when
+    its task began, which a call beside it holding the loop can make late) and not with its
+    run (cancelled, out of time)."""
+    return (
+        due is not None
+        and runtime.cancelled is None
+        and runtime.remaining() != 0
+        and asyncio.get_running_loop().time() >= due
+    )
+
+
+async def _told(
+    invoker: Any, error: BaseException, context: Any, arguments: str, *, said: str | None = None
+) -> Any:
+    """What the SDK makes of ``error``, which a tool's own function raised (the harness has
+    recorded the call as failed): raised as it is when the SDK is to act on it itself — a call
+    it cut at the tool's time limit, or a tool whose invoke has no failure policy of the SDK's
+    (the run ends) — else given to the tool's own invoke in place of its function, which tells
+    the model what its ``failure_error_function`` says, or raises. ``said``: what the run's
+    ``after_tool`` hooks made the failure say (``bridge.hooked``) — the SDK's policy still
+    decides whether the run goes on (it raises, or it tells the model), and what it tells the
+    model is the hooks' words in place of its own."""
+    if not isinstance(error, Exception) or not callable(getattr(invoker, FUNCTION, None)):
+        raise error
+
+    async def failed(_context: Any, _arguments: str) -> Any:
+        raise error
+
+    failing = copy.copy(invoker)
+    setattr(failing, FUNCTION, failed)
+    told = await failing(context, arguments)
+    return told if said is None else said
 
 
 def held(tool: Any, spec: ToolSpec) -> Any:
@@ -118,7 +279,22 @@ def held(tool: Any, spec: ToolSpec) -> Any:
         return True
 
     setattr(asks, HELD, True)
-    return dataclasses.replace(tool, needs_approval=asks)
+    return with_fields(tool, needs_approval=asks)
+
+
+def waits_inside(context: ToolContext[Any]) -> bool:
+    """Whether the SDK holds the run of the agent tool this call made (``Agent.as_tool``)
+    paused on an approval of its own — a ``needs_approval`` tool inside it: what the SDK
+    itself reads after the call to pause the calling run (its record of the call's pending
+    agent run, ``agents.agent_tool_state``). Never so for any other tool's call."""
+    from agents.agent_tool_state import get_agent_tool_state_scope, peek_agent_tool_run_result
+
+    # as the SDK reads it: a call made with its ``ToolContext``, which names the call
+    call = context.tool_call if isinstance(context, ToolContext) else None
+    held = call is not None and peek_agent_tool_run_result(
+        call, scope_id=get_agent_tool_state_scope(context)
+    )
+    return bool(getattr(held, "interruptions", None))
 
 
 async def asked_again(item: Any, context: Any) -> bool | None:
@@ -160,7 +336,8 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
     run while it works, ended with the agent's answer or its error, and what its own run spent
     — the SDK adds it to the calling run's usage — counted toward the run's budget. A pause
     inside leaves it to the next attempt, and stops the calling agent too (the SDK hands the
-    agent tool's pause back as an error text)."""
+    agent tool's pause back as an error text); so does an approval of the SDK's own inside it
+    (:func:`waits_inside`): the helper stays open, and the call made again ends it."""
     inner = getattr(tool, AGENT_OF_TOOL, None)
     model = getattr(inner, "model", None)
 
@@ -179,6 +356,9 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
                 answer = await invoke(context, arguments)
         except Exception as exc:  # a pause leaves it open (``Helpers.end``: the run is pausing)
             await helpers.end(key, error=f"{type(exc).__name__}: {exc}")
+            pending = helpers.runtime.pending
+            if pending is not None:  # paused inside, the pause wrapped in the SDK's error
+                raise Paused(pending.interrupt) from exc
             raise
         finally:
             given, said, cached = (
@@ -193,7 +373,10 @@ def _helped(tool: FunctionTool, invoke: Any, helpers: Helpers) -> Any:
             )
         if helpers.runtime.pending is not None:  # paused inside: the SDK told it as an error text
             raise Paused(helpers.runtime.pending.interrupt)
-        await helpers.end(key, output=text_of(answer))
+        if waits_inside(context):  # the run pauses on the SDK's approval: this helper's call
+            helpers.held = helper
+        else:
+            await helpers.end(key, output=text_of(answer))
         return answer
 
     return helped

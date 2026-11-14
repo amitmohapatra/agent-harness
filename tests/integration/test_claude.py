@@ -705,6 +705,23 @@ async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
     assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
 
 
+async def test_workflows_and_messages_to_other_agents_are_not_offered(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code's dynamic workflow (``Workflow``) runs its agents in the background with no
+    task of their own, an agent's first call coming before anything names it; its
+    ``SendMessage`` resumes a finished background subagent as a task of the call that first
+    started it, or reaches another Claude session. No run of the harness can hold that work,
+    so they are disallowed — with the agent-teams tools older CLIs have, whatever the team's
+    own ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` says (the harness sets no such switch)."""
+    target = options(tmp_path, [{"text": "ok"}])
+    target.env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
+    await harness.wrap(target, id="no-workflow").run("fan this out to agents", user="u1")
+    disallowed = set(started_with(tmp_path)["disallowed_tools"].split(","))
+    assert {"Workflow", "SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
+    assert not {"Agent", "Task", "TaskStop", "ListAgents"} & disallowed
+
+
 async def test_a_large_result_is_the_harness_s_to_keep_not_the_cli_s(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -774,6 +791,40 @@ async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
     # the session keeps it: told it holds for this turn only, a later turn calls tools again
     assert last["prompt"] == TURN_LIMIT.format(limit=1) and last["resume"] is not None
     assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
+
+
+async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost_once(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed session's result carries the session's cost, what it cost before the
+    process that resumed it included (the bundled CLI, driven against a scripted model).
+    A query that paused had no result: the attempt that resumes it is charged both. The
+    one last answer at the turn limit resumes a session whose query was charged already:
+    it is charged what the cost grew by."""
+    from trellis.harness import budget
+
+    costs: list[float | None] = []
+    account = budget.account
+    monkeypatch.setattr(
+        budget, "account", lambda run, **kw: (costs.append(kw["cost"]), account(run, **kw))
+    )
+    refunds.clear()
+    script = [{"tool": "refund", "args": {"order": "o3"}}, {"text": "done"}]
+    paid = options(tmp_path, script, model="m")
+    paid.env["FAKE_CLAUDE_COST"] = "0.5"
+    agent = arm(harness.wrap(paid, id="refunds"), [refund])
+    paused = await agent.run("refund o3", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    assert costs == [None, 1.5]  # the step that paused (no result: no cost), then all three
+    costs.clear()
+    steps = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
+    limited = options(tmp_path, [*steps, {"text": "never"}], model="m", max_turns=2)
+    limited.env["FAKE_CLAUDE_COST"] = "0.5"
+    result = await harness.wrap(limited, id="limited").run("read them", user="u1")
+    assert result.status is RunStatus.SUCCESS
+    assert costs == [1.0, 0.5]  # two steps, then the last answer's one: not 1.0 and 1.5
 
 
 async def test_a_last_query_at_the_limit_that_gives_no_answer_leaves_the_error(

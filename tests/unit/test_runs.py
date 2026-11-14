@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -17,8 +20,35 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
+from trellis.harness import runs as local_runs
 from trellis.harness.runs import LocalRuns
 from trellis.runs import ConflictError, Lease, LeaseLostError, NotFoundError
+
+
+def test_each_named_cadence_fires_as_agent_runs_fires_it() -> None:
+    """docs/runs.md: ``hourly``, ``daily``, ``weekly``, ``weekdays`` (local midnight; weekly on
+    Monday) and ``manual``, which never fires on its own."""
+    from datetime import UTC, datetime
+
+    from trellis.contracts import ScheduleSpec
+    from trellis.harness.runs import _next_fire
+
+    friday = datetime(2026, 11, 13, 10, 30, tzinfo=UTC)
+    expected = {
+        "hourly": datetime(2026, 11, 13, 11, 0, tzinfo=UTC),
+        "daily": datetime(2026, 11, 14, 0, 0, tzinfo=UTC),
+        "weekly": datetime(2026, 11, 16, 0, 0, tzinfo=UTC),
+        "weekdays": datetime(2026, 11, 16, 0, 0, tzinfo=UTC),
+        "manual": None,
+    }
+    for cadence, fires in expected.items():
+        spec = ScheduleSpec(
+            tenant_id="t", agent_id="a", name="n", cadence=cadence, on_behalf_of="u"
+        )
+        assert _next_fire(spec, friday) == fires, cadence
+    tuesday = datetime(2026, 11, 17, 10, 30, tzinfo=UTC)
+    spec = ScheduleSpec(tenant_id="t", agent_id="a", name="n", cadence="weekdays", on_behalf_of="u")
+    assert _next_fire(spec, tuesday) == datetime(2026, 11, 18, 0, 0, tzinfo=UTC)
 
 
 def start(run_id: str = "run_1", agent: str = "a", tenant: str = "t") -> RunStart:
@@ -105,6 +135,81 @@ async def test_queued_runs_are_claimed_once_by_agent_and_leases_expire() -> None
     await runs.heartbeat("run_a", "w3")  # no checkpoint: the one there is kept
     kept = await runs.get("run_a")
     assert kept is not None and kept.checkpoint == {"calls": {"k": ["done"]}}
+
+
+async def test_a_run_kept_in_its_callers_process_is_held_and_ended_once_the_hold_lapses() -> None:
+    """As agent-runs holds it: a heartbeat on a run started ``RUNNING`` holds it for the
+    ``worker_id``, fencing none of its caller's writes; another holder's hold in force is a
+    lost lease; a pause lets go of it; and once a hold lapses the next sweep (at a claim, as for
+    a lapsed lease) ends the run ``ERROR``, never queueing it."""
+    runs = LocalRuns()
+    await runs.start(start("run_held"))
+    await runs.start(start("run_paused"))
+    await runs.start(start("run_kept"))
+    lease = await runs.heartbeat("run_held", "p1", lease_seconds=-1, checkpoint={"calls": {}})
+    assert (lease.run_id, lease.worker_id, lease.cancel_requested) == ("run_held", "p1", False)
+    held = await runs.get("run_held")
+    assert held is not None and held.checkpoint == {"calls": {}}
+    await runs.heartbeat("run_kept", "p2", lease_seconds=60)
+    with pytest.raises(LeaseLostError):  # p2's hold is in force
+        await runs.heartbeat("run_kept", "p1")
+    await runs.heartbeat("run_paused", "p1", lease_seconds=-1)
+    await runs.pause(interrupt("run_paused"))  # no worker named: holding fences nothing
+    with pytest.raises(LeaseLostError):
+        await runs.heartbeat("run_paused", "p1")  # nothing to hold while it waits
+
+    assert await runs.claim("w", ["a"]) is None
+    ended = await runs.get("run_held")
+    assert ended is not None and ended.status is RunStatus.ERROR and ended.error is not None
+    assert (ended.error.code, ended.error.retryable) == ("holder_lost", False)
+    assert "its holder stopped: p1" in ended.error.message
+    for left in ("run_paused", "run_kept"):  # waiting for a person; held by a live holder
+        record = await runs.get(left)
+        assert record is not None and record.status is not RunStatus.ERROR
+    with pytest.raises(LeaseLostError):
+        await runs.heartbeat("run_held", "p1")
+
+
+async def test_an_answered_run_held_when_it_paused_is_held_again_or_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As agent-runs: answered, a run held when it paused is whoever continues it's to hold —
+    another holder may — and one nobody holds within the grace ends ``ERROR``; a run never
+    held is left as it is."""
+    runs = LocalRuns()
+    for run_id in ("run_gone", "run_taken", "run_never"):
+        await runs.start(start(run_id))
+        if run_id != "run_never":
+            await runs.heartbeat(run_id, "p1", lease_seconds=60)
+        await runs.pause(interrupt(run_id))
+    await runs.resume(resolution("run_taken"))
+    await runs.heartbeat("run_taken", "p2", lease_seconds=60)  # another server continues it
+    await runs.resume(resolution("run_never"))
+    monkeypatch.setattr(local_runs, "RESUME_GRACE_SECONDS", -1.0)  # the grace already passed
+    await runs.resume(resolution("run_gone"))
+    assert await runs.claim("w", ["a"]) is None
+    gone = await runs.get("run_gone")
+    assert gone is not None and gone.status is RunStatus.ERROR and gone.error is not None
+    assert gone.error.code == "holder_lost"
+    assert "nobody took the run up after its answer" in gone.error.message
+    for kept in ("run_taken", "run_never"):
+        record = await runs.get(kept)
+        assert record is not None and record.status is RunStatus.RUNNING
+
+
+async def test_its_holder_lets_go_of_a_held_run_which_goes_on_unheld() -> None:
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.heartbeat("run_1", "p1", lease_seconds=-1)
+    with pytest.raises(LeaseLostError):
+        await runs.release("run_1", "p2")
+    released = await runs.release("run_1", "p1", checkpoint={"calls": {}})
+    assert released.status is RunStatus.RUNNING and released.checkpoint == {"calls": {}}
+    assert await runs.claim("w", ["a"]) is None  # its hold lapsed before: none now
+    record = await runs.get("run_1")
+    assert record is not None and record.status is RunStatus.RUNNING
+    with pytest.raises(LeaseLostError):
+        await runs.release("run_1", "p1")
 
 
 async def test_a_claim_for_a_tenant_takes_only_that_tenants_runs() -> None:
@@ -368,6 +473,38 @@ async def test_finished_runs_go_after_their_time_with_their_artifacts(
     assert runs._artifact_runs == {} and set(runs._run_artifacts) == set()
 
 
+async def test_a_schedules_listing_pages_by_offset_and_ends_on_its_last_page() -> None:
+    runs = LocalRuns()
+    for n in range(4):
+        await runs.schedules.create(
+            ScheduleSpec(
+                tenant_id="t", agent_id="a", name=f"s{n}", cadence="daily", on_behalf_of=f"u{n}"
+            )
+        )
+    first = await runs.schedules.list(limit=2, tenant="t")
+    assert [s.name for s in first.items] == ["s3", "s2"] and first.next_cursor == "2"
+    last = await runs.schedules.list(limit=2, cursor=first.next_cursor, tenant="t")
+    assert [s.name for s in last.items] == ["s1", "s0"] and last.next_cursor is None
+    assert (await runs.schedules.list(limit=4, tenant="t")).next_cursor is None
+
+
+async def test_by_default_1000_finished_runs_are_kept_for_an_hour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("trellis.harness.runs.time.monotonic", lambda: clock[0])
+    runs = LocalRuns()
+    for n in range(1001):
+        await finished(runs, f"run_{n}")
+    assert await runs.get("run_0") is None and await runs.get("run_1") is not None
+    clock[0] += 3599
+    await finished(runs, "run_late")  # the 1,000 most recent: run_1 goes
+    assert await runs.get("run_1") is None and await runs.get("run_2") is not None  # in the hour
+    clock[0] += 2
+    await finished(runs, "run_later")
+    assert await runs.get("run_3") is None and await runs.get("run_late") is not None  # past it
+
+
 async def test_a_forgotten_scheduled_run_takes_its_tick_along() -> None:
     runs = LocalRuns(keep_finished=0)
     schedule = await runs.schedules.create(
@@ -394,3 +531,62 @@ def test_retention_is_a_number_from_0() -> None:
 
     with pytest.raises(ConfigurationError, match="from 0"):
         LocalRuns(keep_finished=-1)
+
+
+def kept_under(folder: Path, named: str) -> list[bytes]:
+    """What the files hold under the one folder of ``folder`` named ``named``."""
+    [found] = folder.glob(named)
+    return [kept.read_bytes() for kept in sorted(found.rglob("*")) if kept.is_file()]
+
+
+def made(folder: Path) -> list[Path]:
+    """The folders stores made for their payloads under ``folder``."""
+    return list(folder.glob("trellis-runs-*"))
+
+
+async def test_the_folder_a_store_made_for_its_payloads_goes_with_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store given no ``payload_root`` keeps its payload objects (a checkpoint's segments)
+    in a temporary folder it makes (``trellis-runs-*``): closing the store removes the folder
+    and what the runs wrote in it ("nothing survives a restart" holds on the disk too), and
+    a second close changes nothing."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    assert kept_under(tmp_path, "trellis-runs-*") == [b"a checkpoint's segment"]
+    await runs.aclose()
+    assert made(tmp_path) == []
+    await runs.aclose()
+
+
+async def test_the_folder_of_a_store_never_closed_goes_when_the_store_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store nobody closes (a harness with no ``RUNS_URL`` leaves its store open) takes its
+    folder with it when it is collected — or, at the latest, when the process exits — as
+    ``tempfile.TemporaryDirectory`` does."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    [folder] = made(tmp_path)
+    del runs
+    gc.collect()
+    assert not folder.exists()
+
+
+async def test_a_folder_the_caller_gave_the_store_is_left_alone(tmp_path: Path) -> None:
+    """``payload_root`` is the caller's: neither closing the store nor its end removes it or
+    what the runs wrote in it."""
+    given = tmp_path / "payloads"
+    given.mkdir()
+    runs = LocalRuns(payload_root=given)
+    await runs.start(start())
+    await runs.artifacts.put_payload("run_1", b"a checkpoint's segment", tenant="t")
+    await runs.aclose()
+    del runs
+    gc.collect()
+    kept = [f.read_bytes() for f in sorted(given.rglob("*")) if f.is_file()]
+    assert kept == [b"a checkpoint's segment"]

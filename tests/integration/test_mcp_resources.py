@@ -46,6 +46,9 @@ async def test_the_read_tool_maps_the_servers_resources(harness: Harness) -> Non
     assert result.status is RunStatus.SUCCESS, result.error
     spec = seen["spec"]
     assert spec.side_effects == "read" and spec.idempotent and spec.server == "docs"
+    schema = spec.input_schema
+    assert schema is not None and schema["type"] == "object"
+    assert list(schema["properties"]) == ["uri"] and schema["additionalProperties"] is False
     assert spec.description.splitlines()[1:] == [
         "- docs://handbook: handbook, How the team works "
         "(text/markdown; modified 2026-10-30T09:00:00Z)",

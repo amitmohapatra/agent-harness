@@ -32,9 +32,10 @@ from tests.support.arm import arm
 from trellis import Harness, Settings
 from trellis.contracts import RunStatus
 from trellis.harness.a2a.identity import EXTENSION_URI
-from trellis.harness.a2a.push import PushNotifier, TargetRefused, validate_url
+from trellis.harness.a2a.push import PushNotifier
 from trellis.harness.agent import Agent
 from trellis.harness.identity import IDENTITY_HEADER, identity_headers
+from trellis.harness.outbound import TargetRefused, validate_url
 from trellis.harness.runtime import Runtime
 from trellis.runs.webhooks import SIGNATURE_HEADER, verify_signature
 
@@ -161,6 +162,19 @@ async def test_the_card_describes_the_agent_where_the_url_says() -> None:
     assert card["supportedInterfaces"][0]["url"] == URL
     assert card["capabilities"]["streaming"] and card["capabilities"]["pushNotifications"]
     assert card["capabilities"]["extensions"][0]["uri"] == EXTENSION_URI
+    await harness.aclose()
+
+
+async def test_the_card_says_what_h_wrap_was_told_the_agent_does() -> None:
+    """``h.wrap(description=)`` "says what it does (its A2A card ...; else its function's
+    docstring)": the card ignored it and showed the docstring (or "the <id> agent")."""
+    harness = Harness(config=Settings())
+    agent = harness.wrap(greeter, id="greeter", description="Books tables for the team.")
+    app = FastAPI()
+    agent.serve_a2a(app, URL)
+    async with asgi(app) as http:
+        card = (await http.get("/agents/greeter/.well-known/agent-card.json")).json()
+    assert card["description"] == "Books tables for the team."
     await harness.aclose()
 
 
@@ -315,6 +329,8 @@ def test_push_targets_are_public_https_only() -> None:
         "https://10.0.0.1/hook",
         "https://user:pw@example.com/",
         "https://service.internal/",
+        "https://printer.local/",
+        "https://app.localhost/",  # docs/surfaces.md: never a .local/.internal/.localhost name
     ):
         with pytest.raises(TargetRefused):
             validate_url(refused)
@@ -377,6 +393,15 @@ def test_an_answer_is_read_as_the_decision_it_names() -> None:
     question = Interrupt(tenant_id="t", run_id="r", question="Where?")
     assert _decision(approval, message("yes")) == (InterruptDecision.APPROVE, "yes")
     assert _decision(approval, message("deny"))[0] is InterruptDecision.REJECT
+    words = {
+        InterruptDecision.APPROVE: ("approve", "approved", "yes", "ok", " Allow "),
+        InterruptDecision.REJECT: ("reject", "rejected", "no", "deny", "DENIED"),
+        InterruptDecision.CANCEL: ("cancel", "abort", "stop"),
+    }
+    for decided, said in words.items():  # each word the surface documents, in any case
+        assert [_decision(approval, message(w))[0] for w in said] == [decided] * len(said)
+    edited = {"decision": "edit", "amount": 7, "comment": "less", "remember": "run"}
+    assert _decision(approval, message(data=edited)) == (InterruptDecision.EDIT, {"amount": 7})
     assert _decision(approval, message(data={"amount": 5})) == (
         InterruptDecision.EDIT,
         {"amount": 5},
@@ -416,6 +441,13 @@ async def test_the_a2a_routes_are_in_the_openapi_document_and_still_served_by_th
     async with httpx.AsyncClient(transport=transport, base_url="http://a2a.test") as http:
         card = await http.get("/agents/greeter/.well-known/agent-card.json")
         assert card.status_code == 200 and card.json()["name"] == "greeter"  # the SDK's route
+        modes = ["text/plain", "application/json"]  # it takes and gives text and JSON
+        assert card.json()["defaultInputModes"] == card.json()["defaultOutputModes"] == modes
+    [tag] = doc["tags"]
+    assert tag["description"].startswith("A2A surface (serve_a2a)")
+    assert tag["externalDocs"]["url"].rstrip("/") == "https://a2a-protocol.org"
+    request = rpc["requestBody"]["content"]["application/json"]["schema"]
+    assert request["type"] == "object" and request["required"] == ["jsonrpc", "method"]
     with pytest.raises(HTTPException):
         await served_by_the_sdk()
     bare = Starlette()

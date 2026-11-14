@@ -329,6 +329,25 @@ def _said(text: str) -> list[dict[str, Any]]:
     return [{"id": "m", "role": "user", "content": text}]
 
 
+async def test_the_apps_context_takes_at_most_half_of_the_runs_context_budget(
+    harness: Harness,
+) -> None:
+    seen: list[str] = []
+
+    async def reads(input: Any, agent: Runtime) -> str:
+        seen.append(str(agent.context))
+        return "ok"
+
+    agent = harness.wrap(reads, id="reads")
+    entries = [{"description": f"field {n}", "value": "v" * 1000} for n in range(40)]
+    async with served(agent) as http:
+        body = {"threadId": "t1", "messages": _said("hi"), "context": entries}
+        assert (await http.post(f"{PATH}/run", json=body)).status_code == 200
+    shown = [line for line in seen[0].splitlines() if line.startswith("- field ")]
+    half = agent.context_budget // 2 * 4  # in characters, four to a token
+    assert 0.8 * half < sum(len(line) + 1 for line in shown) <= half
+
+
 def test_the_context_and_state_are_fitted_to_their_budget() -> None:
     from trellis.harness import frontend
     from trellis.harness.frontend import Frontend

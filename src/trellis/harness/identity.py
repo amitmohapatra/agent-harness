@@ -43,6 +43,11 @@ def conversation_key(tenant: str, user: str, thread: str) -> str:
     return CONVERSATION_PREFIX + hashlib.sha256(named.encode()).hexdigest()[:32]
 
 
+def queued_with(conversation: str) -> str:
+    """The ``concurrency_key`` of a conversation's turns: the run store runs one at a time."""
+    return f"thread:{conversation}"
+
+
 class Identity(BaseModel):
     """The scope of one run. ``user`` is required: memory, approvals and the inbox are all
     somebody's, and a run for nobody would be scoped to everybody."""

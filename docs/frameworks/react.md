@@ -100,7 +100,9 @@ The names are Deep Agents' where both have one. In four tiers:
   `system_prompt`, `mode` isolated or fork, `tools`, `model`, `middleware`, `skills`,
   `permissions`, `response_format`) or a `CompiledSubAgent` `{"name", "description",
   "runnable"}` (another `ReAct` among them) — and wrapped agents (`h.wrap(...)`) and `a2a(url)`,
-  each a tool of its own.
+  each a tool of its own; in a chat each also takes tasks in the background, with no server to
+  host ([a task in the background](#a-task-in-the-background)). Deep Agents' `AsyncSubAgent`
+  (`graph_id`, `url`) runs a task on a server of yours instead.
 * `skills`, `memory_files`, `permissions` — Deep Agents' skill sources, its `memory`
   (`AGENTS.md`-style files loaded into the instructions; named so it is not taken for the memory
   service) and its file permission rules, as they are; skills and memory files are read through
@@ -158,7 +160,7 @@ memory service. A graph with a checkpointer or a store of your own is a `create_
 middleware=middleware(), checkpointer=..., store=...)` ([below](#middleware-on-your-own-graph)).
 
 Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../governance.md)'s (a
-sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
+sub-agent's own `interrupt_on` is kept as Deep Agents' approval gate, asked once) —
 `name` (the wrap's `id`) and `debug`.
 
 ## Two ways to run it
@@ -293,7 +295,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `StallGuard` | the same call in `max_repeats` consecutive steps, or 3 consecutive steps in which every call failed and a failure was met again (the same tool, the same error): the model is told so and called once more with no tool (`tool_choice="none"`), so the user is told what went wrong; no answer then stops the run with a `ModelError`. Failures that each differ are a model correcting itself, bounded by `max_steps` |
 | `ModelCallLimitMiddleware` (LangChain, as `AnswerAtLimit`) | `max_steps` model calls; then one more, offered no tool, whose answer ends the run (one extra call at most; LangChain's own limit one call later is the backstop) |
 | `Budgeted` | with a budget (`h.wrap(budget=)`): once it — the run's or its parent's — is spent, one more call without tools; the run ends `PARTIAL` |
-| `ContextEditingMiddleware` (LangChain) | a known window only: past half of it, the older tool results (all but the last 3) cleared from what the model is sent, a placeholder naming `read_file` (the call's id as its path) in their place — the one clearing pass — only when it frees a tenth of the window, so a prompt cache breaks rarely |
+| `ContextEditingMiddleware` (LangChain) | a known window only: past half of it, the turn's older tool results cleared from what the model is sent, oldest first, a placeholder naming `read_file` (the call's id as its path) in each one's place — never the last 3 nor a `read_file` result — stopping once a tenth of the window is freed (LangChain's `clear_at_least`), so more than the last 3 may stay and a prompt cache breaks rarely |
 | `ReadTools` | `read_file` offered once a result was cleared, the graph's state holds a file or the run keeps a result (always, on a backend outside it): a small model offered it from the start reads nothing, again and again; a cleared result is paged from the graph's state as a kept one is (100 lines, 20,000 characters a page) |
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, the run's question kept ahead of a summary (not an earlier turn's replayed before it), and the day it is after the instructions ([tools.md](../tools.md#what-day-it-is)); a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
@@ -474,9 +476,10 @@ the run's, its pauses asked through the run, its crash continued, its cancel wit
   its `name` and `description`), called through Deep Agents' `task` tool; the call is governed
   and becomes a child run (`bridges.helpers`): given the memory context for its task, its tool
   calls governed and recorded under its run. A declarative one gets the loop's guards and its
-  model name routed as `ReAct`'s; a tool it names in `interrupt_on` asks a person — its risk,
-  as the catalog says (a name that is none of its tools stays Deep Agents' approval, asked once
-  through the run). With no Deep Agents capability asked for, the general-purpose helper is a long task's.
+  model name routed as `ReAct`'s; its `interrupt_on` is Deep Agents' own approval gate (LangChain's
+  `HumanInTheLoopMiddleware` in the sub-agent: `when`, `allowed_decisions` and `description`
+  as you give them), asked once through the run — governance takes the gate's decision for
+  its own. With no Deep Agents capability asked for, the general-purpose helper is a long task's.
 * **Wrapped agents and `a2a(url)`** — each a tool named after the agent's id (described by
   `h.wrap(description=)`, else its docstring; an A2A agent by its card), any framework, local or
   remote. The reads among them run at once, the writes one at a time.
@@ -500,6 +503,186 @@ lead = ReAct(
 Runnable: [examples/02_way1_react/subagents.py](../../examples/02_way1_react/subagents.py),
 [examples/05_features/subagents.py](../../examples/05_features/subagents.py),
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+### A task in the background
+
+`ReAct`'s own sub-agents — its wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent`
+dicts — also take tasks in the background, with no server to host: a turn starts a task and
+replies at once, the chat takes new messages while it works, and its result comes back to the
+chat. The tools are Deep Agents' async sub-agent tools, by name, arguments and record —
+`start_async_task`, `check_async_task`, `update_async_task`, `cancel_async_task`,
+`list_async_tasks` — so the model sees one interface whether a task runs here or on a server
+(below). Nothing to configure:
+
+```python
+research = h.wrap(ReAct("You research.", model, tools=[search]), id="research")
+chat = h.wrap(ReAct("You help.", model, subagents=[research]), id="chat")
+chat.serve_chat(app)  # a chat a person reads: the five tools are offered
+```
+
+* **Where it is offered** — where `ask_user` is: a chat a person reads (`serve_chat`), where an
+  outcome can be delivered and a question answered. A run started from code, queued, fired or
+  called by another run hands its sub-agents work in the foreground (`task`, a wrapped agent's
+  own tool), as before. `start_async_task`'s description says when a task in the background is
+  the right call, and that the result comes back by itself.
+* **The task** — a child run of the turn that started it (its tenant, user, documents and
+  what it is without), a run of the sub-agent on a conversation of its own (the task's id is
+  that thread's; a follow-up is a turn of it and sees what it did), its metadata
+  `trellis_background` naming the sub-agent and the chat. A Deep Agents dict runs as the graph
+  its `task` tool runs, as the agent `<id>.<name>` (the parent's tools, budget, time limit).
+  It works in the process that started it, apart from the turn, through the pipeline as any
+  run — its tool calls governed and recorded under its run, its own budget and `max_steps` —
+  and is held in the run store meanwhile: a server killed with it leaves a run the store ends
+  (`holder_lost`), the harness closing cuts it off (`ERROR`, `BackgroundUnfinished`).
+* **Its result** — Deep Agents' notification: a user-role message the user did not type, marked
+  with langchain-core's notification metadata (source `async_subagent`, its data the task's
+  `TaskEvent`: id, name, status, run). The conversation's model is given it before its next
+  model call, at its next turn, or after its final answer (another model turn, within
+  `max_steps`); when no turn works in the chat, a turn of the chat's own — a run of the agent
+  in the chat's thread whose input is the notification — answers it, and the chat's thread
+  stream (`GET /agui/threads/{thread}/events`) delivers that turn as it delivers a scheduled
+  run's. That turn is one run per outcome (its id is the outcome's), run by the server whose
+  start made it: two servers that find the chat idle at once start one turn. An outcome the
+  conversation was told already is not told again: such a turn answers `NO_REPORT` without a
+  model call, and the stream leaves it out.
+* **Its questions** — an approval or a question inside the task pauses its run (`waiting`):
+  the chat's next turn, or a turn of its own when it is idle, asks it as a sub-agent's question
+  is asked through its parent (`payload["subagent"]` names the task's run, `background: true`),
+  and the answer resumes the task where the answer reached — on another server sharing the run
+  store too.
+* **Check, list, update, cancel** — read the run store from any server (the list, only the
+  unfinished tasks). The turn's own reads of its tasks cost at most one request of the run
+  store per model call: a task at work, or ended, in the turn's process is known there, and
+  the others — at work on another server, waiting for a person — are read one per model
+  call, in turn, so with several of them an outcome may be told a model call or two later. `update_async_task`
+  follows Deep Agents' `update_strategy` (a `SubAgent` dict may carry it): `interrupt`, the
+  default, cancels the task's run at work and continues its conversation
+  (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`).
+* **Approvals** — as for a task on a server (below): a check and the list
+  are reads; a start, an update and a cancel are writes, announced on the stream and not
+  asked about (each call the sub-agent makes is governed in its own run). To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Bounds** — a chat has at most as many unfinished tasks as a run may have children working
+  at once (the admission limit of [subagents.md](../subagents.md): 4 at first, less under
+  pressure): a start past it is refused with the reason, and the model is told to wait or
+  cancel one. A task's outcome that reaches an idle chat may start or update a task three
+  times in a row with no message from the user between; the fourth is refused, so a result
+  cannot keep work going by itself. A process keeps at most 1,024 attempts at work.
+* **The list** — the conversation carries its unfinished tasks and the 50 that ended last
+  (a task's record says it ended once the conversation was told); an older one is no longer
+  tracked.
+* **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
+  the agent and the chat thread. The tools, the questions asked through the chat and each
+  read act on a task's run only then; a task id from another conversation is answered as one
+  this conversation does not track. A run's input names no task list (`async_tasks` in a
+  mapping input is left out), and a message a chat client gives is never a notification.
+* **With the turn** — a turn that is cancelled cancels the tasks it started (their attempts
+  stop); one out of time leaves them working: the turn's clock is not theirs.
+* **Notifications in the conversation** — the turn's question stays the user's message; a
+  notification is recorded in memory as one (its role `USER`, its notification metadata in its
+  run record, so a replay marks it again), the earlier-results and turn logic pass over it,
+  and a turn of the chat's own keeps its notification as its question in the conversation's
+  earlier turns.
+
+Deep Agents' async sub-agent runs a task on a server of yours instead. Declare it as Deep Agents
+does, an `AsyncSubAgent` dict with a `graph_id` (with one, the five tools are Deep Agents' own,
+for its server's tasks: the two kinds are not mixed in one `ReAct`):
+
+```python
+optimizer = {
+    "name": "optimizer",
+    "description": "Runs the slow optimization, in the background.",
+    "graph_id": "optimizer",
+    "url": "https://agents.example",  # and "headers": {...} for its authentication
+}
+agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="chat")
+```
+
+* **What you host** — an Agent Protocol server (a LangGraph server) at `url` that serves the
+  graph `graph_id`: Deep Agents' tools create a thread and a run there, read them and cancel
+  the run. Give the `url`: without one Deep Agents looks for a LangGraph server in its own
+  process, which a harness process is not, and the task cannot start. The spec reaches Deep
+  Agents as you wrote it; the server is sent the task's text, your `headers` and the id of the
+  run that started it (Deep Agents' `parent_thread_id`: a `ReAct`'s LangGraph thread is its
+  run), nothing of the run's user or chat thread — and, with `mode="fork"`, the conversation at
+  launch. A `webhook` is checked as every URL the harness hands on (https, a public host; one
+  refused is a `ConfigurationError` when `ReAct` is built) and again each time a task is
+  started, by where its host resolves: one that leads to a private address fails the start,
+  and the server is sent nothing. A start of a sub-agent that forks
+  is a write as any start (Deep Agents asks nobody); to have a person approve it, give
+  `start_async_task` that risk in the tool catalog.
+* **In the chat** — the model starts a task with `start_async_task` and the turn ends at once
+  with the task's id; the next messages are answered while it runs. Deep Agents reads the
+  task's status itself (0.7.27 on) when a turn starts, before each model call and after a
+  final answer (then giving the model another turn, a model call as any: against `max_steps`
+  and the budget; past `max_steps` the run ends with the answer it had, and the outcome read
+  for that turn is not marked read — the next turn is told it, memory on or off): each new outcome is a
+  notification after the conversation's messages — a user-role message the user did not type,
+  marked with langchain-core's notification metadata, which the harness treats so (below). When
+  no turn works, the server holding the task's run reads it — after 10 s at most at first, then
+  less and less often, up to every two minutes, never two servers in step —: ended, its run ends
+  and the chat is told by a turn of its own, as a harness task's outcome is
+  ([above](#a-task-in-the-background)). `update_async_task` and `cancel_async_task` reach it by
+  its id.
+* **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
+  Deep Agents' own tools, announced on the stream and not asked about. To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Its own run** — each task is a child run of the turn that started it, as a `task`
+  sub-agent is ([above](#sub-agents-and-child-runs)), and outlives that turn as the task does: its input
+  the task's text, its metadata (`native_helper`) the task's id, the server's `url` and the
+  `graph_id` (never your `headers`), `helper_started` on the turn's stream. While the task
+  runs, the run is `RUNNING` and held in the run store from the server that started it: a
+  server that dies leaves a run the store ends (cut off). It ends when the task's end is
+  learned — a later `check_async_task` or `list_async_tasks` that reads its final status, the
+  model's `cancel_async_task`, or the holding server's read of it: `SUCCESS` with the task's
+  result, `ERROR` saying why it failed,
+  `CANCELLED` — with `helper_finished` on the stream of the turn that learned it, on any
+  server that shares the run store.
+* **Cancelled with its turn** — a turn that is cancelled (while it works, or where it waits
+  for an approval, or taken over by a newer message: `mode="interrupt"`) cancels the tasks it
+  started, as a cancelled run's other children are: on their server, through Deep Agents'
+  own `cancel_async_task` (the Agent Protocol's cancel of the task's run of now), and their
+  runs end `CANCELLED`. A server that refuses the cancel is said in the log. The task stays in
+  the list, cancelled. A task a turn did not start (one of an earlier turn) goes on. A turn
+  cancelled from another server (agent-runs' cancel of a worker's turn) ends the task's run
+  there, and the server holding that run cancels the task on its server at its next read.
+  New instructions to a task that ended (`update_async_task` after its result) run it again
+  on its server: a run of its own, the child of the turn that sent them.
+* **Across turns** — Deep Agents keeps its list of tasks in the graph's state, and a `ReAct`
+  graph's state is its run's, so the harness carries that list from a conversation's turn to
+  its next one: per user, thread and agent, a cancelled turn's too, and that of a turn that
+  waits for an approval (the task it started is listed meanwhile, and still is, cancelled,
+  when the turn is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
+  running while another ends, two ending at once) each keep the tasks they started. A graph with a checkpointer
+  of its own (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the
+  list in its thread instead, and it lasts as that checkpointer does.
+* **Across servers and restarts** — the list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`, [configuration.md](../configuration.md)), where the
+  next turn reads it wherever it runs: after a restart, and on another server when the
+  servers share that store (a bucket, or a folder they all mount). Unset, the store is a
+  folder on the server's own disk: it survives a restart there, another server does not see
+  it, and a container loses it with its filesystem. What is kept is Deep Agents' record of
+  each task (its ids, the sub-agent's name, a status, three times), at most 256 KiB for a
+  conversation, in a folder that is none of the user's files. A store that cannot be read or
+  written is said in the log, and the list stays in the process as before. The store has no
+  conditional write, so no turn writes over another's: each keeps a file of its own in the
+  conversation's folder (what it read and its own state, merged), a turn reads every file
+  there, and the files a turn read are removed once its own file holds them — two servers
+  ending turns of one conversation at the same moment each keep their task, in any order.
+* **Earlier results** — with memory on, a later turn's history holds the earlier calls and
+  their results. A start's, an update's and a cancel's are left as they were said (the record
+  of what was done: nothing advises starting again); a status and the list are values that
+  change, and an earlier one is marked out of date.
+* **Your own graph** — the same holds for a graph you build with `middleware()` and no
+  checkpointer: `create_deep_agent(..., subagents=[optimizer], middleware=middleware())`, or
+  LangChain's `create_agent` with `middleware=[*middleware(), AsyncSubAgentMiddleware(...)]`
+  (Deep Agents' `deepagents.middleware.async_subagents`). A graph with neither `middleware()`
+  nor a checkpointer keeps no state between turns; its list is carried too, read from the
+  state each turn ends with — so a turn cancelled or failed after a start leaves that task
+  out of the list (with `middleware()` each step is kept, and it is in).
+* **Overlapping turns** — two turns that overlap and both change one task lose neither's
+  update: the conversation's list is merged task by task, the record updated last standing
+  (at the same second, the further status), whichever turn ends last.
 
 ## Where sandbox, skills and hooks go
 

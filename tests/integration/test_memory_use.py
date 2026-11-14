@@ -30,7 +30,7 @@ from tests.support.openai_model import ScriptedModel
 from trellis import Harness, ReAct, Runtime, Settings, current, tool
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness.agent import UNREACHED_FIX
-from trellis.harness.clients.memory import CITED_MAX, PUSHED_BUNDLE, PUSHED_MEMORIES
+from trellis.harness.clients.memory import PUSHED_BUNDLE, PUSHED_MEMORIES
 from trellis.harness.identity import conversation_key
 from trellis.memory.errors import DependencyUnavailableError
 
@@ -402,7 +402,7 @@ async def test_the_cited_memories_are_each_once_and_bounded(
     memory_service: FakeMemoryService,
     sampled: Any,
 ) -> None:
-    memory_service.cited = [f"mem_{i}" for i in range(CITED_MAX + 10)] + ["mem_0"]
+    memory_service.cited = [f"mem_{i}" for i in range(60)] + ["mem_0"]
 
     async def fn(input: str, agent: Runtime) -> str:
         return "an answer"
@@ -414,7 +414,7 @@ async def test_the_cited_memories_are_each_once_and_bounded(
         await h.feedback(result.run_id, "confirm")
     [sent] = [f for f in memory_service.named("feedback") if f.body["source"] == "human"]
     ids = [r["source_id"] for r in sent.body["evidence_refs"]]
-    assert ids == [f"mem_{i}" for i in range(CITED_MAX)]
+    assert ids == [f"mem_{i}" for i in range(50)]  # the service takes at most 50 references
 
 
 async def test_a_verdict_is_not_sent_without_its_citations(

@@ -115,6 +115,11 @@ Body here.
     assert front_matter("No front matter.", where="x") == ({}, "No front matter.")
     assert front_matter("", where="x") == ({}, "")
     assert front_matter("---\nliteral: |\n---\n", where="x") == ({"literal": ""}, "")
+    for block, read in [("|-", "a\nb"), ("|+", "a\nb"), (">-", "a b"), (">+", "a b")]:
+        chomped = f"---\nk: {block}\n  a\n  b\n---\n"  # a block scalar with its chomping
+        assert front_matter(chomped, where="x") == ({"k": read}, ""), block
+    quoted = front_matter("---\nnone: \"\"\nalso: ''\none: '\n---\n", where="x")[0]
+    assert quoted == {"none": "", "also": "", "one": "'"}  # an empty quoted value is empty
 
 
 @pytest.mark.parametrize(

@@ -220,6 +220,16 @@ async def test_items_run_at_most_concurrency_at_a_time(harness: Harness) -> None
         agent, [{"input": str(n)} for n in range(9)], [], concurrency=2, limit=7
     )
     assert most == 2 and [i.output for i in report.items] == [str(n) for n in range(7)]
+    most = 0
+    await harness.evaluate(agent, [{"input": str(n)} for n in range(9)], [])
+    assert most == 4  # by default
+    most = 0
+
+    async def plain(input: str) -> str:
+        return await slow(input, None)  # type: ignore[arg-type]
+
+    await evaluate(plain, [{"input": str(n)} for n in range(9)], [])
+    assert most == 4  # the block's own default too
     with pytest.raises(ConfigurationError, match="at least one"):
         await harness.evaluate(agent, [], [], concurrency=0)
 
@@ -327,6 +337,8 @@ async def test_a_long_answer_is_grounded_on_the_head_verify_takes(
     assert verified("x" * 9000) == "x" * 8000  # no sentence ends within: cut at the limit
     assert verified("\n" + "x" * 9000) == "\n" + "x" * 7999  # nothing but a blank before it
     assert verified(sentence) == sentence
+    exactly = "Fine. " + "x" * 7994
+    assert verified(exactly) == exactly  # 8000 characters: checked whole, not cut back
 
 
 # --------------------------------------------------------------------------- offline, Langfuse
@@ -608,6 +620,18 @@ async def test_the_judge_reads_strict_json_and_asks_once_more(
     if asked == 2:
         retry = model.judged[1][-1]["content"]
         assert retry.startswith("That was not the JSON object asked for (")
+
+
+async def test_the_judge_reads_8000_characters_of_each_part() -> None:
+    model = JudgeOrAnswer(['{"score": 1, "reasoning": "fine"}'])
+    await judge(
+        EvalCase(input="q" * 8000, output={"k": "a" * 9000}, run_id="r"),
+        [llm_judge("Is it right?")],
+        services=EvalServices(judge_model=model),
+    )
+    asked = " ".join(str(m["content"]) for m in model.judged[0])
+    assert "q" * 8000 in asked
+    assert '{"k": "' + "a" * 7993 in asked and "a" * 7994 not in asked  # its JSON's first 8000
 
 
 async def test_the_judge_is_given_its_model_by_evaluate_or_judge() -> None:
@@ -910,6 +934,9 @@ async def test_a_judge_scores_a_tenth_of_runs_unless_it_says(harness: Harness) -
         return None
 
     assert evals_module.sample_of(llm_judge("ok?")) == evals_module.JUDGE_SAMPLE == 0.1
+    from trellis.harness import agent as agent_module
+
+    assert agent_module.GROUNDING_SAMPLE == 0.1  # documented: a fixed 0.1 of the runs grounded
     assert evals_module.sample_of(llm_judge("ok?", sample=0.5)) == 0.5
     assert evals_module.sample_of(custom) == 0.1  # another evaluator: the default share
     with pytest.raises(ConfigurationError, match="sample"):

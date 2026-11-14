@@ -59,7 +59,7 @@ no checkpointer is run with it. Runnable:
 | Your tools | the graph's own, governed at each call as the graph runs them: the catalog's risk and rules, approvals, journal, records, spans — in the main agent and in a sub-agent alike (a sub-agent's calls happen inside the run, so they are the run's) |
 | Sub-agents (`subagents=[...]`, the `task` tool) | each `task` call is a child run of the run ([below](#sub-agents-and-child-runs)): its own record, its turns in memory, its spans in the run's trace. Give a sub-agent the tools it needs (`"tools": tools`); the default `general-purpose` sub-agent gets the main agent's tools |
 | Planning (`TodoListMiddleware`, `write_todos`) | the plan lives in the graph's state (`state["todos"]`, read with `graph.aget_state(...)` on the thread); `write_todos` is Deep Agents' own tool, not a harness tool |
-| Built-in tools | Deep Agents' own. Those that only change the graph's state — `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` on its default backend — run as they are (the run's checkpoint keeps them); `execute` is governed as a write (the catalog's risk over it), and a tool of yours as any of the graph's own is — one that shares a built-in's name too; `task` is a child run. On a backend outside the graph's state (a disk, a store, a sandbox: the graph has no `files` channel), the file tools change real files and are governed too, `ls`, `read_file`, `glob` and `grep` as reads, `write_file`, `edit_file` and `delete` as writes, in the main agent and its sub-agents alike (a `CompositeBackend` with a route on the graph's state keeps its file tools as state tools). Gate more with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
+| Built-in tools | Deep Agents' own. Those that only change the graph's state — `write_todos`, `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep` on its default backend — run as they are (the run's checkpoint keeps them); `execute` is governed as a write (the catalog's risk over it), and a tool of yours as any of the graph's own is — one that shares a built-in's name too; `task` is a child run. On a backend outside the graph's state (a disk, a store, a sandbox), the file tools change real files and are governed too, `ls`, `read_file`, `glob` and `grep` as reads, `write_file`, `edit_file` and `delete` as writes, in the main agent and its sub-agents alike. A `CompositeBackend` is decided call by call, by where Deep Agents routes the path: a file on a state route (the run's skills under `/skills/` among them) is the graph's own, a file on a disk, store or sandbox route is governed, and so is a listing or a search from a folder that holds such a route. Gate more with `interrupt_on` — the harness turns that pause into an approval in the run store like any other |
 | `interrupt_on={tool: True \| InterruptOnConfig}` | LangChain's `HumanInTheLoopMiddleware`: an approval of the calls it holds, answered with `approve`, `edit`, `reject` (with a reason the model reads), `answer` ([interrupts.md](../interrupts.md#framework-approvals-langchains-middleware-and-openai-agents-needs_approval)); needs a checkpointer |
 | Hooks | the tool and run hooks as for every target; a model call is LangChain middleware, as for `create_agent`: `create_deep_agent(..., middleware=[yours, ModelHooks()])` ([hooks.md](../hooks.md)) |
 | A stored prompt of the gateway (`middleware=[ModelHooks(prompt=stored("triage"))]`) | pinned at each run's start, journaled and said (a `prompt` event, the span's `trellis.prompt.*`); each model call gets the version the run pinned ([prompts.md](../prompts.md)) |
@@ -79,6 +79,12 @@ budget, and a sub-agent cut by a crash is ended by the worker that continues the
 ([subagents.md](../subagents.md#automatic)). The wrapped Deep Agent is, the other way round, a
 `ReAct`'s sub-agent like any agent (`subagents=[agent]`). Runnable:
 [examples/06_scenarios/child_runs_every_framework.py](../../examples/06_scenarios/child_runs_every_framework.py).
+
+A sub-agent's files and the rest of what `task` returns to the main agent are a `Command`
+updating the graph's state: the journal keeps it with the call, so a run that replays the
+`task` call (a resume without a checkpointer) has the sub-agent's files without the sub-agent
+working twice ([langgraph.md](langgraph.md#a-tool-of-the-graphs-own-what-it-returns-what-it-raises)).
+A sub-agent that forks the main agent's conversation (`mode="fork"`) is a child run like any.
 
 ## The store
 
@@ -138,14 +144,29 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
   tools of a part turned off later; without it they are offered, and a call is refused
   ([langgraph.md](langgraph.md#limits)).
 
-* Deep Agents' state tools (`write_todos`, the files on its default backend) are not governed
-  or journaled (above): the graph's checkpoint keeps what they did; gate them with
-  `interrupt_on`.
+* Deep Agents' state tools (`write_todos`, the files on its default backend or on a state
+  route of a `CompositeBackend`) are not governed or journaled (above): the graph's
+  checkpoint keeps what they did; gate them with `interrupt_on`.
+* A graph with no thread of its own — `ReAct`, a graph compiled without a checkpointer or
+  with `RunCheckpointer()` — keeps its state files and todos from one turn of a conversation
+  to the next (with its background tasks), as a checkpointer of its own would: at most
+  256 KiB of them are kept for other servers; past that a turn elsewhere starts without
+  them (said in the log). The conversation's messages are never carried this way. How this
+  changes multi-turn accuracy with a backend is to be confirmed in the Haiku measurement
+  phase.
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.
+* `middleware()` beside a middleware of your own with one of its names — Deep Agents'
+  planning is `TodoListMiddleware`, which `middleware()` also brings — fails when the graph
+  is built (`AssertionError: Please remove duplicate middleware instances`, LangChain's):
+  see [langgraph.md](langgraph.md#limits).
 * A sub-agent is given the context for its task, not the main agent's tools: give it the
   memory tools (`memory_search`) when it should read memory itself.
+* The harness knows Deep Agents' state tools by name (`write_todos`, the file tools). A tool
+  another of its middleware brings that says nothing of what it does asks a person at each
+  call, as any undeclared tool: `compact_conversation` (`SummarizationToolMiddleware`) does —
+  give it its risk in the tool catalog to have it run unasked.
 * Deep Agents' built-in tools are sent with every model call: `ls`, `read_file`, `write_file`,
   `edit_file`, `delete`, `glob`, `grep` and `task` are 3,854 input tokens a call on Claude
   (`count_tokens`; `grep` 1,107, `glob` 903, `task` 874, `read_file` 858 alone). None of them
@@ -160,6 +181,9 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
 * [`examples/02_way1_deepagents/agent.py`](../../examples/02_way1_deepagents/agent.py) — planning with
   `TodoListMiddleware`, an approval resumed in place.
 * Tests: `tests/integration/test_deepagents.py`, `tests/integration/test_hitl_middleware.py`
-  (`interrupt_on`), and against the real services `tests/live/test_live_matrix.py`
+  (`interrupt_on`), Deep Agents' own features one by one in
+  `tests/integration/test_deepagents_library.py` (sub-agents, backends, permissions, memory
+  files and skills, summarization, a rubric, a profile), and against the real services
+  `tests/live/test_live_matrix.py`
   (`deepagents`: a sub-agent calling a harness tool and pausing for its approval, `write_todos`,
   `interrupt_on`, a catalog rule set after the graph was built).

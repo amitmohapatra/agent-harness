@@ -167,6 +167,8 @@ DECIMAL_DIGITS: Final = 15
 _VALUE: Final = re.compile(NUMBER + r"|[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9:.]+(Z|[+-][0-9:]+)?)?")
 #: What a cell holding no value says: among numbers, it is missing (``NULL``), not text.
 MISSING: Final = ("NULL", "NONE", "NA", "N/A", "#N/A", "NAN", "-", "--", "\u2014")
+#: :data:`MISSING` as one regular expression (RE2: each word as it is, any one of them).
+_MISSING_SAID: Final = "|".join(re.escape(word) for word in MISSING)
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
 #: The Parquet of typed tables a process keeps (:class:`Typed`): as much as the results its
@@ -196,10 +198,15 @@ def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
     if kind == "table":
         return found
     if kind == "csv":
-        read = list(csv.reader(io.StringIO(text), delimiter=found))
-        width = len(read[0])
-        return list(read[0]), [_padded(r, width) for r in read[1:] if r]
+        return _csv_rows(text, found)
     return ["line"], [[line] for line in found]
+
+
+def _csv_rows(text: str, delimiter: str) -> Table:
+    """CSV text as its table: its first row its columns, each row padded or cut to them."""
+    read = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    width = len(read[0])
+    return list(read[0]), [_padded(r, width) for r in read[1:] if r]
 
 
 def _shape(text: str, *, values: bool = True) -> tuple[str, Any]:
@@ -564,10 +571,20 @@ def _stored(path: str) -> bool:
 
 async def _kept_file(path: str) -> tuple[Source, dict[str, Any]] | str:
     """A file kept for the user (``tools.stored``), loaded from the store: its table and its
-    record, or what is wrong."""
+    record, or what is wrong. A kept CSV file is read under its first line, whatever its
+    columns hold: one column of text, which :func:`_shape` takes for lines when a result is
+    text, is a table here (its delimiter the one its first line uses most, else a comma)."""
     from trellis.harness.tools import stored  # noqa: PLC0415
 
-    return await stored.table(path)
+    found = await stored.table(path)
+    if isinstance(found, str):
+        return found
+    text, record = found
+    if not isinstance(text, str) or not text.strip() or not path.lower().endswith(".csv"):
+        return found
+    head = _QUOTED.sub("", text.splitlines()[0])
+    delimiter = max(DELIMITERS, key=head.count)
+    return {"csv": _csv_rows(text, delimiter if head.count(delimiter) else ",")}, record
 
 
 def _told(runtime: Any, path: str, record: dict[str, Any], sql: str, given: Source | None) -> str:
@@ -1176,9 +1193,11 @@ def _json_source(
 
 
 def _missing(column: str) -> str:
-    """In SQL: whether a text cell says it holds no value (:data:`MISSING`)."""
-    said = ", ".join(map(_quoted, MISSING))
-    return f"upper(trim({_name(column)})) IN ({said})"
+    """In SQL: whether a text cell says it holds no value (:data:`MISSING`) — matched as one
+    expression, not ``IN`` a list (or ``list_contains``): DuckDB makes such a question a join
+    of its own, one a column, and a statement over a few hundred columns ran out of the
+    database's memory (``DB_BYTES``)."""
+    return f"regexp_full_match(upper(trim({_name(column)})), {_quoted(_MISSING_SAID)})"
 
 
 def _counted(column: str) -> str:

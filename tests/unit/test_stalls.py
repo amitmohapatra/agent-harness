@@ -58,6 +58,16 @@ async def test_a_call_with_no_answer_within_its_bound_cancels_the_attempt_as_sta
     assert traced.name == "model_timeout" and traced.attributes["trellis.step"] == "step-1"
 
 
+async def test_with_nothing_tighter_a_call_stalls_after_600_s_as_documented() -> None:
+    """docs/reliability.md: with no ``call_timeout`` a call is watched for ``STALL_SECONDS``,
+    600 s."""
+    runtime, _ = _runtime()
+    runtime.model_started("k")
+    left = runtime._watched["k"].when() - asyncio.get_running_loop().time()
+    runtime.unwatched()
+    assert 599 < left <= 600
+
+
 async def test_an_answered_call_is_no_stall_and_a_key_watched_again_starts_over() -> None:
     runtime, seen = _runtime()
     runtime.running_in = asyncio.current_task()

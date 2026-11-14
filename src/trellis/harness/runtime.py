@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Hashable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -46,7 +46,14 @@ from trellis.harness.files import EVENT as FILE_EVENT
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Made, Pending, Replay, content_key
+from trellis.harness.journal import (
+    Made,
+    Pending,
+    Replay,
+    approval_read,
+    calling_ident,
+    content_key,
+)
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
@@ -200,10 +207,18 @@ class Runtime:
     #: the model's latest reply was cut at its output limit (its ``max_tokens``) before it gave
     #: an answer — what a run that ends with no answer says it ended for (``pipeline``)
     cut_off: bool = False
-    #: the latest harness tool call (its key) and how many times in a row it was made
+    #: the latest harness tool call (its key), how many times in a row it was made
     #: (``tools.bridge``: one made :data:`~trellis.harness.tools.bridge.MAX_REPEATS` times is
-    #: not run again)
-    repeating: tuple[str, int] = ("", 0)
+    #: not run again) and the decision that made it last (:attr:`deciding`)
+    repeating: tuple[str, int, Hashable | None] = ("", 0, None)
+    #: set by an adapter whose framework says which decision a call comes from, the same for
+    #: each execution its framework makes of that decision (a LangGraph task, run again by its
+    #: ``RetryPolicy``): the call made again by the same decision is no repeat of it
+    deciding: Callable[[], Hashable | None] | None = None
+    #: the answers a person gave about this attempt's calls, by the decision each call is part
+    #: of and what was asked (``tools.bridge``): the framework's own tries of that call again
+    #: are answered by them, not asked again — one call, one question
+    decided: dict[Hashable, InterruptResolution] = field(default_factory=dict)
     #: the stored prompts this attempt pinned (``Prompts.pin``: a ``ReAct``'s
     #: ``system_prompt=stored(...)``), by their journal key
     prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
@@ -219,6 +234,9 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: the tool node calls under way of each model step of the run, by the step
+    #: (``middleware.govern_tool_nodes``): a call that pauses waits for the others of its step
+    beside: dict[Hashable, set[Any]] = field(default_factory=dict, repr=False)
     #: when each tool call of this attempt returned, by its reference (the framework's call
     #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
     fetched: dict[str, datetime] = field(default_factory=dict)
@@ -235,12 +253,20 @@ class Runtime:
     #: the results the conversation's earlier turns saved in this process, by path
     #: (``Agent.results``): read and queried as the run's own (``tools.query.saved``)
     earlier_results: dict[str, str] = field(default_factory=dict)
+    #: the graph state the run's conversation carries from turn to turn
+    #: (``adapters.langgraph.CARRIED``): what its last turn ended with (``Agent.results`` in
+    #: this process, the file store anywhere: ``pipeline``), then what the attempt's graph
+    #: holds of it (its latest checkpoint; with no checkpointer, the state its turn ended with)
+    carried: dict[str, Any] = field(default_factory=dict)
     #: the latest model reply's calls repeating an earlier one of it (the same tool, the same
     #: arguments), where its framework runs the reply's calls and the harness reads the reply
     #: (OpenAI Agents: ``hooks.openai_agents``), by what each call's tool is handed — its id,
     #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
     #: the repeat, which does not run (``tools.bridge.same``)
     repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: what the attempt keeps of the calls its framework carries out on this machine, made on
+    #: first use by the code that governs them (``tools.convert.openai_local.Local``)
+    local_calls: Any = field(default=None, repr=False)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
@@ -289,6 +315,12 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: the run is a turn of a chat's own for a background task's outcome
+    #: (``background.notify``): its input, the notification it gives the model
+    notification: Said | None = None
+    #: the background tasks this attempt started (``background.start``: their ids), counted
+    #: with the conversation's unfinished ones before its task list says them
+    tasks_started: set[str] = field(default_factory=set, repr=False)
     #: what the person allowed for this conversation in its runs (``conversation.allowed``),
     #: once read in this attempt
     allowed: frozenset[str] | None = field(default=None, repr=False)
@@ -521,6 +553,8 @@ class Runtime:
         attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
         ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
         run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        if self._elsewhere(self.model_started, key, seconds):
+            return
         self.model_ended(key)
         bound = STALL_SECONDS if seconds is None else seconds
         loop = asyncio.get_running_loop()
@@ -528,9 +562,23 @@ class Runtime:
 
     def model_ended(self, key: str) -> None:
         """The model call ``key`` answered (or failed): its watchdog is off."""
+        if self._elsewhere(self.model_ended, key):
+            return
         found = self._watched.pop(key, None)
         if found is not None:
             found.cancel()
+
+    def _elsewhere(self, then: Callable[..., None], *args: Any) -> bool:
+        """Whether this is called outside the run's event loop — a model called in a graph's
+        sync node, which LangGraph runs in a thread — and ``then(*args)`` was handed to the
+        run's loop to do there."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            assert self.running_in is not None  # a run's runtime runs in its task
+            self.running_in.get_loop().call_soon_threadsafe(then, *args)
+            return True
+        return False
 
     def unwatched(self) -> None:
         """The attempt ended: every watchdog still on is off."""
@@ -699,12 +747,16 @@ class Runtime:
         (``Decision.question``), whose it is and the screen it is reviewed on a hook's ``Ask``
         (else anyone's, the approval control). ``choices``: what the person picks from
         (``governance.decision.choices``), offered as the interrupt's options and said after
-        the question, for plain chat."""
+        the question, for plain chat. A call a helper the framework spawned makes names the
+        helper in the payload (``bridges.helpers.named``)."""
+        from trellis.harness.bridges.helpers import named  # noqa: PLC0415 - a cycle
         from trellis.harness.governance.decision import SAID  # noqa: PLC0415 - a cycle
 
         said = SAID.get(tuple(choices))
-        return await self.interrupt(
+        resolution = await self.interrupt(
             content_key("approve", call.tool, call.args),
+            # a helper's call: the payload names the helper, whose run recorded it
+            payload=named(self),
             reason=InterruptReason.APPROVAL,
             question=decision.question if said is None else f"{decision.question} {said}",
             ui="approve",
@@ -714,6 +766,8 @@ class Runtime:
             component=decision.component,
             props=None if decision.props is None else dict(decision.props),
         )
+        approval_read(call)  # answered (a pause raises): for ``journal.approvals_read``
+        return resolution
 
     def files_folder(self) -> str:
         """Where this run's files are kept in the store: its tenant, user, conversation and run
@@ -788,7 +842,12 @@ class Runtime:
             # makes that call again when the run resumes (``Replay.made``)
             call = _call.get()
             inside = call.made if call is not None and self.suspend is None else None
-            self.pending = Pending(key=key, interrupt=interrupt, inside=inside)
+            self.pending = Pending(
+                key=key, interrupt=interrupt, inside=inside, ident=calling_ident()
+            )
+            if self.suspend is None:  # what the calls before this one read stays read
+                helpers = self.helpers
+                self.replay.paused(since=None if helpers is None else helpers.begun_again())
         if self.suspend is None:
             raise Paused(self.pending.interrupt)
         # the framework's own pause (LangGraph's ``interrupt``): its resume is answered from the

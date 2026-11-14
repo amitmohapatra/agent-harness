@@ -38,6 +38,7 @@ from trellis.harness.conversation import (
     question_id,
     rendered,
     result_id,
+    said_id,
 )
 from trellis.harness.history import Called, Said, Speaker, recorded, said_of
 from trellis.harness.identity import conversation_key
@@ -103,9 +104,10 @@ async def test_a_follow_up_has_the_conversation(
     second = await agent.run("What is the locker code?", user="ada", thread=THREAD)
     assert second.status is RunStatus.SUCCESS, second.error
     assert "4242" in told(seen)  # the earlier turn reached the model
-    if framework == "claude_agent_sdk":  # the session the first turn ran in, continued
+    if framework == "claude_agent_sdk":  # the session the first turn ran in, continued —
+        # in the process that ran it, kept for the conversation (none started to resume it)
         record = json.loads(seen[-1].read_text())
-        assert record["resume"] and record["earlier"] == ["The locker code is 4242."]
+        assert record["earlier"] == ["The locker code is 4242."] and record["resume"] is None
     forget(seen)
     other = await agent.run("What is the locker code?", user="bob", thread=THREAD)
     assert other.status is RunStatus.SUCCESS, other.error
@@ -301,6 +303,33 @@ async def test_the_earlier_turns_are_the_run_stores_answered_ones_in_order(
         "assistant: re: one",
         "user: two",
         "assistant: re: two",
+    ]
+
+
+async def test_a_turn_cut_short_by_its_budget_is_a_turn_with_its_answer(harness: Harness) -> None:
+    from trellis import Budget
+
+    @tool(side_effects="read")
+    def stock(sku: str) -> int:
+        """Units of a SKU in stock."""
+        return 7
+
+    seen: list[list[Said]] = []
+
+    async def answer(input: str, agent: Runtime) -> str:
+        if input == "again":
+            seen.append(await earlier(agent))
+            return "ok"
+        said = await agent.tools.call("stock", sku="a")  # past the budget: not run
+        return f"partly: {said}"
+
+    agent = arm(harness.wrap(answer, id="fn-partial", budget=Budget(max_tool_calls=0)), [stock])
+    first = await agent.run("count", user="ada", thread=THREAD)
+    assert first.status is RunStatus.PARTIAL
+    await agent.run("again", user="ada", thread=THREAD)
+    assert [(s.role.value, s.content) for s in seen[0]] == [
+        ("user", "count"),
+        ("assistant", first.answer),
     ]
 
 
@@ -591,8 +620,6 @@ async def test_turns_give_each_message_to_the_run_holding_the_turn_once() -> Non
         assert turns.steered("c", "run_1") == []  # once
     assert await waiting is True and turns.live("c") is None
     assert turns.steered("c", "run_1") == []
-    async with turns.taken("c") as nobody:  # a turn without a run (as before)
-        assert nobody is None
 
 
 # --------------------------------------------------------------------------- message ids
@@ -675,10 +702,19 @@ def test_ids_are_the_conversations_and_survive_a_cleared_result() -> None:
         question_id("conv_a", "run_1"),
         message_id("conv_a", "call:c1"),
         result_id("conv_a", "c1"),
-        message_id("conv_a", "run_1:2:3"),
+        said_id("conv_a", "run_1", said[3], 0),
         "msg_given",
         answer_id("conv_a", "run_1"),
     ]
+    # what the run said on the way is named by what it said, not by the attempt: a resumed
+    # attempt that says it again names it the same, and another time it is said is another
+    later = SimpleNamespace(conversation="conv_a", run_id="run_1", attempt=3)
+    again = identified([*said[:4], said[3], *said[4:]], later)  # type: ignore[arg-type]
+    assert again[3].id == ids[3] and again[4].id == said_id("conv_a", "run_1", said[3], 1)
+    assert len({s.id for s in again}) == len(again)
+    # a paused attempt has not answered: its last words are not the run's answer
+    paused = identified(said, runtime, answered=False)  # type: ignore[arg-type]
+    assert paused[-1].id == said_id("conv_a", "run_1", said[-1], 0) != ids[-1]
     cleared = [*said[:2], Said(Speaker.TOOL, "[cleared]", tool_call_id="c1"), *said[3:]]
     assert [s.id for s in identified(cleared, runtime)] == ids  # type: ignore[arg-type]
     other = SimpleNamespace(conversation="conv_b", run_id="run_1", attempt=2)

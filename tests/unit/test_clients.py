@@ -143,6 +143,48 @@ async def test_code_mode_calls_are_read_back_from_the_log_by_the_run_id(
     await gateway.aclose()
 
 
+@respx.mock
+async def test_a_log_that_never_settles_is_read_every_2_s_for_at_most_20_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads = iter(range(1000))
+
+    def changing(request: httpx.Request) -> httpx.Response:
+        n = next(reads)  # each read sees one more call: the log never agrees with itself
+        logs = [
+            {
+                "id": f"l{i}",
+                "timestamp": "2026-09-30T00:00:00Z",
+                "server_label": "wiki",
+                "tool_name": "search",
+                "status": "success",
+                "llm_request_id": "run_1",
+                "arguments": "{}",
+                "result": "r",
+                "latency": 1,
+            }
+            for i in range(n + 1)
+        ]
+        return httpx.Response(200, json={"logs": logs})
+
+    route = respx.get(f"{GATEWAY}/api/mcp-logs").mock(side_effect=changing)
+    clock = [1000.0]
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(bifrost.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(bifrost.asyncio, "sleep", sleep)
+    gateway = Gateway(f"{GATEWAY}/v1", None)
+    found = await gateway.code_mode_calls("run_1", datetime(2026, 9, 30, tzinfo=UTC))
+    assert set(slept) == {2.0} and route.call_count == 11  # read at 0, 2, ..., 20 s
+    assert len(found) == 11  # the last read, as it stands
+    assert route.calls[0].request.url.params["limit"] == "500"
+    await gateway.aclose()
+
+
 async def test_a_scripts_calls_are_recorded_in_the_order_they_ran_at_the_scripts_step() -> None:
     """B17: a script's calls were recorded after the run's own, numbered by the memory service
     in the order the log came back: a tool the run called after the script came first in a

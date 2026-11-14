@@ -15,13 +15,10 @@ never raised into the task.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
-import socket
 import time
 from typing import Final
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from a2a.server.tasks import PushNotificationConfigStore, PushNotificationSender
@@ -30,6 +27,7 @@ from a2a.utils.proto_utils import to_stream_response
 from google.protobuf.json_format import MessageToDict
 from tenacity import AsyncRetrying, retry_if_result, stop_after_attempt, wait_exponential
 
+from trellis.harness.outbound import TargetRefused, checked
 from trellis.runs.webhooks import DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, sign
 
 log = logging.getLogger("trellis.a2a.push")
@@ -37,53 +35,8 @@ log = logging.getLogger("trellis.a2a.push")
 EVENT_NAME: Final = "a2a.task_update"
 #: A2A's own header for the token a caller registered.
 TOKEN_HEADER: Final = "X-A2A-Notification-Token"
-URL_MAX_CHARS: Final = 2048
-LOCAL_SUFFIXES: Final = (".localhost", ".local", ".internal")
 ATTEMPTS: Final = 3
 TIMEOUT_SECONDS: Final = 10.0
-
-
-class TargetRefused(ValueError):
-    """The URL points somewhere a notification may not go."""
-
-
-def validate_url(url: str) -> str:
-    """The normalised URL, or :class:`TargetRefused`. Pure: no name resolution."""
-    if len(url) > URL_MAX_CHARS:
-        raise TargetRefused("the url is too long")
-    parts = urlsplit(url.strip())
-    if parts.scheme != "https":
-        raise TargetRefused("the url must use https")
-    if not parts.hostname or parts.username or parts.password or parts.fragment:
-        raise TargetRefused("the url needs a host and no credentials or fragment")
-    host = parts.hostname.lower()
-    if host == "localhost" or host.endswith(LOCAL_SUFFIXES):
-        raise TargetRefused("the url may not point at a local host")
-    try:
-        literal = ipaddress.ip_address(host)
-    except ValueError:
-        literal = None
-    if literal is not None and not _public(literal):
-        raise TargetRefused("the url may not point at a private address")
-    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
-
-
-async def check_addresses(url: str) -> None:
-    """Refuse unless every address the host resolves to is public."""
-    host = urlsplit(url).hostname or ""
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise TargetRefused("the host does not resolve") from exc
-    addresses = {str(info[4][0]) for info in infos}
-    if not addresses or not all(_public(ipaddress.ip_address(a)) for a in addresses):
-        raise TargetRefused("the host resolves to a private address")
-
-
-def _public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return address.is_global and not (address.is_multicast or address.is_reserved)
 
 
 class PushNotifier(PushNotificationSender):
@@ -98,7 +51,7 @@ class PushNotifier(PushNotificationSender):
     async def validate_url(self, url: str) -> bool:
         """The SDK's ``push_url_validator``: refused at registration, not only at delivery."""
         try:
-            await check_addresses(validate_url(url))
+            await checked(url)
         except TargetRefused as exc:
             log.warning("A2A push target refused: %s", exc)
             return False
@@ -117,8 +70,7 @@ class PushNotifier(PushNotificationSender):
             log.warning("A2A push for %s skipped: the config has no token to sign with", task_id)
             return False
         try:
-            target = validate_url(url)
-            await check_addresses(target)
+            target = await checked(url)
         except TargetRefused as exc:
             log.warning("A2A push target refused for %s: %s", task_id, exc)
             return False

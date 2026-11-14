@@ -6,6 +6,7 @@ record (``bridges.helpers``)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -27,7 +28,7 @@ from tests.support.durable import SharedSaver
 from tests.support.fake_claude_cli import STEP_TOKENS
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
-from trellis import Budget, Harness, Settings, tool
+from trellis import Budget, Harness, ReAct, Settings, tool
 from trellis.contracts import RunStatus
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import HELPER, TASK_HEADING
@@ -272,6 +273,32 @@ async def test_a_claude_subagent_is_a_child_run_its_turns_in_memory(
     a_full_child(memory_service, result.run_id, child.run_id, ["Read"])
 
 
+async def test_a_claude_subagent_is_one_child_run_when_the_run_store_takes_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI says a subagent started two ways — its ``Agent`` call's ``PreToolUse`` hook, and
+    the message that carries the call — and each starts the helper by the call's id. With a
+    run store that takes time to answer (agent-runs, over HTTP) the second comes while the
+    first is still being recorded: it is the same helper, not a second child run."""
+    async with Harness(config=Settings()) as h:
+        start = h.runs.start
+
+        async def slow(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.05)
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(h.runs, "start", slow)
+        options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+        result = await h.wrap(options, id="desk").run("check o1", user="u")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked"
+        [child] = await children(h, result.run_id)
+        record = await h.runs.get(child.run_id)
+    assert record is not None and (record.status, record.output) == (
+        RunStatus.SUCCESS,
+        "o1 is fine",
+    )
+
+
 async def test_a_claude_subagents_tokens_count_toward_the_runs_budget(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,6 +361,68 @@ async def test_a_claude_subagent_cut_by_a_crash_is_ended_by_the_next_worker(
     assert child.status is RunStatus.SUCCESS  # the same record, ended by the next worker
 
 
+async def test_two_claude_subagents_of_one_type_at_once_each_record_their_own_calls(
+    tmp_path: Path, memory_service: FakeMemoryService
+) -> None:
+    """Two subagents of one type at work at once: Claude Code names the one a call comes
+    from by its task's id (``agent_id``), which its ``task_started`` ties to the ``Agent``
+    call that started it — each call is recorded under its own subagent's run, not the one
+    started last."""
+    script = [
+        {
+            "agents": [
+                {
+                    "agent": "checker",
+                    "prompt": "check o1",
+                    "steps": [
+                        {"builtin": "Read", "args": {"file_path": "o1"}},
+                        {"text": "o1 is fine"},
+                    ],
+                },
+                {
+                    "agent": "checker",
+                    "prompt": "check o2",
+                    "steps": [
+                        {"builtin": "Grep", "args": {"pattern": "o2"}},
+                        {"text": "o2 is late"},
+                    ],
+                },
+            ]
+        },
+        {"text": "checked both"},
+    ]
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        result = await h.wrap(claude(tmp_path, script), id="desk").run("check both", user="u")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked both"
+        found = {r.input: r for r in await records(h, result.run_id)}
+        await h.writes.drain()
+    one, two = found["check o1"], found["check o2"]
+    assert (one.status, one.output) == (RunStatus.SUCCESS, "o1 is fine")
+    assert (two.status, two.output) == (RunStatus.SUCCESS, "o2 is late")
+    made = {c.body["tool"]: c.scope["agent_run_id"] for c in memory_service.named("record_tool")}
+    assert made["Read"] == one.run_id and made["Grep"] == two.run_id
+    assert made["Agent"] == result.run_id  # the calls that started them are the run's own
+
+
+async def test_a_claude_subagents_text_is_not_the_runs_own_text_on_its_stream(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Claude Code forwards a subagent's text as messages naming its ``Agent`` call
+    (``forward_subagent_text``; a background subagent's always): the run's own text on its
+    stream is the main agent's, as its answer and its transcript are."""
+    from trellis.contracts import RunEventType
+
+    options = claude(tmp_path, [subagent("Read"), {"text": "checked"}])
+    events = [e async for e in harness.wrap(options, id="desk").stream("check o1", user="u")]
+    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert "".join(said) == "checked" == events[-1].data["result"]
+
+
+async def records(h: Harness, run_id: str) -> list[Any]:
+    """The records of ``run_id``'s child runs."""
+    return [await h.runs.get(child.run_id) for child in await children(h, run_id)]
+
+
 # ---------------------------------------------------------------------- OpenAI agent tools
 async def test_an_agent_called_as_a_tool_is_a_child_run_under_the_catalogs_rules(
     memory_service: FakeMemoryService,
@@ -393,8 +482,11 @@ async def test_an_agent_tool_paused_inside_is_the_same_child_after_the_resume(
 
 
 async def test_an_agent_tool_that_fails_is_a_failed_child(harness: Harness) -> None:
+    """Under the SDK's default failure policy an agent tool that fails is a failed child run,
+    and the run goes on: the calling model reads the SDK's default text, which from
+    openai-agents 0.23 names no detail of the error; the child run's error keeps it."""
     broken = Agent(name="checker", model=ScriptedModel([], ids="checker_"))  # no reply to give
-    tool_ = broken.as_tool("check", "Check.", failure_error_function=None)
+    tool_ = broken.as_tool("check", "Check.")
     model = ScriptedModel([("check", {"input": "check o1"}), "it failed"])
     result = await harness.wrap(Agent(name="desk", model=model, tools=[tool_]), id="d").run(
         "check o1", user="u"
@@ -402,3 +494,186 @@ async def test_an_agent_tool_that_fails_is_a_failed_child(harness: Harness) -> N
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     [child] = await children(harness, result.run_id)
     assert child.status is RunStatus.ERROR
+    record = await harness.runs.get(child.run_id)
+    assert record is not None and record.error is not None
+    assert "pop from empty list" in record.error.message
+    told = [i["output"] for i in model.inputs[-1] if i.get("type") == "function_call_output"]
+    assert told == ["An error occurred while running the tool. Please try again."]
+
+
+async def test_an_agent_tool_that_asks_to_raise_ends_the_run_as_the_sdk_does(
+    harness: Harness,
+) -> None:
+    """``failure_error_function=None`` on an agent tool: its failure ends the run with the
+    SDK's error (as ``Runner.run`` does without the harness), the child run failed too."""
+    broken = Agent(name="checker", model=ScriptedModel([], ids="checker_"))
+    tool_ = broken.as_tool("check", "Check.", failure_error_function=None)
+    model = ScriptedModel([("check", {"input": "check o1"}), "never"])
+    result = await harness.wrap(Agent(name="desk", model=model, tools=[tool_]), id="d").run(
+        "check o1", user="u"
+    )
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "Error running tool check" in result.error.message and len(model.inputs) == 1
+    [child] = await children(harness, result.run_id)
+    assert child.status is RunStatus.ERROR
+
+
+# ---------------------------------------------------------------- approvals of helpers' calls
+def approved_where_recorded(service: FakeMemoryService, tool_name: str, run_id: str) -> None:
+    """A person's approval of ``tool_name``, called by a helper of run ``run_id``, is feedback
+    on the run that recorded the call — the helper's, a child of ``run_id`` — so the memory
+    service finds the call it approves (an approval backed by no recorded call is not
+    counted), and it is sent in that run's scope."""
+    [call] = [c for c in service.named("record_tool") if c.body["tool"] == tool_name]
+    helper_run = call.scope["agent_run_id"]
+    assert helper_run != run_id and call.scope["parent_agent_run_id"] == run_id
+    decisions = [f for f in service.named("feedback") if f.body["target_kind"] == "tool_call"]
+    assert decisions
+    for decision in decisions:
+        assert decision.body["metadata"]["tool"] == tool_name
+        assert decision.body["verdict"] == "approve" and decision.body["reviewer"] == "r"
+        assert decision.body["agent_run_id"] == helper_run
+        assert decision.scope.get("agent_run_id") in (None, helper_run)
+        assert decision.body["agent_id"] == call.scope["agent_id"]
+
+
+@pytest.fixture
+async def asks_with_memory(memory_service: FakeMemoryService) -> AsyncIterator[Harness]:
+    async with with_governance(
+        Harness(config=Settings(), memory=memory_service.client()), ASKS
+    ) as h:
+        yield h
+
+
+async def test_a_deep_agents_sub_agents_approved_call_is_feedback_on_its_run(
+    asks_with_memory: Harness, memory_service: FakeMemoryService
+) -> None:
+    h = asks_with_memory
+    main = ScriptedChatModel(turns=[TASK, "o1 refunded"])
+    sub = ScriptedChatModel(turns=[("refund", {"order": "o1"}), "refunded o1"])
+    agent = h.wrap(await deep(h, main, sub), id="desk")
+    paused = await agent.run("refund o1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    [waiting] = await children(h, paused.run_id)
+    assert paused.interrupt.payload == {HELPER: {"run_id": waiting.run_id, "name": "checker"}}
+    done_ = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert done_.status is RunStatus.SUCCESS and done == ["refund o1"], done_.error
+    await h.writes.drain()
+    approved_where_recorded(memory_service, "refund", done_.run_id)
+
+
+async def test_a_react_helpers_approved_call_is_feedback_on_its_run(
+    asks_with_memory: Harness, memory_service: FakeMemoryService
+) -> None:
+    h = asks_with_memory
+    hand = ("task", {"description": "refund o1", "subagent_type": "checker"})
+    mine = {
+        "name": "checker",
+        "description": "Refunds an order.",
+        "model": ScriptedChatModel(turns=[("refund", {"order": "o1"}), "refunded o1"]),
+    }
+    target = ReAct("s", ScriptedChatModel(turns=[hand, "done"]), tools=[refund], subagents=[mine])
+    agent = h.wrap(target, id="react-desk")
+    paused = await agent.run("refund o1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert result.status is RunStatus.SUCCESS and done == ["refund o1"], result.error
+    await h.writes.drain()
+    approved_where_recorded(memory_service, "refund", result.run_id)
+
+
+async def test_an_agent_tools_approved_call_is_feedback_on_its_run(
+    asks_with_memory: Harness, memory_service: FakeMemoryService
+) -> None:
+    h = asks_with_memory
+    # the SDK runs the agent tool again on the resume, its model asked again
+    inner = ScriptedModel([*[("refund", {"order": "o1"})] * 2, "refunded o1"], ids="checker_")
+    checker = Agent(
+        name="checker", model=inner, tools=await native_tools(h, refund, framework="openai_agents")
+    )
+    model = ScriptedModel([*[("check", {"input": "refund o1"})] * 2, "ok"])
+    target = Agent(name="desk", model=model, tools=[checker.as_tool("check", "Refund.")])
+    agent = h.wrap(target, id="desk")
+    paused = await agent.run("refund o1", user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
+    assert result.status is RunStatus.SUCCESS and done == ["refund o1"], result.error
+    await h.writes.drain()
+    approved_where_recorded(memory_service, "refund", result.run_id)
+
+
+async def test_a_claude_subagents_approved_built_in_is_feedback_on_its_run(
+    tmp_path: Path, memory_service: FakeMemoryService
+) -> None:
+    governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
+    async with with_governance(
+        Harness(config=Settings(), memory=memory_service.client()), governance
+    ) as h:
+        agent = h.wrap(claude(tmp_path, [subagent("Bash"), {"text": "checked"}]), id="desk")
+        result = await agent.run("check o1", user="u")
+        assert result.status is RunStatus.PAUSED and result.interrupt is not None
+        [waiting] = await children(h, result.run_id)
+        assert result.interrupt.payload == {HELPER: {"run_id": waiting.run_id, "name": "checker"}}
+        # the catalog's rule asks; Claude Code's own permission check about the same call is
+        # not asked again (one call, one question): the decision is on the subagent's call
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
+        assert result.status is RunStatus.SUCCESS, result.interrupt
+        assert built_ins(tmp_path) == ["Bash"]
+        await h.writes.drain()
+    approved_where_recorded(memory_service, "Bash", result.run_id)
+
+
+async def test_two_claude_subagents_of_one_type_each_have_their_own_decision_on_their_run(
+    tmp_path: Path, memory_service: FakeMemoryService
+) -> None:
+    """Two subagents of one type at work at once, each calling a built-in the catalog asks
+    about: Claude Code names each by its task's id (``agent_id``), so each question names
+    its own subagent's run, and each approval is feedback on the run that recorded the call
+    (the type's name alone would give both to the one started last)."""
+    script = [
+        {
+            "agents": [
+                {
+                    "agent": "checker",
+                    "prompt": f"check {order}",
+                    "steps": [
+                        {"builtin": "Bash", "args": {"command": f"check {order}"}},
+                        {"text": f"{order} is fine"},
+                    ],
+                }
+                for order in ("o1", "o2")
+            ]
+        },
+        {"text": "checked both"},
+    ]
+    governance = Governance(FakeCatalog({"Bash": Rule(risk="irreversible")}))
+    async with with_governance(
+        Harness(config=Settings(), memory=memory_service.client()), governance
+    ) as h:
+        agent = h.wrap(claude(tmp_path, script), id="desk")
+        result = await agent.run("check both", user="u")
+        asked: list[tuple[str, str]] = []
+        while result.status is RunStatus.PAUSED:
+            assert result.interrupt is not None and result.interrupt.tool_call is not None
+            named = (result.interrupt.payload or {})[HELPER]
+            asked.append((str(result.interrupt.tool_call.args["command"]), named["run_id"]))
+            result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
+        assert result.status is RunStatus.SUCCESS and result.answer == "checked both"
+        found = {r.input: r.run_id for r in await records(h, result.run_id)}
+        await h.writes.drain()
+    # one question a call, each naming the run of the subagent that made it
+    assert asked == [("check o1", found["check o1"]), ("check o2", found["check o2"])]
+    made = {
+        c.body["args"]["command"]: c.scope["agent_run_id"] for c in bash_records(memory_service)
+    }
+    assert made == {"check o1": found["check o1"], "check o2": found["check o2"]}
+    decided = {
+        f.body["agent_run_id"]
+        for f in memory_service.named("feedback")
+        if f.body["target_kind"] == "tool_call"
+    }
+    assert decided == {found["check o1"], found["check o2"]}
+
+
+def bash_records(service: FakeMemoryService) -> list[Any]:
+    return [c for c in service.named("record_tool") if c.body["tool"] == "Bash"]

@@ -69,6 +69,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.conversation import Mode
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
 from trellis.harness.removed import removed
@@ -76,8 +77,9 @@ from trellis.harness.skills import skill_set
 
 log = logging.getLogger("trellis.models")
 
-#: The share of the window past which older tool results are cleared from the request, the
-#: last :data:`KEEP_RESULTS` kept, and the share a clearing frees at least (the cached prompt
+#: The share of the window past which older tool results are cleared from the request (oldest
+#: first, never the last :data:`KEEP_RESULTS`), and the share whose freeing stops a clearing
+#: (LangChain's ``clear_at_least``: more than the last results may stay; the cached prompt
 #: breaks only when it pays).
 CLEAR_AT: Final = 0.5  # where a task is long, too: ``automatic.LONG_AT``
 KEEP_RESULTS: Final = 3
@@ -294,7 +296,7 @@ def ReAct(
     runs itself (governed as the harness's). ``subagents`` are what it hands tasks to: Deep
     Agents' own (a ``SubAgent`` dict — ``name``, ``description``, ``system_prompt``, ``mode``,
     ``tools``, ``model``, ``middleware``, ``skills``, ``permissions``, ``response_format``; its
-    ``interrupt_on`` is the catalog's: its tools named there ask a person — a
+    ``interrupt_on`` is Deep Agents' own approval gate, asked once — a
     ``CompiledSubAgent`` ``{"name", "description", "runnable"}``, a ``ReAct`` graph among them),
     each called through Deep Agents' ``task`` tool, and wrapped agents (``h.wrap(...)``) and
     ``a2a(url)``, each a tool of its own; every one a child run. Code runs in
@@ -347,9 +349,11 @@ def ReAct(
     else:
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     own, run = _split(tools)
+    strategies = _strategies(subagents)
     native, helpers = _subagents(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
     )
+    tasks = _background(native, helpers, strategies, max_steps=max_steps)
     # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
     # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's
     general = _native(
@@ -416,7 +420,12 @@ def ReAct(
         system_prompt=instructions,
         # Deep Agents' summarization stands after the harness's narrowing, which it counts;
         # the prompt cache in its own caching middleware's place
-        middleware=[_nothing(SUMMARIZATION), *stacked(defaults, middleware), cached],
+        middleware=[
+            _nothing(SUMMARIZATION),
+            *([tasks] if tasks is not None else []),
+            *stacked(defaults, middleware),
+            cached,
+        ],
         # Deep Agents' own dicts, as given, and its general-purpose helper unless one is named
         subagents=cast(Any, native if general["name"] in own_helpers else [general, *native]),
         skills=skills,
@@ -430,8 +439,81 @@ def ReAct(
         cache=cache,
         name="react",
     )
-    _declared(graph, backend=graph_backend, outside=outside, helper_only=not native, kept=not asked)
+    _declared(
+        graph,
+        backend=graph_backend,
+        outside=outside,
+        helper_only=not native,
+        kept=not asked,
+    )
+    if tasks is not None:
+        tasks.compiled(_compiled(graph))
     return _described(graph, named, window, instructions, [*run, *helpers])
+
+
+#: What Deep Agents' ``update_strategy`` says a follow-up does with the task's run at work, as
+#: the conversation's modes: ``interrupt`` stops it, ``enqueue`` waits for it.
+UPDATE_STRATEGIES: Final[Mapping[str, Mode]] = {
+    "interrupt": Mode.INTERRUPT,
+    "enqueue": Mode.QUEUE,
+}
+
+
+def _strategies(subagents: Sequence[Any]) -> dict[str, Mode]:
+    """Each Deep Agents sub-agent's ``update_strategy`` (Deep Agents' ``AsyncSubAgent`` key,
+    taken by one that runs in the harness too, for its tasks' follow-ups:
+    :data:`UPDATE_STRATEGIES`), out of its spec: an ``AsyncSubAgent`` keeps its own, which Deep
+    Agents reads."""
+    found: dict[str, Mode] = {}
+    for given in subagents:
+        if isinstance(given, dict) and "update_strategy" in given and "graph_id" not in given:
+            strategy = given.pop("update_strategy")
+            if strategy not in UPDATE_STRATEGIES:
+                raise ConfigurationError(
+                    f"{given.get('name')}: update_strategy is 'interrupt' or 'enqueue', "
+                    f"not {strategy!r}"
+                )
+            found[str(given["name"])] = UPDATE_STRATEGIES[strategy]
+    return found
+
+
+def _background(
+    native: Sequence[Mapping[str, Any]],
+    helpers: Sequence[Any],
+    strategies: Mapping[str, Mode],
+    *,
+    max_steps: int,
+) -> Any:
+    """Background tasks for ``ReAct``'s own sub-agents — its wrapped agents and the Deep Agents
+    sub-agents that run in the harness — with Deep Agents' async sub-agent tools
+    (``bridges.background_tasks.BackgroundTasks``); none without such a sub-agent, nor with a
+    remote one (an ``AsyncSubAgent``, ``graph_id``): its tasks are Deep Agents' own, on its
+    server, with the same tools, and the two are not mixed."""
+    from trellis.harness.agent import Agent
+
+    agents = [h for h in helpers if isinstance(h, Agent)]
+    if any("graph_id" in s for s in native) or not (native or agents):
+        return None
+    from trellis.harness.bridges.background_tasks import BackgroundTasks
+    from trellis.harness.subagents import described
+
+    found: dict[str, Agent | None] = {str(s["name"]): None for s in native}
+    found |= {a.id: a for a in agents}
+    said = {str(s["name"]): str(s["description"]) for s in native} | {
+        a.id: described(a) for a in agents
+    }
+    return BackgroundTasks(found, described=said, strategies=strategies, max_steps=max_steps)
+
+
+def _compiled(graph: Any) -> dict[str, Any]:
+    """The compiled graphs of ``graph``'s Deep Agents sub-agents, by name (its ``task`` tool's)."""
+    from trellis.harness.adapters.langgraph import TASK_TOOL, bound_tools, named_subagent_graphs
+
+    found: dict[str, Any] = {}
+    for tool in bound_tools(graph):
+        if getattr(tool, "name", None) == TASK_TOOL:
+            found |= named_subagent_graphs(tool)
+    return found
 
 
 def _deep(
@@ -545,14 +627,17 @@ def _native(
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
     the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
     middleware of those names kept), the prompt cache (``middleware.PromptCache``, around its
-    own ``AnthropicPromptCachingMiddleware``) and its ``interrupt_on`` turned into its tools'
-    declared risk — a tool it names asks a person (``irreversible``), as the catalog says; a
-    name that is none of its tools (a Deep Agents tool of its own) stays Deep Agents'
-    approval, which the harness asks once. One that names no ``tools`` has the run's, as Deep
+    own ``AnthropicPromptCachingMiddleware``); its ``interrupt_on`` is Deep Agents' own
+    (LangChain's ``HumanInTheLoopMiddleware`` in the sub-agent: its ``when``,
+    ``allowed_decisions`` and ``description`` as given), an approval the harness asks once —
+    governance takes the gate's decision for its own. One that names no ``tools`` has the
+    run's, as Deep
     Agents gives it the main agent's: ``ReAct``'s are offered per model call
     (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
     its own tools has exactly those."""
-    if "runnable" in spec or "graph_id" in spec:
+    if "graph_id" in spec:  # an async sub-agent on a server: what it is told to call
+        return _remote(spec)
+    if "runnable" in spec:
         return spec
     from trellis.harness import middleware as ours
 
@@ -568,35 +653,30 @@ def _native(
         cache,
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
-    gates = spec.pop("interrupt_on", None) or {}
-    asked = {name for name, config in gates.items() if config}
-    if "tools" in spec:
-        tools = [_asking(t) if _name_of(t) in asked else t for t in spec["tools"]]
-        asked -= {name for t in tools if (name := _name_of(t)) is not None}
-        spec["tools"] = tools
-    if asked:
-        spec["interrupt_on"] = {name: gates[name] for name in sorted(asked)}
     return spec
 
 
-def _name_of(tool: Any) -> str | None:
-    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
-    return name if isinstance(name, str) else None
+def _remote(spec: dict[str, Any]) -> dict[str, Any]:
+    """A Deep Agents async sub-agent (``AsyncSubAgent``) as it is: its ``webhook`` — the URL its
+    server is told to call with each run's outcome — checked as every URL the harness hands on
+    is (``outbound.validate_url``: https, public); a refused one is refused here."""
+    from trellis.harness.outbound import TargetRefused, validate_url
 
-
-def _asking(tool: Any) -> Any:
-    """``tool`` as a LangChain tool declared ``irreversible`` (governance asks a person)."""
-    from langchain_core.tools import BaseTool
-    from langchain_core.tools import tool as made
-
-    found = tool if isinstance(tool, BaseTool) else made(tool)
-    return found.model_copy(
-        update={"metadata": {**(found.metadata or {}), "side_effects": "irreversible"}}
-    )
+    if spec.get("webhook"):
+        try:
+            validate_url(str(spec["webhook"]))
+        except TargetRefused as exc:
+            raise ConfigurationError(f"{spec.get('name')}: its webhook: {exc}") from exc
+    return spec
 
 
 def _declared(
-    graph: Any, *, backend: Any, outside: bool, helper_only: bool, kept: bool = False
+    graph: Any,
+    *,
+    backend: Any,
+    outside: bool,
+    helper_only: bool,
+    kept: bool = False,
 ) -> None:
     """What the harness reads of Deep Agents' tools — the agent's and its sub-agents' — set on
     them: on a ``backend`` outside the graph's state (``outside``) the file tools are governed

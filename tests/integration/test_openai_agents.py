@@ -14,7 +14,7 @@ from tests.support.catalog import FakeCatalog
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from tests.support.openai_model import ScriptedModel
 from trellis import Budget, Deny, Harness, Hooks, Rewrite, Settings, current, tool
-from trellis.contracts import InterruptReason, RunEventType, RunStatus, ToolCall
+from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus, ToolCall
 from trellis.harness import budget
 from trellis.harness.adapters.claude import RESUMED_ASKED
 from trellis.harness.events import WARNING
@@ -147,7 +147,8 @@ async def test_a_write_allowed_for_the_conversation_runs_its_other_calls_of_the_
 ) -> None:
     """Calls made at once wait at the SDK's gate together, and the SDK keeps each one's
     pending approval when the run resumes: the person's "allow for this conversation" on the
-    first lets the others run too, without asking again."""
+    first lets the others run too, without asking again (the SDK's ``always_approve``: it runs
+    them together, in no set order)."""
     model = ScriptedModel([[("ship", {"order": "o1"}), ("ship", {"order": "o2"})], "both"])
     agent = arm(
         harness.wrap(Agent(name="shipper", model=model), id="shipper"),
@@ -159,7 +160,7 @@ async def test_a_write_allowed_for_the_conversation_runs_its_other_calls_of_the_
         first.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
     )
     assert finished.status is RunStatus.SUCCESS, finished.interrupt
-    assert finished.answer == "both" and done == ["o1", "o2"] and len(model.inputs) == 2
+    assert finished.answer == "both" and sorted(done) == ["o1", "o2"] and len(model.inputs) == 2
 
 
 async def test_a_streamed_reply_allowed_for_the_conversation_does_not_ask_again(
@@ -175,7 +176,7 @@ async def test_a_streamed_reply_allowed_for_the_conversation_does_not_ask_again(
     finished = await agent.resume(
         asked.data["interrupt_id"], "approve", reviewer="u1", remember="run"
     )
-    assert finished.status is RunStatus.SUCCESS and done == ["o1", "o2"]
+    assert finished.status is RunStatus.SUCCESS and sorted(done) == ["o1", "o2"]
 
 
 async def test_a_queued_run_allowed_for_the_conversation_does_not_ask_again() -> None:
@@ -366,10 +367,11 @@ async def test_the_hints_narrow_the_tools_each_turn_the_teams_own_too(
     )
     assert (await agent.run("find t2", user="u1")).answer == "done"
     memory_tools = MEMORY_TOOLS
-    # offered in name order, the agent's own among them, as every other adapter offers them
-    assert model.tools[0] == sorted(["t2", *memory_tools])  # the agent's own eta is no candidate
+    # the agent's own first, in its order, then the harness's
+    assert sorted(model.tools[0]) == sorted(["t2", *memory_tools])  # its own eta: no candidate
     # tool_search found t4 and the agent's own eta: both offered from then on
-    assert model.tools[1] == sorted(["eta", "t2", "t4", *memory_tools])
+    assert sorted(model.tools[1]) == sorted(["eta", "t2", "t4", *memory_tools])
+    assert model.tools[1][0] == "eta"
 
 
 async def test_two_sdk_approvals_in_one_turn_are_answered_one_at_a_time(
@@ -573,9 +575,12 @@ def test_the_sdks_own_tracing_is_left_as_set_and_said_once(
     try:
         provider.set_disabled(False)
         sdk_tracing_said.cache_clear()
-        with caplog.at_level("INFO", logger="trellis.harness"):
+        with caplog.at_level("WARNING", logger="trellis.harness"):
             assert sdk_tracing_said() is True
-        assert "exports to OpenAI" in caplog.text
+        [said] = [r for r in caplog.records if "exports every run's spans" in r.getMessage()]
+        assert said.levelname == "WARNING"
+        assert "agents.set_tracing_disabled(True)" in said.getMessage()
+        assert "OPENAI_AGENTS_DISABLE_TRACING=1" in said.getMessage()
         provider.set_disabled(True)
         sdk_tracing_said.cache_clear()
         assert sdk_tracing_said() is False
@@ -634,7 +639,8 @@ async def test_an_agent_handed_off_to_runs_its_calls_allowed_for_the_conversatio
         first.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
     )
     assert finished.status is RunStatus.SUCCESS, finished.interrupt
-    assert done == ["refund o1", "refund o2"] and len(model.inputs) == 3
+    # allowed for the conversation, the SDK runs the reply's other calls together
+    assert sorted(done) == ["refund o1", "refund o2"] and len(model.inputs) == 3
 
 
 async def test_an_agent_handed_off_to_has_its_own_tools_governed_by_the_catalog() -> None:
@@ -672,26 +678,120 @@ async def test_an_agent_handed_off_to_pulls_from_memory_and_is_narrowed(
         memory_harness.wrap(triage, id="desk", without={"schedules"}), [make(i) for i in range(6)]
     )
     assert (await agent.run("find t2", user="u1")).answer == "checked"
-    assert model.tools[0] == sorted(["t2", *MEMORY_TOOLS])
+    assert sorted(model.tools[0]) == sorted(["t2", *MEMORY_TOOLS])
     # billing: its own refund narrowed away, the memory tools added (not triage's t0..t5)
-    assert model.tools[1] == sorted(MEMORY_TOOLS)
+    assert sorted(model.tools[1]) == sorted(MEMORY_TOOLS)
     assert memory_service.named("call_agent_tool")[0].path["name"] == "memory_search"
     assert [t.name for t in billing.tools] == ["refund"]  # yours, unchanged
 
 
-async def test_a_handoff_object_is_said_once_and_kept(
-    harness: Harness, caplog: pytest.LogCaptureFixture
+async def test_a_handoff_objects_agent_is_governed_and_recorded_as_the_runs(
+    memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
+    """``handoff(agent, input_filter=...)``: the agent behind the ``Handoff`` object runs as a
+    governed copy — its own tool is of the run's tool set, asks as the catalog rules, runs once
+    after the approval and is recorded — while the handoff keeps everything the SDK gives it
+    (its name, its filter, its callback). The team's agent is not changed."""
     from agents import handoff
 
-    model = ScriptedModel(["hi", "hi"])
-    target = Agent(name="t", model=model, handoffs=[handoff(Agent(name="x", model=model))])
-    agent = harness.wrap(target, id="hidden")
+    filtered: list[int] = []
+
+    def nothing_before(data: Any) -> Any:
+        filtered.append(len(data.new_items))
+        return data.clone(input_history=(), pre_handoff_items=(), new_items=())
+
+    @function_tool
+    def refund(order: str) -> str:
+        done.append(f"refund {order}")
+        return f"refunded {order}"
+
+    clerk_model = ScriptedModel([("refund", {"order": "o1"}), "refunded o1"], ids="c")
+    clerk = Agent(name="clerk", model=clerk_model, tools=[refund])
+    desk_model = ScriptedModel([("to_refunds", {})], ids="d")
+    desk = Agent(
+        name="desk",
+        model=desk_model,
+        handoffs=[handoff(clerk, tool_name_override="to_refunds", input_filter=nothing_before)],
+    )
+    memory_service.catalog = {"refund": {"side_effects": "irreversible"}}
+    agent = memory_harness.wrap(desk, id="hidden")
+    assert "refund" in {s.name for s in await agent.adapter.native(desk)}
+    paused = await agent.run("refund o1", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None and done == []
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "refund"
+    finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and finished.answer == "refunded o1"
+    assert done == ["refund o1"] and filtered and clerk_model.inputs[0] == []
+    assert len(desk_model.inputs) == 1  # the approval continued the SDK's run in the clerk
+    await memory_harness.writes.drain()
+    recorded = [c.body["tool"] for c in memory_service.named("record_tool")]
+    assert recorded == ["refund"]
+    assert clerk.tools == [refund]  # yours, unchanged
+
+
+async def test_a_handoff_built_by_hand_is_governed_when_it_hands_off(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``Handoff`` built by hand names no agent before it runs: its agent is governed from
+    the moment the handoff returns it."""
+    from agents import Handoff
+
+    asked: list[str] = []
+
+    @function_tool
+    def wipe(order: str) -> str:
+        done.append(f"wipe {order}")
+        return "wiped"
+
+    # its tools are not of the run's tool set, so the approval is a pause of the harness's: the
+    # resume runs the agents again from the input, against the journal
+    clerk = Agent(
+        name="clerk",
+        model=ScriptedModel([("wipe", {"order": "o1"}), ("wipe", {"order": "o1"}), "wiped o1"]),
+        tools=[wipe],
+    )
+
+    async def to_clerk(context: Any, input_json: str | None) -> Any:
+        asked.append("handed")
+        return clerk
+
+    by_hand = Handoff(
+        tool_name="to_clerk",
+        tool_description="Hand to the clerk.",
+        input_json_schema={},
+        on_invoke_handoff=to_clerk,
+        agent_name="clerk",
+    )
+    desk_model = ScriptedModel([("to_clerk", {}), ("to_clerk", {})], ids="d")
+    desk = Agent(name="desk", model=desk_model, handoffs=[by_hand])
+    agent = declaring(harness, wipe="irreversible").wrap(desk, id="by-hand")
     with caplog.at_level("WARNING", logger="trellis.harness"):
-        await agent.run("hi", user="u1")
-        await agent.run("hi", user="u1")
-    said = [r for r in caplog.records if "Handoff object" in r.getMessage()]
+        paused = await agent.run("wipe o1", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == "wipe"
+    assert done == [] and asked == ["handed"]
+    with caplog.at_level("WARNING", logger="trellis.harness"):
+        finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert finished.status is RunStatus.SUCCESS and done == ["wipe o1"]  # once
+    said = [r for r in caplog.records if "Handoff object built by hand" in r.getMessage()]
     assert len(said) == 1
+
+
+def test_an_sdk_that_no_longer_says_a_handoffs_agent_is_refused_where_it_is_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent behind a ``handoff()`` object is read from the SDK's ``Handoff`` (its
+    ``_agent_ref``): an SDK whose ``Handoff`` no longer has it fails at ``h.wrap``, never runs
+    that agent ungoverned. An agent with no ``Handoff`` object is not affected."""
+    from agents import handoff
+
+    from trellis.contracts import ConfigurationError
+    from trellis.harness.adapters import detect, openai_agents
+
+    monkeypatch.setattr(openai_agents, "HANDOFF_AGENT", "_no_such_field")
+    with pytest.raises(ConfigurationError, match="Handoff"):
+        detect(Agent(name="desk", handoffs=[handoff(Agent(name="clerk"))]))
+    detect(Agent(name="desk", handoffs=[Agent(name="clerk")]))
 
 
 @tool(side_effects="read")
@@ -836,11 +936,12 @@ async def test_the_providers_hosted_tool_calls_are_recorded_with_the_steps_durat
 
 
 @pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
-async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
+async def test_a_call_repeated_in_one_reply_runs_once_a_harness_tool_only(
     harness: Harness,
 ) -> None:
-    """The SDK runs a reply's calls; the harness's tools — and the agent's own, governed — run
-    a call the reply repeats once, and answer each repeat with where its result is."""
+    """The SDK runs a reply's calls; a harness tool runs a call the reply repeats once, and
+    answers each repeat with where its result is — the agent's own tool runs every call the
+    reply makes, as the SDK runs it."""
     asked: list[str] = []
 
     @function_tool
@@ -848,14 +949,14 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
         asked.append(order)
         return "tomorrow"
 
-    calls: list[Any] = [("ship", {"order": "o1"}), ("eta", {"order": "o1"})] * 3
+    calls: list[Any] = [("ship", {"order": "o1"}), ("eta", {"order": "o1"})] * 2
     model = ScriptedModel([calls, "shipped, arriving tomorrow"])
     target = Agent(name="shipper", model=model, tools=[eta])
     wrapped = declaring(harness, eta="read").wrap(target, id="shipper")
     agent = arm(wrapped, [tool(ship.fn, side_effects="write")])
     result = await agent.run("ship o1", user="u1")
     assert result.status is RunStatus.SUCCESS, result.error
-    assert done == ["o1"] and asked == ["o1"]
+    assert done == ["o1"] and asked == ["o1", "o1"]
     outputs = [
         (i["call_id"], i["output"])
         for i in model.inputs[-1]
@@ -865,9 +966,7 @@ async def test_a_call_repeated_in_one_reply_runs_once_the_agents_own_tool_too(
         ("call_1", "shipped o1"),
         ("call_1_1", "tomorrow"),
         ("call_1_2", SAME_CALL.format(first="call_1")),
-        ("call_1_3", SAME_CALL.format(first="call_1_1")),
-        ("call_1_4", SAME_CALL.format(first="call_1")),
-        ("call_1_5", SAME_CALL.format(first="call_1_1")),
+        ("call_1_3", "tomorrow"),
     ]
 
 
@@ -877,38 +976,54 @@ def look(topic: str) -> str:
     return f"facts about {topic}"
 
 
-async def test_at_its_turn_limit_a_run_ends_with_one_last_answer(harness: Harness) -> None:
-    """``max_turns`` reached: the last agent is called once more, told the limit is reached and
-    given no tool (the SDK's own ``max_turns`` error handler), and its answer is the run's — as
-    a ``ReAct`` run's at ``max_steps`` — not ``MaxTurnsExceeded`` with no answer."""
-    turns: list[Any] = [("look", {"topic": f"t{n}"}) for n in range(3)]
-    model = ScriptedModel([*turns, "found t0 to t2; t3 is left"])
+async def test_at_its_turn_limit_a_run_ends_partial_with_the_sdks_outcome(
+    harness: Harness,
+) -> None:
+    """``max_turns`` reached: the SDK stops the run (``MaxTurnsExceeded``) and the harness
+    ends it ``PARTIAL`` with what it did — no model call of the harness's, the last thing the
+    model said as its answer — its warning the budget's (the turn limit is the run's budget of
+    turns)."""
+    turns: list[Any] = [
+        [("look", {"topic": "t0"})],
+        ("look", {"topic": "t1"}),
+        ("look", {"topic": "t2"}),
+    ]
+    model = ScriptedModel([*turns, "never asked"])
     target = Agent(name="looper", instructions="Look.", model=model)
     agent = arm(harness.wrap(target, id="turns", framework_options={"max_turns": 3}), [look])
     events = [e async for e in agent.stream("x", user="u")]
-    assert events[-1].data["result"] == "found t0 to t2; t3 is left", events[-1]
-    assert len(model.inputs) == 4  # one call past the limit
-    assert model.tools[-1] == []  # offered no tool
-    assert json.dumps(model.inputs[-1][-1]) == json.dumps(
-        {"role": "user", "content": budget.LIMIT.format(limit=3)}
-    )
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].outcome is RunOutcome.PARTIAL
+    assert len(model.inputs) == 3  # the SDK's three turns, none past them
     warned = [e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("code")]
-    assert warned[-1]["code"] == "step_limit"
+    assert warned[-1]["code"] == "budget" and "max_turns=3" in warned[-1]["message"]
+    model.turns[:] = [("look", {"topic": "t3"})]
+    result = await agent.run("x", user="u", framework_options={"max_turns": 1})
+    assert result.status is RunStatus.PARTIAL and result.answer is None  # it said nothing
+    assert result.error is not None and result.error.code == budget.BUDGET_EXCEEDED
 
 
-async def test_a_structured_answer_or_a_teams_handler_keeps_its_way(harness: Harness) -> None:
-    from pydantic import BaseModel
+async def test_a_turn_limit_keeps_the_last_thing_the_model_said_and_a_teams_handler(
+    harness: Harness,
+) -> None:
+    from agents import ModelResponse, Usage
+    from openai.types.responses import ResponseFunctionToolCall
 
-    class Plan(BaseModel):
-        steps: list[str]
+    class Says(ScriptedModel):
+        async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+            found = await super().get_response(*args, **kwargs)
+            note = await super().get_response(*args, **kwargs)  # a message beside its call
+            self.inputs.pop()
+            return ModelResponse(
+                output=[*note.output, *found.output], usage=Usage(), response_id=None
+            )
 
-    model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
-    target = Agent(name="planner", instructions="Plan.", model=model, output_type=Plan)
-    options = {"max_turns": 2}
-    agent = arm(harness.wrap(target, id="planner", framework_options=options), [look])
+    call = ("look", {"topic": "a"})
+    model = Says([call, "looking at a", call, "looking again"])
+    target = Agent(name="looper", instructions="Look.", model=model)
+    agent = arm(harness.wrap(target, id="said", framework_options={"max_turns": 2}), [look])
     result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "Max turns (2) exceeded" in result.error.message
+    assert result.status is RunStatus.PARTIAL and result.answer == "looking again"
+    assert isinstance(ResponseFunctionToolCall, type)
 
     model = ScriptedModel([("look", {"topic": f"t{n}"}) for n in range(5)])
     target = Agent(name="looper", instructions="Look.", model=model)
@@ -920,16 +1035,7 @@ async def test_a_structured_answer_or_a_teams_handler_keeps_its_way(harness: Har
         [look],
     )
     result = await agent.run("x", user="u")
-    assert result.answer == "ours, not the harness's"
-
-
-async def test_a_last_call_that_fails_leaves_the_sdks_error(harness: Harness) -> None:
-    model = ScriptedModel([("look", {"topic": "a"}), ("look", {"topic": "b"})])  # then nothing
-    target = Agent(name="looper", instructions="Look.", model=model)
-    agent = arm(harness.wrap(target, id="dry", framework_options={"max_turns": 2}), [look])
-    result = await agent.run("x", user="u")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "Max turns (2) exceeded" in result.error.message
+    assert result.status is RunStatus.SUCCESS and result.answer == "ours, not the harness's"
 
 
 @pytest.mark.usefixtures("writes_unasked")  # not about the write's approval

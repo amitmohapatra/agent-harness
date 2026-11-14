@@ -4,7 +4,8 @@
 
 ``TRELLIS_LIVE_SUFFIX`` keeps one session's agents apart from another's in a shared run store;
 ``TRELLIS_LIVE_LEDGER`` is a file each side effect of ``charge`` appends a line to, so a test
-counts executions across processes.
+counts executions across processes. A test with the ``writes_unasked`` fixture has a ``write``
+run unasked here too (``writes_unasked_here``).
 """
 
 from __future__ import annotations
@@ -14,12 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from tests.live.conftest import live_harness
-from tests.support.arm import arm
+from tests.support.arm import arm, writes_unasked_here
 from trellis import Runtime, tool
 
 SUFFIX = os.environ.get("TRELLIS_LIVE_SUFFIX", "local")
 LEDGER = Path(os.environ.get("TRELLIS_LIVE_LEDGER", "/dev/null"))
 
+writes_unasked_here(os.environ)
 h = live_harness()
 
 

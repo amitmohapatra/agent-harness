@@ -45,6 +45,13 @@ def test_the_settings_are_shown_with_their_sources_and_secrets_redacted() -> Non
     assert rows["spool_dir"] == ("unset", "default")
     assert set(rows) == set(Settings.model_fields)  # every setting, and nothing else
     assert doctor.shown("api_key", "short") == "set"
+    assert doctor.shown("api_key", "8letters") == "set"  # its last 4 would be half of it
+    assert doctor.shown("api_key", "9_letters") == "set (...ters)"
+    assert [n for n in doctor.SECRETS if n not in Settings.model_fields] == []  # no dead name
+    secrets = [f for f in Settings.model_fields if f.endswith(("key", "secret", "headers"))]
+    assert secrets == ["llm_api_key", "api_key", "judge_virtual_key"]
+    for field in secrets:  # every key a setting holds: never in full
+        assert doctor.shown(field, "a-long-secret-value") == "set (...alue)", field
 
 
 MEM = "http://mem.test"
@@ -72,6 +79,22 @@ def memory_answers(
         respx.get(f"{MEM}{doctor.SUGGESTIONS_PATH}").mock(
             return_value=httpx.Response(200, json={"suggestions": []})
         )
+
+
+@respx.mock
+async def test_agent_runs_is_asked_with_the_key_in_the_header_it_reads(tmp_path: Path) -> None:
+    """agent-runs reads the key from ``X-API-Key`` only (its api.md, "Authentication"); a key
+    sent as a bearer token is refused there, so the check would always fail."""
+    runs = respx.get("http://runs.test/v1/runs/doctor-check").mock(
+        side_effect=lambda request: httpx.Response(
+            404 if request.headers.get("x-api-key") == "trk_secret_5678" else 401
+        )
+    )
+    settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
+    async with httpx.AsyncClient() as client:
+        found = await doctor._runs(client, settings)
+    assert found is not None and found.ok, found
+    assert "authorization" not in runs.calls[0].request.headers
 
 
 @respx.mock
@@ -165,6 +188,9 @@ async def test_the_declared_route_is_checked_against_the_endpoint(
     settings = Settings.from_env({"LLM_BASE_URL": "http://gw.test/v1", **env})
     [check] = await doctor.checks(settings)
     assert check.name == "gateway" and check.ok is ok and said in check.said
+    for call in listing.calls:  # MCP's own request: a JSON-RPC tools/list
+        sent = json.loads(call.request.content)
+        assert sent == {"jsonrpc": "2.0", "id": "trellis-doctor", "method": "tools/list"}
 
 
 async def test_a_provider_sdk_route_is_not_asked() -> None:

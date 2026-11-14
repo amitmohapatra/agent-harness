@@ -60,25 +60,30 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
 
    `start()` queues as before, through its `concurrency_key`. A worker's run is not held in
    process, so `mode` has nothing to act on there.
-3. **One id per message**, `msg_` followed by a digest of the conversation and the message's
-   native name: `<run>:input` for the question, `<run>:answer` for the answer,
-   `result:<call>` for a tool result, `call:<first call>` for an assistant message that calls
-   tools, and otherwise the run, attempt and position. The same id appears on the AG-UI
-   stream (the text message, a `TOOL_CALL_RESULT`'s `messageId`) and in the memory service
-   (the message's `custom_metadata`: `message_id`, `run_id`, `tool_call_id`, one level deep,
-   within the service's limit of two). Because the name does not depend on the attempt or on
-   the content, the id survives a resume, a replay and a cleared tool result.
-   The memory service de-duplicates by this id too: it is the message's `source_message_id`,
-   so a resumed attempt that sends the first attempt's messages again (a checkpointed graph's
-   whole state) has each stored once (`test_a_resumed_graph_run_stores_each_message_of_its_transcript_once`).
-4. **A conversation continues the framework's own session.** When a turn of a Claude Agent
-   SDK or ACP target ends (and does not pause), its session (the journal's `session` and, for
-   Claude, its `transcripts`) is kept per conversation in this process (`Agent.sessions`,
-   bounded at 128 conversations: a session's transcripts can be large). The conversation's next turn starts with it in its journal, through the
-   same path a resume after a pause takes, but it sends its own prompt rather than the "goes on"
-   prompt. That session then owns the history: point 1 reads nothing, and with memory on, memory's
-   window is not rendered beside it (`Agent.window` returns `Window.NONE`). When the session cannot
-   be resumed, the existing warning fires and a new session starts.
+
+   *Amended (chat order across processes):* the turn is the run store's, not only the
+   process's, and there is one ordering mechanism: the conversation's line
+   (`trellis.harness.line`), of which `conversation.Turns` is the part in this process (the
+   separate in-process lock is gone). A direct turn of a conversation takes the
+   conversation's `concurrency_key` too; agent-runs creates each run of a key in its place —
+   under the key's transaction lock, in the one statement that follows it, after the key's
+   running and queued runs — and a claim takes a queued run only while no run placed before it
+   runs. The harness reads the place agent-runs gives the run (`RunRecord.placed_at`: its
+   start, or its latest answer's `recorded_at`; `runs.place`), never recomputing it, lists the
+   line by its own key (`concurrency_key`), and waits for the run just ahead: a local one until it leaves the line, one
+   elsewhere by following its event stream (shared, capped: `line.Followers`). A conversation's
+   starts leave one process in the order they were sent (`Turns.accepting`). `interrupt`
+   across processes needs no new call: the message's run names the run it interrupts in its
+   metadata, the process holding that run sees it as it renews the hold and stops the run
+   itself, and the message waits behind it in the line — no overlap, at the price of up to one
+   hold renewal (20 s). `steer` cannot reach a run in another process, so it waits as `queue`
+   does, said once per agent. Set aside: a run started `QUEUED` and claimed by its own process
+   (a claim of one named run is a contract change); a cancel the store asks of the holder
+   (changes the cancel endpoint's documented behaviour; parked on the `-chat-order-cancel`
+   branches, not needed). *Amended again (2026-11-14, approved):* the place is returned by
+   the store as a field of the run (`placed_at`, optional and read-only) and the run listing
+   takes `concurrency_key`: the harness no longer reads answers to compute the place, nor
+   another user's runs on a thread named alike.
 
 ## Consequences
 
@@ -93,4 +98,6 @@ its thread (`identity.conversation_key`). Reading the code at `main` showed four
   per model call. It does nothing when nothing was steered.
 * Tests: `tests/integration/test_conversation.py` covers every adapter × mode, follow-up
   continuity with memory on and off, the session continued, id stability, and steering; the
-  scoping tests are in `test_conversation_scope.py`.
+  scoping tests are in `test_conversation_scope.py`; the line across servers in
+  `test_conversation_line.py` (two harnesses on one store, bursts of 5 and 20 on every adapter)
+  and `tests/live/test_live_chat_order.py` (separate processes on agent-runs and PostgreSQL).

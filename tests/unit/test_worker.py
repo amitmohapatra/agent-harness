@@ -279,9 +279,10 @@ def test_main_serves_the_named_harness_and_exits_cleanly(
     monkeypatch.setattr(cli, "serve", once)
     assert main(["served_app:h"]) == 0
     assert main(["served_app:h", "--concurrency", "3"]) == 0
+    assert main(["served_app:h", "--concurrency", "1"]) == 0  # the least
     monkeypatch.setattr(cli, "serve", interrupted)
     assert main(["served_app:h"]) == 0  # Ctrl-C is a clean stop
-    assert served == [["echo", None], ["echo", 3]]
+    assert served == [["echo", None], ["echo", 3], ["echo", 1]]
 
 
 def test_running_the_module_without_a_target_prints_its_usage(

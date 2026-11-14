@@ -16,7 +16,8 @@ from trellis.contracts import AgentExecutionContext, RunEvent
 from trellis.harness import writes as module
 from trellis.harness.events import RunEvents
 from trellis.harness.writes import SPOOL_FILE, Writes
-from trellis.memory.errors import DependencyUnavailableError, ValidationError
+from trellis.memory.breaker import CircuitBreaker
+from trellis.memory.errors import CircuitOpenError, DependencyUnavailableError, ValidationError
 
 
 @pytest.fixture(autouse=True)
@@ -48,18 +49,175 @@ async def test_writes_run_in_the_background_and_drain_waits_for_them() -> None:
     await writes.aclose()
 
 
+def test_the_queue_holds_10_000_writes_for_4_writers_and_a_full_one_waits_5_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/architecture.md: ``MAX_PENDING`` 10 000, ``WRITERS`` 4, ``WRITE_ATTEMPTS`` 6 (one
+    more than the five failed calls that open the memory client's circuit: SCN-6),
+    ``SUBMIT_WAIT_SECONDS`` 5."""
+    monkeypatch.undo()  # the values themselves, not the fast ones
+    assert (module.MAX_PENDING, module.WRITERS, module.WRITE_ATTEMPTS) == (10_000, 4, 6)
+    assert CircuitBreaker().threshold == 5
+    assert module.SUBMIT_WAIT_SECONDS == 5.0
+
+
 async def test_a_write_that_may_pass_is_tried_again() -> None:
     writes, tries = Writes(), []
 
     async def flaky() -> None:
         tries.append(1)
-        if len(tries) < module.WRITE_ATTEMPTS:
+        if len(tries) < 3:
             raise DependencyUnavailableError("memory is restarting", retryable=True)
 
     await writes.submit("memory.transcript", flaky)
     await writes.drain()
-    assert len(tries) == module.WRITE_ATTEMPTS and writes.failed == 0
+    assert len(tries) == 3 and writes.failed == 0  # the third of its attempts
     await writes.aclose()
+
+
+def circuit_open(retry_after: float) -> CircuitOpenError:
+    """What the memory client raises, sending nothing, while its circuit is open."""
+    return CircuitOpenError(
+        "memory service circuit open after 5 failed calls",
+        code="CIRCUIT_OPEN",
+        status=0,
+        retryable=True,
+        retry_after=retry_after,
+    )
+
+
+async def test_a_write_waits_out_an_open_circuit_spending_no_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SCN-6: the memory service down for longer than a write's attempts (its client's circuit
+    open, then open again after a probe that failed): the write waits each cool-down, queued,
+    and is delivered once the service is back — every wait is the circuit's, none an attempt."""
+    waits: list[float] = []
+    sleep = asyncio.sleep
+
+    async def waited(seconds: float) -> None:
+        waits.append(seconds)
+        await sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", waited)
+    monkeypatch.setattr(module, "WRITE_BACKOFF_SECONDS", 0.5)
+    monkeypatch.setattr(module.random, "uniform", lambda low, high: 0.0)
+    writes, tries = Writes(), []
+    down = [circuit_open(30.0), circuit_open(0.0)] * 3 + [
+        DependencyUnavailableError("the probe failed", retryable=True),
+        DependencyUnavailableError("the probe failed", retryable=True),
+        circuit_open(12.5),
+    ]
+
+    async def write() -> None:
+        tries.append(1)
+        if down:
+            raise down.pop(0)
+
+    await writes.submit("memory.transcript", write)
+    await writes.drain()
+    assert len(tries) == 10 and writes.failed == writes.spooled == 0
+    # the circuit's cool-down (none left: half a second, not at once), and the backoff after
+    # the two failed probes, its attempts whole again after each cool-down
+    assert waits == [30.0, 0.5] * 3 + [0.0, 0.0, 12.5], waits
+    await writes.aclose()
+
+
+async def test_the_first_write_of_an_outage_outlasts_the_failures_that_open_the_circuit() -> None:
+    """SCN-6, the first seconds of an outage: the only write in flight fails five times for
+    want of the service — the failed calls that open its client's circuit — and has a try
+    left: refused by the open circuit, it waits and is delivered when the service is back."""
+    writes, tries = Writes(), []
+    down: list[Exception] = [
+        *(DependencyUnavailableError("unavailable", retryable=True) for _ in range(5)),
+        circuit_open(0.0),
+    ]
+
+    async def write() -> None:
+        tries.append(1)
+        if down:
+            raise down.pop(0)
+
+    await writes.submit("memory.transcript", write)
+    await writes.drain()
+    assert len(tries) == 7 and writes.failed == 0
+    await writes.aclose()
+
+
+async def test_writes_held_by_an_open_circuit_fill_the_queue_and_overflow_as_ever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While the circuit is open the writes wait in the queue, bounded by its size: one more
+    is given up as a full queue's always is (lost here, with no spool), and said."""
+    monkeypatch.setattr(module, "MAX_PENDING", 2)
+    monkeypatch.setattr(module, "WRITERS", 1)
+    writes, delivered = Writes(), []
+    events, seen = run_events()
+    back = asyncio.Event()
+
+    def write(name: str) -> Any:
+        async def work() -> None:
+            if not back.is_set():
+                raise circuit_open(0.0)
+            delivered.append(name)
+
+        return work
+
+    for name in ("a", "b", "c"):  # one waiting on the circuit, two queued
+        await writes.submit("memory.transcript", write(name))
+    await writes.submit("memory.transcript", write("d"), events=events)
+    assert writes.failed == 1
+    assert seen[0].data["message"] == (
+        "memory.transcript failed and is lost: the write queue stayed full"
+    )
+    back.set()
+    await writes.drain()
+    assert delivered == ["a", "b", "c"]
+    await writes.aclose()
+
+
+async def test_a_writes_retries_back_off_at_random_from_half_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the module's own backoff, not this file's
+    ranges: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        ranges.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr(module.random, "uniform", uniform)
+    writes, tries = Writes(), []
+
+    async def flaky() -> None:
+        tries.append(1)
+        if len(tries) < 3:
+            raise DependencyUnavailableError("memory is restarting", retryable=True)
+
+    await writes.submit("memory.transcript", flaky)
+    await writes.drain()
+    assert len(tries) == 3 and ranges[:2] == [(0, 0.5), (0, 1.0)]  # full jitter, doubled
+    await writes.aclose()
+
+
+async def test_a_shutdown_waits_at_most_10_s_for_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()  # the module's own bound, not this file's
+    bounds: list[float] = []
+    timeout = asyncio.timeout
+
+    def bounded(delay: float | None) -> Any:
+        bounds.append(delay or 0.0)
+        return timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", bounded)
+    writes = Writes()
+
+    async def done() -> None:
+        return None
+
+    await writes.submit("memory.transcript", done)
+    await writes.aclose()
+    assert 10.0 in bounds  # the drain bound
 
 
 async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
@@ -73,7 +231,7 @@ async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
 
     await writes.submit("memory.transcript", boom, events=events)
     await writes.drain()
-    assert writes.failed == 1 and len(tries) == module.WRITE_ATTEMPTS
+    assert writes.failed == 1 and len(tries) == 6  # 6 attempts in all
     event: RunEvent = seen[0]
     assert event.data["name"] == "warning"
     assert "memory is down" in event.data["message"]

@@ -107,6 +107,18 @@ async def test_a_loop_that_never_answers_ends_at_the_step_limit(harness: Harness
     assert len(model.requests) == 4
 
 
+async def test_the_step_limit_is_12_model_calls_by_default(harness: Harness) -> None:
+    model = ScriptedChat([("stock", {"sku": f"s{n}"}) for n in range(13)])
+    agent = arm(harness.wrap(ReAct(system_prompt="s", model=model), id="twelve"), [stock])
+    result = await agent.run("x", user="u1")
+    assert result.error is not None
+    assert result.error.message == "stopped: the step limit (12) was reached"
+    assert len(model.requests) == 13
+    # middleware() on a graph of yours: the same default (LangChain's own limit one call on)
+    [limit] = [m for m in middleware() if m.name == "ModelCallLimitMiddleware"]
+    assert (limit.thread_limit or limit.run_limit) == 13  # type: ignore[attr-defined]
+
+
 @respx.mock
 async def test_a_model_name_is_a_gateway_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_BASE_URL", "http://gw.test/v1")
@@ -251,6 +263,13 @@ def test_given_middleware_is_added_before_model_hooks_and_replaces_nothing() -> 
         stacked(defaults, [Named("ModelCallLimitMiddleware")])
     with pytest.raises(ConfigurationError, match=r"A is the harness's \(always on\)"):
         stacked(defaults, [Named("A")])
+    for name, parameter in (
+        ("StallGuard", "max_repeats="),
+        ("ModelHooks", "call_timeout= and system_prompt=stored"),
+        ("ContextEditingMiddleware", "context_window="),
+    ):  # each named as a default a parameter sets: refused, naming the parameter
+        with pytest.raises(ConfigurationError, match=rf"{name} is the harness's \({parameter}"):
+            stacked([*defaults, Named(name)], [Named(name)])
 
 
 def test_reacts_middleware_refuses_the_harness_part_saying_react_has_it() -> None:
@@ -279,6 +298,16 @@ async def test_a_deep_agents_middleware_given_replaces_its_own_by_name() -> None
 def test_steps_and_repeats_are_whole_numbers(name: str, least: int, value: Any) -> None:
     with pytest.raises(ConfigurationError, match=f"{name} is a number of steps, {least} or more"):
         ReAct(system_prompt="s", model=ScriptedChat(["hi"]), **{name: value})
+
+
+def test_the_least_steps_and_repeats_build_and_one_repeat_does_not() -> None:
+    ReAct(system_prompt="s", model=ScriptedChat(["hi"]), max_steps=1, max_repeats=2)
+    with pytest.raises(ConfigurationError, match="max_repeats is a number of steps, 2 or more"):
+        ReAct(system_prompt="s", model=ScriptedChat(["hi"]), max_repeats=1)
+    with pytest.raises(
+        ConfigurationError, match=r"stored prompt \(stored\(\.\.\.\)\): give a text"
+    ):
+        middleware(system_prompt="You sell.")  # type: ignore[arg-type]
 
 
 class Mine(AgentMiddleware):
@@ -424,6 +453,9 @@ def test_the_schema_check_knows_the_basic_json_types() -> None:
     assert arguments_problem(schema, {"either": None, "odd": "1.0", "extra": 1}) is None
     assert arguments_problem(schema, {"n": True}) == "n must be of type integer"
     assert arguments_problem(schema, {"x": "1"}) == "x must be of type number"
+    typed = {"properties": {t: {"type": t} for t in ("integer", "array", "object", "null")}}
+    for name, wrong in (("integer", 1.5), ("array", "x"), ("object", [1]), ("null", 0)):
+        assert arguments_problem(typed, {name: wrong}) == f"{name} must be of type {name}"
     assert arguments_problem(schema, {"flag": 1}) == "flag must be of type boolean"
     assert arguments_problem({}, {"a": 1}) is None
 

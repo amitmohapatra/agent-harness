@@ -159,6 +159,17 @@ def test_null_markers_leave_a_column_a_number() -> None:
 
 
 @pytest.mark.parametrize(
+    "marker", ["NULL", "None", "NA", "N/A", "#N/A", "NaN", "-", "--", "\u2014"]
+)
+def test_each_null_marker_among_numbers_is_a_missing_value(marker: str) -> None:
+    said = ask(
+        f"a,b\nx,1\ny,{marker}\nz,2\n",
+        "SELECT sum(b) s, count(b) n, any_value(typeof(b)) k FROM result",
+    )
+    assert said == "s,n,k\n3,2,BIGINT", marker
+
+
+@pytest.mark.parametrize(
     "cells", [["$1,234.50", "$2.00"], ["1,234.50", "2.00"], ["12.5%", "3%"], ["(12.50)", "1"]]
 )
 def test_a_figure_written_with_symbols_stays_text_and_the_failure_says_how(

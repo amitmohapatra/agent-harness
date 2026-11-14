@@ -12,7 +12,9 @@
   (``middleware.with_question``);
 * transcript: the messages the run added after the question — tool calls and their results
   with the answer — so the conversation memory keeps replays as the framework's would;
-* run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
+* run: ``astream`` with ``version="v2"`` (``agent.run``), or ``astream_events`` with
+  ``version="v3"`` (``agent.stream``: the graph's stream transformers shape what is streamed,
+  and the answer's text is its text content blocks), on the LangGraph thread named by the
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
   resume is ``Command(resume=...)``; without one the run is re-executed from its input and the
@@ -36,7 +38,8 @@
 * a graph that checkpoints into its run (``middleware.RunCheckpointer``, as ``ReAct(...)``
   does) runs on the run's own thread (``thread_id`` is the run id): its checkpoint is in the
   run's journal, so a resume — in any process, after a pause or a crash — continues where it
-  stopped, and it holds no conversation of its own (the memory service gives the recent turns).
+  stopped, and it holds no conversation of its own (the memory service gives the recent turns)
+  but the state its conversation carries from turn to turn (:data:`CARRIED`).
   A graph built with ``middleware()`` and compiled without a checkpointer is run as a copy
   that has one (:func:`checkpointing`); one compiled with a checkpointer of its own keeps it,
   its checkpoints marked with the run (:data:`RUN_METADATA`), and the attempt after a crash
@@ -52,7 +55,11 @@
   (``bridges.helpers``, from the governed ``task`` call: ``middleware.governed_call``): given
   the memory context for its task, its tool calls governed as the run's and recorded under its
   run, its outcome recorded; its model calls count toward the run's budget (``accounting``),
-  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run;
+  as do those of the graph's subgraphs and ``Send`` branches, which run inside the run. A
+  Deep Agents async sub-agent's task (``start_async_task``) is a child run too, outliving the
+  turn as the task does: held while it runs on its server, ended when a later check, list or
+  cancel says how it ended, and cancelled with the turn that started it
+  (``bridges.async_tasks``);
 * framework options: the ``RunnableConfig`` keys the run is given (``recursion_limit``,
   ``configurable``, ``tags``...) go into the config of ``ainvoke``/``astream``; a
   ``configurable.thread_id`` among them is refused (the thread is ``run(thread=)``, one owner).
@@ -64,12 +71,16 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
+import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Final
+
+from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
@@ -86,7 +97,9 @@ from trellis.harness.adapters.base import (
 )
 from trellis.harness.asking import answer_of
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bridges.async_tasks import AsyncTasks
 from trellis.harness.bridges.helpers import Helpers
+from trellis.harness.events import STREAMED
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Journal, Pending
 from trellis.harness.runtime import DEFERRED, MARKER, Runtime, reason_of
@@ -108,12 +121,19 @@ MODEL_NODE: Final = "create_agent.<locals>.amodel_node"
 RUN_ARGUMENTS: Final = ("context", "durability")
 #: Deep Agents' tool that runs a sub-agent.
 TASK_TOOL: Final = "task"
+#: The ``response_metadata`` key marking a run's input message as its question although the
+#: user did not type it (a notification run's: ``background.notify``): what the run says comes
+#: after it (:func:`added`).
+ASKED: Final = "trellis_asked"
 #: The checkpoint metadata key a graph with a checkpointer of its own has its run's checkpoints
 #: marked with (the run's id, from the run's config ``metadata``).
 RUN_METADATA: Final = "trellis_run_id"
 #: The ``configurable`` key under which LangGraph hands a task, by namespace, the checkpoint
 #: its step started from (``CONFIG_KEY_CHECKPOINT_MAP``; the root graph's under ``""``).
 CHECKPOINT_MAP: Final = "checkpoint_map"
+#: The ``configurable`` key under which LangGraph hands a task its id (``CONFIG_KEY_TASK_ID``):
+#: the same for each run of the task its ``RetryPolicy`` makes.
+TASK_ID: Final = "__pregel_task_id"
 #: The result a new turn gives a call its thread's last message holds with none: the run that
 #: made it was stopped (a newer message interrupted it, its time ran out) or left waiting for
 #: a person's approval, and a provider refuses a call with no result — the thread could not go
@@ -124,6 +144,15 @@ STOPPED_CALL: Final = (
 )
 #: The node of Deep Agents' ``PatchToolCallsMiddleware``: a graph that answers such calls itself.
 PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
+#: The graph state channels a conversation carries from one turn to the next where the graph
+#: has no thread of its own to hold them (:func:`carries`: its thread is its run, or it has
+#: none), as a thread of the graph's own would: Deep Agents' list of the background tasks its
+#: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against;
+#: its files kept in the graph's state (``StateBackend``: "persists across turns"), and its
+#: todos. Never the conversation itself (``messages``: the memory window's, or the graph's).
+#: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
+#: in the process and, up to ``pipeline.CARRIED_BYTES``, in the file store: ``pipeline``).
+CARRIED: Final = ("async_tasks", "files", "todos")
 
 
 class LangGraphAdapter:
@@ -158,6 +187,14 @@ class LangGraphAdapter:
         self.narrows: Narrowing = "turn" if per_turn else "none"
         #: the graph's own tools (:meth:`native`), once read
         self._native: list[ToolSpec] | None = None
+        #: the async tasks (Deep Agents' ``start_async_task``) its runs started that this
+        #: process holds the runs of (``bridges.async_tasks``)
+        self.tasks = AsyncTasks()
+
+    async def child_cancelled(self, run_id: str, reason: str | None) -> None:
+        """The run ``run_id`` was cancelled with the run that started it: an async task's
+        that this process holds is cancelled on its server (``subagents.cancel_children``)."""
+        await self.tasks.stopped(run_id, reason)
 
     def steers(self, target: Any) -> bool:
         """A graph with the harness's middleware (``ReAct``, ``middleware()``): its
@@ -183,77 +220,112 @@ class LangGraphAdapter:
     ) -> Any:
         from langchain_core.messages import SystemMessage
 
+        # the context is sent with the user's message: checked as that message is
+        context = screened(target, context) if context else context
         system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
         system += [langchain_message(said) for said in history]
-        if isinstance(input, str):
+        if isinstance(input, str) and not takes_text(target):
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):
             return {"messages": [*system, *input]}
-        if isinstance(input, dict) and isinstance(input.get("messages"), list):
-            return {**input, "messages": [*system, *input["messages"]]}
-        return input
+        if not isinstance(input, dict):
+            return input
+        # what the conversation carries is the harness's to give (:func:`_continued`), never
+        # an input's: whoever starts a run names no task list for it
+        given = {name: value for name, value in input.items() if name not in CARRIED}
+        if isinstance(given.get("messages"), list):
+            given["messages"] = [*system, *given["messages"]]
+        return given
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
+        from langgraph.types import GraphOutput
+
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        values: Any = None
+        interrupts: list[Any] = []
         try:
             given = await _continued(target, native_input, run)
-            return await self._graph(target, run.runtime).ainvoke(
-                given,
-                self._config(target, run),
-                version="v2",
-                **_run_arguments(run.runtime, target),
-            )
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
+            try:
+                # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the
+                # graph's nodes write to the stream is the run's (:func:`_written`)
+                async for part in graph.astream(
+                    given,
+                    config,
+                    stream_mode=["values", "custom"],
+                    version="v2",
+                    **_run_arguments(run.runtime, target),
+                ):
+                    if part["type"] == "custom":
+                        _written(run.runtime, part["data"])
+                    else:
+                        values = part["data"]
+                        interrupts.extend(part["interrupts"])
+            except Exception as exc:
+                values, interrupts[:] = await _asked_again(graph, config, exc)
+            _ended_with(target, run.runtime, values)
+            return GraphOutput(value=values, interrupts=tuple(interrupts))
         except BaseException as exc:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
+            await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        from langchain_core.messages import AIMessage
+        """The run streamed as LangGraph streams a graph to its consumers. A graph given
+        stream transformers of its own (:func:`transforms`: ``create_agent``'s
+        ``transformers=``, a middleware's — ``PIIMiddleware`` redacts the text on the wire) is
+        streamed through them (:func:`_transformed`), and what reaches the run is what they
+        let through; any other by its stream modes (:func:`_streamed`). The answer's text is
+        each model reply's text as it arrives — a text content block's too, a model's
+        reasoning not (:class:`_Text`); the root graph's ``values`` are its state and its
+        pauses, and what its nodes write (``custom``) is the run's."""
         from langgraph.types import GraphOutput
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        text = _Text()
         try:
             given = await _continued(target, native_input, run)
-            async for part in self._graph(target, run.runtime).astream(
-                given,
-                self._config(target, run),
-                stream_mode=["messages", "values"],
-                version="v2",
-                **_run_arguments(run.runtime, target),
-            ):
-                if part["type"] == "messages":
-                    chunk = part["data"][0]
-                    if (
-                        isinstance(chunk, AIMessage)
-                        and isinstance(chunk.content, str)
-                        and chunk.content
-                    ):
-                        yield chunk.content
-                elif part["type"] == "values":
-                    values = part["data"]
-                    interrupts = part["interrupts"] or interrupts
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
+            source = _transformed if transforms(graph) else _streamed
+            try:
+                async for kind, data, held in source(
+                    graph, given, config, _run_arguments(run.runtime, target)
+                ):
+                    if kind == "messages":
+                        if said := text.of(*data):
+                            yield said
+                    elif kind == "custom":
+                        _written(run.runtime, data)
+                    else:  # "values"
+                        values, interrupts = data, tuple(held) or interrupts
+            except Exception as exc:
+                values, again = await _asked_again(graph, config, exc)
+                interrupts = tuple(again)
         except BaseException as exc:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
+            await self.tasks.cancelled(run.runtime)
+        _ended_with(target, run.runtime, values)
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        state = output.value
-        answer: Any = None
+        state = fields_of(output.value)
+        answer: Any = output.value
         messages: list[Any] = []
-        if isinstance(state, dict):
-            messages = state.get("messages") or []
-            answer = state.get("structured_response")
-            if answer is None:
-                answer = _last_ai_text(messages)
+        if isinstance(state, Mapping) and state.get("structured_response") is not None:
+            answer = state["structured_response"]
+        elif isinstance(state, Mapping) and isinstance(state.get("messages"), list):
+            answer = _answer_text(state["messages"])
+        if isinstance(state, Mapping) and isinstance(state.get("messages"), list):
+            messages = state["messages"]
         transcript = added(messages) or (
             [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
         )
@@ -274,8 +346,14 @@ class LangGraphAdapter:
             first = (ours or raised)[0]
             # calls made at once may each have asked: the pause names each one's interrupt
             ids = {i.value.get("interrupt_id"): i.id for i in ours}
-            pause = NativePause(value=first.value, native_id=first.id, ids=ids)
-        return Extracted(answer=answer, transcript=transcript, pause=pause)  # type: ignore[arg-type]
+            schema = first.response_schema  # surfaced as its JSON Schema
+            pause = NativePause(
+                value=first.value,
+                native_id=first.id,
+                ids=ids,
+                schema=schema if isinstance(schema, dict) else None,
+            )
+        return Extracted(answer, transcript, pause, asked=asked(messages))  # type: ignore[arg-type]
 
     def resume_input(
         self,
@@ -366,6 +444,7 @@ class LangGraphAdapter:
         """The run's config: its framework options (less its run arguments) and the harness's
         thread id (theirs names none: ``check_options``)."""
         runtime = run.runtime
+        runtime.deciding = _task
         if _checkpointed(target):
             from langgraph.types import interrupt
 
@@ -379,6 +458,136 @@ class LangGraphAdapter:
         if _checkpointed(target) and not run_scoped(target):  # its checkpoints: the run's
             config["metadata"] = {**options.get("metadata", {}), RUN_METADATA: runtime.run_id}
         return config
+
+
+class _Text:
+    """The answer's text in a graph's ``messages`` events (``astream_events(version="v3")``),
+    after its stream transformers: a model's text content block, delta by delta and then the
+    rest of the block its ``content-block-finish`` holds beyond what its deltas gave (a
+    transformer may keep the tail of a block back until it finishes: ``PIIMiddleware``'s
+    keeps the last characters, a redaction could still reach into them); a message a node
+    returns whole (a model that does not stream, a hook's reply), its text. Reasoning,
+    tool-call and other blocks are not the answer's text."""
+
+    def __init__(self) -> None:
+        #: what each text block (by the model call's run id and the block's index) has given
+        self._given: dict[tuple[str, Any], str] = {}
+
+    def of(self, payload: Any, metadata: Mapping[str, Any] | None) -> str:
+        from langchain_core.messages import AIMessage
+
+        if isinstance(payload, AIMessage):
+            return _text(payload)
+        if not isinstance(payload, dict):
+            return ""
+        key = (str((metadata or {}).get("run_id") or ""), payload.get("index"))
+        kind = payload.get("event")
+        if kind == "content-block-delta":
+            delta = payload.get("delta") or {}
+            said = delta.get("text") if delta.get("type") == "text-delta" else None
+            if not isinstance(said, str):
+                return ""
+            self._given[key] = self._given.get(key, "") + said
+            return said
+        if kind == "content-block-finish":
+            given = self._given.pop(key, "")
+            block = payload.get("content") or {}
+            whole = block.get("text") if block.get("type") == "text" else None
+            if isinstance(whole, str) and whole.startswith(given):
+                return whole[len(given) :]
+        return ""
+
+
+#: One event of a graph's stream as the run reads it, whichever way the graph is streamed:
+#: its kind (``messages``, ``custom``, ``values``), its data, and the pauses a ``values`` holds.
+Streamed = tuple[str, Any, Sequence[Any]]
+
+
+def transforms(graph: Any) -> bool:
+    """Whether ``graph`` was given stream transformers of its own — a middleware's, its
+    builder's (``transformers=``) — beside the projections ``create_agent`` gives every graph
+    (tool calls, sub-agents: they add to the stream and change nothing a model said). Those
+    decide what the wire may carry, so the graph is streamed through them."""
+    from langchain.agents._subagent_transformer import SubagentTransformer
+    from langgraph.prebuilt import ToolCallTransformer
+
+    given = getattr(graph, "stream_transformers", ())
+    return any(t is not ToolCallTransformer and t is not SubagentTransformer for t in given)
+
+
+async def _streamed(
+    graph: Any, given: Any, config: Any, arguments: Mapping[str, Any]
+) -> AsyncIterator[Streamed]:
+    """A graph's stream by its stream modes (``astream``): each model message as it arrives,
+    the root graph's state and pauses, what its nodes write."""
+    async for part in graph.astream(
+        given, config, stream_mode=["messages", "values", "custom"], version="v2", **arguments
+    ):
+        yield part["type"], part["data"], part.get("interrupts") or ()
+
+
+async def _transformed(
+    graph: Any, given: Any, config: Any, arguments: Mapping[str, Any]
+) -> AsyncIterator[Streamed]:
+    """A graph's stream through its stream transformers (``astream_events(version="v3")``):
+    every event passes them first, and the root graph's are the run's."""
+    from langchain_core._api import LangChainBetaWarning
+
+    with warnings.catch_warnings():  # the harness's choice: said to no user of it
+        warnings.simplefilter("ignore", LangChainBetaWarning)
+        # returns without awaiting anything: no other task runs under this filter
+        events = await graph.astream_events(
+            given, config, version="v3", transformers=[_custom_mode()], **arguments
+        )
+    async with events:
+        async for event in events:
+            method, params = event["method"], event["params"]
+            if method == "messages" or not params["namespace"]:
+                yield method, params["data"], params.get("interrupts") or ()
+
+
+@functools.cache
+def _custom_mode() -> Any:
+    """A stream transformer that asks the graph for its ``custom`` stream mode, and nothing
+    else: ``astream_events(version="v3")`` streams only the modes its transformers ask for,
+    and LangGraph's own ``CustomTransformer`` would take the ``custom`` projection a graph
+    may already register."""
+    from langgraph.stream import StreamTransformer
+
+    class CustomMode(StreamTransformer):
+        required_stream_modes = ("custom",)
+
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            return True
+
+    return CustomMode
+
+
+async def _asked_again(graph: Any, config: Any, error: Exception) -> tuple[Any, list[Any]]:
+    """The graph's state and its pauses, still open, after the answer a resume gave a pause
+    was not one its ``response_schema`` takes (``is_invalid_resume``: a check the schema's
+    JSON form, checked first, could not make — a validator of its own): LangGraph saved
+    nothing, so the question is asked again rather than the run failing on it. Any other
+    error is raised as it was."""
+    from langgraph.errors import is_invalid_resume
+
+    if not is_invalid_resume(error):
+        raise error
+    log.warning("an answer was not one the graph's interrupt takes, asked again: %s", error)
+    state = await graph.aget_state(config)
+    return state.values, list(state.interrupts)
+
+
+def _written(runtime: Runtime, value: Any) -> None:
+    """What a node of the graph wrote to LangGraph's ``custom`` stream mode
+    (``get_stream_writer()``, a middleware's ``runtime.stream_writer``): a ``CUSTOM`` event of
+    the run (:data:`~trellis.harness.events.STREAMED`), its ``value`` the write as JSON."""
+    from pydantic_core import to_jsonable_python
+
+    runtime.events.custom(STREAMED, value=to_jsonable_python(value, fallback=str))
 
 
 def _own_spec(spec: ToolSpec, *, outside: bool) -> ToolSpec:
@@ -425,8 +634,9 @@ def _without_middleware(name: str) -> None:
     what the middleware gives."""
     log.warning(
         "the graph %s is wrapped without the harness's middleware: its tools are governed and "
-        "narrowed, and a large result is kept for read_file and query_result, but it has no "
-        "memory or gateway MCP tools, no step limit or stall guard, no "
+        "narrowed, and their results are the library's as they are (none kept for read_file "
+        "or query_result), but it has no memory or gateway MCP tools, no step limit or stall "
+        "guard, no "
         "model spans, call_timeout or budget stop, and no checkpoint in the run — build it with "
         "middleware=trellis.middleware() (its checkpoint is then kept in the run)",
         name,
@@ -503,19 +713,71 @@ def run_scoped(target: Any) -> bool:
     return isinstance(target.checkpointer, RunCheckpointer)
 
 
+def carries(target: Any) -> bool:
+    """Whether a conversation carries state of ``target`` from turn to turn: a graph with one
+    of the channels :data:`CARRIED` names and no thread of its own that holds it — it
+    checkpoints into its run, or not at all."""
+    channels = getattr(target, "channels", None) or {}
+    own = _checkpointed(target) and not run_scoped(target)
+    return not own and any(name in channels for name in CARRIED)
+
+
+def _ended_with(target: Any, runtime: Any, values: Any) -> None:
+    """What the run's conversation carries to its next turn (:data:`CARRIED`), read from the
+    state the graph ended its turn with (``values``, whole: a checkpoint holds a channel kept
+    as deltas — Deep Agents' ``files`` — only now and then), over what the turn began with
+    (:func:`carried_of`)."""
+    if carries(target) and isinstance(values, Mapping):
+        runtime.carried = carried_of(values, getattr(runtime, "carried", None) or {})
+
+
+def carried_of(values: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
+    """The channels of a graph's state its conversation carries (:data:`CARRIED`), as
+    ``values`` holds them now: those it holds anything in — Deep Agents sets its list of
+    tasks, empty, on every turn, and a turn that started none carries nothing — and those the
+    turn began with (``before``) and emptied, carried empty. An entry of a mapping the turn
+    began with and no longer holds (a file it deleted) is carried as ``None``: what merges
+    the conversation's states (``tools.results.merged``) keeps the entries of both, and Deep
+    Agents' files take ``None`` for a file that is gone."""
+    out: dict[str, Any] = {}
+    for name in CARRIED:
+        now, was = values.get(name), before.get(name)
+        if not now and not was:
+            continue
+        if isinstance(now, Mapping) and isinstance(was, Mapping):
+            gone = {key: None for key, entry in was.items() if entry is not None and key not in now}
+            out[name] = {**now, **gone}
+        else:
+            out[name] = now
+    return out
+
+
+def carried_plain(values: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
+    """``before`` with the carried channels a checkpoint's ``values`` hold whole — a channel
+    kept as deltas is not in every checkpoint, and is read where the turn ends
+    (:func:`_ended_with`)."""
+    whole = {n: values[n] for n in CARRIED if isinstance(values.get(n), dict | list)}
+    return {**before, **carried_of(whole, {n: before[n] for n in whole if n in before})}
+
+
 def checkpointing(target: Any) -> Any:
     """``target`` as the harness runs it: a graph built with ``middleware()`` (it takes the
     run's tools per model call) and compiled without a checkpointer, as a copy checkpointing
     into its run (``middleware.RunCheckpointer``: a resume continues where it stopped) — the
     graph itself left as it is; any other as it is (a checkpointer of its own, or
-    ``checkpointer=False``, stays the graph's)."""
-    if HARNESS_TOOLS not in (getattr(target, "channels", None) or {}):
-        return target
-    if getattr(target, "checkpointer", False) is not None:
-        return target
-    from trellis.harness.middleware import RunCheckpointer
+    ``checkpointer=False``, stays the graph's). A graph checkpointing into its run — so, or
+    built with a ``RunCheckpointer`` — reads its checkpoint back strictly
+    (``middleware.STRICT_SERDE``), its own state's types allowed (``state_types``)."""
+    from trellis.harness.middleware import RunCheckpointer, state_types
 
-    return target.copy({"checkpointer": RunCheckpointer()})
+    saver = getattr(target, "checkpointer", False)
+    if saver is None and HARNESS_TOOLS in (getattr(target, "channels", None) or {}):
+        saver = RunCheckpointer()
+    if not isinstance(saver, RunCheckpointer):
+        return target
+    # its strict serializer is told the graph's own state types, by LangGraph's own means
+    typed = saver.with_allowlist(state_types(target))
+    return target if typed is target.checkpointer else target.copy({"checkpointer": typed})
 
 
 async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
@@ -528,16 +790,21 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     none of the run's starts from its input."""
     from langgraph.types import Command
 
-    if not _checkpointed(target):
-        return native_input
     runtime = run.runtime
+    # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
+    carried = getattr(runtime, "carried", None)
+    started = (
+        {**native_input, **carried} if carried and isinstance(native_input, dict) else native_input
+    )
+    if not _checkpointed(target):
+        return started
     replay = runtime.replay
     thread = thread_of(target, runtime)
     replay.where = _stepping(thread)
     resumed = isinstance(native_input, Command)
     if run_scoped(target):
         if not replay.journal.graph:
-            return native_input
+            return started
         replay.resumed = _latest(replay.journal.graph)
         return native_input if resumed else None
     state = await target.aget_state({"configurable": {"thread_id": thread}})
@@ -609,36 +876,83 @@ def _stepping(thread: str) -> Callable[[], str | None]:
     return where
 
 
+def _task() -> str | None:
+    """The LangGraph task a call is made in (its id, the same for each run of the task its
+    ``RetryPolicy`` makes; a tool node's call is one of its task's): the decision a harness
+    call comes from (``Runtime.deciding``); ``None`` outside a task of a graph."""
+    from langgraph.config import get_config
+
+    try:
+        task = (get_config().get("configurable") or {}).get(TASK_ID)
+    except RuntimeError:  # not inside a step of a graph
+        return None
+    return task if isinstance(task, str) else None
+
+
+#: The ``type`` of a ``HumanInTheLoopMiddleware(interrupt_mode="per_call")`` request: one
+#: call's approval (``ToolApprovalRequest``), answered with one decision.
+TOOL_APPROVAL: Final = "tool_approval"
+#: The key of an approval's payload holding the JSON Schema of the decision the request takes
+#: (LangGraph's ``Interrupt.response_schema``: a per-call request's allowed decisions, an
+#: edit's arguments as its tool takes them).
+DECISION_SCHEMA: Final = "response_schema"
+
+
 def is_hitl(value: Any) -> bool:
-    """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request (its
-    ``action_requests`` and their ``review_configs``)."""
+    """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request: a batch's (its
+    ``action_requests`` and their ``review_configs``) or one call's (``interrupt_mode=
+    "per_call"``: a :data:`TOOL_APPROVAL`)."""
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") == TOOL_APPROVAL:
+        return isinstance(value.get("name"), str) and isinstance(value.get("args"), dict)
     return (
-        isinstance(value, dict)
-        and isinstance(value.get("action_requests"), list)
+        isinstance(value.get("action_requests"), list)
         and bool(value["action_requests"])
         and isinstance(value.get("review_configs"), list)
     )
 
 
+def hitl_calls(request: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """The calls a ``HumanInTheLoopMiddleware`` request holds, each its tool and arguments,
+    in order: a batch's, or the one call of a per-call request."""
+    actions = [request] if request.get("type") == TOOL_APPROVAL else request["action_requests"]
+    return [(str(a.get("name")), dict(a.get("args") or {})) for a in actions]
+
+
 def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> dict[str, Any]:
-    """The ``{"decisions": [...]}`` a ``HumanInTheLoopMiddleware`` pause resumes with — one
-    decision per call it holds, in order — for a harness decision:
+    """What a ``HumanInTheLoopMiddleware`` pause resumes with, for a harness decision: a
+    batch's ``{"decisions": [...]}``, one decision per call it holds, in order — or a per-call
+    request's one decision:
 
     * ``approve`` approves every call;
-    * ``edit`` runs the first call (the one the interrupt shows) with the edited arguments and
-      approves the others;
+    * ``edit`` runs the call with the edited arguments — one call: a batch of several takes
+      one decision for each, given as ``{"decisions": [...]}``;
     * ``reject`` rejects every call, with the reviewer's reason (``answer=``) as the message the
       model reads;
     * ``answer`` responds for every call with the answer (the tool does not run).
 
-    An answer (or edit) that already is ``{"decisions": [...]}`` is sent as it is. A decision a
-    call's ``allowed_decisions`` does not include raises ``ConfigurationError``."""
+    An answer (or edit) that already is what the request takes (``{"decisions": [...]}``, a
+    per-call decision) is sent as it is. A decision a call does not allow (its
+    ``allowed_decisions``, a per-call request's schema of them: :data:`DECISION_SCHEMA`), or an
+    edit of a batch in one set of arguments, raises ``ConfigurationError``: the run stays
+    paused, for an answer it takes."""
     raw = resolution.payload if resolution.decision is InterruptDecision.EDIT else resolution.answer
+    if request.get("type") == TOOL_APPROVAL:
+        given = raw if isinstance(raw, dict) and "type" in raw else None
+        decision = given or _decision(resolution, request)
+        _allowed(request, decision)
+        return decision
     if isinstance(raw, dict) and isinstance(raw.get("decisions"), list):
         return raw
     actions: list[dict[str, Any]] = request["action_requests"]
     configs: list[dict[str, Any]] = request["review_configs"]
-    decisions = [_decision(resolution, action, first=n == 0) for n, action in enumerate(actions)]
+    if resolution.decision is InterruptDecision.EDIT and len(actions) > 1:
+        raise ConfigurationError(
+            f"the approval holds {len(actions)} calls, and an edit's arguments are one call's: "
+            'give one decision for each call, in order, as {"decisions": [...]}'
+        )
+    decisions = [_decision(resolution, action) for action in actions]
     for action, config, decision in zip(actions, configs, decisions, strict=False):
         allowed = config.get("allowed_decisions") or []
         if decision["type"] not in allowed:
@@ -649,12 +963,50 @@ def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> d
     return {"decisions": decisions}
 
 
-def _decision(resolution: InterruptResolution, action: dict[str, Any], *, first: bool) -> Any:
+def hitl_approved(
+    request: Mapping[str, Any], resolution: InterruptResolution
+) -> list[tuple[str, Any]]:
+    """The calls a ``HumanInTheLoopMiddleware`` request's resume runs as a person decided —
+    each call its decision approves, as the model made it, or edits, as edited
+    (:func:`hitl_response`); a rejected or answered call runs nothing, and a cancel decides
+    none."""
+    if resolution.decision is InterruptDecision.CANCEL:
+        return []
+    sent = hitl_response(dict(request), resolution)
+    decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
+    approved: list[tuple[str, Any]] = []
+    for (name, args), decision in zip(hitl_calls(request), decisions, strict=False):
+        if decision.get("type") == "approve":
+            approved.append((name, args))
+        elif decision.get("type") == "edit":
+            edited = decision.get("edited_action") or {}
+            approved.append((str(edited.get("name", name)), edited.get("args") or {}))
+    return approved
+
+
+def _allowed(request: Mapping[str, Any], decision: Any) -> None:
+    """A per-call request's decision, checked against the schema of those it takes
+    (:data:`DECISION_SCHEMA`), as LangGraph checks it on the resume: refused here, the run
+    stays paused rather than failing on it."""
+    from jsonschema.exceptions import best_match
+    from jsonschema.validators import validator_for
+
+    schema = request.get(DECISION_SCHEMA)
+    if not isinstance(schema, dict):
+        return
+    error = best_match(validator_for(schema)(schema).iter_errors(decision))
+    if error is not None:
+        raise ConfigurationError(
+            f"{request.get('name')} does not take the decision {decision!r}: {error.message}"
+        )
+
+
+def _decision(resolution: InterruptResolution, action: Mapping[str, Any]) -> Any:
     decision = resolution.decision
     if decision is InterruptDecision.REJECT:
         reason = reason_of(resolution)
         return {"type": "reject", "message": reason} if reason else {"type": "reject"}
-    if decision is InterruptDecision.EDIT and first:
+    if decision is InterruptDecision.EDIT:
         return {
             "type": "edit",
             "edited_action": {"name": action["name"], "args": resolution.payload},
@@ -694,13 +1046,20 @@ def graph_tools(target: Any, depth: int = SUBAGENT_DEPTH) -> list[Any]:
 
 
 def subagent_graphs(task: Any) -> list[Any]:
-    """The sub-agent graphs a Deep Agents ``task`` tool runs, as its code holds them (the
-    graphs its sub-agents were compiled to, by name); ``[]`` when they cannot be read (a
-    release laid out otherwise: its sub-agents' tools are then left out of the run's set)."""
+    """The sub-agent graphs a Deep Agents ``task`` tool runs (:func:`named_subagent_graphs`),
+    each once."""
+    return list({id(g): g for g in named_subagent_graphs(task).values()}.values())
+
+
+def named_subagent_graphs(task: Any) -> dict[str, Any]:
+    """The sub-agent graphs a Deep Agents ``task`` tool runs, by name, as its code holds them
+    (the graphs its sub-agents were compiled to); ``{}`` when they cannot be read (a release
+    laid out otherwise: its sub-agents' tools are then left out of the run's set, and it has no
+    background tasks)."""
     from langgraph.pregel import Pregel
 
     seen: set[int] = set()
-    graphs: dict[int, Any] = {}
+    graphs: dict[str, Any] = {}
     pending = [getattr(task, "coroutine", None), getattr(task, "func", None)]
     while pending:
         fn = pending.pop()
@@ -713,10 +1072,10 @@ def subagent_graphs(task: Any) -> list[Any]:
             except ValueError:  # an empty cell
                 continue
             if isinstance(value, dict):
-                graphs.update((id(v), v) for v in value.values() if isinstance(v, Pregel))
+                graphs.update((k, v) for k, v in value.items() if isinstance(v, Pregel))
             elif callable(value) and hasattr(value, "__closure__"):
                 pending.append(value)
-    return list(graphs.values())
+    return graphs
 
 
 def _checkpointed(target: Any) -> bool:
@@ -727,9 +1086,22 @@ def _checkpointed(target: Any) -> bool:
 
 def langchain_message(said: Said) -> Any:
     """``said`` as LangChain's own message: an assistant's with its tool calls, a tool's with
-    the call it answers."""
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    the call it answers, a notification marked as one (``add_notification_metadata``)."""
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+        add_notification_metadata,
+    )
 
+    if said.role is Speaker.USER and said.notified:
+        data = said.notified.get("data")
+        return add_notification_metadata(
+            HumanMessage(content=said.content),
+            source=str(said.notified.get("source")),
+            data=data if isinstance(data, dict) else None,
+        )
     if said.role is Speaker.USER:
         return HumanMessage(content=said.content)
     if said.role is Speaker.ASSISTANT:
@@ -743,24 +1115,69 @@ def langchain_message(said: Said) -> Any:
     return SystemMessage(content=said.content)
 
 
+def input_screens(target: Any) -> list[Any]:
+    """The ``PIIMiddleware`` instances of a ``create_agent`` graph that check the user's
+    message before each model call (``apply_to_input``), in the graph's order: read from the
+    ``before_model`` nodes ``create_agent`` made of them. ``[]`` for any other graph."""
+    from langchain.agents.middleware import PIIMiddleware
+
+    found: list[Any] = []
+    for node in (getattr(target, "nodes", None) or {}).values():
+        bound = getattr(node, "bound", None)
+        for hook in (getattr(bound, "func", None), getattr(bound, "afunc", None)):
+            owner = getattr(hook, "__self__", None)
+            screens = isinstance(owner, PIIMiddleware) and owner.apply_to_input
+            if screens and not any(owner is m for m in found):
+                found.append(owner)
+    return found
+
+
+def screened(target: Any, text: str) -> str:
+    """``text`` the harness sends with the user's message (the memory context), checked as the
+    graph checks that message: the rule of each of its ``PIIMiddleware`` instances applied
+    (:func:`input_screens`: its detector and strategy — redacted, masked or hashed; a
+    ``block`` raises the library's ``PIIDetectionError``, which ends the run as a blocked
+    question does). As it is for a graph that checks no input."""
+    from langchain.agents.middleware._redaction import apply_strategy
+
+    for screen in input_screens(target):
+        if matches := screen.detector(text):
+            text = apply_strategy(text, matches, screen.strategy)
+    return text
+
+
+def _asked_at(messages: Sequence[Any]) -> int | None:
+    """Where the run's question is in ``messages``: the message marked :data:`ASKED`, else the
+    last user message neither steered into the run nor added by the harness (``notified``)."""
+    humans = [i for i, m in enumerate(messages) if getattr(m, "type", None) == "human"]
+    marked = [i for i in humans if ASKED in (getattr(messages[i], "response_metadata", None) or {})]
+    typed = [i for i in humans if not _steered(messages[i]) and notified(messages[i]) is None]
+    found = marked or typed
+    return found[-1] if found else None
+
+
+def asked(messages: Sequence[Any]) -> str | None:
+    """The run's question as the graph's conversation keeps it (:func:`_asked_at`): its text
+    after the graph's own middleware (``PIIMiddleware`` redacts it there); ``None`` without
+    one, or when it holds no text."""
+    at = _asked_at(messages)
+    return (_text(messages[at]) or None) if at is not None else None
+
+
 def added(messages: Sequence[Any]) -> list[Said]:
-    """What the run said after its question (the last user message not steered into it): each
-    answer with the tool calls it made, and their results, and each message steered into it
-    (``middleware.STEERED``, with its id); ``[]`` without a question."""
-    asked = next(
-        (
-            i
-            for i in range(len(messages) - 1, -1, -1)
-            if getattr(messages[i], "type", None) == "human" and not _steered(messages[i])
-        ),
-        None,
-    )
-    if asked is None:
+    """What the run said after its question (:func:`_asked_at`): each answer
+    with the tool calls it made, and their results, each message steered into it
+    (``middleware.STEERED``, with its id) and each notification it was given (``Said.notified``:
+    a background task's update); ``[]`` without a question."""
+    at = _asked_at(messages)
+    if at is None:
         return []
     out: list[Said] = []
-    for m in messages[asked + 1 :]:
+    for m in messages[at + 1 :]:
         kind = getattr(m, "type", None)
-        if kind == "human":  # steered into the run
+        if kind == "human" and (noted := notified(m)) is not None:
+            out.append(Said(Speaker.USER, _text(m), id=m.id, notified=noted))
+        elif kind == "human":  # steered into the run
             out.append(Said(Speaker.USER, _text(m), id=m.id))
         elif kind == "ai":
             calls = tuple(
@@ -772,6 +1189,18 @@ def added(messages: Sequence[Any]) -> list[Said]:
         elif kind == "tool":
             out.append(Said(Speaker.TOOL, _text(m), tool_call_id=m.tool_call_id))
     return out
+
+
+def notified(message: Any) -> dict[str, Any] | None:
+    """The notification metadata of a message the harness or a framework added, which the user
+    did not type — a background task's update, a summary of earlier turns (langchain-core's
+    ``get_notification_metadata``); ``None`` for any other message."""
+    from langchain_core.messages import BaseMessage, get_notification_metadata
+
+    if not isinstance(message, BaseMessage):
+        return None
+    found = get_notification_metadata(message)
+    return None if found is None else dict(found)
 
 
 def _steered(message: Any) -> bool:
@@ -786,8 +1215,34 @@ def _text(message: Any) -> str:
     return text if isinstance(text, str) else ""
 
 
-def _last_ai_text(messages: list[Any]) -> str | None:
+def _answer_text(messages: list[Any]) -> str | None:
+    """The answer of a graph whose state is its conversation: the text of the tool result it
+    ended with (a ``return_direct`` tool's: ``create_agent`` ends its loop on it), else of its
+    model's last reply that has any."""
+    if messages and getattr(messages[-1], "type", None) == "tool":
+        return _text(messages[-1])
     for message in reversed(messages):
         if getattr(message, "type", None) == "ai" and (text := _text(message)):
             return text
     return None
+
+
+def fields_of(value: Any) -> Any:
+    """A graph's output as the mapping of its state's fields — a state LangGraph gives as its
+    Pydantic model or dataclass (``version="v2"`` coerces the output to the state's schema), as
+    one; any other output (a ``@entrypoint``'s return value, a state dict) as it is."""
+    if isinstance(value, BaseModel):
+        return dict(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: getattr(value, f.name) for f in dataclasses.fields(value)}
+    return value
+
+
+def takes_text(target: Any) -> bool:
+    """Whether the graph's input schema takes a string as it is (a ``@entrypoint`` typed to
+    take one, or not typed at all): a run's string input is then given to it unchanged, where
+    a graph whose input is its state gets it as the conversation's user message."""
+    schema: dict[str, Any] = target.get_input_jsonschema()
+    said = [schema, *schema.get("anyOf", ())]
+    constrained = {"type", "anyOf", "oneOf", "allOf", "properties", "$ref"} & schema.keys()
+    return not constrained or any(k.get("type") == "string" for k in said)

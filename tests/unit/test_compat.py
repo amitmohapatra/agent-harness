@@ -60,8 +60,8 @@ def test_versions_compare_by_their_release_numbers() -> None:
     assert compat.tested("langgraph", "1.2")
     assert not compat.tested("langgraph", "1.3.0")
     assert not compat.tested("langgraph", "1.1.9")
-    assert compat.tested("deepagents", "0.7.19")
-    assert not compat.tested("deepagents", "0.7.18")
+    assert compat.tested("deepagents", "0.7.38")
+    assert not compat.tested("deepagents", "0.7.37")
     assert compat.tested("claude-agent-sdk", "0.2.999")
     assert compat.tested("not-a-framework", "9")  # not the harness's to judge
 
@@ -81,7 +81,7 @@ def test_an_untested_framework_is_said_once_at_wrap_time(
     warned = [r.getMessage() for r in caplog.records if "trellis-harness was tested" in r.message]
     assert warned == [
         "openai-agents 0.30.1 is installed, but this trellis-harness was tested with "
-        "openai-agents>=0.22.3,<0.23: use a newer trellis-harness (docs/versioning.md)"
+        "openai-agents>=0.24,<0.25: use a newer trellis-harness (docs/versioning.md)"
     ]
 
 

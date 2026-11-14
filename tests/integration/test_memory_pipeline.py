@@ -35,11 +35,10 @@ from trellis.harness.agent import (
     ANSWERING,
     ASKING,
     EARLIER_VALUES,
-    NARROW_FROM,
     REMEMBERED,
 )
 from trellis.harness.clients.bifrost import CODE_MODE_TOOLS, Gateway
-from trellis.harness.clients.memory import RECORDED_OUTPUT_MAX_BYTES
+from trellis.harness.clients.memory import recorded_output
 from trellis.harness.conversation import answer_id, question_id
 from trellis.harness.governance import catalog
 from trellis.harness.governance.decision import CHOICES, SAID
@@ -303,13 +302,18 @@ async def test_confident_hints_narrow_a_large_tool_set(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
     memory_service.candidates = ["t3", "t1"]
-    model = ScriptedChat(["done"])
-    tools = many(NARROW_FROM)
+    model = ScriptedChat(["done", "done"])
+    tools = many(30)  # from 30 tools of the run's own
     agent = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="n"), tools)
     result = await agent.run("look up a", user="u")
     assert result.status is RunStatus.SUCCESS, result.error
     offered = {t["function"]["name"] for t in model.requests[0]["tools"]}
     assert {"t1", "t3"} <= offered and "t5" not in offered
+    fewer = arm(memory_harness.wrap(ReAct(system_prompt="s", model=model), id="m"), many(29))
+    await fewer.run("look up a", user="u")
+    assert {f"t{i}" for i in range(29)} <= {
+        t["function"]["name"] for t in model.requests[1]["tools"]
+    }
 
 
 async def test_hints_below_the_floor_narrow_nothing(
@@ -634,9 +638,16 @@ async def test_a_large_result_is_recorded_within_the_services_limit(
     await memory_harness.writes.drain()
     [recorded] = memory_service.named("record_tool")
     output = recorded.body["output"]
-    assert len(json.dumps(output).encode()) <= RECORDED_OUTPUT_MAX_BYTES
+    assert len(json.dumps(output).encode()) <= 256 * 1024
     assert isinstance(output, str) and output.startswith('[{"region": "north", "line": 0')
     assert output.endswith("bytes; cut to the service's limit)")
+
+
+def test_an_output_is_recorded_whole_up_to_the_services_256_kib() -> None:
+    exact = "x" * (256 * 1024 - 2)  # its JSON, quotes included: 262,144 bytes
+    assert recorded_output(exact) == exact
+    over = recorded_output(exact + "x")
+    assert isinstance(over, str) and over.endswith("(262145 bytes; cut to the service's limit)")
 
 
 async def test_a_failed_run_is_rejected_and_a_cancelled_one_says_nothing(
@@ -723,6 +734,53 @@ async def test_a_resumed_graph_run_stores_each_message_of_its_transcript_once(
     assert [r for r, _, _ in said] == ["USER", "ASSISTANT", "TOOL", "ASSISTANT"], said
     ids = [m["custom_metadata"].get("message_id") for m in stored]
     assert len(ids) == len(set(ids)), ids
+
+
+async def test_a_graphs_own_interrupt_after_a_draft_keeps_the_resumed_answer(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """A graph that pauses with its own ``interrupt()`` after the model wrote a draft: the
+    paused attempt's draft is not the run's answer, so it does not take the answer's id; the
+    resumed attempt's final answer is what memory keeps as the run's last message, and the
+    draft it sends again is stored once (memory keeps the first message of an id it has
+    seen: ``source_message_id``)."""
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    model = ScriptedChatModel(turns=["Done. 3"])
+
+    async def think(state: MessagesState) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    def confirm(state: MessagesState) -> dict[str, Any]:
+        answer = interrupt({"question": "Send the stock report?"})
+        said = state["messages"][-1].content
+        return {"messages": [AIMessage(content=f"{said} (confirmed: {answer})")]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("model", think)
+    builder.add_node("confirm", confirm)
+    builder.add_edge(START, "model")
+    builder.add_edge("model", "confirm")
+    builder.add_edge("confirm", END)
+    agent = memory_harness.wrap(builder.compile(checkpointer=InMemorySaver()), id="reporter")
+    paused = await agent.run("Is A-1 low?", user="u", thread="t-report")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None, paused.error
+    await memory_harness.writes.drain()
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and done.answer == "Done. 3 (confirmed: yes)"
+    await memory_harness.writes.drain()
+    conversation = await memory_harness.conversation(user="u", thread="t-report")
+    stored = memory_service.threads[conversation]
+    said = [(m["role"], m["content"]) for m in stored]
+    assert said == [
+        ("USER", "Is A-1 low?"),
+        ("ASSISTANT", "Done. 3"),
+        ("ASSISTANT", "Done. 3 (confirmed: yes)"),
+    ], said
+    last = stored[-1]["custom_metadata"]["message_id"]
+    assert last == answer_id(conversation, done.run_id)
 
 
 async def test_an_approval_decision_is_feedback_on_the_tool_call(

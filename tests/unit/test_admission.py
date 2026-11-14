@@ -157,6 +157,64 @@ def test_a_fast_provider_is_never_slow_and_unpaced_calls_are_not_counted() -> No
     assert limit._paced == LATENCY_SAMPLES + 10
 
 
+def test_the_documented_defaults_start_4_within_1_and_16_past_85_percent_every_2s() -> None:
+    clock = Clock()
+    machine = Fixed(cpu=0.85, memory=0.85)
+    limit = Admission(machine=machine, clock=clock)
+    assert (limit.limit, limit.floor, limit.ceiling) == (4, 1, 16)
+    assert limit.pressure() is None  # at 85% exactly: not past it
+    machine.readings["memory"] = 0.86
+    clock.now += 0.5
+    assert limit.pressure() is None  # the machine is read at most once a second
+    clock.now += 0.5
+    assert limit.pressure() == "memory at 86% of the container's limit"
+    limit.throttled()
+    assert limit.limit == 2
+    clock.now += 1.5
+    limit.throttled()
+    assert limit.limit == 2  # within 2 s of the last cut
+    clock.now += 0.5
+    limit.throttled()
+    assert limit.limit == 1  # 2 s on: cut again, to the floor
+    rising = Admission()
+    for _ in range(200):
+        rising.ended(ok=True)
+    assert rising.limit == 16
+
+
+def test_a_slow_provider_is_judged_from_5_calls_and_under_50_tokens_a_second() -> None:
+    limit = Admission()
+    limit.paced(0.0, 10)  # a call that took no time is a pace too
+    for _ in range(3):
+        limit.paced(1.0, 100)
+    limit.paced(30.0, 100)  # 0.3 s a token after four calls at most 0.01
+    assert limit._paced == 5
+    assert limit.pressure() == "the model provider is slowing down"
+    fewer = Admission()
+    for _ in range(3):
+        fewer.paced(1.0, 100)
+    fewer.paced(30.0, 100)
+    assert fewer.pressure() is None  # four calls are not enough to judge
+    under_twice = Admission()
+    for _ in range(5):
+        under_twice.paced(1.0, 100)
+    for _ in range(30):
+        under_twice.paced(2.5, 100)  # its smoothed pace about 1.9 times its fastest
+    assert under_twice.pressure() is None
+    over_twice = Admission()
+    for _ in range(5):
+        over_twice.paced(1.0, 100)
+    for _ in range(12):
+        over_twice.paced(3.0, 100)  # about 2.5 times its fastest
+    assert over_twice.pressure() == "the model provider is slowing down"
+    forty = Admission()
+    for _ in range(5):
+        forty.paced(0.5, 100)
+    for _ in range(30):
+        forty.paced(2.5, 100)  # 40 tokens a second, five times slower
+    assert forty.pressure() == "the model provider is slowing down"
+
+
 @pytest.mark.parametrize(("start", "floor", "ceiling"), [(0, 1, 4), (5, 1, 4), (1, 2, 4)])
 def test_a_limit_out_of_its_bounds_is_refused(start: int, floor: int, ceiling: int) -> None:
     with pytest.raises(ValueError, match="floor <= start <= ceiling"):
