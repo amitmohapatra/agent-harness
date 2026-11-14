@@ -269,7 +269,8 @@ def test_a_turn_of_the_chats_own_is_quiet_only_for_what_was_told() -> None:
     assert background.quiet(run, "NO_REPORT") and not background.quiet(runtime(runs), "NO_REPORT")
     run.carried = {"async_tasks": {"task_1": {**TASK, "status": "success"}}}
     assert background.of_turn(run) == ["run_1"]
-    run.carried["async_tasks"]["task_1"]["superseded_run_ids"] = ["run_0"]
+    queued: dict[str, Any] = {**TASK, "superseded_run_ids": ["run_0"]}
+    run.carried = {"async_tasks": {"task_1": queued}}
     assert background.of_turn(run) == ["run_1", "run_0"]
 
 

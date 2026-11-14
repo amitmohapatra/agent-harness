@@ -208,9 +208,7 @@ class AsyncTasks:
             return  # it works (or could not be read): read again later
         told = text_of(update["messages"][-1])
         said = _checked(told)
-        await self._closed(
-            run_id, kept, status, str(said.get("error") or said.get("result") or "")
-        )
+        await self._closed(run_id, kept, status, str(said.get("error") or said.get("result") or ""))
         event = {k: found[k] for k in ("task_id", "agent_name", "status", "run_id")}
         if "result" in said:
             event["result"] = said["result"]
