@@ -71,6 +71,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
@@ -78,6 +79,8 @@ import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Final
+
+from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
@@ -217,7 +220,7 @@ class LangGraphAdapter:
 
         system = [SystemMessage(content=context, id=CONTEXT_MESSAGE_ID)] if context else []
         system += [langchain_message(said) for said in history]
-        if isinstance(input, str):
+        if isinstance(input, str) and not takes_text(target):
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):
             return {"messages": [*system, *input]}
@@ -309,14 +312,14 @@ class LangGraphAdapter:
         yield Output(GraphOutput(value=values, interrupts=interrupts))
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        state = output.value
-        answer: Any = None
+        state = fields_of(output.value)
+        answer: Any = output.value
         messages: list[Any] = []
-        if isinstance(state, dict):
-            messages = state.get("messages") or []
+        if isinstance(state, Mapping) and isinstance(state.get("messages"), list):
+            messages = state["messages"]
             answer = state.get("structured_response")
             if answer is None:
-                answer = _last_ai_text(messages)
+                answer = _answer_text(messages)
         transcript = added(messages) or (
             [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
         )
@@ -992,8 +995,34 @@ def _text(message: Any) -> str:
     return text if isinstance(text, str) else ""
 
 
-def _last_ai_text(messages: list[Any]) -> str | None:
+def _answer_text(messages: list[Any]) -> str | None:
+    """The answer of a graph whose state is its conversation: the text of the tool result it
+    ended with (a ``return_direct`` tool's: ``create_agent`` ends its loop on it), else of its
+    model's last reply that has any."""
+    if messages and getattr(messages[-1], "type", None) == "tool":
+        return _text(messages[-1])
     for message in reversed(messages):
         if getattr(message, "type", None) == "ai" and (text := _text(message)):
             return text
     return None
+
+
+def fields_of(value: Any) -> Any:
+    """A graph's output as the mapping of its state's fields — a state LangGraph gives as its
+    Pydantic model or dataclass (``version="v2"`` coerces the output to the state's schema), as
+    one; any other output (a ``@entrypoint``'s return value, a state dict) as it is."""
+    if isinstance(value, BaseModel):
+        return dict(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: getattr(value, f.name) for f in dataclasses.fields(value)}
+    return value
+
+
+def takes_text(target: Any) -> bool:
+    """Whether the graph's input schema takes a string as it is (a ``@entrypoint`` typed to
+    take one, or not typed at all): a run's string input is then given to it unchanged, where
+    a graph whose input is its state gets it as the conversation's user message."""
+    schema: dict[str, Any] = target.get_input_jsonschema()
+    said = [schema, *schema.get("anyOf", ())]
+    constrained = {"type", "anyOf", "oneOf", "allOf", "properties", "$ref"} & schema.keys()
+    return not constrained or any(k.get("type") == "string" for k in said)

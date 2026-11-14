@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import asyncio
 import operator
+from dataclasses import dataclass
 from typing import Annotated, Any, NotRequired, TypedDict
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
-from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph, add_messages
 from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode, ToolRuntime, tools_condition
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import CachePolicy, Command, RetryPolicy, Send, TimeoutPolicy, interrupt
+from pydantic import BaseModel
 
 from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService
@@ -458,6 +460,119 @@ async def test_an_entrypoint_and_its_tasks_run_and_pause_as_a_graph_does(harness
     assert done.status is RunStatus.SUCCESS
     assert ran == ["draft tides"]  # the task's result came from its checkpoint, not a second run
     assert await state_of(harness, workflow, "t") == {"text": "about tides", "verdict": "yes"}
+
+
+# ------------------------------------------------------------------------ what a graph returns
+async def test_an_entrypoint_typed_to_take_text_is_given_the_text_and_answers_with_its_return(
+    harness: Harness,
+) -> None:
+    """A ``@entrypoint`` typed to take a string is given the run's string input as it is, and
+    what it returns is the run's answer — a model it asks included."""
+    from langgraph.func import entrypoint
+
+    model = ScriptedChatModel(turns=["a summary of tides"])
+
+    @entrypoint()
+    async def summarize(topic: str) -> str:
+        ran.append(topic)
+        return (await model.ainvoke(f"summarize {topic}")).text
+
+    result = await harness.wrap(summarize, id="summarize").run("tides", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a summary of tides"
+    assert ran == ["tides"]
+
+
+class Summary(TypedDict):
+    topic: str
+    summary: NotRequired[str]
+
+
+async def test_a_graph_whose_model_writes_its_state_answers_with_that_state(
+    harness: Harness,
+) -> None:
+    """A graph whose state is not a conversation answers with the state it ended with, as
+    ``ainvoke`` returns it — though a model wrote it, and wrote no message."""
+    model = ScriptedChatModel(turns=["a summary"])
+
+    async def summarize(state: Summary) -> dict[str, Any]:
+        return {"summary": (await model.ainvoke(state["topic"])).text}
+
+    graph = StateGraph(Summary)
+    graph.add_node("summarize", summarize)
+    graph.add_edge(START, "summarize")
+    graph.add_edge("summarize", END)
+    result = await harness.wrap(graph.compile(), id="summary").run({"topic": "tides"}, user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert result.answer == {"topic": "tides", "summary": "a summary"}
+
+
+class Chat(BaseModel):
+    messages: Annotated[list[AnyMessage], add_messages]
+    turns: int = 0
+
+
+async def test_a_graph_of_a_pydantic_state_answers_with_its_models_reply(
+    harness: Harness,
+) -> None:
+    """LangGraph gives a Pydantic state's graph its output as that model: its conversation is
+    read from it as from a dict's, and the model's reply is the answer."""
+    model = ScriptedChatModel(turns=["hello"])
+
+    async def think(state: Chat) -> dict[str, Any]:
+        return {"messages": [await model.ainvoke(state.messages)], "turns": state.turns + 1}
+
+    graph = StateGraph(Chat)
+    graph.add_node("think", think)
+    graph.add_edge(START, "think")
+    graph.add_edge("think", END)
+    result = await harness.wrap(graph.compile(), id="pydantic").run("hi", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "hello"
+
+
+@dataclass
+class Notes:
+    topic: str
+    note: str = ""
+
+
+async def test_a_graph_of_a_dataclass_state_answers_with_that_state(harness: Harness) -> None:
+    """A dataclass state is the graph's output as LangGraph gives it (``version="v2"``: the
+    state's own type), and that is the answer — on the stream, as JSON."""
+    graph = StateGraph(Notes)
+    graph.add_node("note", lambda state: {"note": f"on {state.topic}"})
+    graph.add_edge(START, "note")
+    graph.add_edge("note", END)
+    agent = harness.wrap(graph.compile(), id="notes")
+    result = await agent.run({"topic": "tides"}, user="u")
+    assert result.status is RunStatus.SUCCESS
+    assert result.answer == Notes(topic="tides", note="on tides")
+    events = [e async for e in agent.stream({"topic": "tides"}, user="u")]
+    assert events[-1].data["result"] == {"topic": "tides", "note": "on tides"}
+
+
+@pytest.mark.parametrize("harnessed", [False, True], ids=["create_agent", "middleware"])
+async def test_a_return_direct_tools_result_is_the_answer(
+    harness: Harness, harnessed: bool
+) -> None:
+    """``create_agent`` ends its loop on a ``return_direct`` tool's result, which its model
+    never reads: that result is the run's answer."""
+    from langchain.agents import create_agent
+
+    import trellis
+
+    @lc_tool(return_direct=True)
+    def lookup(sku: str) -> str:
+        """Look a SKU up; its result is the answer."""
+        return f"{sku}: 7 in stock"
+
+    lookup.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(turns=[("lookup", {"sku": "a"})])
+    graph = create_agent(
+        model, tools=[lookup], middleware=trellis.middleware() if harnessed else ()
+    )
+    result = await harness.wrap(graph, id="direct").run("a?", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "a: 7 in stock"
+    assert len(model.seen) == 1
 
 
 # ------------------------------------------------------------------------------ time travel

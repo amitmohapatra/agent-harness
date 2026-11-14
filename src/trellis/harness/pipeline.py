@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
 
 from trellis.contracts import (
     AgentError,
@@ -1463,9 +1464,11 @@ async def _settle_cancelled(
 
 
 def jsonable(value: Any) -> Any:
-    """An answer as a run record stores it."""
+    """An answer as a run record stores it (a dataclass as its fields: a LangGraph state)."""
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return to_jsonable_python(value, fallback=str)
     try:
         json.dumps(value)
     except (TypeError, ValueError):
