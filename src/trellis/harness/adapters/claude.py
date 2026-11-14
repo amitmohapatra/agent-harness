@@ -110,9 +110,12 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import (
     JournalSessions,
+    TaskEnded,
+    TaskStarted,
     deciding_matcher,
     harness_matcher,
     session_store,
+    task_said,
     with_context,
 )
 from trellis.harness.bridges.claude_live import (
@@ -122,7 +125,6 @@ from trellis.harness.bridges.claude_live import (
     LiveSession,
     LiveSessions,
     Turn,
-    backgrounded,
     gone,
 )
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
@@ -977,27 +979,18 @@ async def _subagents(helpers: Helpers, message: Any) -> None:
 
 
 async def _tasks(helpers: Helpers, message: Any) -> None:
-    """A task's start or end in a system ``message``: whose helper its worker works for,
-    and how a background helper's work ended."""
-    from claude_agent_sdk import (
-        TERMINAL_TASK_STATUSES,
-        TaskNotificationMessage,
-        TaskStartedMessage,
-        TaskUpdatedMessage,
-    )
-
-    if isinstance(message, TaskStartedMessage):
-        if message.tool_use_id:
-            background = backgrounded(message)
-            helpers.attribute(message.task_id, message.tool_use_id, background=background)
-    elif isinstance(message, TaskNotificationMessage):
-        failed = message.status != TASK_COMPLETED
-        said = message.summary if message.status != TASK_STOPPED else STOPPED
-        await helpers.settled(message.task_id, failed=failed, said=said)
-    elif isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
-        failed = message.status != TASK_COMPLETED
-        said = "" if message.status in (TASK_COMPLETED, TASK_FAILED) else STOPPED
-        await helpers.settled(message.task_id, failed=failed, said=said, final=False)
+    """A task's start or end in a system ``message`` (``task_said``): whose helper its
+    worker works for, and how a background helper's work ended."""
+    found = task_said(message)
+    if isinstance(found, TaskStarted) and found.call_id:
+        helpers.attribute(found.task_id, found.call_id, background=found.background)
+    elif isinstance(found, TaskEnded):
+        failed = found.status != TASK_COMPLETED
+        # a notification's summary is its last word; an update says only how it ended
+        said = found.summary if found.final and found.status != TASK_STOPPED else ""
+        stopped = found.status not in (TASK_COMPLETED, TASK_FAILED)
+        said = STOPPED if stopped else said
+        await helpers.settled(found.task_id, failed=failed, said=said, final=found.final)
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:

@@ -90,7 +90,7 @@ from trellis.contracts import Interrupt, InterruptResolution, RunStatus
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges.claude import JournalSessions, ours
+from trellis.harness.bridges.claude import JournalSessions, TaskEnded, TaskStarted, ours, task_said
 from trellis.harness.bridges.helpers import Kind, ended
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
@@ -154,7 +154,6 @@ GONE_SAID: Final = (
 #: apart, and its calls are those of a run the workflows share (:data:`SHARED`:
 #: :meth:`LiveSession._working`).
 WORKFLOW_TOOL: Final = "Workflow"
-WORKFLOW_TASK: Final = "local_workflow"
 WORKFLOW_AGENT: Final = "workflow-subagent"
 #: The run the workflows at work together in a session share, for the calls of agents no one
 #: of them can claim: a child run of the turn that made them concurrent, kept as a background
@@ -174,13 +173,6 @@ FAILED: Final = "the background subagent's task failed"
 _NUDGE: Final = object()
 #: What a request relayed to a background run is answered when that run has ended.
 _OVER: Final = object()
-
-
-def backgrounded(message: Any) -> bool:
-    """Whether the task a ``task_started`` ``message`` starts works in the background of its
-    call: a subagent that says so (``is_backgrounded``), and a dynamic workflow, always."""
-    data = message.data
-    return bool(data.get("is_backgrounded")) or data.get("task_type") == WORKFLOW_TASK
 
 
 class Left(Exception):
@@ -968,42 +960,35 @@ class LiveSession:
             self._settled.set()
 
     def _tracked(self, message: Any) -> None:
-        """The background tasks under way, as the stream says: started, or ended (its
-        notification, or an update to a terminal status: either may be all that comes)."""
-        from claude_agent_sdk import (
-            TERMINAL_TASK_STATUSES,
-            TaskNotificationMessage,
-            TaskStartedMessage,
-            TaskUpdatedMessage,
-        )
-
-        if isinstance(message, TaskStartedMessage):
-            self.working[message.task_id] = message.description
-            self._launched(message)
-        elif isinstance(message, TaskNotificationMessage) or (
-            isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES
-        ):
-            self.working.pop(message.task_id, None)
+        """The background tasks under way, as the stream says (``task_said``): started, or
+        ended (its notification, or an update to a terminal status: either may be all that
+        comes)."""
+        said = task_said(message)
+        if isinstance(said, TaskStarted):
+            self.working[said.task_id] = said.described
+            self._launched(said)
+        elif isinstance(said, TaskEnded):
+            self.working.pop(said.task_id, None)
             # its end, with no turn served, is followed by a turn of the session's own
             self.due = self.due or self.turn is None
-            found = self.background.get(message.task_id)
+            found = self.background.get(said.task_id)
             if found is not None:
-                found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
+                found.finished(said.status, said.summary)
                 if found.over:  # its run ended first: its task was stopped
                     self._forget(found)
                 self._unshared()
 
-    def _launched(self, message: Any) -> None:
+    def _launched(self, message: TaskStarted) -> None:
         """A subagent the turn being served started in the background (the CLI says which
         it runs so: ``is_backgrounded``): the child run its ``Agent`` call started is kept
         open from here (:class:`Background`), no longer that turn's to end."""
         turn = self.turn
         started = None if turn is None else turn.runtime.helpers
-        if started is None or not message.tool_use_id or not backgrounded(message):
+        if started is None or not message.call_id or not message.background:
             return
-        helper = started.detached(message.tool_use_id)
+        helper = started.detached(message.call_id)
         if helper is not None:
-            found = Background(self, message.task_id, message.tool_use_id, helper)
+            found = Background(self, message.task_id, message.call_id, helper)
             self.background[message.task_id] = self.sessions.attended[found.run_id] = found
         if turn is not None and len(self._flows()) > 1 and self._sharing is None:
             # workflows at work together: what none of them can claim is a run they share

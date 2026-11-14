@@ -68,6 +68,57 @@ def ours(matcher: Any) -> bool:
     return bool(matcher.hooks) and all(hook in _OURS for hook in matcher.hooks)
 
 
+#: The ``task_type`` of a dynamic workflow's task (it names no ``is_backgrounded``: it is
+#: always in the background).
+WORKFLOW_TASK: Final = "local_workflow"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TaskStarted:
+    """A task Claude Code started (its ``task_started``): its id — the ``agent_id`` its
+    worker's calls name —, the tool call that started it, how the call described it, and
+    whether it works in the background of that call (a subagent that says so,
+    ``is_backgrounded``; a dynamic workflow, always)."""
+
+    task_id: str
+    call_id: str | None
+    described: str
+    background: bool
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TaskEnded:
+    """A task that ended: its status and — ``final``, its ``task_notification`` — its
+    summary; a ``task_updated`` to a terminal status, which may be all that comes, has
+    none and may be followed by the notification."""
+
+    task_id: str
+    status: str
+    summary: str
+    final: bool
+
+
+def task_said(message: Any) -> TaskStarted | TaskEnded | None:
+    """What a message of Claude's stream says of a task (``None``: nothing): the one reader
+    of its task messages, for a query's helpers and a live session's background runs."""
+    from claude_agent_sdk import (
+        TERMINAL_TASK_STATUSES,
+        TaskNotificationMessage,
+        TaskStartedMessage,
+        TaskUpdatedMessage,
+    )
+
+    if isinstance(message, TaskStartedMessage):
+        data = message.data
+        background = bool(data.get("is_backgrounded")) or data.get("task_type") == WORKFLOW_TASK
+        return TaskStarted(message.task_id, message.tool_use_id, message.description, background)
+    if isinstance(message, TaskNotificationMessage):
+        return TaskEnded(message.task_id, str(message.status), message.summary or "", True)
+    if isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
+        return TaskEnded(message.task_id, str(message.status), "", False)
+    return None
+
+
 def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dict[str, Any]:
     """The options' hooks with one more ``UserPromptSubmit`` matcher, whose hook adds
     ``context`` to every prompt — nothing, when there is none — (the options' own hooks run
