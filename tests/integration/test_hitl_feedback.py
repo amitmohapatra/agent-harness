@@ -3,6 +3,7 @@ sent with a fixed id the client may retry and the service stores once."""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -59,6 +60,43 @@ async def test_each_decision_on_a_tool_call_is_feedback_once_with_a_fixed_id(
     assert sent.body["metadata"]["decision_seconds"] >= 0
     assert sent.body.get("correction") == (answer if decision == "edit" else None)
     assert memory_harness.writes.failed == 0
+
+
+@tool(side_effects="irreversible")
+def deploy(plan: dict[str, Any], hosts: list[str]) -> str:
+    """Deploy a plan to hosts."""
+    return f"deployed to {len(hosts)} hosts"
+
+
+async def _deploys(input: str, agent: Runtime) -> Any:
+    plan = {"service": "api", "steps": [{"run": "migrate", "env": {"DRY": "0"}}]}
+    return await agent.tools.call("deploy", plan=plan, hosts=["a", "b"])
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_a_decision_on_a_call_with_nested_arguments_reaches_memory(
+    memory_harness: Harness,
+    memory_service: FakeMemoryService,
+    decision: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A function tool taking an object and a list: the decision on its call is feedback the
+    memory service takes, the arguments unchanged, nothing failed or logged. Memory refused
+    metadata nested past two levels, so such a decision was lost."""
+    agent = arm(memory_harness.wrap(_deploys, id="ops"), [deploy])
+    paused = await agent.run("deploy", user="u")
+    assert paused.interrupt is not None
+    with caplog.at_level(logging.WARNING, logger="trellis.writes"):
+        await agent.resume(paused.interrupt.interrupt_id, decision, reviewer="boss")
+        await memory_harness.writes.drain()
+    [decided] = _decided(memory_service)
+    assert decided["verdict"] == decision and decided["metadata"]["tool"] == "deploy"
+    assert decided["metadata"]["args"] == {
+        "plan": {"service": "api", "steps": [{"run": "migrate", "env": {"DRY": "0"}}]},
+        "hosts": ["a", "b"],
+    }
+    assert memory_harness.writes.failed == 0
+    assert [r.getMessage() for r in caplog.records if r.name == "trellis.writes"] == []
 
 
 @pytest.mark.parametrize("decision", ["answer", "cancel"])

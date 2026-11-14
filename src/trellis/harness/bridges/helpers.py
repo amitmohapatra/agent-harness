@@ -106,6 +106,10 @@ class Helper:
     #: how its work in the background ended, once the framework said: whether it failed,
     #: and what it said (:meth:`Helpers.settled`)
     ended: tuple[bool, str] | None = None
+    #: how the framework spawned it
+    kind: Kind | None = None
+    #: how far the run had read its journal when it started (``Replay.cursor``)
+    read: dict[str, int] = field(default_factory=dict)
 
 
 #: The runs of the helpers handed on past their attempt (:meth:`Helpers.detached`), until
@@ -153,10 +157,19 @@ def named(runtime: Runtime) -> dict[str, Any] | None:
     """What an approval asked while a helper of ``runtime``'s run works carries in its
     payload: the helper (``{HELPER: {"run_id", "name"}}``) — the run its call is recorded
     under, which the person's decision is feedback on (:func:`asked_inside`)."""
-    helper = inside(runtime)
-    if helper is None:
-        return None
-    return {HELPER: {"run_id": helper.run_id, "name": helper.name}}
+    return _naming(inside(runtime))
+
+
+def held(runtime: Runtime) -> dict[str, Any] | None:
+    """The same, for an approval of the framework's own the run paused on when a helper's
+    work holds it (``Helpers.held``: an OpenAI agent tool whose own tool waits on the SDK's
+    approval): the helper, whose run records the call."""
+    helpers = runtime.helpers
+    return _naming(None if helpers is None else helpers.held)
+
+
+def _naming(helper: Helper | None) -> dict[str, Any] | None:
+    return None if helper is None else {HELPER: {"run_id": helper.run_id, "name": helper.name}}
 
 
 class Helpers:
@@ -177,6 +190,8 @@ class Helpers:
         self._workers: dict[str, str] = {}
         #: the calls waiting to learn whose a worker is (:meth:`of`)
         self._learning: dict[str, asyncio.Event] = {}
+        #: the helper whose work holds an approval of the framework's own (:func:`held`)
+        self.held: Helper | None = None
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
     async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
@@ -217,7 +232,9 @@ class Helpers:
                 },
             )
         )
-        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)])
+        helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
+        if kind is Kind.SUBAGENT:  # its framework starts it again after a pause in its work
+            helper.read = parent.replay.cursor()
         helper.memory = self._memory(run_id)
         helper.context = await self._pushed(helper, task)
         self._open[key] = helper
@@ -290,6 +307,14 @@ class Helpers:
                     await learning.wait()
         key = self._workers.get(worker)
         return self.named(name) if key is None else self._open.get(key)
+
+    def begun_again(self) -> dict[str, int] | None:
+        """Where the run had read its journal when the first of its open subagents started
+        (Claude's, an ACP agent's, in the foreground): the framework, going on from its
+        session after a pause in a subagent's work, starts that subagent again, and it makes
+        its calls again (``Replay.paused``). ``None``: no such subagent is at work."""
+        working = [h for h in self._open.values() if h.kind is Kind.SUBAGENT and not h.background]
+        return min(working, key=lambda h: h.began).read if working else None
 
     def waits(self, key: str) -> bool:
         """Whether the open helper ``key`` works in the background: its call's result is

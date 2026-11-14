@@ -106,7 +106,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, answers_read
+from trellis.harness.journal import Pending, answers_read, content_key
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -1059,6 +1059,11 @@ class Steps:
     def started(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self.calls[call_id] = (name, args, time.time())
         self.runtime.model_ended(STEP)
+        from trellis.harness.tools.convert.claude import SERVER
+
+        if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
+            bare = name.removeprefix(f"mcp__{SERVER}__")
+            self.runtime.replay.announced(content_key("call", bare, args), call_id)
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
@@ -1232,7 +1237,7 @@ def _governance(steps: Steps) -> Any:
         try:
             # a subagent's call is decided as its helper's work: an approval names the helper
             with answers_read() as read, runtime.helpers.working(helper):
-                decided = await bridge.permitted(_spec(runtime, name), args)
+                decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             steps.helped.pop(call_id, None)
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
@@ -1311,7 +1316,7 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             try:
                 # the same helper's work as the call's PreToolUse said (``Steps.helped``)
                 with helpers.working(steps.helped.get(this)):
-                    decided = await bridge.asked(spec, args, CLAUDE_CODE)
+                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this)
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:
@@ -1336,20 +1341,23 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     with their answers."""
     made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
+    # the answers it reads are this call's: read again when it is made again after a pause
+    calling = runtime.replay.calling(content_key("call", QUESTION_TOOL, made.args))
     async with runtime.limited(None, made=made):
-        for asked in made.args.get("questions") or ():
-            options = [o for o in asked.get("options") or () if o.get("label")]
-            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-            picked = await ask_question(
-                asked["question"],
-                [str(o["label"]) for o in options],
-                multiple=bool(asked.get("multiSelect")),
-                recommended=best.get("label"),
-                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-            )
-            answers[asked["question"]] = (
-                ", ".join(picked) if isinstance(picked, list) else str(picked)
-            )
+        with calling:
+            for asked in made.args.get("questions") or ():
+                options = [o for o in asked.get("options") or () if o.get("label")]
+                best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+                picked = await ask_question(
+                    asked["question"],
+                    [str(o["label"]) for o in options],
+                    multiple=bool(asked.get("multiSelect")),
+                    recommended=best.get("label"),
+                    why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+                )
+                answers[asked["question"]] = (
+                    ", ".join(picked) if isinstance(picked, list) else str(picked)
+                )
     runtime.replay.ended(made)
     return {**made.args, "answers": answers}
 

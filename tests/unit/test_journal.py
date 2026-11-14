@@ -460,3 +460,146 @@ async def test_a_cancel_that_cannot_read_the_journal_leaves_the_sandbox_to_the_r
     shutil.rmtree(tmp_path)
     assert await agent_module._sandbox_of(runs, record) is None
     assert "left to the reaper" in caplog.text
+
+
+def approval(decision: str) -> dict[str, Any]:
+    return InterruptResolution(
+        interrupt_id="r.1.1", run_id="r", decision=InterruptDecision(decision.upper())
+    ).model_dump(mode="json")
+
+
+def test_a_session_that_goes_on_reads_past_what_the_calls_before_read() -> None:
+    """The same call twice in a session the framework keeps: the second paused, answered; the
+    attempt that goes on makes only the second again, which reads its own answer and runs —
+    not the first call's record and answer."""
+    journal = Journal(session="s1")
+    first = Replay(journal)
+    with first.calling("k"):
+        assert first.answer("a") is None  # the first call asks: the run pauses
+        first.paused()
+    journal.answers["a"] = [approval("approve")]
+    second = Replay(journal)
+    with second.calling("k"):  # the first call made again, answered: it runs
+        assert not second.call("k")[0] and second.answer("a") is not None
+        second.record_call("k", "ran once", tool="t", stepped=True)
+    with second.calling("k"):  # the second asks: its own answer is not there yet
+        assert not second.call("k")[0] and second.answer("a") is None
+        second.paused()
+    assert journal.cursors == {"c:k": 1, "a:a": 1}
+    journal.answers["a"].append(approval("reject"))
+    third = Replay(journal)  # the session holds the first call: only the second again
+    with third.calling("k"):
+        assert third.call("k") == (False, None)
+        answered = third.answer("a")
+    assert answered is not None and answered.decision is InterruptDecision.REJECT
+    assert third.cursor() == {"c:k": 1, "a:a": 2}
+    journal.session = None  # run again from its input: nothing of the cursors kept
+    fourth = Replay(journal)
+    fourth.paused()
+    assert journal.cursors == {}
+
+
+def test_a_replayed_call_reads_past_its_answer_so_the_next_reads_its_own() -> None:
+    """Run again from its input: the first call replays from its record and the second, the
+    same call, reads the second answer — the first's was its own."""
+    journal = Journal(answers={"a": [approval("approve"), approval("reject")]})
+    first = Replay(journal)
+    with first.calling("k"):
+        assert first.answer("a") is not None
+        first.record_call("k", "ran", tool="t", stepped=True)
+    again = Replay(journal)
+    with again.calling("k"):
+        assert again.call("k") == (True, "ran")
+    with again.calling("k"):
+        assert again.call("k")[0] is False
+        later = again.answer("a")
+    assert later is not None and later.decision is InterruptDecision.REJECT
+    # a record of a call that read nothing besides keeps its place among those that did
+    with again.calling("k"):
+        again.record_call("k", "unasked", tool="t", stepped=True)
+    assert journal.reads == {"k": [{"a:a": 1}, {}]}
+    other = Replay(journal)
+    other.record_call("k", "outside a call", stepped=True)  # read nothing: its place kept
+    assert journal.reads["k"] == [{"a:a": 1}, {}, {}]
+
+
+def test_a_subagent_begun_again_reads_its_calls_again() -> None:
+    """A subagent paused in its work is started again where the session goes on: all its
+    reads in the attempt are put back (``since``: where it started), so its first call
+    replays from its record and its answer is read past."""
+    journal = Journal(session="s1", answers={"a": [approval("approve")]})
+    first = Replay(journal)
+    since = first.cursor()
+    with first.calling("k"):
+        assert first.answer("a") is not None
+        first.record_call("k", "ran", tool="t", stepped=True)
+    with first.calling("j"):
+        first.paused(since=since)
+    assert journal.cursors == {}
+    again = Replay(journal)
+    with again.calling("k"):
+        assert again.call("k") == (True, "ran")
+    assert again.cursor() == {"c:k": 1, "a:a": 1}
+
+
+def test_a_step_passed_drops_the_reads_of_its_records() -> None:
+    journal = Journal(answers={"a": [approval("approve")]})
+    replay = stepped(journal, "s1")
+    with replay.calling("k"):
+        replay.answer("a")
+        replay.record_call("k", "x", tool="t", stepped=True)
+    later = stepped(journal, "s2")
+    with later.calling("k"):
+        later.record_call("k", "y", tool="t", stepped=True)
+    later.passed("s1")
+    assert journal.calls["k"] == ["y"] and journal.reads == {"k": [{}]}
+    later.passed("s2")
+    assert "k" not in journal.calls and "k" not in journal.reads
+
+
+def test_a_rejection_is_the_call_it_answered_where_the_session_goes_on() -> None:
+    """A rejection filed for the call its framework named ``c1``: that call, made again under
+    its id or still waiting, keeps it; another call — ``c2``, the same arguments — is asked,
+    and reads its own answer after it; run again from its input, ids are not compared."""
+    journal = Journal(session="s1")
+    first = Replay(journal)
+    with first.calling("k", ident="c1"):
+        assert first.answer("a") is None
+    asked = Interrupt(tenant_id="t", run_id="r", question="Approve?")
+    journal.pending = Pending(key="a", interrupt=asked, ident="c1")
+    journal.answered(
+        InterruptResolution(interrupt_id="r.1.1", run_id="r", decision=InterruptDecision.REJECT)
+    )
+    assert journal.answered_by == {"a": ["c1"]}
+    same = Replay(journal)
+    with same.calling("k", ident="c1"):
+        assert same.answered("a")
+        kept = same.answer("a")
+    assert kept is not None and kept.decision is InterruptDecision.REJECT
+    other = Replay(journal)
+    with other.calling("k", ident="c2"):
+        assert not other.answered("a") and other.answer("a") is None
+    journal.answers["a"].append(approval("approve"))  # c2's, filed with no id
+    with other.calling("k", ident="c2"):
+        later = other.answer("a")
+    assert later is not None and later.decision is InterruptDecision.APPROVE
+    journal.session = None  # run again from its input: the rejection is the first call's
+    again = Replay(journal)
+    with again.calling("k", ident="c9"):
+        rerun = again.answer("a")
+    assert rerun is not None and rerun.decision is InterruptDecision.REJECT
+
+
+def test_a_call_its_framework_said_it_makes_is_claimed_once_in_order() -> None:
+    replay = Replay(Journal())
+    replay.announced("k", "c1")
+    replay.announced("k", "c2")
+    assert [replay.claimed("k"), replay.claimed("k"), replay.claimed("k")] == ["c1", "c2", None]
+
+
+def test_a_step_passed_drops_whose_answers_they_were() -> None:
+    journal = Journal(answers={"a": [approval("reject")]}, answered_by={"a": ["c1"]})
+    stepped(journal, "s1").answer("a")
+    later = stepped(journal, "s2")
+    later.passed("s1")
+    assert "a" not in journal.answers and "a" not in journal.answered_by
