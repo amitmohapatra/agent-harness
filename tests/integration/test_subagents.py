@@ -109,6 +109,18 @@ async def test_a_child_run_of_any_framework_answers_its_parents_call(harness: Ha
     assert {
         t["function"]["name"]: t["function"]["description"] for t in model.requests[0]["tools"]
     }["research"] == "Research a topic and report what was found."
+    sent = {t["function"]["name"]: t["function"]["parameters"] for t in model.requests[0]["tools"]}
+    assert sent["research"] == {  # what the model is told a child's tool takes: the task alone
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "the task, with everything the agent needs to know to do it",
+            }
+        },
+        "required": ["message"],
+        "additionalProperties": False,
+    }
 
 
 async def test_children_that_only_read_run_at_once(harness: Harness) -> None:
