@@ -170,6 +170,23 @@ def _naming(helper: Helper | None) -> dict[str, Any] | None:
     return None if helper is None else {HELPER: {"run_id": helper.run_id, "name": helper.name}}
 
 
+def ended(
+    events: Any, *, run_id: str, name: str, framework: str, status: RunStatus, began: float
+) -> None:
+    """A helper's end, said on the stream ``events`` of the run it worked for (its
+    ``helper_finished``): the one place that says it, for a helper an attempt ends
+    (:meth:`Helpers.finished`) and one that outlived its attempt
+    (``claude_live.Background``). ``began``: when it started (``time.monotonic()``)."""
+    events.helper(
+        "finished",
+        run_id=run_id,
+        agent_id=name,
+        framework=framework,
+        status=status.value.lower(),
+        seconds=round(time.monotonic() - began, 3),
+    )
+
+
 class Helpers:
     """The helpers of one attempt of a run, by the framework's key for each (a tool call id,
     an agent's name): each started once and ended once. Holds the open ones only."""
@@ -436,13 +453,13 @@ class Helpers:
                 error=None if error is None else AgentError(code=UNFINISHED, message=error),
                 tenant=self.runtime.tenant,
             )
-        self.runtime.events.helper(
-            "finished",
+        ended(
+            self.runtime.events,
             run_id=helper.run_id,
-            agent_id=helper.name,
+            name=helper.name,
             framework=self.framework,
-            status=status.value.lower(),
-            seconds=round(time.monotonic() - helper.began, 3),
+            status=status,
+            began=helper.began,
         )
         await self._recorded(helper)
         await self._outcome(helper, error)

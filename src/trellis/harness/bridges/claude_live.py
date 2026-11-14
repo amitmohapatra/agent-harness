@@ -91,7 +91,7 @@ from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.claude import JournalSessions, ours
-from trellis.harness.bridges.helpers import Kind
+from trellis.harness.bridges.helpers import Kind, ended
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
 
@@ -373,13 +373,13 @@ class Background:
         record = await self.agent.harness.runs.get(self.run_id, tenant=self.tenant)
         if parent is None or record is None or not record.status.final:
             return
-        parent.events.helper(
-            "finished",
+        ended(
+            parent.events,
             run_id=self.run_id,
-            agent_id=self.name,
+            name=self.name,
             framework=self.agent.adapter.name,
-            status=record.status.value.lower(),
-            seconds=round(time.monotonic() - self.began, 3),
+            status=record.status,
+            began=self.began,
         )
 
     async def _answered(self) -> InterruptResolution | None:
