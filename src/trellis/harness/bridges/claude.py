@@ -21,6 +21,8 @@ to put it behind.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import dataclasses
 import functools
 import logging
@@ -117,6 +119,96 @@ def task_said(message: Any) -> TaskStarted | TaskEnded | None:
     if isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
         return TaskEnded(message.task_id, str(message.status), "", False)
     return None
+
+
+#: How long Claude Code waits for a hook whose matcher sets no ``timeout`` (seconds).
+HOOK_SECONDS: Final = 60.0
+#: The events at which a team's hook may put something in the place of what the call's other
+#: hooks were given: the keys of its answer that do, and the key of the hook's input they
+#: replace — a call's arguments before it runs, its result after.
+REPLACES: Final[dict[str, tuple[tuple[str, ...], str]]] = {
+    "PreToolUse": (("updatedInput",), "tool_input"),
+    "PostToolUse": (("updatedToolOutput", "updatedMCPToolOutput"), "tool_response"),
+}
+
+
+class _Theirs:
+    """The team's own hooks asked about one call at one event: when each has answered (and
+    how long Claude Code waits for it), and what they said, in the order the answers came."""
+
+    __slots__ = ("asked", "said")
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[asyncio.Future[None], float]] = []
+        self.said: list[Any] = []
+
+
+def after_theirs(hooks: Mapping[str, Sequence[Any]]) -> dict[str, list[Any]]:
+    """``hooks`` with the harness's own hooks of a tool call (:func:`ours`) answering after
+    the team's. Claude Code asks every hook of an event at once, in the order they are
+    registered — the team's first — and takes the arguments (``updatedInput``) of the one
+    that answers last (seen with the bundled CLI, 2.1.325): asked beside them, the harness
+    decided and recorded the call as the model made it, not as the team's hook left it. Here
+    a harness hook waits for the team's hooks asked about the same call (no longer than
+    Claude Code waits for them), reads the call as they left it — its arguments before it
+    runs, its result after (:data:`REPLACES`) — and says nothing of a call one of them
+    refused: Claude Code refuses it. Kept per call until the harness's hook read it."""
+    calls: dict[tuple[str, str], _Theirs] = {}
+
+    def theirs(event: str, callback: Any, seconds: float) -> Any:
+        async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+            ref = tool_use_id or given.get("tool_use_id")
+            answered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            found = calls.setdefault((event, ref), _Theirs()) if ref else _Theirs()
+            found.asked.append((answered, seconds))
+            try:
+                answer = await callback(given, tool_use_id, hook)
+                found.said.append(answer)
+                return answer
+            finally:
+                answered.set_result(None)
+
+        return relay
+
+    def own(event: str, callback: Any) -> Any:
+        keys, replaced = REPLACES[event]
+
+        async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+            ref = tool_use_id or given.get("tool_use_id")
+            found = calls.pop((event, ref), None) if ref else None
+            for answered, seconds in found.asked if found is not None else ():
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(answered), seconds)
+            said = [a for a in (found.said if found is not None else ()) if isinstance(a, dict)]
+            if any(_refuses(answer) for answer in said):
+                return {}
+            specific = [answer.get("hookSpecificOutput") or {} for answer in said]
+            left = [out[key] for out in specific for key in keys if key in out]
+            if left:
+                given = {**given, replaced: left[-1]}
+            return await callback(given, tool_use_id, hook)
+
+        _OURS.add(relay)
+        return relay
+
+    def ordered(event: str, matcher: Any) -> Any:
+        if ours(matcher):
+            return dataclasses.replace(matcher, hooks=[own(event, c) for c in matcher.hooks])
+        seconds = matcher.timeout or HOOK_SECONDS
+        return dataclasses.replace(
+            matcher, hooks=[theirs(event, c, seconds) for c in matcher.hooks]
+        )
+
+    return {
+        event: [ordered(event, m) if event in REPLACES else m for m in matchers]
+        for event, matchers in hooks.items()
+    }
+
+
+def _refuses(answer: Mapping[str, Any]) -> bool:
+    """Whether a hook's answer about a call refuses it, or stops the turn."""
+    decided = (answer.get("hookSpecificOutput") or {}).get("permissionDecision")
+    return decided == "deny" or answer.get("continue_") is False
 
 
 def with_context(hooks: Mapping[str, Sequence[Any]] | None, context: str) -> dict[str, Any]:

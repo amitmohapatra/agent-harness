@@ -112,6 +112,7 @@ from trellis.harness.bridges.claude import (
     JournalSessions,
     TaskEnded,
     TaskStarted,
+    after_theirs,
     deciding_matcher,
     harness_matcher,
     session_store,
@@ -1414,14 +1415,15 @@ def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
 
 def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell) -> dict[str, Any]:
     """The options' hooks with the governance hook (:func:`_governance`) and the record hooks
-    (:func:`_recorded`) after theirs."""
+    (:func:`_recorded`) after theirs — registered after them, and answering after them
+    (``after_theirs``)."""
     given = dict(hooks or {})
     given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
     recorded = _recorded(steps, shell)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
     given[RAN_EVENT] = [*given[RAN_EVENT], _steering()]
-    return given
+    return after_theirs(given)
 
 
 def _steering() -> Any:

@@ -11,6 +11,7 @@ seen doing, driven against a scripted model on this machine. No real model was c
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pwd
@@ -485,6 +486,82 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
         ("Edit", {"file_path": "o1"}),
     ]
     assert tool_results(events) == ["Bash", "Edit", "Agent"]  # what ran is recorded
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_the_teams_hook_answers_before_governance_decides_what_it_left(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code asks every ``PreToolUse`` hook at once, and the call runs with the
+    arguments of the hook that answered last. The harness's hook answers after the team's
+    own: the run's hooks and governance decide the call as the team's hook left it — its
+    rewritten arguments, which are also the ones recorded — not the ones the model gave."""
+    seen: list[dict[str, Any]] = []
+
+    async def scoped(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)  # the team's hook is still at work when the harness's is asked
+        safe = {**given["tool_input"], "command": "make deploy --dry-run"}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": safe}}
+
+    class Seeing(Hooks):
+        async def before_tool(self, call: ToolCall) -> None:
+            seen.append(dict(call.args))
+
+    script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
+    own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[scoped])]}
+    target = options(tmp_path, script, hooks=own, permission_mode="bypassPermissions")
+    agent = harness.wrap(target, id="ordered", hooks=[Seeing()])
+    events = [e async for e in agent.stream("deploy", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "Bash ran"
+    rewritten = {"command": "make deploy --dry-run"}
+    assert seen == [rewritten]  # what governance decided is what ran
+    assert [c["args"] for c in lines(tmp_path / "builtins.jsonl")] == [rewritten]
+    said = [e.data["args"] for e in events if e.type is RunEventType.TOOL_CALL_ARGS]
+    assert said == [rewritten]  # and what the run recorded of the call
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_call_the_teams_hook_refuses_is_not_a_persons_to_approve(
+    tmp_path: Path, path: str
+) -> None:
+    """A call the team's own ``PreToolUse`` hook refuses does not run, whatever the harness
+    says of it: nobody is asked to approve it first."""
+
+    async def refusing(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)
+        refused = {"permissionDecision": "deny", "permissionDecisionReason": "not on Fridays"}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", **refused}}
+
+    script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
+    own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[refusing])]}
+    rules = {"Bash": Rule(risk="irreversible")}  # governance would ask a person
+    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog(rules))) as h:
+        agent = h.wrap(options(tmp_path, script, hooks=own), id="refused")
+        result = await agent.run("deploy", user="u1", thread=conversation(path))
+    assert result.status is RunStatus.SUCCESS and result.answer == "not on Fridays", result
+    assert lines(tmp_path / "builtins.jsonl") == []
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_the_result_the_teams_hook_put_in_its_place_is_the_one_recorded(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """A team's ``PostToolUse`` hook replaces what a call returned before the model reads it
+    (``updatedToolOutput``): the run's record of the call is what the model read, not what
+    the hook took out."""
+
+    async def redacting(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)
+        clean = [{"type": "text", "text": "card ending 4242"}]
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": clean}}
+
+    script = [{"builtin": "Read", "args": {"file_path": "cards.csv"}}, {"text": "{last}"}]
+    own = {"PostToolUse": [HookMatcher(matcher="Read", hooks=[redacting])]}
+    agent = harness.wrap(options(tmp_path, script, hooks=own), id="redacted")
+    events = [e async for e in agent.stream("read", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "card ending 4242"  # what the model read
+    [read] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert read["tool"] == "Read" and read["output"] == "card ending 4242"
 
 
 @pytest.mark.parametrize("path", PATHS)

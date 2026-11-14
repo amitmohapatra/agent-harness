@@ -75,6 +75,12 @@ the user Claude Code would ask:
   yours), decides each built-in call as a harness tool call is: the run's `before_tool` hooks
   ([hooks.md](../hooks.md)), then governance by the tool's risk and the tool catalog's rules.
   A call they refuse, or ask a person about, stops there.
+* **Your hooks answer first.** Claude Code asks every `PreToolUse` hook at once and runs the
+  call with the arguments of the one that answers last (seen with the bundled CLI, 2.1.325).
+  The harness's hook waits for yours about the same call, then decides the call as your hook
+  left it (its `updatedInput`); a call your hook refuses is not put to a person. The same
+  after the call: what your `PostToolUse` hook put in the place of the result
+  (`updatedToolOutput`) is what the run records, as the model read it.
 * **A call that cannot be decided does not run.** If the harness's hook fails (the tool
   catalog or the run store out of reach), the call is refused, saying why. The hook's matcher
   is also registered `on_failure="block"`, so Claude Code itself blocks a call whose hook

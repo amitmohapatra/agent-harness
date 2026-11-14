@@ -221,6 +221,12 @@ def replaced(path: str, data: Any) -> None:
     os.replace(part, path)
 
 
+def matches(matcher: dict[str, Any], name: str) -> bool:
+    """Whether a hook matcher is for the tool ``name`` (none, or ``*``: every tool)."""
+    pattern = matcher.get("matcher")
+    return pattern in (None, "", "*") or bool(re.fullmatch(pattern, name))
+
+
 def named(tool_id: str) -> str | None:
     """The call's id as a hook or a permission request carries it — none from a CLI (or a
     relay) that leaves it out (``FAKE_CLAUDE_NO_CALL_IDS``)."""
@@ -584,46 +590,59 @@ class Cli:
         ]
 
     def pre_tool_use(self, session: str, name: str, args: dict[str, Any], tool_id: str) -> dict:
-        """What the ``PreToolUse`` hooks matching ``name`` decide (the first decision)."""
-        for matcher in self.hooks.get("PreToolUse") or []:
-            pattern = matcher.get("matcher")
-            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
-                continue
-            for callback in matcher.get("hookCallbackIds") or []:
-                try:
-                    answer = self.pre_tool_hook(session, callback, name, args, tool_id)
-                except RuntimeError:
-                    # a hook that failed decides nothing, and the CLI goes on — unless its
-                    # matcher says ``onFailure: "block"``: the call is blocked
-                    if matcher.get("onFailure") == "block" and not FAIL_OPEN:
-                        return {"hookSpecificOutput": {**BLOCKED, "hookEventName": "PreToolUse"}}
-                    continue
-                said = answer.get("hookSpecificOutput") or {}
-                if said.get("permissionDecision") or answer.get("continue") is False:
-                    return answer
-        return {}
+        """What the ``PreToolUse`` hooks matching ``name`` decide, asked all at once in the
+        order they were registered, as the bundled CLI (2.1.325) asks them: a refusal wins,
+        then a question, then an allowance, and the arguments are those of the hook that
+        answered last (``updatedInput``). A hook that failed decides nothing, and the CLI goes
+        on — unless its matcher says ``onFailure: "block"``: the call is blocked."""
+        matched = [
+            (matcher, callback)
+            for matcher in self.hooks.get("PreToolUse") or []
+            if matches(matcher, name)
+            for callback in matcher.get("hookCallbackIds") or []
+        ]
+        asked = [
+            self.pre_tool_hook(session, callback, name, args, tool_id) for _, callback in matched
+        ]
+        answers = self.controls(asked)
+        blocks = (
+            matched[n][0].get("onFailure") == "block" for n, answer in answers if answer is None
+        )
+        if any(blocks) and not FAIL_OPEN:
+            return {"hookSpecificOutput": {**BLOCKED, "hookEventName": "PreToolUse"}}
+        said = [(answer, answer.get("hookSpecificOutput") or {}) for _, answer in answers if answer]
+        for answer, decided in said:
+            if decided.get("permissionDecision") == "deny" or answer.get("continue") is False:
+                return answer
+        merged: dict[str, Any] = {}
+        decisions = {decided.get("permissionDecision") for _, decided in said}
+        for decision in ("allow", "ask"):
+            if decision in decisions:
+                merged["permissionDecision"] = decision
+        for _, decided in said:
+            if "updatedInput" in decided:
+                merged["updatedInput"] = decided["updatedInput"]
+        return {"hookSpecificOutput": merged} if merged else {}
 
     def pre_tool_hook(
         self, session: str, callback: str, name: str, args: dict[str, Any], tool_id: str
     ) -> dict[str, Any]:
-        """One ``PreToolUse`` hook's answer (an error raised: the hook failed)."""
-        return self.control(
-            {
-                "subtype": "hook_callback",
-                "callback_id": callback,
-                "input": {
-                    "session_id": session,
-                    "transcript_path": "",
-                    "cwd": os.getcwd(),
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": name,
-                    "tool_input": args,
-                    "tool_use_id": named(tool_id),
-                    **self.working,
-                },
+        """The request that asks one ``PreToolUse`` hook about a call."""
+        return {
+            "subtype": "hook_callback",
+            "callback_id": callback,
+            "input": {
+                "session_id": session,
+                "transcript_path": "",
+                "cwd": os.getcwd(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": name,
+                "tool_input": args,
                 "tool_use_id": named(tool_id),
-            }
-        )
+                **self.working,
+            },
+            "tool_use_id": named(tool_id),
+        }
 
     def post_tool_use(
         self,
@@ -634,9 +653,11 @@ class Cli:
         *,
         content: list[dict[str, Any]],
         error: str | None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """A call that ran, to the ``PostToolUse`` hooks matching ``name`` (its result) or —
-        it failed — the ``PostToolUseFailure`` ones (its error), as the real CLI reports it."""
+        it failed — the ``PostToolUseFailure`` ones (its error), asked all at once as the real
+        CLI asks them: the result the "model" reads, the one the hook that answered last gave
+        in its place (``updatedToolOutput``) when one did."""
         event = "PostToolUse" if error is None else "PostToolUseFailure"
         given: dict[str, Any] = {
             "session_id": session,
@@ -652,23 +673,50 @@ class Cli:
             given["tool_response"] = content
         else:
             given["error"] = error
-        for matcher in self.hooks.get(event) or []:
-            pattern = matcher.get("matcher")
-            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
+        asked = [
+            {
+                "subtype": "hook_callback",
+                "callback_id": callback,
+                "input": given,
+                "tool_use_id": named(tool_id),
+            }
+            for matcher in self.hooks.get(event) or []
+            if matches(matcher, name)
+            for callback in matcher.get("hookCallbackIds") or []
+        ]
+        record = os.environ.get("FAKE_CLAUDE_RECORD")
+        for _, answer in self.controls(asked):
+            said = (answer or {}).get("hookSpecificOutput") or {}
+            if said.get("additionalContext") and record:
+                appended(f"{record}.added", said["additionalContext"])
+            if "updatedToolOutput" in said and error is None:
+                content = said["updatedToolOutput"]  # what the model reads instead
+        return content
+
+    def controls(self, requests: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any] | None]]:
+        """Control requests sent to the SDK all at once, as the CLI asks the hooks of one
+        event: which was answered what (``None``: it failed), in the order the answers came."""
+        ids = [f"cli_{self.requests + n + 1}" for n in range(len(requests))]
+        self.requests += len(requests)
+        threaded = threading.current_thread() is not threading.main_thread()
+        handed: queue.Queue[dict[str, Any]] = queue.Queue()
+        for request_id, request in zip(ids, requests, strict=True):
+            if threaded:  # the main thread reads stdin and hands the answer over
+                _AWAITED[request_id] = handed
+            send({"type": "control_request", "request_id": request_id, "request": request})
+        answers: list[tuple[int, dict[str, Any] | None]] = []
+        while len(answers) < len(ids):
+            message = {"type": "control_response", "response": handed.get()} if threaded else read()
+            if message is None:
+                raise RuntimeError("stdin closed while waiting for the SDK")
+            response = message.get("response") or {}
+            if message.get("type") != "control_response" or response.get("request_id") not in ids:
+                self.aside(message)
                 continue
-            for callback in matcher.get("hookCallbackIds") or []:
-                answer = self.control(
-                    {
-                        "subtype": "hook_callback",
-                        "callback_id": callback,
-                        "input": given,
-                        "tool_use_id": named(tool_id),
-                    }
-                )
-                added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
-                record = os.environ.get("FAKE_CLAUDE_RECORD")
-                if added and record:
-                    appended(f"{record}.added", added)
+            failed = response.get("subtype") == "error"
+            answer = None if failed else response.get("response") or {}
+            answers.append((ids.index(response["request_id"]), answer))
+        return answers
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
@@ -1170,7 +1218,9 @@ class Cli:
             error = failure is not None
             text = f"{builtin} failed: {failure}" if error else f"{builtin} ran"
             content = [{"type": "text", "text": text}]
-            self.post_tool_use(session, name, ran, tool_id, content=content, error=failure)
+            content = self.post_tool_use(
+                session, name, ran, tool_id, content=content, error=failure
+            )
         elif allowed:
             called = self.call_tool(item["tool"], ran, server, tool_id)
             answered = called.get("result") or {}
@@ -1179,7 +1229,7 @@ class Cli:
                 {"type": "text", "text": json.dumps(called.get("error"))}
             ]
             failed = "".join(c.get("text", "") for c in content) if error else None
-            self.post_tool_use(session, name, ran, tool_id, content=content, error=failed)
+            content = self.post_tool_use(session, name, ran, tool_id, content=content, error=failed)
         else:
             content = [{"type": "text", "text": permission.get("message", "denied")}]
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))

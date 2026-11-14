@@ -317,6 +317,11 @@ cancelled after its start (the task is cancelled with it). See
   background runs making the same call with the same arguments were told apart by "the first
   that matches". Claude Code names the call in the MCP request (`_meta`), which the
   `trellis` server now reads (the `claude-agent-sdk` extra pins `mcp>=2.2,<3` for it).
+- **The team's hooks answer before governance decides.** Claude Code asks all `PreToolUse`
+  hooks at once: governance decided, and the run recorded, the arguments the model gave
+  while the call ran with the ones a team's hook rewrote; a call a team's hook refused was
+  still put to a person; and the record kept the result a team's `PostToolUse` hook had
+  replaced. The harness's hooks now wait for the team's about the same call.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.
