@@ -909,3 +909,12 @@ def test_a_querys_rows_past_what_a_query_loads_are_shown_and_not_kept(
     monkeypatch.setattr(query, "LOAD_CHARS", 100)
     again, dropped = query._whole(Cursor(list(many)), names)
     assert again == shown and dropped is None
+
+
+def test_one_line_is_a_line_and_a_markdown_header_alone_is_a_table_of_no_rows(
+    journal: Journal,
+) -> None:
+    """A text of one line is no CSV (no row under its header): the table of its lines; a
+    markdown table's header over its rule line is a table with those columns and no rows."""
+    assert ask("a,b", "SELECT * FROM result") == 'line\n"a,b"'
+    assert ask("| a | b |\n|---|---|", "SELECT * FROM result") == "a,b"
