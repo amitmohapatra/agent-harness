@@ -58,7 +58,7 @@ react = [
   "deepagents>=0.7.38,<0.8",
 ]
 openai-agents = ["openai-agents>=0.24,<0.25"]
-claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
+claude-agent-sdk = ["claude-agent-sdk>=0.2.182,<0.3", "mcp>=2.2,<3"]
 # ``kimi()``: Kimi Code over the Agent Client Protocol (``adapters.acp``): the ACP SDK, and the MCP
 # SDK that serves the harness's tools to it. The agent itself is the ``kimi`` program
 # (``npm install -g @moonshot-ai/kimi-code@2.1.1``), its tested range in compat.BINARIES.

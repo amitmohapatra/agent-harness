@@ -11,6 +11,7 @@ seen doing, driven against a scripted model on this machine. No real model was c
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pwd
@@ -167,7 +168,8 @@ async def test_the_options_reach_the_cli_as_the_sdk_sends_them(
         "--tools": "Read,Bash,Agent",
         "--allowedTools": "Read",
         "--add-dir": str(tmp_path / "shared"),
-        "--settings": '{"includeCoAuthoredBy": false}',
+        # the team's, and other Claude sessions' messages refused
+        "--settings": '{"includeCoAuthoredBy": false, "crossSessionInbound": "refuse"}',
         "--setting-sources": "user,project",
         "--team-flag": "on",
         "--max-thinking-tokens": "2048",
@@ -266,6 +268,7 @@ async def test_a_sandbox_of_the_options_is_merged_into_the_settings_the_cli_gets
     settings = json.loads(str(flag(started_with(tmp_path)["argv"], "--settings")))
     assert settings == {
         "includeCoAuthoredBy": False,
+        "crossSessionInbound": "refuse",
         "sandbox": {"enabled": True, "autoAllowBashIfSandboxed": False},
     }
 
@@ -348,9 +351,9 @@ async def test_every_hook_event_of_the_teams_own_runs_inside_the_run(
 async def test_a_slash_command_no_model_replied_in_is_a_turn_done_with_an_empty_answer(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:
-    """A prompt that is one of Claude Code's slash commands runs as with the SDK alone
-    (``/compact``: the options' ``PreCompact`` hook is called, inside the run; no prompt
-    hook). The CLI answers it itself — its result says ``success`` with no text, and no
+    """A slash command the app sends on purpose (the run's ``verbatim_prompts=False``: a
+    user's own text is delivered as written) runs as with the SDK alone (``/compact``: the
+    options' ``PreCompact`` hook is called, inside the run; no prompt hook). The CLI answers it itself — its result says ``success`` with no text, and no
     reply of the model's is in its turn — so the run ends ``SUCCESS`` with an empty answer,
     as a run of any framework in which no model replied does. The conversation goes on."""
     called: list[tuple[str, str | None]] = []
@@ -362,7 +365,10 @@ async def test_a_slash_command_no_model_replied_in_is_a_turn_done_with_an_empty_
 
     hooks = {event: [HookMatcher(hooks=[own])] for event in ("PreCompact", "UserPromptSubmit")}
     agent = harness.wrap(options(tmp_path, [{"text": "ok"}], hooks=hooks), id="compact")
-    compacted = await agent.run("/compact", user="u1", thread=conversation(path))
+    explicit = {"verbatim_prompts": False}
+    compacted = await agent.run(
+        "/compact", user="u1", thread=conversation(path), framework_options=explicit
+    )
     assert called == [("PreCompact", compacted.run_id)]
     assert compacted.status is RunStatus.SUCCESS and compacted.answer == "", compacted.error
     after = await agent.run("hello", user="u1", thread=conversation(path))
@@ -483,7 +489,125 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
 
 
 @pytest.mark.parametrize("path", PATHS)
-@pytest.mark.parametrize("name", ["EnterWorktree", "mcp__erp__post_invoice"])
+async def test_what_claude_code_says_beside_its_replies_is_on_the_runs_stream(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code says on its stream when it is close to (or at) its rate limit, retries a
+    model call, compacts the session's context, falls back to another model, or could not
+    mirror a step into the session store, and when a reply failed: each is a warning of the
+    run, by its own code —
+    a slow, shortened or rerouted turn says why. A rate limit that is fine says nothing."""
+    limit = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}}
+    near = {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.9}
+    failed = {"id": "msg_failed", "role": "assistant", "model": "fake", "content": []}
+    frames = [
+        limit,
+        {**limit, "rate_limit_info": near},
+        {"type": "system", "subtype": "api_retry", "attempt": 2, "error": "overloaded"},
+        {"type": "system", "subtype": "compact_boundary", "trigger": "auto"},
+        {"type": "system", "subtype": "model_fallback", "to": "claude-haiku"},
+        {"type": "system", "subtype": "mirror_error", "error": "the store timed out"},
+        {
+            "type": "assistant",
+            "message": failed,
+            "parent_tool_use_id": None,
+            "error": "server_error",
+        },
+    ]
+    script = [*({"frame": frame} for frame in frames), {"text": "done"}]
+    agent = harness.wrap(options(tmp_path, script), id="noticed")
+    events = [e async for e in agent.stream("go", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "done"
+    warned = [
+        (e.data["code"], e.data["message"]) for e in events if e.data.get("name") == "warning"
+    ]
+    codes = ["rate_limit", "model_retry", "compaction", "model_fallback", "session_store"]
+    assert [code for code, _ in warned] == [*codes, "model_error"]
+    said = dict(warned)
+    assert "allowed_warning" in said["rate_limit"] and "five_hour" in said["rate_limit"]
+    assert "overloaded" in said["model_retry"] and "claude-haiku" in said["model_fallback"]
+    assert "the store timed out" in said["session_store"]
+    assert "server_error" in said["model_error"]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_the_teams_hook_answers_before_governance_decides_what_it_left(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code asks every ``PreToolUse`` hook at once, and the call runs with the
+    arguments of the hook that answered last. The harness's hook answers after the team's
+    own: the run's hooks and governance decide the call as the team's hook left it — its
+    rewritten arguments, which are also the ones recorded — not the ones the model gave."""
+    seen: list[dict[str, Any]] = []
+
+    async def scoped(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)  # the team's hook is still at work when the harness's is asked
+        safe = {**given["tool_input"], "command": "make deploy --dry-run"}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": safe}}
+
+    class Seeing(Hooks):
+        async def before_tool(self, call: ToolCall) -> None:
+            seen.append(dict(call.args))
+
+    script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
+    own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[scoped])]}
+    target = options(tmp_path, script, hooks=own, permission_mode="bypassPermissions")
+    agent = harness.wrap(target, id="ordered", hooks=[Seeing()])
+    events = [e async for e in agent.stream("deploy", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "Bash ran"
+    rewritten = {"command": "make deploy --dry-run"}
+    assert seen == [rewritten]  # what governance decided is what ran
+    assert [c["args"] for c in lines(tmp_path / "builtins.jsonl")] == [rewritten]
+    said = [e.data["args"] for e in events if e.type is RunEventType.TOOL_CALL_ARGS]
+    assert said == [rewritten]  # and what the run recorded of the call
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_call_the_teams_hook_refuses_is_not_a_persons_to_approve(
+    tmp_path: Path, path: str
+) -> None:
+    """A call the team's own ``PreToolUse`` hook refuses does not run, whatever the harness
+    says of it: nobody is asked to approve it first."""
+
+    async def refusing(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)
+        refused = {"permissionDecision": "deny", "permissionDecisionReason": "not on Fridays"}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", **refused}}
+
+    script = [{"builtin": "Bash", "args": {"command": "make deploy"}}, {"text": "{last}"}]
+    own = {"PreToolUse": [HookMatcher(matcher="Bash", hooks=[refusing])]}
+    rules = {"Bash": Rule(risk="irreversible")}  # governance would ask a person
+    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog(rules))) as h:
+        agent = h.wrap(options(tmp_path, script, hooks=own), id="refused")
+        result = await agent.run("deploy", user="u1", thread=conversation(path))
+    assert result.status is RunStatus.SUCCESS and result.answer == "not on Fridays", result
+    assert lines(tmp_path / "builtins.jsonl") == []
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_the_result_the_teams_hook_put_in_its_place_is_the_one_recorded(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """A team's ``PostToolUse`` hook replaces what a call returned before the model reads it
+    (``updatedToolOutput``): the run's record of the call is what the model read, not what
+    the hook took out."""
+
+    async def redacting(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        await asyncio.sleep(0.05)
+        clean = [{"type": "text", "text": "card ending 4242"}]
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": clean}}
+
+    script = [{"builtin": "Read", "args": {"file_path": "cards.csv"}}, {"text": "{last}"}]
+    own = {"PostToolUse": [HookMatcher(matcher="Read", hooks=[redacting])]}
+    agent = harness.wrap(options(tmp_path, script, hooks=own), id="redacted")
+    events = [e async for e in agent.stream("read", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "card ending 4242"  # what the model read
+    [read] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert read["tool"] == "Read" and read["output"] == "card ending 4242"
+
+
+@pytest.mark.parametrize("path", PATHS)
+@pytest.mark.parametrize("name", ["FutureTool", "mcp__erp__post_invoice"])
 async def test_a_tool_that_says_nothing_of_what_it_does_asks_a_person_once(
     harness: Harness, tmp_path: Path, path: str, name: str
 ) -> None:
@@ -505,6 +629,51 @@ async def test_a_tool_that_says_nothing_of_what_it_does_asks_a_person_once(
     # Claude Code did ask (its own check), and was answered without a person
     asked = lines(tmp_path / "cli.json.permissions")
     assert [(a["tool"], a["answer"]["behavior"]) for a in asked] == [(name, "allow")]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_loading_a_deferred_tool_asks_nobody(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code loads a team MCP server's deferred tools with ``ToolSearch`` (and waits for
+    a server still connecting with ``WaitForMcpServers``): both only read, so they run."""
+    script = [
+        {"builtin": "ToolSearch", "args": {"query": "select:mcp__erp__post_invoice"}},
+        {"builtin": "WaitForMcpServers", "args": {}},
+        {"text": "{last}"},
+    ]
+    done = await harness.wrap(options(tmp_path, script), id="deferred").run(
+        "go on", user="u1", thread=conversation(path)
+    )
+    assert done.status is RunStatus.SUCCESS and done.answer == "WaitForMcpServers ran"
+    assert [c["tool"] for c in lines(tmp_path / "builtins.jsonl")] == [
+        "ToolSearch",
+        "WaitForMcpServers",
+    ]
+
+
+@pytest.mark.parametrize("name", ["ExitPlanMode", "WebFetch", "WebSearch", "Skill"])
+async def test_what_claude_code_asks_about_a_person_answers_unless_the_catalog_allows_it(
+    tmp_path: Path, name: str
+) -> None:
+    """Claude Code asks its user before it leaves plan mode with a plan (``ExitPlanMode``),
+    reaches the network (``WebFetch``, ``WebSearch``) or runs a skill (``Skill``): a person
+    answers as it would have, once — unless the tool catalog allows the tool, which then
+    runs without a question."""
+    script = [{"builtin": name, "args": {"url": "https://example.com"}}, {"text": "{last}"}]
+    async with with_governance(Harness(config=Settings()), Governance(FakeCatalog({}))) as h:
+        agent = h.wrap(options(tmp_path, script), id="asks")
+        paused = await agent.run("go on", user="u1")
+        assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+        assert paused.interrupt.tool_call is not None and paused.interrupt.tool_call.tool == name
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+        assert done.answer == f"{name} ran", done.error
+        assert [c["tool"] for c in lines(tmp_path / "builtins.jsonl")] == [name]  # once
+    (tmp_path / "builtins.jsonl").unlink()
+    allows = FakeCatalog({name: Rule(risk="read")})
+    async with with_governance(Harness(config=Settings()), Governance(allows)) as h:
+        done = await h.wrap(options(tmp_path, script), id="allowed").run("go on", user="u1")
+        assert done.status is RunStatus.SUCCESS and done.answer == f"{name} ran", done.error
 
 
 @pytest.mark.parametrize("path", PATHS)
@@ -564,6 +733,36 @@ async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_i
         assert done.status is RunStatus.SUCCESS, again  # no second question
     ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
     assert ran == [("Bash", {"command": "make deploy -n"} if why == "rewritten" else command)]
+
+
+async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SEC-R-7: a person's answer spares the call it answered Claude Code's own question, by
+    the call's id. From a CLI (or a relay) that names no id, nothing is carried: an approved
+    ``make deploy`` is no approval of the ``rm -rf build`` that follows, which a person is
+    asked about before it runs (the call it could not name is asked about again)."""
+    deploy, wipe = {"command": "make deploy"}, {"command": "rm -rf build"}
+    script = [{"builtin": "Bash", "args": deploy}, {"builtin": "Bash", "args": wipe}]
+
+    class Asking(Hooks):
+        async def before_tool(self, call: ToolCall) -> Ask | None:
+            return Ask("Deploy now?") if call.args == deploy else None
+
+    target = options(tmp_path, [*script, {"text": "{last}"}])
+    target.env["FAKE_CLAUDE_NO_CALL_IDS"] = "1"
+    agent = harness.wrap(target, id="carries", hooks=[Asking()])
+    asked = await agent.run("deploy, then clean", user="u1")
+    for _ in range(2):  # the hook's question, then Claude Code's own about the same call
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.error
+        assert asked.interrupt.tool_call is not None
+        if asked.interrupt.tool_call.args != deploy:
+            break
+        asked = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.answer
+    assert asked.interrupt.tool_call is not None and asked.interrupt.tool_call.args == wipe
+    ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
+    assert ran == [("Bash", deploy)]
 
 
 @pytest.mark.parametrize("path", PATHS)
@@ -680,6 +879,37 @@ async def test_a_session_id_of_the_options_names_the_session_and_a_pause_resumes
     again = started_with(tmp_path)
     assert again["session"] == named and again["resume"] == named
     assert flag(again["argv"], "--session-id") is None
+
+
+async def test_where_the_options_cut_the_session_they_resume_holds_for_the_first_query_only(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``resume_session_at`` (with ``resume_drops_turn``) cuts the session the options resume
+    at an entry of theirs. The run's later attempt resumes the run's own session after a
+    pause: cut there, it would lose the paused turn's work, so it is not."""
+
+    @tool(side_effects="irreversible")
+    def refund(order: str) -> str:
+        """Refund an order."""
+        return f"refunded {order}"
+
+    began = str(uuid.uuid4())
+    cut = {"resume_session_at": str(uuid.uuid4()), "resume_drops_turn": str(uuid.uuid4())}
+    first = await harness.wrap(
+        options(tmp_path, [{"text": "noted"}], session_id=began), id="a"
+    ).run("the code is 4242", user="u1")
+    assert first.answer == "noted"
+    script = [{"tool": "refund", "args": {"order": "o1"}}, {"text": "{last}"}]
+    target = options(tmp_path, script, resume=began, fork_session=True, **cut)
+    agent = arm(harness.wrap(target, id="cut"), [refund])
+    paused = await agent.run("refund o1", user="u1")
+    assert paused.interrupt is not None, paused.error
+    argv = started_with(tmp_path)["argv"]
+    assert flag(argv, "--resume-session-at") == cut["resume_session_at"]  # the options' own
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.answer == "refunded o1", done.error
+    argv = started_with(tmp_path)["argv"]
+    assert flag(argv, "--resume-session-at") is None and flag(argv, "--resume-drops-turn") is None
 
 
 async def test_the_sessions_the_options_choose_are_claude_codes_to_resume_fork_or_continue(

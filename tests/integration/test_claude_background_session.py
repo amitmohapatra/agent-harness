@@ -25,7 +25,6 @@ import pytest
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
-    TaskNotificationMessage,
     TaskStartedMessage,
     create_sdk_mcp_server,
 )
@@ -46,15 +45,15 @@ from trellis.contracts import (
 )
 from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
-    AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
+    UNHELD_AGENTS,
     ClaudeAdapter,
 )
 from trellis.harness.agent import Agent
 from trellis.harness.bridges import claude_live
-from trellis.harness.bridges.claude_live import UNATTENDED, LiveSession
+from trellis.harness.bridges.claude_live import SHARED, SHARED_SAID, UNATTENDED, LiveSession
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
@@ -96,6 +95,13 @@ def options(tmp_path: Path, turns: list[list[dict[str, Any]]], **fields: Any) ->
 def served(tmp_path: Path) -> list[dict[str, Any]]:
     """What the CLI recorded of each turn it was sent, in order: which process took it."""
     log = tmp_path / "cli.json.turns"
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def own_turns(tmp_path: Path) -> list[str]:
+    """What the session said in each turn it ran by itself (a finished task's notification),
+    as the CLI recorded it: nobody's answer."""
+    log = tmp_path / "cli.json.own"
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
@@ -217,15 +223,11 @@ async def test_a_background_task_goes_on_while_the_next_turns_are_answered_by_it
     assert live_of(agent) is live and open_sessions(agent) == 1 and list(live.working) == ["t1"]
 
     (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
-    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
-    assert not live.working
-    # what came with no turn to take it is kept: the task's notification, the session's own
-    # turn for it and that turn's result — none of it anybody's answer
-    [notification] = [m for m in live.kept if isinstance(m, TaskNotificationMessage)]
-    assert notification.task_id == "t1" and notification.summary == "the market is growing"
-    [injected] = [m for m in live.kept if isinstance(m, ResultMessage)]
-    assert injected.origin == {"kind": "task-notification"}
-    assert injected.result == "Noted: the market is growing"
+    await until(lambda: own_turns(tmp_path))
+    await until(lambda: not live.working)
+    # what came with no turn to take it — the task's notification, the session's own turn
+    # for it and that turn's result — is nobody's answer
+    assert own_turns(tmp_path) == ["Noted: the market is growing"]
 
     third = await agent.run("what did it find?", user="u1", thread="t1")
     asked = ["research the market", "what is 2+2?", NOTIFIED, "what did it find?"]
@@ -254,7 +256,7 @@ async def test_the_result_of_a_turn_the_session_injected_is_never_a_users_answer
     assert events[-1].data["result"] == "my own answer"
     said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
     assert "".join(said) == "my own answer"
-    assert [m.result for m in live.kept if isinstance(m, ResultMessage)] == ["still noting"]
+    assert own_turns(tmp_path) == ["still noting"]
 
 
 async def test_a_prompt_that_crosses_the_start_of_the_sessions_own_turn_still_gets_its_answer(
@@ -277,9 +279,7 @@ async def test_a_prompt_that_crosses_the_start_of_the_sessions_own_turn_still_ge
     assert not live.injected
     result = await agent.run("and you?", user="u1", thread="t1")
     assert result.status is RunStatus.SUCCESS and result.answer == "my own answer"
-    [injected] = [m for m in live.kept if isinstance(m, ResultMessage)]
-    assert injected.result == "Noted: the market is growing"
-    assert injected.origin == {"kind": "task-notification"}
+    assert own_turns(tmp_path) == ["Noted: the market is growing"]
 
 
 def test_an_injected_turns_result_in_a_querys_messages_is_not_its_answer() -> None:
@@ -897,45 +897,30 @@ async def test_a_session_the_options_keep_themselves_is_served_live_too(
     assert two["pid"] == one["pid"] and open_sessions(agent) == 1
 
 
-async def test_at_its_turn_limit_a_conversations_turn_gets_its_last_answer_from_its_session(
+async def test_at_its_turn_limit_a_conversations_turn_ends_partial_and_its_work_goes_on(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """The one last answer at the turn limit is asked in the conversation's live session, as
-    its next turn — the session and the background work the turn started there go on (a
-    process of its own would be a second process on the session, and closing the live one
-    first would stop that work): told the limit is reached, its tool calls are refused, and
-    its answer is the run's."""
+    """A conversation's turn that reaches ``max_turns`` ends with Claude Code's own
+    ``error_max_turns`` result, ``PARTIAL``, and no turn more is asked of its live session:
+    the session and the background work the turn started there go on, and the conversation's
+    next turn is served by the same process, with its tools."""
     reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
-    target = options(tmp_path, [[BACKGROUND, *reads, {"text": "never"}]], max_turns=3)
+    scripts = [[BACKGROUND, *reads, {"text": "never"}], [{"text": "next turn"}]]
+    target = options(tmp_path, scripts, max_turns=3)
     agent = harness.wrap(target, id="limited")
     result = await agent.run("research, then read", user="u1", thread="t1")
-    assert result.status is RunStatus.SUCCESS, result.error
-    assert result.answer == "What I found before the limit."
-    one, two = served(tmp_path)
-    assert two["pid"] == one["pid"] and alive(one["pid"])  # the live session's own process
+    assert result.status is RunStatus.PARTIAL, result.error
+    (one,) = served(tmp_path)  # no last answer asked
+    assert alive(one["pid"])
+    assert [c["tool"] for c in built_ins(tmp_path)] == ["Read", "Read"]
     child = await child_of(harness, result.run_id)
     live = live_of(agent)
     assert child.status is RunStatus.RUNNING, (child.status, child.error)
     assert live is not None and not live.closed and list(live.working) == ["t1"]
-    assert open_sessions(agent) == 1
-
-
-async def test_a_tool_call_in_the_last_answer_at_the_turn_limit_is_refused(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """The last answer's turn in a live session has the process's tools (a live process keeps
-    the ones it started with): a call the model makes in it anyway is refused, not run, and
-    the answer it gives then is the run's."""
-    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(3)]
-    target = options(tmp_path, [[*reads, {"text": "never"}]], max_turns=2)
-    target.env["FAKE_CLAUDE_AT_LIMIT_CALLS"] = json.dumps(
-        {"builtin": "Write", "args": {"file_path": "notes.txt", "content": "x"}}
-    )
-    agent = harness.wrap(target, id="limited-calls")
-    result = await agent.run("read both", user="u1", thread="t1")
-    assert result.status is RunStatus.SUCCESS, result.error
-    assert [c["tool"] for c in built_ins(tmp_path)] == ["Read", "Read"]  # the Write did not run
-    assert result.answer == AT_LIMIT
+    second = await agent.run("and now?", user="u1", thread="t1")
+    assert second.status is RunStatus.SUCCESS and second.answer == "next turn"
+    _, two = served(tmp_path)
+    assert two["pid"] == one["pid"] and open_sessions(agent) == 1
 
 
 async def test_a_turn_after_the_hour_turned_is_served_by_the_same_session(
@@ -1095,7 +1080,15 @@ async def test_a_session_that_owes_a_left_turns_result_for_too_long_is_replaced(
     agent = harness.wrap(options(tmp_path, scripts), id="owing")
     await agent.run("research the market", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
-    await until(lambda: len(served(tmp_path)) == 2)
+
+    def mirrored(prompt: str) -> bool:
+        """The session's own record of the turn ``prompt`` began has come (the CLI mirrors it
+        after it took the turn): what a process that resumes the session goes on from."""
+        live = live_of(agent)
+        kept = live.mirror.transcripts.values() if live and live.mirror else ()
+        return any(e.get("prompt") == prompt for entries in kept for e in entries)
+
+    await until(lambda: mirrored("a long one"), seconds=60)
     await agent.cancel(turn_running(agent))
     assert (await slow).status is RunStatus.CANCELLED
     events = [e async for e in agent.stream("and now?", user="u1", thread="t1")]
@@ -1774,7 +1767,7 @@ async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
 
     from claude_agent_sdk import AssistantMessage, TextBlock
 
-    session = LiveSession("k", None, claude_live.LiveSessions())
+    session = LiveSession("k", None, claude_live.LiveSessions(), owner="u")
     turn = claude_live.Turn(None, None, None, contextvars.copy_context(), stopped=True)
     said = AssistantMessage(content=[TextBlock("…")], model="m")
     ended = ResultMessage("success", 1, 1, False, 1, "s")
@@ -1861,9 +1854,8 @@ async def test_the_main_agents_own_call_with_no_turn_is_still_refused(
     await when(harness, child.run_id, RunStatus.SUCCESS)
     live = live_of(agent)
     assert live is not None
-    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
-    [noted] = [m.result for m in live.kept if isinstance(m, ResultMessage)]
-    assert noted == f"Noted: {UNATTENDED}" and built_ins(tmp_path) == []
+    await until(lambda: own_turns(tmp_path))
+    assert own_turns(tmp_path) == [f"Noted: {UNATTENDED}"] and built_ins(tmp_path) == []
     events = [e async for e in agent.stream("and?", user="u1", thread="t1")]
     [said] = warned(events)
     assert "were refused" in said and "Read x1" in said
@@ -2273,14 +2265,51 @@ async def test_with_memory_on_each_live_turn_asks_memory_first_and_is_saved_afte
 
 
 # --------------------------------------------------------------------------- the tools
-def test_the_task_tools_the_bundled_cli_exposes_have_a_declared_risk() -> None:
-    """Named as the bundled CLI (2.1.283) lists them when asked (its ``init`` message), each
-    by what it does: stopping a task is a write; tools that only list or look up, read-only by
-    the CLI's own word, are reads. ``TaskOutput`` and ``Monitor`` are not tools it lists."""
-    assert BUILTIN_SIDE_EFFECTS["TaskStop"] == "write"
-    looked_up = ("ListAgents", "ListConnectors", "ReadNotifications", "ReportFindings")
-    assert {BUILTIN_SIDE_EFFECTS[name] for name in looked_up} == {"read"}
-    assert not {"TaskOutput", "Monitor"} & set(BUILTIN_SIDE_EFFECTS)
+#: The tools the bundled CLI (2.1.325) has: those its ``init`` message lists, and those it
+#: offers where it is set up for them (a shell on Windows, an LSP server, MCP servers, deferred
+#: tools, worktrees, a claude.ai login, auto mode...) — its own list of tool names, read from
+#: the binary, and those 2.1.283 had beside it.
+CLI_TOOLS = (
+    "Agent", "Artifact", "AskUserQuestion", "Bash", "ClaudeDesign", "CronCreate", "CronDelete",
+    "CronList", "Edit", "EndConversation", "EnterPlanMode", "EnterWorktree", "ExitPlanMode",
+    "ExitWorktree", "Glob", "Grep", "ListAgents", "ListMcpResourcesTool", "LSP", "Monitor",
+    "NotebookEdit", "OfferChromeSetup", "PowerShell", "Projects", "propose_skills",
+    "ProposeGoal", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "ReadNotifications", "RemoteTrigger", "ReportFindings", "ScheduleWakeup", "SendFeedback",
+    "SendMessage", "SendUserFile", "SendUserMessage", "ShareOnboardingGuide",
+    "ShowOnboardingRolePicker", "Skill", "SubagentHandback", "TaskCreate", "TaskGet",
+    "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch", "WaitForMcpServers",
+    "WebFetch", "WebSearch", "Workflow", "Write",
+    # its ``init`` message's, not in that list
+    "ListConnectors", "ListPlugins", "ListSkills", "SearchMcpRegistry", "SearchPlugins",
+    "SearchSkills", "SuggestConnectors", "SuggestPluginInstall", "SuggestSkills", "Task",
+    # 2.1.283's, still in the binary
+    "MultiEdit", "REPL", "StructuredOutput",
+)  # fmt: skip
+
+
+def test_every_tool_of_the_bundled_cli_has_a_declared_risk_or_is_not_offered() -> None:
+    """Each tool the bundled CLI has is declared by what it does — or is not offered (work
+    that outlives the run, agents no run holds) — and no name it does not have is: a tool
+    with no word asks a person on every call, and one listed but gone is a ghost in the
+    agent's tool set. Loading a deferred tool or waiting for MCP servers only reads; a
+    shell, a worktree, a published page or a notification writes; ``ListAgents``, which lists
+    the other sessions of the worker's user (other tenants' runs), and ``RemoteTrigger``,
+    whose scheduled task outlives the run as a schedule does, are not offered."""
+    offered = set(BUILTIN_SIDE_EFFECTS)
+    off = {*OUTLIVES_THE_QUERY, *UNHELD_AGENTS}
+    assert set(CLI_TOOLS) - offered - off == set()
+    assert not {"LS", "KillShell", "BashOutput", "SlashCommand", "TaskOutput"} & offered
+    assert {"RemoteTrigger", "CronCreate"} <= set(OUTLIVES_THE_QUERY)
+    assert {"ListAgents", "SendMessage"} <= set(UNHELD_AGENTS) and not off & offered
+    reads = ("ToolSearch", "WaitForMcpServers", "LSP", "SubagentHandback", "ReportFindings")
+    reads = (*reads, "OfferChromeSetup", "propose_skills", "ReadMcpResourceDirTool")
+    assert {BUILTIN_SIDE_EFFECTS[name] for name in reads} == {"read"}
+    writes = ("TaskStop", "PowerShell", "Monitor", "EnterWorktree", "Artifact", "REPL")
+    writes = (*writes, "ClaudeDesign", "Projects", "ProposeGoal")
+    assert {BUILTIN_SIDE_EFFECTS[name] for name in writes} == {"write"}
+    # the placeholder that keeps deferred tools loading is never to be called: no word of it
+    assert "DeferredToolPlaceholder" not in offered | off
 
 
 async def test_schedules_stay_disallowed_in_a_live_session(
@@ -2294,8 +2323,11 @@ async def test_schedules_stay_disallowed_in_a_live_session(
     await agent.run("every Monday", user="u1")
     kept, alone = served(tmp_path)
     assert kept["pid"] != alone["pid"]
+    off = {"CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger"}
     for started in (kept, alone):
-        assert set(OUTLIVES_THE_QUERY) <= set(started["disallowed_tools"].split(","))
+        # the CLI's own rule hides a disallowed tool from the model, deferred ones behind
+        # ToolSearch too (the bundled CLI, 2.1.325, driven against a scripted model)
+        assert off <= set(started["disallowed_tools"].split(","))
 
 
 def test_the_frames_the_stand_in_sends_are_the_sdks_task_messages() -> None:
@@ -2313,3 +2345,344 @@ def test_the_frames_the_stand_in_sends_are_the_sdks_task_messages() -> None:
         }
     )
     assert isinstance(started, TaskStartedMessage) and started.task_type == "local_agent"
+
+
+# --------------------------------------------------------------------------- dynamic workflows
+#: A dynamic workflow's launch: its ``Workflow`` call returns at once, task ``w1`` runs, its
+#: agents named in their hooks by ids of their own (``a1``, ``a2``) and ``workflow-subagent``.
+SCRIPT = "export const meta = { name: 'probe', description: 'probe', phases: [] }\nreturn 1"
+WORKFLOW = {"workflow": {"id": "w1", "name": "probe", "script": SCRIPT}}
+ANOTHER = {"workflow": {"id": "w2", "name": "probe", "script": SCRIPT}}
+#: What the bundled CLI's notification of a finished workflow says.
+FLOWED = 'Dynamic workflow "probe" completed'
+
+
+async def test_a_workflows_agents_calls_are_governed_and_recorded_on_its_one_child_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A dynamic workflow (``Workflow``) is one child run of the turn that launched it, kept
+    open as a background subagent's while it works: the calls of its agents — each named by
+    an id of its own and ``workflow-subagent`` — are decided by that run's hooks and
+    governance and recorded under it, between turns and while a turn is answered; it ends
+    ``SUCCESS`` with what the workflow's notification says."""
+
+    @tool(side_effects="read")
+    def whoami() -> str:
+        """The run this call is made in."""
+        runtime = current()
+        assert runtime is not None
+        return runtime.run_id
+
+    class Guard(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            return Deny("no searching here") if call.tool == "Grep" else None
+
+    scripts = [[WORKFLOW, {"text": "started it"}], [{"stall": 0.8}, {"text": "done"}]]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="flow", hooks=[Guard()]), [whoami])
+    first = await agent.run("fan out over the repo", user="u1", thread="t1")
+    assert first.answer == "started it", first.error
+    child = await child_of(harness, first.run_id)
+    assert child.status is RunStatus.RUNNING and child.input == SCRIPT
+    assert child.metadata[HELPER] == {
+        "framework": "claude_agent_sdk",
+        "kind": "workflow",
+        "name": "workflow",
+    }
+    seen, following = await followed(agent, child.run_id)
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert await calls(tmp_path, grep, "w1") == {
+        "result": "Grep was not run: no searching here",
+        "ok": False,
+    }
+    mine = await calls(tmp_path, {"by": "a2", "tool": "whoami"}, "w1")
+    assert mine == {"result": child.run_id, "ok": True}
+
+    async def during_the_turn() -> None:
+        await until(lambda: len(served(tmp_path)) == 2)
+        (tmp_path / "tasks" / "w1.call").write_text(json.dumps({"by": "a3", **READS}))
+
+    calling = asyncio.create_task(during_the_turn())
+    events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
+    await calling
+    assert events[-1].data["result"] == "done" and results(events) == []
+    assert results(seen) == ["Read", "whoami", "Read"]
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    ended = await when(harness, child.run_id, RunStatus.SUCCESS)
+    assert ended.output == FLOWED
+    following.cancel()
+
+
+async def test_a_workflow_of_a_run_with_no_conversation_keeps_its_child_run(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """In a process of the run's own, the workflow's child run is open until its task ends:
+    its agents' calls are recorded under it, and it ends ``SUCCESS``; the run answers."""
+    agent = memory_harness.wrap(options(tmp_path, [[WORKFLOW, {"text": "started it"}]]), id="alone")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("fan out", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    await until(lambda: "Workflow" in results(seen))
+    run_id = seen[0].run_id
+    child = await child_of(memory_harness, run_id, None)
+    assert child.status is RunStatus.RUNNING
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert (await calls(tmp_path, grep, "w1"))["ok"]
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    await running
+    await following
+    assert events[-1].data["result"] == "started it"
+    child = await child_of(memory_harness, run_id, None)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, FLOWED)
+    await memory_harness.writes.drain()
+    made = [(c.body["tool"], c.scope["agent_run_id"]) for c in memory_service.named("record_tool")]
+    assert made == [("Workflow", run_id), ("Read", child.run_id), ("Grep", child.run_id)]
+
+
+def runs_of(agent: Agent) -> dict[str, str]:
+    """The background runs of the conversation's session, by what they are: each workflow's by
+    its task's id, the shared one as ``workflows``."""
+    live = live_of(agent)
+    assert live is not None
+    return {found.task_id.partition(":")[0]: found.run_id for found in live.background.values()}
+
+
+async def test_two_workflows_at_once_share_a_run_for_the_calls_no_one_of_them_can_claim(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Two workflows launched in one turn both run, each its own child run. While both work,
+    an agent first seen then cannot be told apart (its hooks name only its kind): its calls
+    are those of a run the two share (``workflows``, a child run of the turn that made them
+    concurrent, held as a background run is), which decides them — in a turn or between two
+    — and records them, marked with the agent. One cancelled leaves the other; once one is
+    left the shared run ends ``SUCCESS`` saying what it owned, and that workflow's agents'
+    calls are its run's again, an agent first seen together included."""
+
+    @tool(side_effects="read")
+    def whoami() -> str:
+        """The run this call is made in."""
+        runtime = current()
+        assert runtime is not None
+        return runtime.run_id
+
+    refused: list[str] = []
+
+    class Guard(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            if call.tool != "Grep":
+                return None
+            refused.append(call.tool)
+            return Deny("no searching here")
+
+    scripts = [[WORKFLOW, ANOTHER, {"text": "started both"}], [{"stall": 1.5}, {"text": "done"}]]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="flows", hooks=[Guard()]), [whoami])
+    first = await agent.run("fan out twice", user="u1", thread="t1")
+    assert first.answer == "started both", first.error
+    await until(lambda: set(runs_of(agent)) == {"w1", "w2", SHARED})
+    found = runs_of(agent)
+    for run_id in found.values():
+        record = await harness.runs.get(run_id, tenant="default")
+        assert record is not None and record.status is RunStatus.RUNNING
+        assert record.parent_run_id == first.run_id
+    shared = await harness.runs.get(found[SHARED], tenant="default")
+    assert shared is not None and shared.metadata[HELPER]["name"] == SHARED
+    seen, following = await followed(agent, found[SHARED])
+    # between turns: the shared run decides and records
+    mine = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
+    assert mine == {"result": found[SHARED], "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert await calls(tmp_path, grep, "w2") == {
+        "result": "Grep was not run: no searching here",
+        "ok": False,
+    }
+    assert refused == ["Grep"]  # refused once
+
+    async def during_the_turn() -> dict[str, Any]:
+        await until(lambda: len(served(tmp_path)) == 2)
+        return await calls(tmp_path, {"by": "a1", **READS}, "w1")
+
+    calling = asyncio.create_task(during_the_turn())
+    events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
+    assert await calling == {"result": "Read ran", "ok": True}
+    assert events[-1].data["result"] == "done" and results(events) == []  # not the turn's
+    await until(lambda: results(seen) == ["whoami", "Read"])
+    made = [e.data.get("made_by") for e in seen if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert made == [None, {"agent_id": "a1", "agent_type": "workflow-subagent"}]
+
+    await agent.cancel(found["w2"], reason="not that one")
+    await when(harness, found["w2"], RunStatus.CANCELLED)
+    await until((tmp_path / "tasks" / "w2.stopped").exists)
+    ended = await when(harness, found[SHARED], RunStatus.SUCCESS)
+    assert ended.output == SHARED_SAID.format(count=3, tools="Grep, Read, whoami")
+    still = await harness.runs.get(found["w1"], tenant="default")
+    assert still is not None and still.status is RunStatus.RUNNING
+    # one left: its run's, the agent first seen together too
+    mine = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
+    assert mine == {"result": found["w1"], "ok": True}
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    assert (await when(harness, found["w1"], RunStatus.SUCCESS)).output == FLOWED
+    following.cancel()
+
+
+@pytest.mark.parametrize("when_", ["between", "during"])
+@pytest.mark.parametrize("decision", ["approve", "reject", "edit"])
+async def test_a_shared_runs_call_asks_a_person_once_and_runs_as_they_decided(
+    tmp_path: Path, decision: str, when_: str
+) -> None:
+    """A call of the shared run the catalog asks a person about waits in Claude Code (as a
+    background subagent's does), its question reaching the chat once, in the conversation's
+    next turn: approved it runs once, edited it runs once as edited, rejected it never runs
+    — and nothing is asked again."""
+    edited = {"file_path": "notes.txt", "content": "y"}
+    scripts = [
+        [WORKFLOW, ANOTHER, {"text": "started both"}],
+        [{"stall": 1}, {"text": "ok"}],
+        [{"text": "ok"}],
+        [{"text": "ok"}],
+    ]
+    catalog = FakeCatalog({"Write": Rule(risk="write", approve_when="true")})
+    async with with_governance(Harness(config=Settings()), Governance(catalog)) as h:
+        agent = h.wrap(options(tmp_path, scripts, allowed_tools=["Write"]), id="shared-asks")
+        await agent.run("fan out twice", user="u1", thread="t1")
+        await until(lambda: SHARED in runs_of(agent))
+        shared = runs_of(agent)[SHARED]
+        writes = json.dumps({"by": "a1", **WRITES})
+        if when_ == "during":
+            turn = asyncio.create_task(agent.run("how is it going?", user="u1", thread="t1"))
+            await until(lambda: len(served(tmp_path)) == 2)
+            (tmp_path / "tasks" / "w1.call").write_text(writes)
+            await when(h, shared, RunStatus.PAUSED)
+            assert (await turn).answer == "ok"  # the turn under way is not the call's
+        else:
+            (tmp_path / "tasks" / "w1.call").write_text(writes)
+            await when(h, shared, RunStatus.PAUSED)
+        assert built_ins(tmp_path) == []
+        asking = await agent.run("and now?", user="u1", thread="t1")
+        assert asking.status is RunStatus.PAUSED and asking.interrupt is not None
+        named = (asking.interrupt.payload or {})[SUBAGENT]
+        assert named["run_id"] == shared and asking.interrupt.tool_call is not None
+        assert asking.interrupt.tool_call.tool == "Write"
+        answer = edited if decision == "edit" else None
+        done = await agent.resume(
+            asking.interrupt.interrupt_id, decision, reviewer="u1", answer=answer
+        )
+        assert done.status is RunStatus.SUCCESS and done.answer == "ok", done.error
+        await until((tmp_path / "tasks" / "w1.called").exists)
+        called = json.loads((tmp_path / "tasks" / "w1.called").read_text())
+        ran = {"approve": WRITES["args"], "edit": edited, "reject": None}[decision]
+        if ran is None:
+            assert not called["ok"] and built_ins(tmp_path) == []  # never ran
+        else:
+            assert called == {"result": "Write ran", "ok": True}
+            assert built_ins(tmp_path) == [{"tool": "Write", "args": ran}]  # once
+        after = await agent.run("anything else?", user="u1", thread="t1")
+        assert after.status is RunStatus.SUCCESS  # nothing asked again
+        record = await h.runs.get(shared, tenant="default")
+        assert record is not None and record.status is RunStatus.RUNNING
+
+
+@pytest.mark.parametrize("how", ["cancel", "lost"])
+async def test_the_shared_run_ends_with_the_turn_that_made_it_or_its_session(
+    harness: Harness, tmp_path: Path, how: str
+) -> None:
+    """The shared run is a child of the turn that made the workflows concurrent: cancelling
+    that turn cancels it (with the workflows'), and a killed session ends it ``ERROR``."""
+    stall = {"stall": 30 if how == "cancel" else 0}
+    scripts = [[WORKFLOW, ANOTHER, stall, {"text": "started both"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id=f"shared-{how}")
+    if how == "cancel":
+        slow = asyncio.create_task(agent.run("fan out twice", user="u1", thread="t1"))
+        await until(lambda: SHARED in runs_of(agent) if live_of(agent) else False)
+        shared = runs_of(agent)[SHARED]
+        await agent.cancel(turn_running(agent))
+        assert (await slow).status is RunStatus.CANCELLED
+        await when(harness, shared, RunStatus.CANCELLED)
+        return
+    await agent.run("fan out twice", user="u1", thread="t1")
+    await until(lambda: SHARED in runs_of(agent))
+    shared = runs_of(agent)[SHARED]
+    [one] = served(tmp_path)
+    os.kill(one["pid"], signal.SIGKILL)
+    died = await when(harness, shared, RunStatus.ERROR)
+    assert died.error is not None and "session was closed" in died.error.message
+
+
+async def test_two_workflows_of_a_run_with_no_conversation_record_their_agents_calls_marked(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """In a process of the run's own, two workflows at work: an agent's call is the run's own,
+    recorded with the agent that made it; once one workflow has ended, the other's agents'
+    calls are its run's. Both runs end ``SUCCESS`` with their own task."""
+    scripts = [[WORKFLOW, ANOTHER, {"text": "started both"}]]
+    agent = memory_harness.wrap(options(tmp_path, scripts), id="alone2")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("fan out twice", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    await until(lambda: results(seen).count("Workflow") == 2)
+    run_id = seen[0].run_id
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    (tmp_path / "tasks" / "w2.done").write_text(FLOWED)
+
+    async def statuses() -> dict[str, RunStatus]:
+        kids = [r async for r in memory_harness.runs.iterate(parent_run_id=run_id)]
+        return {k.run_id: k.status for k in kids}
+
+    async with asyncio.timeout(5):
+        while RunStatus.SUCCESS not in (await statuses()).values():  # noqa: ASYNC110
+            await asyncio.sleep(0.02)
+    [left] = [k for k, status in (await statuses()).items() if status is RunStatus.RUNNING]
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert (await calls(tmp_path, grep, "w1"))["ok"]
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    await running
+    await following
+    assert set((await statuses()).values()) == {RunStatus.SUCCESS}
+    await memory_harness.writes.drain()
+    made = {c.body["tool"]: c for c in memory_service.named("record_tool")}
+    assert made["Read"].scope["agent_run_id"] == run_id  # two at work: the run's own
+    [read] = [e.data for e in events if e.data.get("tool") == "Read" and "output" in e.data]
+    assert read["made_by"] == {"agent_id": "a1", "agent_type": "workflow-subagent"}
+    assert made["Grep"].scope["agent_run_id"] == left  # one left: its run's
+
+
+@pytest.mark.parametrize("how", ["cancel", "lost", "quit"])
+async def test_a_workflow_that_does_not_finish_ends_its_run_as_it_was_ended(
+    harness: Harness, tmp_path: Path, how: str
+) -> None:
+    """The turn that launched it was cancelled (its task is stopped with ``stop_task``: the
+    run ``CANCELLED``), the session's process died (``ERROR``: lost with it), or a run with
+    no conversation ended before the workflow did (``ERROR``: cut off) — never a success."""
+    if how == "quit":
+        agent = harness.wrap(options(tmp_path, [[WORKFLOW, {"text": "ok", "quit": True}]]), id="q")
+        done = await agent.run("fan out", user="u1")
+        child = await child_of(harness, done.run_id)
+        assert child.status is RunStatus.ERROR and child.error is not None
+        assert "cut off" in child.error.message
+        return
+    scripts = [[WORKFLOW, {"stall": 2}, {"text": "never said"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id=f"flow-{how}")
+    if how == "cancel":
+        slow = asyncio.create_task(agent.run("fan out", user="u1", thread="t1"))
+        await until(lambda: len(agent.running) == 2)
+        started = turn_running(agent)
+        child = await child_of(harness, started)
+        await agent.cancel(started)
+        assert (await slow).status is RunStatus.CANCELLED
+        await when(harness, child.run_id, RunStatus.CANCELLED)
+        await until((tmp_path / "tasks" / "w1.stopped").exists)
+        return
+    first = await agent.run("fan out", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    [one] = served(tmp_path)
+    os.kill(one["pid"], signal.SIGKILL)
+    died = await when(harness, child.run_id, RunStatus.ERROR)
+    assert died.error is not None and "session was closed" in died.error.message

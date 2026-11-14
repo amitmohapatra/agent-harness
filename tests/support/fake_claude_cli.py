@@ -65,6 +65,13 @@ the bundled CLI (2.1.283) reports them when driven against a scripted model.
 Background work, as far as the SDK's message types say its shape (``task_started``,
 ``task_notification``, a turn of the session's own whose result has ``origin: {"kind":
 "task-notification"}``):
+``{"workflow": {"id": "w1", "name": "probe", "script": "..."}}`` is a dynamic workflow's
+``Workflow`` call: a ``local_workflow`` task with its ``workflow_name`` and no
+``is_backgrounded``; ``w1.call`` with ``"by": "<agent id>"`` is a call one of its agents
+makes, in a thread of its own beside the main turn — its hooks name the agent by that id and
+``agent_type`` ``workflow-subagent``, and the CLI sends none of the agents' messages — and
+``w1.done`` its end (no last reply of its own),
+as the bundled CLI (2.1.283) does them against a scripted model.
 ``{"background": {"id": "t1", "agent": "researcher", "prompt": "..."}}`` is an ``Agent`` call
 with ``run_in_background`` (``"shell": "<command>"`` instead: a ``Bash`` one) that returns at
 once and leaves task ``t1`` running. Files in ``FAKE_CLAUDE_TASKS`` drive a running task from
@@ -90,28 +97,41 @@ were seen from the bundled CLI driven against a scripted model; no real model wa
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
 import json
 import os
+import queue
 import re
 import select
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
+#: What a dynamic workflow's agents are named in their hooks (``agent_type``), and the task a
+#: workflow is (``task_type``), as the bundled CLI (2.1.283) sends them.
+WORKFLOW_AGENT = "workflow-subagent"
+WORKFLOW_TASK = "local_workflow"
+#: A CLI that predates ``onFailure`` on hook matchers (before 2.1.3xx): it ignores the option,
+#: and its ``initialize`` answer does not say ``hook_on_failure_supported``.
+FAIL_OPEN = bool(os.environ.get("FAKE_CLAUDE_HOOKS_FAIL_OPEN"))
+#: What the CLI answers the SDK's ``initialize`` request.
+INITIALIZED: dict[str, Any] = {
+    "commands": [],
+    **({} if FAIL_OPEN else {"hook_on_failure_supported": True}),
+}
+#: What a call whose hook failed in a matcher set to block is refused with.
+BLOCKED = {"permissionDecision": "deny", "permissionDecisionReason": "PreToolUse hook failed"}
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
-#: How the harness begins the prompt that asks for one last answer at the turn limit
-#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool
-#: — unless ``FAKE_CLAUDE_AT_LIMIT_CALLS`` is a step it makes first (its answer: that call's result).
-LIMIT_PROMPT = "This turn has reached its limit"
 #: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
 #: without asking, and the turn's result carries what it was given (``structured_output``).
 STRUCTURED = "StructuredOutput"
@@ -128,11 +148,21 @@ STEP_TOKENS = (10, 5)
 _SDK = {"orphaned": False}
 
 
+#: One message on stdout at a time (a workflow agent's call is made in a thread of its own).
+_SENDING = threading.Lock()
+#: The answers a workflow agent's thread waits for, by request id: whatever reads stdin (the
+#: main thread, alone) hands them over (:func:`read`).
+_AWAITED: dict[str, queue.Queue[dict[str, Any]]] = {}
+#: Each thread's subagent at work (``agent_id``, ``agent_type``): what its hooks name.
+_LOCAL = threading.local()
+
+
 def send(message: dict[str, Any]) -> None:
     if _SDK["orphaned"]:
         return
-    sys.stdout.write(json.dumps(message) + "\n")
-    sys.stdout.flush()
+    with _SENDING:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
 
 
 def orphaned(cli: Cli) -> None:
@@ -164,7 +194,12 @@ def read(timeout: float | None = None) -> dict[str, Any] | None:
         _unread.extend(chunk)
     line, _, rest = bytes(_unread).partition(b"\n")
     _unread[:] = rest
-    return json.loads(line)
+    message = json.loads(line)
+    answered = (message.get("response") or {}).get("request_id")
+    if message.get("type") == "control_response" and answered in _AWAITED:
+        _AWAITED.pop(answered).put(message["response"])  # a workflow agent's thread's
+        return read(timeout)
+    return message
 
 
 class Interrupted(Exception):
@@ -184,6 +219,18 @@ def replaced(path: str, data: Any) -> None:
     with open(part, "w") as handle:
         json.dump(data, handle)
     os.replace(part, path)
+
+
+def matches(matcher: dict[str, Any], name: str) -> bool:
+    """Whether a hook matcher is for the tool ``name`` (none, or ``*``: every tool)."""
+    pattern = matcher.get("matcher")
+    return pattern in (None, "", "*") or bool(re.fullmatch(pattern, name))
+
+
+def named(tool_id: str) -> str | None:
+    """The call's id as a hook or a permission request carries it — none from a CLI (or a
+    relay) that leaves it out (``FAKE_CLAUDE_NO_CALL_IDS``)."""
+    return None if os.environ.get("FAKE_CLAUDE_NO_CALL_IDS") else tool_id
 
 
 def appended(path: str, data: Any) -> None:
@@ -221,8 +268,8 @@ class Cli:
         self.hooks: dict[str, Any] = {}
         self.initialized: dict[str, Any] = {}
         #: the subagent working now (its ``agent_id`` and ``agent_type``), as the real CLI
-        #: names it in the hooks of the tool calls it makes
-        self.working: dict[str, str] = {}
+        #: names it in the hooks of the tool calls it makes (each thread's own)
+        self.working = {}
         #: the session this process runs (one for all its turns), once its first turn began
         self.session: str | None = None
         #: whether the last tool call ended without running, or failed (not paused): done
@@ -246,17 +293,33 @@ class Cli:
         self.helped = 0
         #: what the process exits with when its input ends: 1 once a turn ended at a limit
         self.status = 0
+        #: the prompt under way was composed by the client (``client_composed``: the SDK's
+        #: ``verbatim_prompts``): its text is delivered as written — no ``@path`` read, no
+        #: slash command
+        self.composed = False
         #: the structured answer the turn under way gave (:data:`STRUCTURED`)
         self.structured: dict[str, Any] | None = None
         #: the steps the session took before this process resumed it: a result's cost is
         #: the session's (the bundled CLI's resumed query reports the cost of the turns
         #: before it too), while ``--max-budget-usd`` caps what this process spends
         self.before = 0
+        #: the steps taken when the conversation was last reset: the running cost counts from
+        #: there
+        self.zeroed = 0
+
+    @property
+    def working(self) -> dict[str, str]:
+        return getattr(_LOCAL, "working", {})
+
+    @working.setter
+    def working(self, who: dict[str, str]) -> None:
+        _LOCAL.working = who
 
     def aside(self, message: dict[str, Any]) -> None:
         """A message that came while another was waited for: a prompt is queued, a control
         request answered (an ``interrupt`` stops the turn under way)."""
         if message.get("type") == "user":
+            self.composed = bool(message.get("client_composed"))
             self.queued.append(message["message"]["content"])
         elif message.get("type") == "control_request":
             if message["request"].get("subtype") == "interrupt":
@@ -323,28 +386,18 @@ class Cli:
                 unanswered = {"result": "no answer from the SDK: the call did not run", "ok": False}
                 (Path(folder) / f"{task_id}.called").write_text(json.dumps(unanswered))
             elif call.exists():
-                item = json.loads(call.read_text())
+                asked = call.read_text()
+                if not asked:  # the test is still writing it (created, not yet written)
+                    continue
+                item = json.loads(asked)
                 call.unlink()
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
-                was, self.working = (
-                    self.working,
-                    {"agent_id": task_id, "agent_type": task["agent"]},
-                )
-                try:
-                    said, ok, _ = self.tool(
-                        self.session,
-                        0,
-                        item,
-                        tool_id=f"{task['tool_id']}_{task['calls']}",
-                        parent=task["tool_id"],
-                    )
-                finally:
-                    self.working = was
-                self.steps += 1
-                self.helped += 1
-                (Path(folder) / f"{task_id}.called").write_text(
-                    json.dumps({"result": said, "ok": ok})
-                )
+                if task["agent"] == WORKFLOW_AGENT:  # its agents work beside the main turn
+                    threading.Thread(
+                        target=self.called, args=(task_id, task, item), daemon=True
+                    ).start()
+                else:
+                    self.called(task_id, task, item)
             if task_id not in self.tasks:  # stopped while its call waited
                 continue
             if (Path(folder) / f"{task_id}.stop").exists():
@@ -362,7 +415,7 @@ class Cli:
                 self.helped += 1
                 status = "completed" if ended is done else "failed"
                 frame = {"type": "system", "task_id": task_id, "session_id": self.session}
-                if task["agent"] != "shell":  # the subagent's last reply
+                if task["agent"] not in ("shell", WORKFLOW_AGENT):  # the subagent's last reply
                     said = [{"type": "text", "text": summary}]
                     send(assistant(self.session, said, parent=task["tool_id"]))
                 send({**frame, "subtype": "task_updated", "patch": {"status": status}})
@@ -379,6 +432,30 @@ class Cli:
                     }
                 )
                 self.owed.append(summary)
+
+    def called(self, task_id: str, task: dict[str, str], item: dict[str, Any]) -> None:
+        """A call task ``task_id`` makes (``item``, a JSON step): a subagent's, as its own in
+        its hooks and permission request, or a workflow agent's (named by ``"by"``: its
+        messages not sent); what it was answered written to ``<id>.called``."""
+        assert self.session is not None
+        flow = task["agent"] == WORKFLOW_AGENT
+        who = str(item.pop("by", "")) if flow else task_id
+        was, self.working = (self.working, {"agent_id": who, "agent_type": task["agent"]})
+        try:
+            said, ok, _ = self.tool(
+                self.session,
+                0,
+                item,
+                tool_id=f"{task['tool_id']}_{task['calls']}",
+                parent=task["tool_id"],
+                quiet=flow,
+            )
+        finally:
+            self.working = was
+        self.steps += 1
+        self.helped += 1
+        folder = Path(os.environ["FAKE_CLAUDE_TASKS"])
+        (folder / f"{task_id}.called").write_text(json.dumps({"result": said, "ok": ok}))
 
     def injected(self, summary: str) -> None:
         """The turn the session runs by itself once a background task ended: the "model"'s
@@ -411,14 +488,22 @@ class Cli:
         finally:
             self.in_turn = self.stopping = False
         send({**self.ended(self.session, last=last, turns=len(script)), "origin": origin})
+        record = os.environ.get("FAKE_CLAUDE_RECORD")
+        if record:  # what the session said in a turn of its own (nobody's answer)
+            appended(f"{record}.own", last)
 
     def background(self, session: str, step: int, item: dict[str, Any]) -> tuple[str, bool, bool]:
         """A call that leaves a task running in the background: an ``Agent`` call (or, with
         ``shell``, a ``Bash`` one) with ``run_in_background``, through the hooks and the
         permission rules as any call; then the task's start, and the call's result at once."""
-        spec = item["background"]
+        spec = item.get("background") or item["workflow"]
         tool_id = f"toolu_bg_{spec['id']}"
-        if "shell" in spec:
+        started: dict[str, Any] = {"is_backgrounded": True}
+        if "workflow" in item:  # a workflow's task says nothing of the background
+            name, kind = "Workflow", WORKFLOW_TASK
+            args = {"script": spec["script"]}
+            started = {"workflow_name": spec["name"], "prompt": spec["script"]}
+        elif "shell" in spec:
             name, kind = "Bash", "local_bash"
             args = {"command": spec["shell"], "run_in_background": True}
         else:
@@ -437,21 +522,24 @@ class Cli:
             waits = content[0]["text"] == WAITING
             return content[0]["text"], False, waits or bool(permission.get("interrupt"))
         ran = permission.get("updatedInput", args)
-        self.tasks[spec["id"]] = {"tool_id": tool_id, "agent": spec.get("agent", "shell")}
+        agent = WORKFLOW_AGENT if kind == WORKFLOW_TASK else spec.get("agent", "shell")
+        self.tasks[spec["id"]] = {"tool_id": tool_id, "agent": agent}
         send(
             {
                 "type": "system",
                 "subtype": "task_started",
                 "task_id": spec["id"],
                 "tool_use_id": tool_id,
-                "description": spec.get("prompt") or spec.get("shell"),
+                "description": spec.get("prompt") or spec.get("shell") or spec.get("name"),
                 "task_type": kind,
-                "is_backgrounded": True,
+                **started,
                 "uuid": str(uuid.uuid4()),
                 "session_id": session,
             }
         )
-        content = [{"type": "text", "text": f"Async task launched: {spec['id']}"}]
+        launched = "Workflow launched in background. Task ID" if kind == WORKFLOW_TASK else None
+        said = f"{launched or 'Async task launched'}: {spec['id']}"
+        content = [{"type": "text", "text": said}]
         self.post_tool_use(session, name, ran, tool_id, content=content, error=None)
         self.result(session, tool_id, content)
         return content[0]["text"], True, False
@@ -505,33 +593,59 @@ class Cli:
         ]
 
     def pre_tool_use(self, session: str, name: str, args: dict[str, Any], tool_id: str) -> dict:
-        """What the ``PreToolUse`` hooks matching ``name`` decide (the first decision)."""
-        for matcher in self.hooks.get("PreToolUse") or []:
-            pattern = matcher.get("matcher")
-            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
-                continue
-            for callback in matcher.get("hookCallbackIds") or []:
-                answer = self.control(
-                    {
-                        "subtype": "hook_callback",
-                        "callback_id": callback,
-                        "input": {
-                            "session_id": session,
-                            "transcript_path": "",
-                            "cwd": os.getcwd(),
-                            "hook_event_name": "PreToolUse",
-                            "tool_name": name,
-                            "tool_input": args,
-                            "tool_use_id": tool_id,
-                            **self.working,
-                        },
-                        "tool_use_id": tool_id,
-                    }
-                )
-                said = answer.get("hookSpecificOutput") or {}
-                if said.get("permissionDecision") or answer.get("continue") is False:
-                    return answer
-        return {}
+        """What the ``PreToolUse`` hooks matching ``name`` decide, asked all at once in the
+        order they were registered, as the bundled CLI (2.1.325) asks them: a refusal wins,
+        then a question, then an allowance, and the arguments are those of the hook that
+        answered last (``updatedInput``). A hook that failed decides nothing, and the CLI goes
+        on — unless its matcher says ``onFailure: "block"``: the call is blocked."""
+        matched = [
+            (matcher, callback)
+            for matcher in self.hooks.get("PreToolUse") or []
+            if matches(matcher, name)
+            for callback in matcher.get("hookCallbackIds") or []
+        ]
+        asked = [
+            self.pre_tool_hook(session, callback, name, args, tool_id) for _, callback in matched
+        ]
+        answers = self.controls(asked)
+        blocks = (
+            matched[n][0].get("onFailure") == "block" for n, answer in answers if answer is None
+        )
+        if any(blocks) and not FAIL_OPEN:
+            return {"hookSpecificOutput": {**BLOCKED, "hookEventName": "PreToolUse"}}
+        said = [(answer, answer.get("hookSpecificOutput") or {}) for _, answer in answers if answer]
+        for answer, decided in said:
+            if decided.get("permissionDecision") == "deny" or answer.get("continue") is False:
+                return answer
+        merged: dict[str, Any] = {}
+        decisions = {decided.get("permissionDecision") for _, decided in said}
+        for decision in ("allow", "ask"):
+            if decision in decisions:
+                merged["permissionDecision"] = decision
+        for _, decided in said:
+            if "updatedInput" in decided:
+                merged["updatedInput"] = decided["updatedInput"]
+        return {"hookSpecificOutput": merged} if merged else {}
+
+    def pre_tool_hook(
+        self, session: str, callback: str, name: str, args: dict[str, Any], tool_id: str
+    ) -> dict[str, Any]:
+        """The request that asks one ``PreToolUse`` hook about a call."""
+        return {
+            "subtype": "hook_callback",
+            "callback_id": callback,
+            "input": {
+                "session_id": session,
+                "transcript_path": "",
+                "cwd": os.getcwd(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": name,
+                "tool_input": args,
+                "tool_use_id": named(tool_id),
+                **self.working,
+            },
+            "tool_use_id": named(tool_id),
+        }
 
     def post_tool_use(
         self,
@@ -542,9 +656,11 @@ class Cli:
         *,
         content: list[dict[str, Any]],
         error: str | None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """A call that ran, to the ``PostToolUse`` hooks matching ``name`` (its result) or —
-        it failed — the ``PostToolUseFailure`` ones (its error), as the real CLI reports it."""
+        it failed — the ``PostToolUseFailure`` ones (its error), asked all at once as the real
+        CLI asks them: the result the "model" reads, the one the hook that answered last gave
+        in its place (``updatedToolOutput``) when one did."""
         event = "PostToolUse" if error is None else "PostToolUseFailure"
         given: dict[str, Any] = {
             "session_id": session,
@@ -553,35 +669,70 @@ class Cli:
             "hook_event_name": event,
             "tool_name": name,
             "tool_input": args,
-            "tool_use_id": tool_id,
+            "tool_use_id": named(tool_id),
             **self.working,
         }
         if error is None:
             given["tool_response"] = content
         else:
             given["error"] = error
-        for matcher in self.hooks.get(event) or []:
-            pattern = matcher.get("matcher")
-            if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
+        asked = [
+            {
+                "subtype": "hook_callback",
+                "callback_id": callback,
+                "input": given,
+                "tool_use_id": named(tool_id),
+            }
+            for matcher in self.hooks.get(event) or []
+            if matches(matcher, name)
+            for callback in matcher.get("hookCallbackIds") or []
+        ]
+        record = os.environ.get("FAKE_CLAUDE_RECORD")
+        for _, answer in self.controls(asked):
+            said = (answer or {}).get("hookSpecificOutput") or {}
+            if said.get("additionalContext") and record:
+                appended(f"{record}.added", said["additionalContext"])
+            if "updatedToolOutput" in said and error is None:
+                content = said["updatedToolOutput"]  # what the model reads instead
+        return content
+
+    def controls(self, requests: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any] | None]]:
+        """Control requests sent to the SDK all at once, as the CLI asks the hooks of one
+        event: which was answered what (``None``: it failed), in the order the answers came."""
+        ids = [f"cli_{self.requests + n + 1}" for n in range(len(requests))]
+        self.requests += len(requests)
+        threaded = threading.current_thread() is not threading.main_thread()
+        handed: queue.Queue[dict[str, Any]] = queue.Queue()
+        for request_id, request in zip(ids, requests, strict=True):
+            if threaded:  # the main thread reads stdin and hands the answer over
+                _AWAITED[request_id] = handed
+            send({"type": "control_request", "request_id": request_id, "request": request})
+        answers: list[tuple[int, dict[str, Any] | None]] = []
+        while len(answers) < len(ids):
+            message = {"type": "control_response", "response": handed.get()} if threaded else read()
+            if message is None:
+                raise RuntimeError("stdin closed while waiting for the SDK")
+            response = message.get("response") or {}
+            if message.get("type") != "control_response" or response.get("request_id") not in ids:
+                self.aside(message)
                 continue
-            for callback in matcher.get("hookCallbackIds") or []:
-                answer = self.control(
-                    {
-                        "subtype": "hook_callback",
-                        "callback_id": callback,
-                        "input": given,
-                        "tool_use_id": tool_id,
-                    }
-                )
-                added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
-                record = os.environ.get("FAKE_CLAUDE_RECORD")
-                if added and record:
-                    appended(f"{record}.added", added)
+            failed = response.get("subtype") == "error"
+            answer = None if failed else response.get("response") or {}
+            answers.append((ids.index(response["request_id"]), answer))
+        return answers
 
     def control(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send a control request to the SDK and wait for its answer."""
         self.requests += 1
         request_id = f"cli_{self.requests}"
+        if threading.current_thread() is not threading.main_thread():
+            # a workflow agent's call: the main thread reads stdin and hands the answer over
+            answer: queue.Queue[dict[str, Any]] = _AWAITED.setdefault(request_id, queue.Queue())
+            send({"type": "control_request", "request_id": request_id, "request": request})
+            response = answer.get()
+            if response.get("subtype") == "error":
+                raise RuntimeError(response.get("error"))
+            return response.get("response") or {}
         send({"type": "control_request", "request_id": request_id, "request": request})
         while (message := read()) is not None:
             if message.get("type") == "control_response":
@@ -605,9 +756,14 @@ class Cli:
         self.ready()
         return [t["name"] for t in self.mcp("tools/list", {})["result"]["tools"]]
 
-    def call_tool(self, name: str, args: dict[str, Any], server: str = SERVER) -> dict[str, Any]:
+    def call_tool(
+        self, name: str, args: dict[str, Any], server: str, tool_id: str
+    ) -> dict[str, Any]:
+        """A tool of an in-process server called, the request naming the call as the bundled
+        CLI (2.1.325) does: its ``tool_use_id`` in the request's ``_meta``."""
         self.ready(server)
-        return self.mcp("tools/call", {"name": name, "arguments": args}, server)
+        params = {"name": name, "arguments": args, "_meta": {"claudecode/toolUseId": tool_id}}
+        return self.mcp("tools/call", params, server)
 
     def ready(self, server: str = SERVER) -> None:
         if server not in self.mcp_ready:
@@ -669,7 +825,7 @@ class Cli:
                 "tool_name": name,
                 "input": args,
                 "permission_suggestions": suggested,
-                "tool_use_id": tool_id,
+                "tool_use_id": named(tool_id),
                 **{k: v for k, v in self.working.items() if k == "agent_id"},
             }
         )
@@ -701,7 +857,7 @@ class Cli:
         self.began = self.steps - self.helped
         resumed = (self.resumes() if first else self.session) or None
         session = self.session = resumed or argument("--session-id") or str(uuid.uuid4())
-        if str(prompt).strip() == COMPACT:  # a slash command: no prompt hook, no model turn
+        if str(prompt).strip() == COMPACT and not self.composed:  # a slash command: no hook
             self.hooked("PreCompact", session, trigger="manual", custom_instructions=None)
             send(self.ended(session, last="", turns=0))
             return
@@ -709,7 +865,7 @@ class Cli:
             self.heard = prompts(session)
             self.before = spent_before(session) if resumed is not None else 0
         earlier = list(self.heard)
-        if not str(prompt).startswith((PAUSED_PROMPT, LIMIT_PROMPT)):
+        if not str(prompt).startswith(PAUSED_PROMPT):
             self.heard.append(str(prompt))
         context = self.prompt_context(session, prompt)
         self.recorded(session, prompt, context, earlier, first=first)
@@ -729,9 +885,6 @@ class Cli:
             mirror(session, 0, prompt=str(prompt))
         state = json.loads(kept.read_text())
         done, turn = state["done"], state.get("turn", 0)
-        if str(prompt).startswith(LIMIT_PROMPT):  # one last answer, no tool
-            self.at_limit(session, turn, context)
-            return
         if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
             done, turn = 0, turn + 1  # the conversation's next turn, in the same session
             kept.write_text(json.dumps({"done": 0, "turn": turn}))
@@ -748,38 +901,31 @@ class Cli:
         finally:
             self.in_turn = self.stopping = False
 
-    def at_limit(self, session: str, turn: int, context: str) -> None:
-        """The one last answer at the turn limit: ``FAKE_CLAUDE_AT_LIMIT``, no tool — or a
-        "model" that calls ``FAKE_CLAUDE_AT_LIMIT_CALLS`` all the same, then says what it
-        was told."""
-        called = os.environ.get("FAKE_CLAUDE_AT_LIMIT_CALLS")
-        if called:
-            self.played(session, [json.loads(called), {"text": "{last}"}], 0, turn, context)
-            return
-        said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
-        self.steps += 1
-        send(assistant(session, [{"type": "text", "text": said}]))
-        send(self.ended(session, last=said, turns=1))
-
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""
         own = self.steps - self.helped - self.began
         self.kept()
         if "--session-mirror" in sys.argv:  # the transcript holds what the session cost
-            entry = {"type": "progress", "uuid": f"{session}-spent-{self.before + self.steps}"}
+            entry = {"type": "progress", "uuid": f"{session}-spent-{self.total()}"}
             path = projects() / "fake-project" / f"{session}.jsonl"
-            mirrored_ = {**entry, "spent": self.before + self.steps}
+            mirrored_ = {**entry, "spent": self.total()}
             send({"type": "transcript_mirror", "filePath": str(path), "entries": [mirrored_]})
         structured, self.structured = self.structured, None
         if structured is not None and error is None:
             fields = {**fields, "last": json.dumps(structured), "structured": structured}
-        return result(session, error, steps=own, total=self.before + self.steps, **fields)
+        return result(session, error, steps=own, total=self.total(), **fields)
+
+    def total(self) -> int:
+        """The steps the session's running cost counts: all it took, before this process
+        and in it, since the conversation was last reset (``{"reset": true}``: the real CLI
+        zeroes its totals when the conversation is replaced)."""
+        return self.before + self.steps - self.zeroed
 
     def kept(self) -> None:
         """What the session cost so far, kept with it (also as the process ends: a query
         that paused has no result)."""
         if self.session is not None:
-            spent_file(self.session).write_text(str(self.before + self.steps))
+            spent_file(self.session).write_text(str(self.total()))
 
     def recorded(
         self, session: str, prompt: Any, context: str, earlier: list[str], *, first: bool
@@ -813,9 +959,19 @@ class Cli:
                 "cwd": os.getcwd(),
                 "team_env": {k: v for k, v in os.environ.items() if k.startswith("TEAM_")},
                 "initialize": self.initialized,
+                "hooks": {
+                    event: [matcher.get("onFailure") for matcher in matchers]
+                    for event, matchers in self.hooks.items()
+                },
+                "composed": self.composed,
+                "attached": {} if self.composed else attached(str(prompt)),
+                "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+                "auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+                "memory": remembered(),
             }
             replaced(record, said)
             appended(f"{record}.turns", said)
+        remember(str(prompt))
 
     def played(
         self, session: str, script: list[dict[str, Any]], done: int, turn: int, context: str
@@ -869,7 +1025,16 @@ class Cli:
         if "stall" in item:  # the model says nothing for a while, then goes on
             self.wait(float(item["stall"]))
             return None, read, True, False, 0
-        if "background" in item:
+        if "reset" in item or "frame" in item:
+            # a frame the CLI sends beside the model's replies: the one given, or the
+            # conversation's reset (its running totals start again from here)
+            frame = item.get("frame")
+            if frame is None:
+                self.zeroed = self.before + self.steps
+                frame = {"type": "conversation_reset", "new_conversation_id": str(uuid.uuid4())}
+            send({**frame, "session_id": session, "uuid": str(uuid.uuid4())})
+            return None, read, True, False, 0
+        if "background" in item or "workflow" in item:
             read, completed, interrupted = self.background(session, step, item)
             return None, read, completed, interrupted, 0
         if "text" in item:
@@ -1045,17 +1210,20 @@ class Cli:
         *,
         tool_id: str | None = None,
         parent: str | None = None,
+        quiet: bool = False,
     ) -> tuple[str, bool, bool]:
         """One tool call (``parent``: of a subagent, its ``Agent`` call): the text of its
         result, whether it is done (it ran, without an error), and whether the permission
-        check stopped the turn."""
+        check stopped the turn. ``quiet``: a workflow's agent's, whose messages the CLI does
+        not send (its hooks and permission requests only)."""
         tool_id = tool_id or str(item.get("id") or f"toolu_{step}")
         builtin = item.get("builtin")
         server = item.get("server", SERVER)
         name = builtin or f"mcp__{server}__{item['tool']}"
         args = item.get("args", {})
         call = [{"type": "tool_use", "id": tool_id, "name": name, "input": args}]
-        send(assistant(session, call, parent=parent))
+        if not quiet:
+            send(assistant(session, call, parent=parent))
         permission = self.allowed(session, name, args, tool_id)
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
@@ -1068,21 +1236,24 @@ class Cli:
             error = failure is not None
             text = f"{builtin} failed: {failure}" if error else f"{builtin} ran"
             content = [{"type": "text", "text": text}]
-            self.post_tool_use(session, name, ran, tool_id, content=content, error=failure)
+            content = self.post_tool_use(
+                session, name, ran, tool_id, content=content, error=failure
+            )
         elif allowed:
-            called = self.call_tool(item["tool"], ran, server)
+            called = self.call_tool(item["tool"], ran, server, tool_id)
             answered = called.get("result") or {}
             error = bool(answered.get("isError")) or "error" in called
             content = answered.get("content") or [
                 {"type": "text", "text": json.dumps(called.get("error"))}
             ]
             failed = "".join(c.get("text", "") for c in content) if error else None
-            self.post_tool_use(session, name, ran, tool_id, content=content, error=failed)
+            content = self.post_tool_use(session, name, ran, tool_id, content=content, error=failed)
         else:
             content = [{"type": "text", "text": permission.get("message", "denied")}]
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
-        self.result(session, tool_id, content, parent)
+        if not quiet:
+            self.result(session, tool_id, content, parent)
         stops = waits or bool(permission.get("interrupt"))
         # a call that did not run, or failed, is done all the same: the "model" read why, as
         # the real CLI's transcript keeps it, and a resumed session goes on after it
@@ -1136,6 +1307,42 @@ def mirror(
         entry["prompt"] = prompt
     path = projects() / "fake-project" / f"{session}.jsonl"
     send({"type": "transcript_mirror", "filePath": str(path), "entries": [entry]})
+
+
+def attached(prompt: str) -> dict[str, str]:
+    """The files an ``@/path`` in ``prompt`` names, read into the turn as the real CLI expands a
+    mention (a prompt not composed by the client)."""
+    found = {}
+    for path in re.findall(r"@(/\S+)", prompt):
+        with contextlib.suppress(OSError):
+            found[path] = Path(path).read_text()
+    return found
+
+
+def memory_file() -> Path:
+    """Where Claude Code's auto memory is kept: under its config folder (``CLAUDE_CONFIG_DIR``,
+    else ``~/.claude``)."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    return Path(base) / "projects" / "fake-project" / "memory" / "MEMORY.md"
+
+
+def remembered() -> str | None:
+    """What auto memory holds (``None``: nothing, or auto memory is off)."""
+    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"):
+        return None
+    with contextlib.suppress(OSError):
+        return memory_file().read_text()
+    return None
+
+
+def remember(prompt: str) -> None:
+    """Auto memory saves what the turn learned (each prompt here), unless it is off."""
+    if os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"):
+        return
+    kept = memory_file()
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    with kept.open("a") as file:
+        file.write(prompt + "\n")
 
 
 def materialised(session: str) -> list[dict[str, Any]] | None:
@@ -1265,7 +1472,7 @@ def acknowledge(message: dict[str, Any]) -> None:
             "response": {
                 "subtype": "success",
                 "request_id": message["request_id"],
-                "response": {"commands": []} if initialize else {},
+                "response": INITIALIZED if initialize else {},
             },
         }
     )
@@ -1328,6 +1535,7 @@ def main() -> None:
             cli.asked_to_stop(message)
             acknowledge(message)
         elif kind == "user":
+            cli.composed = bool(message.get("client_composed"))
             cli.turn(message["message"]["content"])
 
 

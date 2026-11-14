@@ -29,7 +29,12 @@
 * spending: each query's usage and cost (its ``ResultMessage``) count toward the run's budget;
 * helpers: each subagent Claude runs (``agents=``, its ``Agent`` tool) is a child run of the run
   (``bridges.helpers``), from its call to that call's result; its own tool calls go through the
-  same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``;
+  same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``. A dynamic
+  workflow (its ``Workflow`` tool) is one such child run, in the background: its agents'
+  calls are its run's by their kind (``claude_live.WORKFLOW_AGENT``) while it is the one at
+  work; while several are, a conversation's session gives them a run the workflows share
+  (``claude_live.SHARED``), and a run with no conversation takes them as its own — marked
+  with the agent either way;
 * conversations: a conversation's turn leaves its CLI process running, and the next turn is
   sent into it (``bridges.claude_live``: the SDK's ``ClaudeSDKClient``), so what Claude started
   in the background — a subagent with ``background``, a shell command — goes on between the
@@ -56,7 +61,8 @@
   virtual key (:func:`routed_env`; the options' own ``ANTHROPIC_BASE_URL`` wins), carrying
   the deny-all MCP scope, the run's dimensions and its ``traceparent`` as
   ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them as it starts, once
-  per attempt;
+  per attempt; a conversation's live session, which serves many runs, carries the dimensions
+  that hold for all of them (``telemetry.lasting_headers``: no run, no ``traceparent``);
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
   hooks go after theirs), ``can_use_tool`` (asked when Claude Code would ask, after the hooks
@@ -87,6 +93,7 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    stable_id,
 )
 from trellis.harness import budget, skills
 from trellis.harness.adapters.base import (
@@ -103,18 +110,33 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import (
     JournalSessions,
+    SessionCost,
+    TaskEnded,
+    TaskStarted,
+    after_theirs,
+    deciding_matcher,
     harness_matcher,
     session_store,
+    task_said,
     with_context,
 )
-from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn, gone
+from trellis.harness.bridges.claude_live import (
+    WORKFLOW_AGENT,
+    WORKFLOW_TOOL,
+    Background,
+    LiveSession,
+    LiveSessions,
+    Turn,
+    gone,
+)
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Pending, approvals_read, call_key
-from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
+from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
+from trellis.harness.telemetry import gateway_headers, lasting_headers
 from trellis.harness.tools import bridge
 from trellis.harness.tools.ask import ask_question
 from trellis.harness.tools.base import UNDECLARED, SideEffects
@@ -125,61 +147,103 @@ log = logging.getLogger("trellis.harness")
 if TYPE_CHECKING:
     from claude_agent_sdk.types import PreToolUseHookSpecificOutput, SyncHookJSONOutput
 
-#: Claude Code's built-in tools, and what each does as governance sees it (the tool catalog's
-#: word overrides it): reads run; writes, ``Bash`` among them, run and are announced, Claude
-#: Code's own permission check asking first where it would (a team that wants every shell
-#: command approved gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the
-#: tool catalog); a subagent's
-#: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
-#: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
-#: may do anything its command does: a write. Stopping a background task (``TaskStop``, named
-#: ``KillShell`` before) is a write. Tools that only list or look up (``ListAgents``,
-#: ``ListConnectors``, ``ReadNotifications``, ``ReportFindings``, ``SearchMcpRegistry``,
-#: ``SuggestConnectors``: each read-only by the bundled CLI's own word) are reads. So are the
-#: tools Claude keeps its own work with, which change nothing outside its session and which
-#: the bundled CLI runs without asking its user: its task list (``TaskCreate``, ``TaskGet``,
-#: ``TaskList``, ``TaskUpdate``: ``TodoWrite``'s successors), entering plan mode
-#: (``EnterPlanMode``), and the tool it hands a structured answer to (``StructuredOutput``,
-#: with ``output_format``: asked about, a run would pause on its own answer). Any other
-#: tool the CLI asks about has said nothing of what it does: a person approves each call (its
-#: risk in the catalog says more).
+#: Claude Code's built-in tools — every one the bundled CLI (2.1.325) has, those its ``init``
+#: message lists and those it offers where it is set up for them — and what each does as
+#: governance sees it (the tool catalog's word overrides it). Reads run: looking things up,
+#: listing, loading a deferred tool (``ToolSearch``), waiting for MCP servers to connect
+#: (``WaitForMcpServers``), code intelligence (``LSP``), a card shown to the user (a
+#: suggestion, ``OfferChromeSetup``, ``propose_skills``: nothing is written), the tools Claude
+#: keeps its own work with (its task list, plan mode, a structured answer, a subagent's
+#: hand-back), and a
+#: subagent's or a workflow's call (``Agent``, ``Task``, ``Workflow``), which only hands work
+#: on — its agents' calls are governed one by one. Writes run and are announced, Claude Code's
+#: own permission check asking first where it would: a file changed, a shell (``Bash``,
+#: ``PowerShell``, ``REPL``, ``Monitor``'s command), a worktree entered or left, a task
+#: stopped, a page published, a notification, a file or feedback sent, the session ended, a
+#: claude.ai design or project changed (``ClaudeDesign``, ``Projects``), a goal that keeps
+#: the session working (``ProposeGoal``).
+#: A team that wants every shell command approved gives ``Bash`` the risk ``irreversible``,
+#: or an ``approve_when``, in the tool catalog. What Claude Code asks its user about although
+#: it only reads — leaving plan mode with a plan, the network, a skill (:data:`CLAUDE_ASKS`)
+#: — a person answers. Any other tool says nothing of what it does: a person approves each
+#: call (its risk in the catalog says more).
 BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
-    "Read": "read",
-    "Glob": "read",
-    "Grep": "read",
-    "LS": "read",
-    "WebFetch": "read",
-    "WebSearch": "read",
-    "TodoWrite": "read",
-    "Agent": "read",
-    "Task": "read",
-    "Skill": "read",
-    "ExitPlanMode": "read",
-    "EnterPlanMode": "read",
-    "TaskCreate": "read",
-    "TaskGet": "read",
-    "TaskList": "read",
-    "TaskUpdate": "read",
-    "StructuredOutput": "read",
-    "AskUserQuestion": "read",
-    "BashOutput": "read",
-    "ListMcpResourcesTool": "read",
-    "ReadMcpResourceTool": "read",
-    "ListAgents": "read",
-    "ListConnectors": "read",
-    "ReadNotifications": "read",
-    "ReportFindings": "read",
-    "SearchMcpRegistry": "read",
-    "SuggestConnectors": "read",
-    "Write": "write",
-    "Edit": "write",
-    "MultiEdit": "write",
-    "NotebookEdit": "write",
-    "KillShell": "write",
-    "TaskStop": "write",
-    "SlashCommand": "write",
-    "Bash": "write",
+    **dict.fromkeys(
+        (
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+            "TodoWrite",
+            "Agent",
+            "Task",
+            "Workflow",
+            "Skill",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "StructuredOutput",
+            "AskUserQuestion",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+            "ListConnectors",
+            "ReadNotifications",
+            "ReportFindings",
+            "SearchMcpRegistry",
+            "SuggestConnectors",
+            "ListPlugins",
+            "ListSkills",
+            "SearchPlugins",
+            "SearchSkills",
+            "SuggestPluginInstall",
+            "SuggestSkills",
+            "ShowOnboardingRolePicker",
+            "OfferChromeSetup",
+            "propose_skills",
+            "LSP",
+            "ToolSearch",
+            "WaitForMcpServers",
+            "SubagentHandback",
+            "SendUserMessage",
+        ),
+        "read",
+    ),
+    **dict.fromkeys(
+        (
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "TaskStop",
+            "Bash",
+            "PowerShell",
+            "REPL",
+            "Monitor",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Artifact",
+            "PushNotification",
+            "SendFeedback",
+            "SendUserFile",
+            "ShareOnboardingGuide",
+            "EndConversation",
+            "ClaudeDesign",
+            "Projects",
+            "ProposeGoal",
+        ),
+        "write",
+    ),
 }
+#: The tools Claude Code asks its user about although they only read: leaving plan mode with a
+#: plan (``ExitPlanMode``), the network (``WebFetch``, ``WebSearch``), a skill (``Skill``). A
+#: person answers when it asks, as for a write — unless the tool catalog has a rule for the
+#: tool that lets it run.
+CLAUDE_ASKS: Final = frozenset({"ExitPlanMode", "WebFetch", "WebSearch", "Skill"})
 #: Claude Code's question to its user, asked as the run's (:func:`_answered`), and the mark it
 #: ends a recommended option's label with.
 QUESTION_TOOL: Final = "AskUserQuestion"
@@ -193,18 +257,27 @@ CLAUDE_CODE: Final = "Claude Code"
 #: is idle, and the turn a schedule fires then has no run: its tool calls are refused and its
 #: answer reaches nobody. So they stay disallowed (with the tools that list and delete the
 #: schedules): offered, Claude promised a schedule that nothing keeps.
-OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+OUTLIVES_THE_QUERY: Final = (
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "RemoteTrigger",  # a claude.ai scheduled task: it fires with no run either
+)
 #: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
-#: too. A dynamic workflow (``Workflow``, alias ``RunWorkflow``) is one background task whose
-#: agents have none of their own: the stream names each only in that task's progress, and an
-#: agent's first tool call can come before any frame names it (the bundled CLI, 2.1.283,
-#: driven against a scripted model), so its calls cannot be told apart from the main agent's.
-#: ``SendMessage`` resumes a finished background subagent as a new task, whose messages carry
-#: the call that first started it, or reaches another Claude session on the machine or in the
-#: cloud. The agent-teams tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS``
-#: (``TeamCreate``, ``TeamDelete``; 2.1.283 has none, its named agents are background
-#: subagents) are left out with them, whatever the team's own environment says.
-UNHELD_AGENTS: Final = ("Workflow", "SendMessage", "TeamCreate", "TeamDelete")
+#: too. ``SendMessage`` resumes a finished background subagent as a new task, whose messages
+#: carry the call that first started it (the bundled CLI, 2.1.283, driven against a scripted
+#: model), or reaches another Claude session on the machine or in the cloud. The agent-teams
+#: tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` (``TeamCreate``,
+#: ``TeamDelete``; 2.1.283 has none, its named agents are background subagents) are left out
+#: with it, whatever the team's own environment says, and ``ListAgents`` — the agents
+#: ``SendMessage`` reaches: the other Claude sessions of the worker's user, other tenants' runs
+#: among them.
+UNHELD_AGENTS: Final = ("SendMessage", "ListAgents", "TeamCreate", "TeamDelete")
+#: The name of a dynamic workflow's child run (its script names it, which the call does not).
+WORKFLOW: Final = "workflow"
+#: What the record of a workflow agent's call keeps of who made it (its hook's input).
+AGENT_KEYS: Final = ("agent_id", "agent_type")
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -247,6 +320,26 @@ SUBAGENT_FAILED: Final = "the subagent's call failed"
 TASK_COMPLETED: Final = "completed"
 TASK_FAILED: Final = "failed"
 TASK_STOPPED: Final = "stopped"
+#: Claude Code's config folder (its settings, sessions, auto memory: ``~/.claude`` unless this
+#: says otherwise) and the switch that turns its auto memory off. Each tenant and user of a
+#: worker has a folder of their own (:func:`config_folder`), so no run reads another's state or
+#: the worker's own, and auto memory — which the memory service does not see — is off.
+CONFIG_ENV: Final = "CLAUDE_CONFIG_DIR"
+AUTO_MEMORY_ENV: Final = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+#: Claude Code's setting for what a session does with a message another Claude session of the
+#: same OS user sends it, and the value that refuses them: every run on a worker is that one
+#: user's, other tenants' among them.
+INBOUND: Final = {"crossSessionInbound": "refuse"}
+#: What Claude Code says on its stream beside the model's replies that explains a slow, a
+#: shortened or a rerouted turn — the system frame's ``subtype`` — and the code of the run's
+#: warning that says it: a model call tried again, the session's context compacted, another
+#: model answering, a step the session store did not take.
+NOTICES: Final = {
+    "api_retry": "model_retry",
+    "compact_boundary": "compaction",
+    "model_fallback": "model_fallback",
+    "mirror_error": "session_store",
+}
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -257,11 +350,9 @@ OWNED: Final[dict[str, str]] = {
 #: Why a conversation's live session is closed before a query that runs in a process of its
 #: own (two processes do not hold one session).
 OWN_PROCESS: Final = "this query runs in a process of its own"
-#: What a tool call in the one last answer at the turn limit is refused with, in a live
-#: session (whose process keeps the tools it started with).
-AT_LIMIT: Final = (
-    "No tool runs now: this turn has reached its limit. Answer with what you found so far."
-)
+#: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
+#: would let a call whose hook failed through to its own permission check.
+UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
 #: What a resumed session is told: the run goes on, and the call it paused on is made again.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
@@ -340,7 +431,7 @@ class ClaudeAdapter:
         self.live = LiveSessions()
         #: what each session cost so far, as its last result charged here carried it (the
         #: most recent): a process that resumes one reports the session's cost, not its own
-        self.costs: LRU[str, float] = LRU()
+        self.costs: LRU[str, SessionCost] = LRU()
 
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
@@ -383,21 +474,30 @@ class ClaudeAdapter:
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        from claude_agent_sdk import ResultMessage
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
         transcript = _transcript(output)
         answer: Any = None
+        said: str | None = None  # what Claude said in the turn so far
         for message in output:
+            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+                said = text or said
             # the result of the turn's own prompt: one of a turn the session injected (a
             # finished background task's notification) is not the user's answer
             if isinstance(message, ResultMessage) and _own(message):
-                if message.is_error:
+                if message.subtype == MAX_TURNS:  # what it said before the limit: PARTIAL
+                    answer = said
+                elif message.is_error:
                     raise ClaudeRunError("; ".join(message.errors or []) or message.subtype)
-                answer = (
-                    message.structured_output
-                    if message.structured_output is not None
-                    else message.result
-                )
+                else:
+                    answer = (
+                        message.structured_output
+                        if message.structured_output is not None
+                        else message.result
+                    )
+            if isinstance(message, ResultMessage):
+                said = None
         return Extracted(answer=answer, transcript=transcript)
 
     def resume_input(
@@ -514,50 +614,36 @@ class ClaudeAdapter:
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
-        """The query's messages (:meth:`_attempted`) — and, when it reached its turn limit
-        (``error_max_turns``: no answer), one last answer instead of that error: its session
-        resumed (Claude's own ``resume``), told the limit is reached for this turn
-        (``budget.TURN_LIMIT``: the session keeps it, and the next turn has its tools again),
-        for one turn with no tool, as a ``ReAct`` run at ``max_steps`` answers. A last query
-        that gives no answer leaves the error."""
+        """The query's messages (:meth:`_attempted`). A query that reached its turn limit
+        ends with Claude Code's own ``error_max_turns`` result, and Claude Code leaves it
+        there: the run ends ``PARTIAL`` with what Claude said before it (``extract``), its
+        limit as the budget it spent (``Runtime.budget_spent``) and a ``step_limit`` warning
+        — no query more (a paid last answer), and a live session and the background work in
+        it go on."""
         from claude_agent_sdk import ResultError, ResultMessage
 
         runtime = run.runtime
-        limited: Any = None
+        limited = False
         try:
             async with aclosing(self._attempted(target, native_input, run)) as messages:
                 async for message in messages:
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
-                        limited = message
-                        continue
-                    if isinstance(message, ResultMessage):
+                        limited = True
+                        limit = runtime.framework_options.get("max_turns") or target.max_turns
+                        stopped = f"the turn limit ({limit}) was reached"
+                        log.warning("run %s stopped: %s", runtime.run_id, stopped)
+                        runtime.events.warning("step_limit", f"stopped: {stopped}")
+                        runtime.budget_spent = stopped
+                    elif isinstance(message, ResultMessage):
                         # past Claude Code's own recovery: what a run with no answer says
                         runtime.cut_off = message.stop_reason == MAX_TOKENS
+                    _noticed(runtime, message)
                     yield message
         except ResultError:
             # the CLI exits with an error after its error result (the SDK raises it then): at
             # the turn limit that is the end the result already said
-            if limited is None:
+            if not limited:
                 raise
-        if limited is None:
-            return
-        # the result names the session it ran in (the journal's): resumed for the last answer
-        session = runtime.replay.journal.session
-        limit = int(runtime.framework_options.get("max_turns") or target.max_turns or 0)
-        told = dataclasses.replace(native_input, prompt=budget.TURN_LIMIT.format(limit=limit))
-        last: list[Any] = []
-        async with aclosing(self._query(target, told, run, session, last=True)) as messages:
-            async for message in messages:
-                last.append(message)
-        answered = [m for m in last if isinstance(m, ResultMessage) and not m.is_error]
-        if not answered or not (answered[-1].result or "").strip():
-            yield limited
-            return
-        stopped = f"stopped: the turn limit ({limit}) was reached"
-        log.warning("run %s %s", runtime.run_id, stopped)
-        runtime.events.warning("step_limit", stopped)
-        for message in last:
-            yield message
 
     async def _attempted(
         self, target: Any, native_input: Any, run: Invocation
@@ -599,12 +685,9 @@ class ClaudeAdapter:
         native_input: Any,
         run: Invocation,
         session: str | None,
-        *,
-        last: bool = False,
     ) -> AsyncGenerator[Any, None]:
         """One query (``session``: the one it resumes); the session it runs in kept in the
-        journal as it goes. ``last``: the one last answer at the turn limit — its prompt as
-        given, one turn, no tool (no built-in, no MCP server), no context added again."""
+        journal as it goes."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
 
         runtime = run.runtime
@@ -614,9 +697,8 @@ class ClaudeAdapter:
         plugins, written = await skills.for_run(target.plugins)
         target = dataclasses.replace(target, plugins=plugins) if written else target
         steps = Steps(runtime, self)
-        # a conversation's turn is served by its live session (``bridges.claude_live``) — its
-        # one last answer too, a turn of that session whose tool calls are refused (the live
-        # process and its background work go on); a run with no conversation of its own, a
+        # a conversation's turn is served by its live session (``bridges.claude_live``); a
+        # run with no conversation of its own, a
         # sub-agent's, and options whose parts are a process's alone (a plugin written for
         # the run; an in-process MCP server of the team's, whose tools run in the context of
         # the process's first turn; a budget of the options' own, which the CLI counts for a
@@ -626,15 +708,12 @@ class ClaudeAdapter:
         # run at work there) is forked: the turn goes on here, in a process of its own
         held = session is not None and await self._held_elsewhere(runtime)
         kept = key is not None and not written and not _own_process(target) and not held
-        context = None if last else _dated(native_input.context, run, kept=kept)
-        steps.last = last
+        context = _dated(native_input.context, run, kept=kept)
         options = _options(target, context, run, session, steps, kept=kept)
         options = dataclasses.replace(options, fork_session=options.fork_session or held)
-        if last and not kept:
-            options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
-        first = last or session is None or runtime.attempt == 1 or native_input.unsent
+        first = session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         spending = Spending(runtime, options, self.costs, None if held else session)
@@ -644,8 +723,7 @@ class ClaudeAdapter:
         try:
             if kept:
                 assert key is not None
-                unsent = first and not last  # the last answer's turn: asked already
-                live = await self._live(key, options, run, session, spending, unsent=unsent)
+                live = await self._live(key, options, run, session, spending, unsent=first)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
                 _said(self.live, runtime)
@@ -730,12 +808,25 @@ class ClaudeAdapter:
                 found = None
         if found is None:
             transcripts = runtime.replay.journal.transcripts
-            found = await self.live.open(key, shape, options, transcripts)
-            if found is not None and session is not None:
+            # the places are the server process's: every agent's sessions count (``KEPT``)
+            adapters = (a.adapter for a in runtime.agent.harness.agents.values())
+            among = {id(a): a.live for a in adapters if isinstance(a, ClaudeAdapter)}
+            among[id(self)] = self.live
+            found = await self.live.open(
+                key,
+                shape,
+                options,
+                transcripts,
+                owner=(runtime.tenant, runtime.user),
+                among=list(among.values()),
+            )
+            if found is not None:
                 # a process that resumes a session reports the session's cost: what its
                 # first turn is charged counts from what the session cost before (the
                 # journal's, on any worker)
-                found.billed = spending.billed
+                found.cost = spending.cost
+        else:  # the session's running cost is the one its process has been charged from
+            spending.cost = found.cost
         _said(self.live, runtime)
         if found is not None and unsent:
             await found.asks(runtime)
@@ -801,7 +892,7 @@ def _shape(options: Any) -> tuple[Any, ...]:
     """What a process started with ``options`` has for good, and a later turn must bring the
     same to be served by it: the options less what each turn brings of its own (its hooks'
     and its permission check's code, its harness tools' code, its journal, the session it
-    resumes, its run's gateway headers), the hooks' places, and the tools its ``trellis``
+    resumes), the hooks' places, and the tools its ``trellis``
     server lists with their schemas (not their wording of the moment: ``convert.listing``)."""
     from trellis.harness.tools.convert import claude as convert
 
@@ -817,7 +908,6 @@ def _shape(options: Any) -> tuple[Any, ...]:
         mcp_servers={n: c for n, c in servers.items() if n != convert.SERVER}
         if isinstance(servers, dict)
         else servers,
-        env={k: v for k, v in options.env.items() if k != CUSTOM_HEADERS},
     )
     hooks = tuple(
         (event, tuple((m.matcher, len(m.hooks), m.timeout) for m in matchers))
@@ -849,6 +939,19 @@ async def _briefed(
     kind, called = Kind.SUBAGENT, str(args.get("subagent_type") or GENERAL_PURPOSE)
     helper = await helpers.start(call_id, kind=kind, name=called, task=task)
     return {**args, "prompt": helpers.briefed(helper, task)} if "prompt" in args else args
+
+
+async def _working(helpers: Helpers, given: Mapping[str, Any]) -> Helper | None:
+    """The helper a call is the work of, from its hook's input (``given``): a subagent's, by
+    its task's id (``agent_id``: ``Helpers.of``); a dynamic workflow's, whose agents name their
+    kind (:data:`WORKFLOW_AGENT`) — while it is the one workflow at work (``Helpers.of_kind``);
+    ``None``: the run's own (several workflows at work: the call cannot be told apart)."""
+    who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
+    if who is None:
+        return None
+    if kind == WORKFLOW_AGENT:
+        return helpers.of_kind(Kind.WORKFLOW, str(who))
+    return await helpers.of(str(who), kind)
 
 
 async def _subagents(helpers: Helpers, message: Any) -> None:
@@ -891,27 +994,44 @@ async def _subagents(helpers: Helpers, message: Any) -> None:
 
 
 async def _tasks(helpers: Helpers, message: Any) -> None:
-    """A task's start or end in a system ``message``: whose helper its worker works for,
-    and how a background helper's work ended."""
-    from claude_agent_sdk import (
-        TERMINAL_TASK_STATUSES,
-        TaskNotificationMessage,
-        TaskStartedMessage,
-        TaskUpdatedMessage,
-    )
+    """A task's start or end in a system ``message`` (``task_said``): whose helper its
+    worker works for, and how a background helper's work ended."""
+    found = task_said(message)
+    if isinstance(found, TaskStarted) and found.call_id:
+        helpers.attribute(found.task_id, found.call_id, background=found.background)
+    elif isinstance(found, TaskEnded):
+        failed = found.status != TASK_COMPLETED
+        stopped = found.status not in (TASK_COMPLETED, TASK_FAILED)
+        if found.final:  # its notification: the summary is its last word
+            said = STOPPED if stopped else found.summary
+            await helpers.settled(found.task_id, failed=failed, said=said)
+        else:  # an update says only how it ended, and more may be said
+            said = STOPPED if stopped else ""
+            await helpers.settled(found.task_id, failed=failed, said=said, final=False)
 
-    if isinstance(message, TaskStartedMessage):
-        if message.tool_use_id:
-            background = bool(message.data.get("is_backgrounded"))
-            helpers.attribute(message.task_id, message.tool_use_id, background=background)
-    elif isinstance(message, TaskNotificationMessage):
-        failed = message.status != TASK_COMPLETED
-        said = message.summary if message.status != TASK_STOPPED else STOPPED
-        await helpers.settled(message.task_id, failed=failed, said=said)
-    elif isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES:
-        failed = message.status != TASK_COMPLETED
-        said = "" if message.status in (TASK_COMPLETED, TASK_FAILED) else STOPPED
-        await helpers.settled(message.task_id, failed=failed, said=said, final=False)
+
+def _noticed(runtime: Runtime, message: Any) -> None:
+    """What ``message`` says beside the model's replies, as a warning of the run: Claude's
+    rate limit near or reached (one that is fine says nothing), a frame of
+    :data:`NOTICES` (with what it carries, as Claude Code said it), a reply that failed."""
+    from claude_agent_sdk import AssistantMessage, RateLimitEvent, SystemMessage
+
+    if isinstance(message, RateLimitEvent):
+        info = message.rate_limit_info
+        if info.status != "allowed":
+            said = f"Claude's rate limit ({info.rate_limit_type}): {info.status}"
+            runtime.events.warning("rate_limit", said)
+    elif isinstance(message, SystemMessage) and message.subtype in NOTICES:
+        carried = {
+            key: value
+            for key, value in message.data.items()
+            if key not in ("type", "subtype", "uuid", "session_id")
+            and isinstance(value, str | int | float | bool)
+        }
+        said = f"Claude Code: {message.subtype} {json.dumps(carried, sort_keys=True)}"
+        runtime.events.warning(NOTICES[message.subtype], said)
+    elif isinstance(message, AssistantMessage) and message.error:
+        runtime.events.warning("model_error", f"Claude's reply failed: {message.error}")
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:
@@ -926,9 +1046,8 @@ def _transcript(messages: Sequence[Any]) -> list[Said]:
         UserMessage,
     )
 
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import bare
 
-    harness = f"mcp__{SERVER}__"
     out: list[Said] = []
     for message in messages:
         if getattr(message, "parent_tool_use_id", None) is not None:
@@ -936,7 +1055,7 @@ def _transcript(messages: Sequence[Any]) -> list[Said]:
         if isinstance(message, AssistantMessage):
             text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
             calls = tuple(
-                Called(b.id, b.name.removeprefix(harness), b.input)
+                Called(b.id, bare(b.name) or b.name, b.input)
                 for b in message.content
                 if isinstance(b, ToolUseBlock)
             )
@@ -969,16 +1088,17 @@ class Spending:
     bundled CLI's results, driven against a scripted model). So each reply's usage is kept
     by its message id until a result counts it — the main agent's are in the result's
     usage, its subagents' are counted with it — and a result is charged what the session's
-    cost grew by since the last one charged: this query's (it gives one for the turn and
-    one for every turn the session ran for a background task), an earlier query's of the
-    run (the journal's ``session_cost``), or the conversation's last turn's in this process
+    cost grew by since the last one charged (``bridges.claude.SessionCost``, which the live
+    session serving the query shares): this query's (it gives one for the turn and one for
+    every turn the session ran for a background task), an earlier query's of the run (the
+    journal's ``session_cost``), or the conversation's last turn's in this process
     (``ClaudeAdapter.costs``) — journaled as the query starts, so an attempt that resumes
     the session after a pause before any result is charged its own cost, on any worker."""
 
-    __slots__ = ("billed", "costs", "helped", "journal", "options", "own", "results", "runtime")
+    __slots__ = ("cost", "costs", "helped", "journal", "options", "own", "results", "runtime")
 
     def __init__(
-        self, runtime: Runtime, options: Any, costs: LRU[str, float], session: str | None
+        self, runtime: Runtime, options: Any, costs: LRU[str, SessionCost], session: str | None
     ) -> None:
         self.runtime = runtime
         self.options = options
@@ -991,14 +1111,15 @@ class Spending:
         if session is None:  # a new session: nothing was spent in it
             self.journal.session_cost = None
         known = self.journal.session_cost
-        if known is None and session is not None:
-            known = costs.get(session)
-        #: the session's running cost, as the last result charged carried it
-        self.billed = known or 0.0
+        found = None if session is None or known is not None else costs.get(session)
+        #: the session's running cost (the journal's, an earlier attempt's of the run; else
+        #: the one its last turn in this process left): shared with the live session that
+        #: serves the query (``ClaudeAdapter._live``)
+        self.cost = found if found is not None else SessionCost(known or 0.0)
         if session is not None:
             # in the journal from the start: an attempt that pauses before its first result
             # leaves it to the one that resumes the session, on any worker
-            self.journal.session_cost = self.billed
+            self.journal.session_cost = self.cost.total
 
     def replied(self, message: Any) -> None:
         """An assistant message: its reply's usage (one reply comes as a message a block)."""
@@ -1008,16 +1129,14 @@ class Spending:
 
     def ended(self, result: Any, live: LiveSession | None) -> None:
         """A turn's result. One of a ``live`` session comes with what its turn is charged
-        (``claude_live.LiveSession.charged``, which keeps the running cost)."""
+        (``claude_live.LiveSession.charged``, which read the running cost they share)."""
         cost = result.total_cost_usd
-        if live is not None:
-            self.billed = live.billed
-        elif cost is not None:
-            cost, self.billed = max(0.0, cost - self.billed), cost
-        self.journal.session_cost = self.billed
+        if live is None and cost is not None:
+            cost = self.cost.grew_by(cost)
+        self.journal.session_cost = self.cost.total
         self.results += 1
         if result.session_id:
-            self.costs[result.session_id] = self.billed
+            self.costs[result.session_id] = self.cost
         # a turn no reply of the model's is in — one the CLI answered itself, a slash
         # command (``/compact``: ``num_turns`` 0) — is no model call: the run, its answer
         # empty, is one no model replied in (``pipeline._unanswered``)
@@ -1085,13 +1204,13 @@ def _spent(
 def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     """What the resumed session is told: the call a person answered about, named as Claude
     calls it (a harness tool through the ``trellis`` server, a built-in by its own name)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import named
 
     call = native_input.answered
     if call is None:
         return RESUMED
     harness = any(t.name == call.tool for t in run.tools)
-    name = f"mcp__{SERVER}__{call.tool}" if harness else call.tool
+    name = named(call.tool) if harness else call.tool
     return resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
 
 
@@ -1110,7 +1229,7 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "last", "runtime")
+    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1122,8 +1241,6 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
-        #: the one last answer at the turn limit: its tool calls are refused (:data:`AT_LIMIT`)
-        self.last = False
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
@@ -1141,8 +1258,7 @@ class Steps:
         permission request; ``None``: the run's own call."""
         helpers = self.runtime.helpers
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
-        who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
-        working = None if who is None else await helpers.of(str(who), kind)
+        working = await _working(helpers, given)
         if working is not None:
             self.helped[call_id] = working
         return working
@@ -1155,14 +1271,27 @@ class Steps:
     def started(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self.calls[call_id] = (name, args, time.time())
         self.runtime.model_ended(STEP)
-        from trellis.harness.tools.convert.claude import SERVER
+        from trellis.harness.tools.convert.claude import bare
 
-        if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
-            bare = name.removeprefix(f"mcp__{SERVER}__")
-            self.runtime.replay.announced(call_key(bare, args), call_id)
+        own = bare(name)
+        if own is not None:  # its MCP request names no call: said here
+            self.runtime.replay.announced(call_key(own, args), call_id)
+
+    def approved(self, tool_use_id: Any) -> None:
+        """A person approved the call the CLI names ``tool_use_id`` before it ran: carried to
+        Claude Code's own question about that call (:meth:`carries`), until the call ends. A
+        call the CLI names no id for carries nothing: its tool's name would name every later
+        call of the tool."""
+        if tool_use_id:
+            self.answered.add(str(tool_use_id))
+
+    def carries(self, tool_use_id: Any) -> bool:
+        """Whether a person approved the call ``tool_use_id`` already (:meth:`approved`)."""
+        return bool(tool_use_id) and str(tool_use_id) in self.answered
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
+        self.answered.discard(call_id)
         found = self.calls.pop(call_id, None)
         self.waiting()
         return found
@@ -1189,18 +1318,30 @@ def _options(
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
-    env = dict(routed_env(options.env, runtime) or options.env)
+    # whose the CLI's model calls are, told the gateway for as long as the process lives: a
+    # query's own, its run and trace; one a live session may keep, what holds for every turn
+    headers = lasting_headers(runtime) if kept else gateway_headers()
+    env = dict(routed_env(options.env, runtime, headers) or options.env)
     if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
         env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
+    # the run's tenant and user's own Claude Code folder, with no auto memory (the team's own
+    # word in the options' ``env`` stands)
+    env.setdefault(CONFIG_ENV, config_folder(runtime.tenant, runtime.user))
+    env.setdefault(AUTO_MEMORY_ENV, "1")
     shell = _shell(options, env)
     hooks = _with_governance(options.hooks, steps, shell)
+    prompt, context = _told(options.system_prompt, context)
     changes: dict[str, Any] = {
         "hooks": with_context(hooks, context or "") if context or kept else hooks,
-        "system_prompt": _told(options.system_prompt),
+        "system_prompt": prompt,
         # what Claude Code asks its user about, the harness answers (the team's own first)
         "can_use_tool": _asked(options.can_use_tool, steps, shell),
         "max_buffer_size": options.max_buffer_size or CLI_MESSAGE_BYTES,
         "env": env,
+        "settings": _settings(options),
+        # a user's text is delivered as written: an ``@path`` in it reads no file, a
+        # ``/command`` runs nothing — unless the app says so for the run
+        "verbatim_prompts": runtime.framework_options.get("verbatim_prompts", True),
     }
     store = session_store(options, runtime.replay.journal, runtime.agent_id)
     if store is not None:
@@ -1213,6 +1354,9 @@ def _options(
     changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
+        # the run's own session goes on whole: where the options cut the one they resumed is not
+        # where it is cut (the paused turn's work would go)
+        changes["resume_session_at"] = changes["resume_drops_turn"] = None
         if not options.fork_session:
             # the session the options named to start (``session_id``) is the one resumed:
             # Claude Code takes both only to fork
@@ -1220,34 +1364,64 @@ def _options(
     return dataclasses.replace(options, **changes)
 
 
-def _told(given: Any) -> Any:
-    """The options' system prompt with what Claude is told of its folder's ``outputs/``
-    (``sandbox.DELIVERS_HERE``: the user's), after it — appended to a preset (``append``), to
-    a custom prompt or text, or as the prompt when there is none (the SDK's empty one). A
-    prompt read from a file is left as it is: the CLI takes no text beside it."""
+def _settings(options: Any) -> str:
+    """The options' ``settings`` with other Claude sessions' messages refused
+    (:data:`INBOUND`), as inline JSON: theirs as given — inline, or a file read as the CLI
+    reads it (relative to its ``cwd``, with or without a BOM). Settings that cannot be read
+    start no query: sent without them, the team's rules would be gone."""
+    given = (options.settings or "").strip()
+    try:
+        if given and not (given.startswith("{") and given.endswith("}")):
+            given = (Path(options.cwd or "") / given).read_text(encoding="utf-8-sig")
+        return json.dumps({**json.loads(given or "{}"), **INBOUND})
+    except (OSError, ValueError, TypeError) as exc:
+        raise ConfigurationError(
+            f"the options' settings ({options.settings!r}) could not be read: {exc}"
+        ) from exc
+
+
+def config_folder(tenant: str, user: str) -> str:
+    """The Claude Code config folder of ``tenant``'s ``user`` on this worker: under the XDG data
+    folder (``$XDG_DATA_HOME/trellis/claude``, else ``~/.local/share/trellis/claude``), made
+    for them alone. The SDK seeds a resumed session's folder from it."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    folder = Path(base) / "trellis" / "claude" / stable_id(tenant, user, prefix="u_")
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return str(folder)
+
+
+def _told(given: Any, context: str | None) -> tuple[Any, str | None]:
+    """The options' system prompt and the turn's context, one of them with what Claude is told
+    of its folder's ``outputs/`` (``sandbox.DELIVERS_HERE``: the user's, as every run's is —
+    ``sandbox.delivered``): after the team's prompt — appended to a preset (``append``), to a
+    custom prompt or a text — or, where there is none to append to, with the context: no
+    prompt stays none (the SDK's default), and one read from a file is left as it is (the CLI
+    takes no text beside it)."""
     from trellis.harness.sandbox import DELIVERS_HERE
 
     def after(text: str | None) -> str:
         return f"{text}\n\n{DELIVERS_HERE}" if text else DELIVERS_HERE
 
-    if given is None or isinstance(given, str):
-        return after(given)
-    kind = given.get("type")
+    kind = given.get("type") if isinstance(given, Mapping) else None
     if kind == "preset":
-        return {**given, "append": after(given.get("append"))}
+        return {**given, "append": after(given.get("append"))}, context
     if kind == "custom":
-        return {**given, "prompt": after(given.get("prompt"))}
-    return given
+        return {**given, "prompt": after(given.get("prompt"))}, context
+    if isinstance(given, str) and given:
+        return after(given), context
+    return given, after(context)
 
 
-def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
+def routed_env(
+    env: Mapping[str, str], runtime: Runtime, headers: Mapping[str, str]
+) -> dict[str, str] | None:
     """The CLI's environment with its model calls routed through the gateway when the route
     serving the harness has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost;
     ``None``: as it is): the gateway's Anthropic route (``ANTHROPIC_BASE_URL``, the
     virtual key as ``ANTHROPIC_API_KEY``) — unless the options' own ``env`` names a base URL
-    (code over the environment) — and, on Bifrost's route, its headers as
-    ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own: the deny-all MCP scope, the
-    run's dimensions and its ``traceparent`` (read as the CLI starts)."""
+    (code over the environment) — and, on Bifrost's route, the deny-all MCP scope and
+    ``headers`` as ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own (the CLI reads
+    them once, as it starts)."""
     gateway = runtime.agent.harness.model_gateway
     if not gateway.has(Capability.ANTHROPIC_ROUTE):
         return None
@@ -1259,7 +1433,7 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
         given["ANTHROPIC_API_KEY"] = gateway.key or NO_KEY
     if not given["ANTHROPIC_BASE_URL"].startswith(gateway.origin):
         return given if given != env else None  # their own endpoint: no Bifrost headers
-    ours = GatewayHeaders().now()
+    ours = {**NO_GATEWAY_TOOLS, **headers}
     lines = (given.get(CUSTOM_HEADERS) or "").splitlines()
     kept = [line for line in lines if line.partition(":")[0].strip().lower() not in ours]
     given[CUSTOM_HEADERS] = "\n".join([*kept, *(f"{k}: {v}" for k, v in ours.items())])
@@ -1281,14 +1455,15 @@ def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
 
 def _with_governance(hooks: Mapping[str, Any] | None, steps: Steps, shell: Shell) -> dict[str, Any]:
     """The options' hooks with the governance hook (:func:`_governance`) and the record hooks
-    (:func:`_recorded`) after theirs."""
+    (:func:`_recorded`) after theirs — registered after them, and answering after them
+    (``after_theirs``)."""
     given = dict(hooks or {})
     given[TOOL_EVENT] = [*given.get(TOOL_EVENT, ()), _governance(steps)]
     recorded = _recorded(steps, shell)
     for event in (RAN_EVENT, FAILED_EVENT):
         given[event] = [*given.get(event, ()), recorded]
     given[RAN_EVENT] = [*given[RAN_EVENT], _steering()]
-    return given
+    return after_theirs(given)
 
 
 def _steering() -> Any:
@@ -1307,56 +1482,69 @@ def _steering() -> Any:
 
 
 def _governance(steps: Steps) -> Any:
-    """The ``PreToolUse`` hook every tool call goes through, in every permission mode: a
-    harness tool runs (the bridge decides about it); any other is the run's decision
-    (``bridge.permitted``: hooks, governance), then Claude Code's own — its permission mode and
-    rules, and :func:`_asked` when it would ask — with the arguments as they were decided (a
-    call a hook rewrote is asked about as rewritten). A subagent's call is let through with
-    its prompt briefed (:func:`_briefed`). Before Claude takes a step, the run's progress is
-    saved — its session as mirrored so far among it — so a worker that dies during the step
-    continues the session from there, not from an earlier step."""
-    from trellis.harness.tools.convert.claude import SERVER, WAITING
+    """The ``PreToolUse`` hook every tool call goes through, in every permission mode
+    (:func:`_decide`). A call it cannot decide — the catalog or the run store out of reach —
+    is refused, saying why; were the refusal to fail too, Claude Code blocks the call (the
+    matcher's ``on_failure``)."""
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
-        if steps.last:  # the one last answer, in a live session that has its tools
-            return _decided("deny", AT_LIMIT)
-        return await decide(given, tool_use_id)
-
-    async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
-        runtime = current()
-        assert runtime is not None  # the CLI asks inside the run it works for
-        await runtime.progress(now=True)
-        name, args = given["tool_name"], dict(given.get("tool_input") or {})
-        call_id = tool_use_id or str(given.get("tool_use_id") or name)
-        if name.startswith(f"mcp__{SERVER}__"):
-            steps.started(call_id, name, args)  # the bridge records it
-            return _decided("allow")
-        assert runtime.helpers is not None  # the query runs with the attempt's helpers
-        helper = await steps.helper_of(call_id, given)
         try:
-            # a subagent's call is decided as its helper's work: an approval names the helper
-            with approvals_read() as approved, runtime.helpers.working(helper):
-                decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
-        except Paused:  # the run pauses: Claude stops here, and the resume goes on
-            steps.helped.pop(call_id, None)
-            return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
-        if isinstance(decided, ToolOutcome):
-            steps.helped.pop(call_id, None)
-            return _decided("deny", str(decided.output))
-        if any(c.tool == name for c in approved):
-            # a person answered the approval of this call, whatever made governance ask (a
-            # hook's own question, answered meanwhile, approves nothing)
-            steps.answered.add(call_id)
-        if name in SUBAGENT_TOOLS:
-            ran = await _briefed(runtime, call_id, name, decided.args)
-            steps.started(call_id, name, ran)
-            return _decided("allow", updated=ran)
-        steps.started(call_id, name, decided.args)
-        if decided.args != args:
-            return _decided("ask", updated=decided.args)
-        return {}  # Claude Code's own permission check decides
+            return await _decide(steps, given, tool_use_id)
+        except Exception as exc:
+            log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
+            steps.helped.pop(tool_use_id or "", None)
+            return _decided("deny", UNDECIDED.format(why=f"{type(exc).__name__}: {exc}"))
 
-    return harness_matcher(pre_tool_use)
+    return deciding_matcher(pre_tool_use)
+
+
+async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
+    """What the run decides about a tool call before Claude Code does: a harness tool runs
+    (the bridge decides about it); any other is the run's decision (``bridge.permitted``:
+    hooks, governance), then Claude Code's own — its permission mode and rules, and
+    :func:`_asked` when it would ask — with the arguments as they were decided (a call a hook
+    rewrote is asked about as rewritten). A subagent's call is let through with its prompt
+    briefed (:func:`_briefed`), and a workflow's opens its child run. Before Claude takes a
+    step, the run's progress is saved — its session as mirrored so far among it — so a worker
+    that dies during the step continues the session from there, not from an earlier step."""
+    from trellis.harness.tools.convert.claude import WAITING, bare
+
+    runtime = current()
+    assert runtime is not None  # the CLI asks inside the run it works for
+    await runtime.progress(now=True)
+    name, args = given["tool_name"], dict(given.get("tool_input") or {})
+    call_id = tool_use_id or str(given.get("tool_use_id") or name)
+    if bare(name) is not None:
+        steps.started(call_id, name, args)  # the bridge records it
+        return _decided("allow")
+    assert runtime.helpers is not None  # the query runs with the attempt's helpers
+    helper = await steps.helper_of(call_id, given)
+    try:
+        # a subagent's call is decided as its helper's work: an approval names the helper
+        with approvals_read() as approved, runtime.helpers.working(helper):
+            decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
+    except Paused:  # the run pauses: Claude stops here, and the resume goes on
+        steps.helped.pop(call_id, None)
+        return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
+    if isinstance(decided, ToolOutcome):
+        steps.helped.pop(call_id, None)
+        return _decided("deny", str(decided.output))
+    if any(c.tool == name for c in approved):
+        # a person answered the approval of this call, whatever made governance ask (a
+        # hook's own question, answered meanwhile, approves nothing)
+        steps.approved(tool_use_id or given.get("tool_use_id"))
+    if name in SUBAGENT_TOOLS:
+        ran = await _briefed(runtime, call_id, name, decided.args)
+        steps.started(call_id, name, ran)
+        return _decided("allow", updated=ran)
+    if name == WORKFLOW_TOOL:  # its child run, open from here as a background subagent's
+        flow = decided.args.get("script") or decided.args.get("name")
+        task = str(flow or decided.args.get("scriptPath") or "")
+        await runtime.helpers.start(call_id, kind=Kind.WORKFLOW, name=WORKFLOW, task=task)
+    steps.started(call_id, name, decided.args)
+    if decided.args != args:
+        return _decided("ask", updated=decided.args)
+    return {}  # Claude Code's own permission check decides
 
 
 def _shell(options: Any, env: Mapping[str, str]) -> Shell:
@@ -1406,9 +1594,10 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
-            this in steps.answered
-            or spec.side_effects == "read"
+            steps.carries(getattr(context, "tool_use_id", None))
+            or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
+            or (name in CLAUDE_ASKS and await _catalog_allows(runtime, name, args))
         ):  # a person approved this call (``PreToolUse``)
             verdict = PermissionResultAllow()
         else:
@@ -1431,6 +1620,18 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
         return verdict
 
     return can_use_tool
+
+
+async def _catalog_allows(runtime: Runtime, name: str, args: dict[str, Any]) -> bool:
+    """Whether the tool catalog has a rule for ``name`` that lets this call run without a
+    person (:data:`CLAUDE_ASKS`: Claude Code asks about it otherwise)."""
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    rules = await governance.rules([name], agent_id=runtime.agent_id)
+    if rules.get(name) is None:
+        return False
+    risk = BUILTIN_SIDE_EFFECTS[name]
+    decision = await governance.check(name, args, side_effects=risk, agent_id=runtime.agent_id)
+    return not decision.asks
 
 
 async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
@@ -1478,32 +1679,36 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
     the bridge's. Either way the stall watch goes on once no call runs. A shell command of
     Claude's own (not a subagent's: the CLI keeps their folder) is where the shell may have
     moved (``Shell.ran``)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import bare
 
     async def post_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         call_id = tool_use_id or str(given.get("tool_use_id") or given.get("tool_name"))
         found = steps.ended(call_id)
         name = str(given.get("tool_name") or "")
-        if name.startswith(f"mcp__{SERVER}__"):
+        if bare(name) is not None:
             return {}
         steps.adapter.observed(name)
         _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
         failed = given.get("hook_event_name") == FAILED_EVENT
+        # a workflow agent's call says who made it (several workflows at once: the run's own)
+        agent = (
+            {k: given[k] for k in AGENT_KEYS} if given.get("agent_type") == WORKFLOW_AGENT else {}
+        )
         outcome = ToolOutcome(
             tool=name,
             status=ToolStatus.ERROR if failed else ToolStatus.OK,
             output=given.get("error") if failed else _result_text(given.get("tool_response")),
             error_class="ClaudeToolError" if failed else None,
+            metadata={bridge.MADE_BY: agent} if agent else {},
         )
         spec = steps.runtime.native.get(name) or native_spec(name)
         helpers = steps.runtime.helpers
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
         # a call a subagent made is recorded under its run: the CLI names the subagent by
         # its task's id (``agent_id``), which its ``task_started`` tied to its ``Agent`` call
-        who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
-        working = None if who is None else await helpers.of(str(who), kind)
+        working = await _working(helpers, given)
         with helpers.working(working):
             await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
         return {}
@@ -1514,16 +1719,15 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
 async def _declared(target: Any) -> list[ToolSpec]:
     """The tools ``ClaudeAgentOptions`` declare (:meth:`ClaudeAdapter.native`, less what the
     agent was seen calling)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import SERVER, bare
 
     given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
     denied = set(target.disallowed_tools or ())
     found = [native_spec(name) for name in given if name not in denied]
-    own = f"mcp__{SERVER}__"
     found.extend(
         native_spec(name)
         for name in target.allowed_tools or ()
-        if name.startswith("mcp__") and not name.startswith(own) and name not in denied
+        if name.startswith("mcp__") and bare(name) is None and name not in denied
     )
     for server, config in configured_servers(target.mcp_servers).items():
         instance = config.get("instance") if isinstance(config, Mapping) else None

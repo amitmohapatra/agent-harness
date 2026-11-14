@@ -372,6 +372,17 @@ async def test_cancelling_a_parent_cancels_its_children(harness: Harness) -> Non
         [kid] = await children(harness, paused.run_id)
         assert kid.status is RunStatus.CANCELLED  # nobody is left waiting on it
 
+    async def delegates(input: str, agent: Runtime) -> str:
+        return str(await agent.tools.call("asks", message=input))
+
+    # a framework that keeps nothing going for its children outside its attempts: the same
+    coded = arm(harness.wrap(delegates, id="p-code"), [waiting])
+    paused = await coded.run("x", user="u")
+    assert paused.interrupt is not None, paused.error
+    await coded.cancel(paused.run_id, reason="no longer needed")
+    [kid] = await children(harness, paused.run_id)
+    assert kid.status is RunStatus.CANCELLED
+
 
 async def test_a_child_has_what_is_left_of_its_parents_time_and_its_deadline(
     harness: Harness,

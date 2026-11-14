@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
+)
 
 from tests.support.arm import arm, with_governance
 from tests.support.catalog import FakeCatalog
@@ -24,6 +29,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
+from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     RESUMED_ASKED,
@@ -517,7 +523,9 @@ async def test_what_claude_saves_in_its_outputs_folder_is_kept_for_its_user(
     assert not (work / "outputs" / "report.csv").exists()  # moved to the file store
     assert (work / "outputs" / "big.csv").exists() and (work / "notes.txt").exists()
     assert (work / "outputs" / "sub" / "x.txt").exists()
-    assert started_with(tmp_path)["system_prompt"] == boxes.DELIVERS_HERE  # none of its own
+    # no system prompt of its own stays none (the SDK's default): told with the context
+    started = started_with(tmp_path)
+    assert started["system_prompt"] == "" and started["context"] == boxes.DELIVERS_HERE
     await harness.aclose()
 
 
@@ -613,7 +621,8 @@ async def test_the_context_goes_with_the_prompt_as_a_hook_adds_it(
 async def test_without_memory_no_context_hook_is_registered(
     harness: Harness, tmp_path: Path
 ) -> None:
-    target = options(tmp_path, [{"text": "told: {context}"}])
+    script = [{"text": "told: {context}"}]
+    target = options(tmp_path, script, system_prompt="You help.")  # told of outputs/ there
     result = await harness.wrap(target, id="helper").run("reach me how?", user="u1")
     assert result.answer == "told: " and started_with(tmp_path)["context"] == ""
 
@@ -705,21 +714,70 @@ async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
     assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
 
 
-async def test_workflows_and_messages_to_other_agents_are_not_offered(
+async def test_messages_to_other_agents_are_not_offered_and_workflows_are(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Claude Code's dynamic workflow (``Workflow``) runs its agents in the background with no
-    task of their own, an agent's first call coming before anything names it; its
-    ``SendMessage`` resumes a finished background subagent as a task of the call that first
-    started it, or reaches another Claude session. No run of the harness can hold that work,
-    so they are disallowed — with the agent-teams tools older CLIs have, whatever the team's
-    own ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` says (the harness sets no such switch)."""
+    """Claude Code's ``SendMessage`` resumes a finished background subagent as a task of the
+    call that first started it, or reaches another Claude session: no run of the harness can
+    hold that work, so it is disallowed — with the agent-teams tools older CLIs have,
+    whatever the team's own ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` says (the harness sets no
+    such switch). A dynamic workflow (``Workflow``) is offered: it is one child run
+    (``test_claude_background_session``)."""
     target = options(tmp_path, [{"text": "ok"}])
     target.env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
-    await harness.wrap(target, id="no-workflow").run("fan this out to agents", user="u1")
+    await harness.wrap(target, id="no-teams").run("fan this out to agents", user="u1")
     disallowed = set(started_with(tmp_path)["disallowed_tools"].split(","))
-    assert {"Workflow", "SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
-    assert not {"Agent", "Task", "TaskStop", "ListAgents"} & disallowed
+    assert {"SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
+    assert "ListAgents" in disallowed  # the sessions SendMessage would reach
+    assert not {"Workflow", "Agent", "Task", "TaskStop"} & disallowed
+
+
+async def test_a_users_text_is_delivered_as_written_no_file_read_no_command(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """What a user types is text: an ``@/path`` in it reads no file of the worker and a
+    ``/command`` runs nothing (Claude Code is told the prompt is composed: the SDK's
+    ``verbatim_prompts``). An app that means a slash command sends it explicitly, with the
+    run's ``verbatim_prompts=False``."""
+    secret = tmp_path / "hostname"
+    secret.write_text("worker-7")
+    target = options(tmp_path, [{"text": "ok"}])
+    agent = harness.wrap(target, id="verbatim")
+    said = f"what is in @{secret} ? /compact"
+    assert (await agent.run(said, user="u1")).answer == "ok"
+    record = started_with(tmp_path)
+    assert record["composed"] and record["attached"] == {} and record["prompt"] == said
+    compacted = await agent.run("/compact", user="u1")
+    assert compacted.answer == "ok"  # a turn of the model's: no command ran
+    explicit = await agent.run(
+        f"@{secret}", user="u1", framework_options={"verbatim_prompts": False}
+    )
+    assert explicit.status is RunStatus.SUCCESS
+    assert started_with(tmp_path)["attached"] == {str(secret): "worker-7"}
+
+
+async def test_each_user_has_a_claude_folder_of_their_own_and_no_auto_memory(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code keeps settings, sessions and memory in its config folder: each tenant and
+    user gets one of their own (``CLAUDE_CONFIG_DIR``), with auto memory off — two users on
+    one worker share no settings and no memory, and nothing is written to the worker's own
+    ``~/.claude``. The team's own settings still reach the CLI (its flag layer)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = options(tmp_path, [{"text": "ok"}], settings='{"model": "team-model"}')
+    agent = harness.wrap(target, id="folders")
+    folders = []
+    for user in ("ada", "bob", "ada"):
+        await agent.run(f"note for {user}", user=user)
+        record = started_with(tmp_path)
+        assert record["auto_memory_off"] == "1" and record["memory"] is None
+        assert "--settings" in record["argv"]
+        folders.append(record["config_dir"])
+    assert folders[0] == folders[2] != folders[1]
+    assert all(not Path(f).is_relative_to(home) for f in folders)
+    assert not (home / ".claude").exists()
 
 
 async def test_a_large_result_is_the_harness_s_to_keep_not_the_cli_s(
@@ -761,36 +819,65 @@ async def test_the_harness_tools_are_loaded_from_the_first_step(
     assert servers["erp"] == erp
 
 
-async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
-    harness: Harness, tmp_path: Path
+@pytest.mark.parametrize("said", ["Refunding o1 first.", None])
+async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
+    harness: Harness, tmp_path: Path, said: str | None
 ) -> None:
-    """A query that reaches ``max_turns`` ends ``error_max_turns``, with no answer. As a
-    ``ReAct`` run at ``max_steps`` and an OpenAI Agents run at ``max_turns`` do, the run asks
-    once more: its session resumed (Claude's own ``resume``), told the limit is reached
-    (``budget.LIMIT``), one turn and no tool. Its answer is the run's, said as a
-    ``step_limit`` warning."""
-    from trellis.harness.budget import TURN_LIMIT
+    """A query that reaches ``max_turns`` ends with Claude Code's own ``error_max_turns``
+    result, and Claude Code leaves it there: the run ends ``PARTIAL`` with what Claude said
+    before the limit (nothing: no answer), its error ``BUDGET_EXCEEDED`` naming the limit and
+    a ``step_limit`` warning. No query more is made (no paid last answer), so the call the
+    limit stopped before never runs."""
+    from trellis.harness.budget import BUDGET_EXCEEDED
 
     refunds.clear()
     script = [
+        *([{"text": said}] if said else []),
         {"tool": "refund", "args": {"order": "o1"}},
         {"tool": "refund", "args": {"order": "o2"}},
         {"text": "never"},
     ]
-    target = options(tmp_path, script, max_turns=1)
-    target.env["FAKE_CLAUDE_AT_LIMIT"] = "Refunded o1; o2 is left undone."
+    target = options(tmp_path, script, max_turns=len(script) - 2)
     agent = arm(harness.wrap(target, id="limited"), [tool(refund.fn, side_effects="write")])
     events = [e async for e in agent.stream("refund o1 and o2", user="u1")]
     done = events[-1]
-    assert done.type is RunEventType.RUN_FINISHED and done.error is None
-    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
-    assert said == ["Refunded o1; o2 is left undone."] and refunds == ["o1"]
+    assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
+    assert done.data["result"] == said and refunds == ["o1"]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
-    assert warned == ["stopped: the turn limit (1) was reached"]
-    last = started_with(tmp_path)  # the last query the CLI was started with
-    # the session keeps it: told it holds for this turn only, a later turn calls tools again
-    assert last["prompt"] == TURN_LIMIT.format(limit=1) and last["resume"] is not None
-    assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
+    limit = len(script) - 2
+    assert warned == [f"stopped: the turn limit ({limit}) was reached"]
+    started = (tmp_path / "cli.json.turns").read_text().splitlines()
+    assert len(started) == 1  # the one query: no last answer asked
+    result = await agent.run("refund o1 and o2", user="u1")
+    assert result.status is RunStatus.PARTIAL and result.error is not None
+    assert result.error.code == BUDGET_EXCEEDED and f"turn limit ({limit})" in result.error.message
+
+
+@pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])
+async def test_a_conversation_reset_is_charged_what_the_session_cost_since(
+    harness: Harness, tmp_path: Path, kept: bool
+) -> None:
+    """ARCH-13: a result carries its session's running cost, and Claude Code zeroes it when
+    the conversation is replaced. Three turns of one conversation, 0.5 a step: three steps
+    (1.5), then a reset and one step (the total is 0.5: lower than the last seen), then one
+    more (1.0). Each turn is charged what it cost — the turn after the reset its 0.5, not
+    nothing — in a process kept for the conversation and in one process a turn alike."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(2)]
+    turns = [[*reads, {"text": "one"}], [{"reset": True}, {"text": "two"}], [{"text": "three"}]]
+    own = {} if kept else {"max_budget_usd": 100.0}  # a budget of its own: a process a query
+    target = options(tmp_path, [], model="m", **own)
+    target.env.update(FAKE_CLAUDE_TURNS=json.dumps(turns), FAKE_CLAUDE_COST="0.5")
+    agent = harness.wrap(target, id="reset")
+    charged = []
+    for said in ("one", "two", "three"):
+        events = [e async for e in agent.stream("go on", user="u1", thread="t1")]
+        assert events[-1].data["result"] == said
+        charged.append(events[-1].data["spent"]["cost"])
+    assert charged == [1.5, 0.5, 0.5]
+    pids = {
+        json.loads(line)["pid"] for line in (tmp_path / "cli.json.turns").read_text().splitlines()
+    }
+    assert len(pids) == (1 if kept else 3)
 
 
 async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost_once(
@@ -799,8 +886,7 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     """A resumed session's result carries the session's cost, what it cost before the
     process that resumed it included (the bundled CLI, driven against a scripted model).
     A query that paused had no result: the attempt that resumes it is charged both. The
-    one last answer at the turn limit resumes a session whose query was charged already:
-    it is charged what the cost grew by."""
+    query that reached its turn limit is charged its steps, and no more."""
     from trellis.harness import budget
 
     costs: list[float | None] = []
@@ -823,20 +909,8 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     limited = options(tmp_path, [*steps, {"text": "never"}], model="m", max_turns=2)
     limited.env["FAKE_CLAUDE_COST"] = "0.5"
     result = await harness.wrap(limited, id="limited").run("read them", user="u1")
-    assert result.status is RunStatus.SUCCESS
-    assert costs == [1.0, 0.5]  # two steps, then the last answer's one: not 1.0 and 1.5
-
-
-async def test_a_last_query_at_the_limit_that_gives_no_answer_leaves_the_error(
-    harness: Harness, tmp_path: Path
-) -> None:
-    target = options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "x"}],
-                     max_turns=1)  # fmt: skip
-    target.env["FAKE_CLAUDE_AT_LIMIT"] = ""
-    agent = arm(harness.wrap(target, id="limited-2"), [tool(refund.fn, side_effects="write")])
-    result = await agent.run("refund o3", user="u1")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "maximum number of turns" in result.error.message
+    assert result.status is RunStatus.PARTIAL
+    assert costs == [1.0]  # two steps: no last answer charged
 
 
 async def test_a_query_stopped_by_its_own_budget_keeps_its_error(
@@ -923,6 +997,104 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     result = await agent.run("work", user="u1")
     assert result.answer == "said: Bash was not run: nothing runs here"
     assert built_ins(tmp_path) == []  # neither ran
+
+
+async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code goes on with a call whose ``PreToolUse`` hook failed as if the hook had
+    decided nothing — under ``bypassPermissions`` the call would run ungoverned. The
+    harness's hook never fails so: a call it cannot decide (here governance itself raises) is
+    refused, saying why, and does not run."""
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the catalog is out of reach")
+
+    monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    target = options(tmp_path, script, permission_mode="bypassPermissions")
+    result = await harness.wrap(target, id="fails-closed").run("work", user="u1")
+    assert result.answer.startswith("said: The harness could not decide this call")
+    assert "the catalog is out of reach" in result.answer
+    assert built_ins(tmp_path) == []  # it did not run
+
+
+@pytest.mark.parametrize("given", [None, "inline", "file"])
+async def test_messages_from_other_claude_sessions_are_refused(
+    harness: Harness, tmp_path: Path, given: str | None
+) -> None:
+    """SEC: every Claude Code a worker starts runs as one OS user, so each takes the others —
+    other tenants' runs — for "your other sessions", and a message one sends arrives here as
+    a turn nobody asked for. The session refuses them (Claude Code's ``crossSessionInbound``
+    setting, ``refuse``), whatever the options' own settings say of it; the rest of those
+    settings — inline, or a file read as the CLI reads it — reach the CLI as given."""
+    own = {"permissions": {"deny": ["Bash(rm:*)"]}, "crossSessionInbound": "accept"}
+    (tmp_path / "team.json").write_text(json.dumps(own))
+    settings = {None: None, "inline": json.dumps(own), "file": "team.json"}[given]
+    target = options(tmp_path, [{"text": "ok"}], settings=settings, cwd=str(tmp_path))
+    assert (await harness.wrap(target, id="alone").run("hello", user="u1")).answer == "ok"
+    argv = started_with(tmp_path)["argv"]
+    sent = json.loads(argv[argv.index("--settings") + 1])
+    assert sent.pop("crossSessionInbound") == "refuse"
+    assert sent == ({} if given is None else {"permissions": own["permissions"]})
+
+
+async def test_settings_that_cannot_be_read_start_no_query(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Settings the harness cannot read would be sent without the team's rules, or without
+    the refusal: the run ends ``ERROR`` naming the file, and Claude Code is not started."""
+    target = options(tmp_path, [{"text": "ok"}], settings="missing.json", cwd=str(tmp_path))
+    result = await harness.wrap(target, id="unread").run("hello", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "missing.json" in result.error.message
+    assert not (tmp_path / "cli.json").exists()
+
+
+async def test_a_governance_hook_that_fails_blocks_the_call_in_claude_code_itself(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEC: the harness's ``PreToolUse`` matcher is registered ``on_failure="block"`` (the
+    SDK's ``HookMatcher`` option, Claude Code 2.1.325's ``onFailure``): were the hook to fail
+    all the same — here its own refusal fails too — Claude Code blocks the call, where an
+    unset matcher lets it through to its permission mode. A team's own matcher keeps what it
+    set (nothing: a failure of theirs decides nothing, as Claude Code does it)."""
+
+    class Unsayable:
+        def format(self, **why: Any) -> str:
+            raise RuntimeError("no refusal either")
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the catalog is out of reach")
+
+    async def theirs(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        return {}
+
+    monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
+    monkeypatch.setattr(claude_adapter, "UNDECIDED", Unsayable())
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    own = {"PreToolUse": [HookMatcher(hooks=[theirs])]}
+    target = options(tmp_path, script, permission_mode="bypassPermissions", hooks=own)
+    result = await harness.wrap(target, id="blocks").run("work", user="u1")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert built_ins(tmp_path) == []  # it did not run
+    registered = started_with(tmp_path)["hooks"]["PreToolUse"]
+    assert registered == [None, "block"]  # theirs, then the harness's
+
+
+async def test_a_claude_code_that_cannot_block_on_a_failed_hook_is_not_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SEC: a Claude Code that predates ``onFailure`` would run a call whose governance hook
+    failed. The SDK refuses to start a query on one (its ``initialize`` answer says whether
+    it honors the option): the run ends ``ERROR`` saying so, and nothing ran."""
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "done"}]
+    target = options(tmp_path, script, permission_mode="bypassPermissions")
+    target.env["FAKE_CLAUDE_HOOKS_FAIL_OPEN"] = "1"
+    result = await harness.wrap(target, id="old-cli").run("work", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "does not honor on_failure" in result.error.message
+    assert built_ins(tmp_path) == []
 
 
 async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_duration(
