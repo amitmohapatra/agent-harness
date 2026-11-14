@@ -157,6 +157,10 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.
+* `middleware()` beside a middleware of your own with one of its names — Deep Agents'
+  planning is `TodoListMiddleware`, which `middleware()` also brings — fails when the graph
+  is built (`AssertionError: Please remove duplicate middleware instances`, LangChain's):
+  see [langgraph.md](langgraph.md#limits).
 * A sub-agent is given the context for its task, not the main agent's tools: give it the
   memory tools (`memory_search`) when it should read memory itself.
 * The harness knows Deep Agents' state tools by name (`write_todos`, the file tools). A tool

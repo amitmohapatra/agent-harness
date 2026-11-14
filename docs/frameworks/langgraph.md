@@ -301,6 +301,20 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
 
 ## Limits
 
+* `middleware()` brings middleware named as LangChain's own — `TodoListMiddleware`
+  (planning), `ContextEditingMiddleware` (with a `context_window`), `ModelCallLimitMiddleware`
+  (`max_steps`) and `AnthropicPromptCachingMiddleware` (the prompt cache). `create_agent`
+  takes one middleware per name: given one of those of your own beside `middleware()`, it
+  raises `AssertionError: Please remove duplicate middleware instances` when the graph is
+  built, before the harness sees it. Leave yours out and set the harness's (`max_steps=`,
+  `context_window=`), or build the graph without `middleware()` and keep yours. `ReAct`
+  refuses the same with a `ConfigurationError` naming the middleware and the parameter that
+  sets it.
+* With a `PIIMiddleware`: the run store keeps the run's input as it was given — a retry and
+  a resume run the graph from it — so the stored input is not redacted; and a run that fails
+  before its graph returns a state records the question as it was asked, not as the
+  middleware would have left it. What the model is sent, the stream, the memory context and
+  the recorded turn of a run that ends are covered (above).
 * A graph's tools are fixed when it is compiled: a tool of a part turned off
   (`h.wrap(without=)`, a run's `without=`) stays bound, and so do the tools the hints leave
   out: a `create_agent` graph's model calls are offered only what the run offers (the
