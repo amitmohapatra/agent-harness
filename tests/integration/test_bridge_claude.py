@@ -220,3 +220,6 @@ async def test_the_journal_keeps_each_entry_once_by_its_uuid() -> None:
     sub = {"project_key": "here", "session_id": "s1", "subpath": "subagents/agent-1"}
     await store.append(sub, [{"type": "user", "uuid": "u2"}])
     assert list(journal.transcripts) == ["s1", "s1/subagents/agent-1"]
+    # a session's subagents' transcripts, listed for a resume to restore with it
+    assert await store.list_subkeys(elsewhere) == ["subagents/agent-1"]
+    assert await store.list_subkeys({"project_key": "here", "session_id": "s2"}) == []

@@ -139,6 +139,14 @@ class JournalSessions:
         kept = self.journal.transcripts.get(_name(key))
         return list(kept) if kept else None
 
+    async def list_subkeys(self, key: Mapping[str, Any]) -> list[str]:
+        """The ``subpath`` of each transcript the session's subagents keep beside its own: a
+        resume restores them with it (the SDK asks when the store has this)."""
+        under = f"{key['session_id']}/"
+        return [
+            name.removeprefix(under) for name in self.journal.transcripts if name.startswith(under)
+        ]
+
 
 def _name(key: Mapping[str, Any]) -> str:
     subpath = key.get("subpath")

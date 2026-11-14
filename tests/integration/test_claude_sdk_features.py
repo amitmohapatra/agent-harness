@@ -730,6 +730,37 @@ async def test_a_session_id_of_the_options_names_the_session_and_a_pause_resumes
     assert flag(again["argv"], "--session-id") is None
 
 
+async def test_where_the_options_cut_the_session_they_resume_holds_for_the_first_query_only(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """``resume_session_at`` (with ``resume_drops_turn``) cuts the session the options resume
+    at an entry of theirs. The run's later attempt resumes the run's own session after a
+    pause: cut there, it would lose the paused turn's work, so it is not."""
+
+    @tool(side_effects="irreversible")
+    def refund(order: str) -> str:
+        """Refund an order."""
+        return f"refunded {order}"
+
+    began = str(uuid.uuid4())
+    cut = {"resume_session_at": str(uuid.uuid4()), "resume_drops_turn": str(uuid.uuid4())}
+    first = await harness.wrap(
+        options(tmp_path, [{"text": "noted"}], session_id=began), id="a"
+    ).run("the code is 4242", user="u1")
+    assert first.answer == "noted"
+    script = [{"tool": "refund", "args": {"order": "o1"}}, {"text": "{last}"}]
+    target = options(tmp_path, script, resume=began, fork_session=True, **cut)
+    agent = arm(harness.wrap(target, id="cut"), [refund])
+    paused = await agent.run("refund o1", user="u1")
+    assert paused.interrupt is not None, paused.error
+    argv = started_with(tmp_path)["argv"]
+    assert flag(argv, "--resume-session-at") == cut["resume_session_at"]  # the options' own
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.answer == "refunded o1", done.error
+    argv = started_with(tmp_path)["argv"]
+    assert flag(argv, "--resume-session-at") is None and flag(argv, "--resume-drops-turn") is None
+
+
 async def test_the_sessions_the_options_choose_are_claude_codes_to_resume_fork_or_continue(
     harness: Harness, tmp_path: Path
 ) -> None:

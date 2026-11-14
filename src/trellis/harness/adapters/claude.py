@@ -1297,6 +1297,9 @@ def _options(
     changes["disallowed_tools"] = _disallowed(runtime, options.disallowed_tools)
     if session is not None:
         changes["resume"] = session
+        # the run's own session goes on whole: where the options cut the one they resumed is not
+        # where it is cut (the paused turn's work would go)
+        changes["resume_session_at"] = changes["resume_drops_turn"] = None
         if not options.fork_session:
             # the session the options named to start (``session_id``) is the one resumed:
             # Claude Code takes both only to fork

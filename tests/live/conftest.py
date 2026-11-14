@@ -196,10 +196,19 @@ async def harness() -> AsyncIterator[Harness]:
         yield h
 
 
+def claude_cli() -> str | None:
+    """The Claude Code CLI the Claude Agent SDK runs when the options name none: the one
+    bundled with the SDK, else a ``claude`` on PATH (``None``: neither)."""
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return shutil.which("claude")
+    bundled = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    return str(bundled) if bundled.is_file() else shutil.which("claude")
+
+
 #: The Claude Code CLI, which the Claude Agent SDK runs (its tests skip without it).
-needs_claude_cli = pytest.mark.skipif(
-    shutil.which("claude") is None, reason="needs the Claude Code CLI"
-)
+needs_claude_cli = pytest.mark.skipif(claude_cli() is None, reason="needs the Claude Code CLI")
 
 
 @pytest.fixture
