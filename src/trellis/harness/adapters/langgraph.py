@@ -501,7 +501,8 @@ def transforms(graph: Any) -> bool:
     builder's (``transformers=``) — beside the projections ``create_agent`` gives every graph
     (tool calls, sub-agents: they add to the stream and change nothing a model said). Those
     decide what the wire may carry, so the graph is streamed through them."""
-    from langchain.agents.factory import SubagentTransformer, ToolCallTransformer
+    from langchain.agents._subagent_transformer import SubagentTransformer
+    from langgraph.prebuilt import ToolCallTransformer
 
     given = getattr(graph, "stream_transformers", ())
     return any(t is not ToolCallTransformer and t is not SubagentTransformer for t in given)

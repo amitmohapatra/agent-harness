@@ -607,6 +607,7 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
     ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
     typed = checkpointing(ours)
     assert isinstance(typed.checkpointer, RunCheckpointer) and run_scoped(typed)
+    assert isinstance(ours.checkpointer, RunCheckpointer)  # the builder's own, left as it was
     assert typed.checkpointer.serde is not ours.checkpointer.serde
 
 
