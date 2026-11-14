@@ -20,6 +20,7 @@ import pytest
 import respx
 from agents import Agent
 
+from tests.support.arm import declaring
 from tests.support.gateway import URL, FakeGateway
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -346,6 +347,47 @@ async def test_a_name_the_runs_multiprovider_gives_its_own_provider_keeps_it(
     assert first.answer == "object"
     said = [r for r in caplog.records if "'RunConfig.model' has a model object" in r.getMessage()]
     assert len(said) == 1
+
+
+async def test_a_sandbox_memorys_models_go_through_bifrost_in_and_after_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandbox ``Memory``'s phase models, named, are asked through Bifrost — in the run
+    (counted toward its budget) and, bound to the run's route, after it (a sandbox the app
+    keeps and closes later) — whatever the agent's own model is."""
+    from agents import ModelSettings, function_tool
+    from agents.models.interface import ModelTracing
+    from agents.sandbox.capabilities.memory import Memory
+    from agents.sandbox.config import MemoryGenerateConfig
+
+    from trellis.harness.adapters.openai_agents import governed_capability
+
+    made: list[Any] = []
+
+    async def ask(model: Any) -> str:
+        reply = await model.get_response(
+            None, "summarise", ModelSettings(), [], None, [], ModelTracing.DISABLED
+        )
+        return str(reply.output[0].content[0].text)
+
+    @function_tool
+    async def summarise() -> str:
+        """Summarise the sandbox's work."""
+        memory = Memory(generate=MemoryGenerateConfig(phase_one_model="gpt-m"))
+        made.append(governed_capability(memory).generate.phase_one_model)
+        return await ask(made[-1])
+
+    fake = FakeGateway(turns=["in the run", "after the run"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    model = ScriptedModel([("summarise", {}), "done"])
+    async with declaring(Harness(config=settings, gateway=fake.gateway()), summarise="read") as h:
+        agent = h.wrap(Agent(name="m", model=model, tools=[summarise]), id="mem")
+        events = [e async for e in agent.stream("go", user="u")]
+        assert await ask(made[0]) == "after the run"  # its route kept: no run to read it from
+    assert [r["model"] for r in fake.responses.requests] == ["openai/gpt-m"] * 2
+    assert fake.responses.headers[0]["x-bf-dim-agent"] == "mem"
+    assert events[-1].data["spent"]["tokens"] == 15  # the phase's reply, counted in the run
 
 
 async def test_a_run_config_with_its_own_provider_or_a_model_object_is_kept(

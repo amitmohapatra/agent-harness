@@ -537,10 +537,12 @@ def governed_capability(capability: Any) -> Any:
     made = capability.model_copy()
     if isinstance(made, Memory) and made.generate is not None:
         generate = made.generate
+        runtime = current()
+        provider = None if runtime is None else _provider_of(runtime)
         made.generate = dataclasses.replace(
             generate,
-            phase_one_model=ThroughRun.of(generate.phase_one_model),
-            phase_two_model=ThroughRun.of(generate.phase_two_model),
+            phase_one_model=ThroughRun.of(generate.phase_one_model, provider),
+            phase_two_model=ThroughRun.of(generate.phase_two_model, provider),
         )
     object.__setattr__(made, "__class__", _governing(type(capability)))
     return made
@@ -598,29 +600,47 @@ def _capability_served(capability: Any, model: Any, asked: Mapping[str, Any]) ->
 
 class ThroughRun:
     """A sandbox ``Memory``'s model (its ``phase_one_model``/``phase_two_model``, named) made
-    through the model route of the run whose sandbox it summarises: the run's provider as the
-    harness gives it (Bifrost for the names it leaves to the default provider:
-    :func:`routed_provider`), each reply's usage counted toward the run's budget and its call
-    watched for a stall; outside a run (a sandbox you keep, closed after it), the SDK's default
-    provider. Two are the same when they name the same model (the SDK compares a session's
-    memory configs). Made by :meth:`of`, a subclass of the SDK's ``Model``."""
+    through the model route of the run whose sandbox it summarises (:func:`_provider_of`:
+    Bifrost for the names the run leaves to the default provider, the run's own provider
+    else) — the route it was made with, so a sandbox you keep and close after the run still
+    asks through it — each reply's usage counted toward the budget of the run it is asked in
+    and its call watched for a stall. Made outside a run, it reads the route of the run asking.
+    Two are the same when they name the same model (the SDK compares a session's memory
+    configs). Made by :meth:`of`, a subclass of the SDK's ``Model``."""
 
     @staticmethod
-    def of(model: Any) -> Any:
-        """``model`` through the run when it is a name; a model object as it is."""
-        return _through_run_class()(model) if isinstance(model, str) else model
+    def of(model: Any, provider: Any = None) -> Any:
+        """``model`` through ``provider`` (the run's, :func:`_provider_of`) when it is a name; a
+        model object as it is."""
+        return _through_run_class()(model, provider) if isinstance(model, str) else model
+
+
+def _provider_of(runtime: Runtime | None) -> Any:
+    """The model provider of ``runtime``'s run as the harness routes it (:func:`_routed`): its
+    ``RunConfig.model_provider``, on Bifrost for the names a ``MultiProvider`` leaves to its
+    default provider; outside a run, the SDK's default."""
+    from agents import RunConfig
+
+    if runtime is None:
+        return RunConfig().model_provider
+    given = runtime.framework_options.get("run_config")
+    gateway = runtime.agent.harness.model_gateway
+    route = _route_of(gateway, runtime.framework_options)
+    if route is not None:
+        return routed_provider(cast("Bifrost", gateway), route)
+    return (RunConfig() if given is None else _coerced(given)).model_provider
 
 
 @functools.cache
 def _through_run_class() -> type:
-    from agents import RunConfig
     from agents.models.interface import Model
 
     from trellis.harness.hooks.openai_agents import counted
 
     class Through(Model, ThroughRun):  # type: ignore[misc]
-        def __init__(self, name: str) -> None:
+        def __init__(self, name: str, provider: Any = None) -> None:
             self.name = name
+            self._provider = provider
 
         def __eq__(self, other: object) -> bool:
             return isinstance(other, Through) and other.name == self.name
@@ -629,12 +649,7 @@ def _through_run_class() -> type:
             return hash(self.name)
 
         def _model(self) -> Any:
-            runtime = current()
-            given = None if runtime is None else runtime.framework_options.get("run_config")
-            provider = (RunConfig() if given is None else _coerced(given)).model_provider
-            if runtime is not None and _route_of(runtime.agent.harness.model_gateway, {}):
-                gateway = runtime.agent.harness.model_gateway
-                provider = routed_provider(cast("Bifrost", gateway), provider)
+            provider = self._provider or _provider_of(current())
             return provider.get_model(self.name)
 
         async def get_response(self, *args: Any, **kwargs: Any) -> Any:
@@ -656,13 +671,7 @@ def _through_run_class() -> type:
             async for event in self._model().stream_response(*args, **kwargs):
                 usage = getattr(getattr(event, "response", None), "usage", None)
                 if runtime is not None and event.type == "response.completed" and usage:
-                    from agents import Usage
-
-                    counted(
-                        runtime,
-                        self.name,
-                        Usage(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens),
-                    )
+                    counted(runtime, self.name, usage)
                 yield event
 
     return Through

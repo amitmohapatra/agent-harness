@@ -92,12 +92,15 @@ agent = h.wrap(
 )
 ```
 
-`Shell()` runs the commands that read a loaded skill's files. The SDK's default capabilities
-(`Capabilities.default()`: `Filesystem`, `Shell`, `Compaction`) work only on OpenAI's Responses
-API: `Filesystem`'s `apply_patch` is a hosted tool, and a chat completions model refuses it
-(`UserError: Hosted tools are not supported with the ChatCompletions API`): a model name the
-harness routes (its chat completions, `use_responses=False`) or an `OpenAIChatCompletionsModel`
-of your own.
+`Shell()` runs the commands that read a loaded skill's files. `load_skill` and the shell's
+tools are governed like your own function tools: say their risk in the catalog. The SDK's
+default capabilities (`Capabilities.default()`: `Filesystem`, `Shell`, `Compaction`) work only
+on OpenAI's Responses API: `Filesystem`'s `apply_patch` is a hosted tool and `Compaction` a
+Responses parameter. A model name the harness routes through Bifrost to an OpenAI provider keeps
+them; one Bifrost converts to chat completions is refused them before the run's first model call
+([openai-agents.md](frameworks/openai-agents.md)), and an `OpenAIChatCompletionsModel` of your
+own refuses them itself (`UserError: Hosted tools are not supported with the ChatCompletions
+API`).
 
 ## Per run
 

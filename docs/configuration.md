@@ -113,7 +113,7 @@ framework:
 | Framework | How its models are routed |
 |---|---|
 | `ReAct(model="name")` | its chat model routes each call as the harness running it says |
-| OpenAI Agents | with Bifrost, an agent's model name (or the SDK's default) through Bifrost's chat completions (`RunConfig.model_provider`), unless the run's own `run_config` names a provider |
+| OpenAI Agents | with Bifrost, a model name the run leaves to the SDK's default provider (or the SDK's default) through Bifrost's `/v1/responses` (`RunConfig.model_provider`); the run's own provider, a `MultiProvider(provider_map=...)` entry and the `litellm/` and `any-llm/` prefixes are kept ([openai-agents.md](frameworks/openai-agents.md)) |
 | Claude Agent SDK | with Bifrost (`Capability.ANTHROPIC_ROUTE`), the CLI through its Anthropic route (`ANTHROPIC_BASE_URL`, the virtual key), its headers in `ANTHROPIC_CUSTOM_HEADERS`, unless the options' own `env` names a base URL |
 | a model object you built (a `ChatOpenAI`, an OpenAI `Model`) | as you built it: with Bifrost set, a call that does not go through it is said once per agent and model |
 
