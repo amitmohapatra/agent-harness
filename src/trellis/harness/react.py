@@ -64,6 +64,7 @@ from trellis.contracts import ConfigurationError
 from trellis.harness.adapters.base import (
     MODEL_METADATA,
     PROMPT_METADATA,
+    PROVIDER_TOOLS,
     TOOLS_ATTRIBUTE,
     WINDOW_METADATA,
     context_window,
@@ -348,6 +349,7 @@ def ReAct(
     else:
         log.info("the context window of %s: %d tokens (%s)", named or "the model", window, source)
     own, run = _split(tools)
+    provided = _provided(own)
     strategies = _strategies(subagents)
     native, helpers = _subagents(
         subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
@@ -422,6 +424,7 @@ def ReAct(
         middleware=[
             _nothing(SUMMARIZATION),
             *([tasks] if tasks is not None else []),
+            *([provided] if provided is not None else []),
             *stacked(defaults, middleware),
             cached,
         ],
@@ -447,7 +450,19 @@ def ReAct(
     )
     if tasks is not None:
         tasks.compiled(_compiled(graph))
-    return _described(graph, named, window, instructions, [*run, *helpers])
+    described = _described(graph, named, window, instructions, [*run, *helpers])
+    if provided is not None:  # of the run's tool set, beside what its tool nodes run
+        setattr(described, PROVIDER_TOOLS, list(provided.specs.values()))
+    return described
+
+
+def _provided(own: Sequence[Any]) -> Any:
+    """The middleware that governs and records the provider's own tools among ``own`` (each a
+    ``dict``: ``provider_tools.ProviderTools``); none when there are none."""
+    from trellis.harness.provider_tools import ProviderTools, checked
+
+    given = [t for t in own if isinstance(t, dict)]
+    return ProviderTools(checked(given)) if given else None
 
 
 def _strategies(subagents: Sequence[Any]) -> dict[str, str]:
@@ -567,8 +582,10 @@ def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
             raise ConfigurationError(
                 f"an agent is a sub-agent: ReAct(subagents=[...]), not tools= ({given!r})"
             )
-    own = [t for t in tools if isinstance(t, BaseTool)]
-    return own, [t for t in tools if not isinstance(t, BaseTool)]
+    # a provider's own tool (a ``dict``: web search, code execution) is the graph's, bound to
+    # the model as LangChain binds it (``provider_tools``)
+    own = [t for t in tools if isinstance(t, BaseTool | dict)]
+    return own, [t for t in tools if not isinstance(t, BaseTool | dict)]
 
 
 def _subagents(

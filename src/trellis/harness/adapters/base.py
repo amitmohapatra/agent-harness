@@ -268,6 +268,9 @@ FIT_SHARE: Final = 0.95
 #: The attribute a graph ``ReAct(...)`` built carries its declared tools on (``tools=``, its
 #: ``subagents=`` among them): what ``h.wrap`` gives its runs.
 TOOLS_ATTRIBUTE: Final = "trellis_tools"
+#: Where a ``ReAct`` graph keeps the specs of the provider's own tools it binds to its model
+#: (``provider_tools``: run by the provider, so in no tool node), of the run's tool set.
+PROVIDER_TOOLS: Final = "trellis_provider_tools"
 
 
 def declared_tools(target: Any) -> list[Any]:

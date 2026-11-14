@@ -84,6 +84,7 @@ from trellis.harness.adapters.base import (
     Narrowing,
     NativePause,
     Output,
+    PROVIDER_TOOLS,
     ToolFormat,
     builtin,
     helper,
@@ -399,7 +400,8 @@ class LangGraphAdapter:
                 and not (t.metadata or {}).get(MACHINERY)
                 and not made(t)
             )
-            self._native = unique(found)
+            provided = getattr(target, PROVIDER_TOOLS, None) or []  # ``ReAct``'s provider tools
+            self._native = unique([*found, *provided])
         return self._native
 
     def _graph(self, target: Any, runtime: Runtime) -> Any:

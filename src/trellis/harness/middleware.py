@@ -1600,8 +1600,9 @@ def _unnarrowed(node: str) -> None:
 
 
 def _named(tool: BaseTool | dict[str, Any]) -> str:
-    if isinstance(tool, dict):
-        return str((tool.get("function") or tool).get("name", ""))
+    if isinstance(tool, dict):  # a schema, or a provider's own tool: by its name, else its type
+        found = tool.get("function") or tool
+        return str(found.get("name") or ("" if "function" in tool else tool.get("type", "")))
     return tool.name
 
 
@@ -2872,6 +2873,8 @@ def _narrowed(
     request = _unheld(request)  # an earlier narrowing's line: said anew, of what is held now
     must = set(runtime.used) if runtime is not None else set()
     must |= {*STATE_TOOLS, TOOL_SEARCH, *(SAVING if _saved(request.state) else ())}
+    # a provider's own tool (``provider_tools``): its definition is the provider's, not cut
+    must |= {_named(t) for t in tools if isinstance(t, dict) and _provider_own(t)}
     hinted = (runtime.offered or set()) if runtime is not None else set()
     asked = next((m.text for m in reversed(request.messages) if typed(m)), "")
     words = set(_WORD.findall(asked.lower()))
@@ -2907,6 +2910,12 @@ def _narrowed(
         return incoming
     out = request.override(tools=[kept[n] for n in sorted(kept)])  # the offered order kept
     return _held_said(out, offered)
+
+
+def _provider_own(tool: dict[str, Any]) -> bool:
+    """Whether a tool given as a ``dict`` is a provider's own (a ``type`` other than a
+    function's), not a schema."""
+    return "function" not in tool and tool.get("type") not in (None, "function")
 
 
 def _signature(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
