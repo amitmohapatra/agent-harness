@@ -934,6 +934,9 @@ async def test_a_judge_scores_a_tenth_of_runs_unless_it_says(harness: Harness) -
         return None
 
     assert evals_module.sample_of(llm_judge("ok?")) == evals_module.JUDGE_SAMPLE == 0.1
+    from trellis.harness import agent as agent_module
+
+    assert agent_module.GROUNDING_SAMPLE == 0.1  # documented: a fixed 0.1 of the runs grounded
     assert evals_module.sample_of(llm_judge("ok?", sample=0.5)) == 0.5
     assert evals_module.sample_of(custom) == 0.1  # another evaluator: the default share
     with pytest.raises(ConfigurationError, match="sample"):

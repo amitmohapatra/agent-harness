@@ -335,6 +335,7 @@ async def test_on_a_disk_the_file_tools_are_governed_and_offered_from_the_start(
     assert sides["read_file"] == "read" and sides["edit_file"] == "write"
     reads = {"ls", "read_file", "glob", "grep"}  # the reads read; the others write
     governed = [n for n, mark in outside.items() if mark]
+    assert set(governed) == {"ls", "read_file", "glob", "grep", "write_file", "edit_file", "delete"}
     assert all(sides[n] == ("read" if n in reads else "write") for n in governed)
     assert outside["delete"] and sides["delete"] == "write"
     agent = harness.wrap(graph, id="disk")

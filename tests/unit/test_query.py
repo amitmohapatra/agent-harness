@@ -143,6 +143,7 @@ KINDS = {"BIGINT": "INTEGER", "DOUBLE": "REAL", "DECIMAL": "DECIMAL", "VARCHAR":
         (["-0.05", "12.50", ".5", "7."], "DECIMAL"),
         (["123456789012345", "0.000000000000001"], "DECIMAL"),
         (["1234567890123456.5"], "REAL"),  # 17 digits: more than a decimal keeps
+        (["123456789012345.6"], "REAL"),  # 16 digits: past the 15 a decimal keeps
         (["0.30000000000000004"], "REAL"),
         (["1e-3", "2"], "REAL"),
         (["007", "8"], "TEXT"),
