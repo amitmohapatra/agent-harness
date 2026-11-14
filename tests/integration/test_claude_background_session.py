@@ -25,7 +25,6 @@ import pytest
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ResultMessage,
-    TaskNotificationMessage,
     TaskStartedMessage,
     create_sdk_mcp_server,
 )
@@ -96,6 +95,13 @@ def options(tmp_path: Path, turns: list[list[dict[str, Any]]], **fields: Any) ->
 def served(tmp_path: Path) -> list[dict[str, Any]]:
     """What the CLI recorded of each turn it was sent, in order: which process took it."""
     log = tmp_path / "cli.json.turns"
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def own_turns(tmp_path: Path) -> list[str]:
+    """What the session said in each turn it ran by itself (a finished task's notification),
+    as the CLI recorded it: nobody's answer."""
+    log = tmp_path / "cli.json.own"
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
@@ -217,15 +223,11 @@ async def test_a_background_task_goes_on_while_the_next_turns_are_answered_by_it
     assert live_of(agent) is live and open_sessions(agent) == 1 and list(live.working) == ["t1"]
 
     (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
-    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
-    assert not live.working
-    # what came with no turn to take it is kept: the task's notification, the session's own
-    # turn for it and that turn's result — none of it anybody's answer
-    [notification] = [m for m in live.kept if isinstance(m, TaskNotificationMessage)]
-    assert notification.task_id == "t1" and notification.summary == "the market is growing"
-    [injected] = [m for m in live.kept if isinstance(m, ResultMessage)]
-    assert injected.origin == {"kind": "task-notification"}
-    assert injected.result == "Noted: the market is growing"
+    await until(lambda: own_turns(tmp_path))
+    await until(lambda: not live.working)
+    # what came with no turn to take it — the task's notification, the session's own turn
+    # for it and that turn's result — is nobody's answer
+    assert own_turns(tmp_path) == ["Noted: the market is growing"]
 
     third = await agent.run("what did it find?", user="u1", thread="t1")
     asked = ["research the market", "what is 2+2?", NOTIFIED, "what did it find?"]
@@ -254,7 +256,7 @@ async def test_the_result_of_a_turn_the_session_injected_is_never_a_users_answer
     assert events[-1].data["result"] == "my own answer"
     said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
     assert "".join(said) == "my own answer"
-    assert [m.result for m in live.kept if isinstance(m, ResultMessage)] == ["still noting"]
+    assert own_turns(tmp_path) == ["still noting"]
 
 
 async def test_a_prompt_that_crosses_the_start_of_the_sessions_own_turn_still_gets_its_answer(
@@ -277,9 +279,7 @@ async def test_a_prompt_that_crosses_the_start_of_the_sessions_own_turn_still_ge
     assert not live.injected
     result = await agent.run("and you?", user="u1", thread="t1")
     assert result.status is RunStatus.SUCCESS and result.answer == "my own answer"
-    [injected] = [m for m in live.kept if isinstance(m, ResultMessage)]
-    assert injected.result == "Noted: the market is growing"
-    assert injected.origin == {"kind": "task-notification"}
+    assert own_turns(tmp_path) == ["Noted: the market is growing"]
 
 
 def test_an_injected_turns_result_in_a_querys_messages_is_not_its_answer() -> None:
@@ -1854,9 +1854,8 @@ async def test_the_main_agents_own_call_with_no_turn_is_still_refused(
     await when(harness, child.run_id, RunStatus.SUCCESS)
     live = live_of(agent)
     assert live is not None
-    await until(lambda: any(isinstance(m, ResultMessage) for m in live.kept))
-    [noted] = [m.result for m in live.kept if isinstance(m, ResultMessage)]
-    assert noted == f"Noted: {UNATTENDED}" and built_ins(tmp_path) == []
+    await until(lambda: own_turns(tmp_path))
+    assert own_turns(tmp_path) == [f"Noted: {UNATTENDED}"] and built_ins(tmp_path) == []
     events = [e async for e in agent.stream("and?", user="u1", thread="t1")]
     [said] = warned(events)
     assert "were refused" in said and "Read x1" in said

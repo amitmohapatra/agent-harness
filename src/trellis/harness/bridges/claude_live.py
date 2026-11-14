@@ -34,9 +34,8 @@ it (``client.query``) instead of into a new process that resumes the session.
   session injected, a subagent's with no run — has no run under way: nothing can decide it
   (the run's hooks, governance, a person's approval, its budget) or record it. Such a call is
   refused (:data:`UNATTENDED`), never run unchecked, and the conversation's next run says
-  how many were. Messages that arrive then are kept, the most recent
-  (:func:`unattended` — the one place a later change delivers them from); Claude's own
-  session holds them already, so the next turn's model knows them.
+  how many were. Messages that arrive then are nobody's answer; Claude's own session holds
+  them, so the next turn's model knows them.
 * **A turn that is left** (its run paused, was cancelled, stopped reading) is not stopped
   with the SDK's ``interrupt`` while background work is under way: the CLI stops that work
   with the turn. The turn ends by itself instead: its next tool call is refused with the
@@ -74,7 +73,7 @@ import contextvars
 import dataclasses
 import logging
 import time
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import (
     AsyncGenerator,
     Awaitable,
@@ -111,8 +110,6 @@ KEPT: Final = 16
 #: How long a turn waits for the result of an earlier turn that was left (paused, cancelled)
 #: before its own prompt is sent; past it the session is closed and the turn runs without.
 SETTLE_SECONDS: Final = 30.0
-#: The most messages kept of those that arrived with no turn to take them (the most recent).
-UNATTENDED_KEPT: Final = 200
 #: What the main agent's call in a turn that was left is refused with: the turn ends there.
 LEFT: Final = "The user left this turn: it ends here."
 #: What a tool call made while no run of the conversation is under way is answered.
@@ -217,14 +214,6 @@ async def gone(runtime: Runtime, run_id: str, interrupt_id: str, answer: Any) ->
         )
         await runs.finish(run_id, RunStatus.ERROR, error=error, tenant=tenant)
     runtime.events.warning("claude_session", GONE_SAID)
-
-
-def unattended(session: LiveSession, message: Any) -> None:
-    """A message that arrived while no turn could take it — a background task's progress,
-    its notification, the turn the session injected for it and that turn's result: kept, the
-    most recent :data:`UNATTENDED_KEPT`. The one place such messages pass: delivering them
-    into the conversation is built from here."""
-    session.kept.append(message)
 
 
 @dataclasses.dataclass(eq=False)
@@ -678,8 +667,6 @@ class LiveSession:
         self._calling: dict[str, Background] = {}
         #: why the session was closed (``LiveSessions.forget``)
         self.why = "the harness was closed"
-        #: the messages no turn took (:func:`unattended`)
-        self.kept: deque[Any] = deque(maxlen=UNATTENDED_KEPT)
         #: the tool calls refused since the last turn for want of a run, by tool
         self.refused: Counter[str] = Counter()
         #: the prompts sent whose result has not come (one at most)
@@ -975,7 +962,6 @@ class LiveSession:
         else:
             if result:
                 self.charged(message, own=own, taken=False)
-            unattended(self, message)
             if turn is None:
                 self._rest()
         if result and not self.owed and not self.injected:

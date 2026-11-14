@@ -476,6 +476,9 @@ class Cli:
         finally:
             self.in_turn = self.stopping = False
         send({**self.ended(self.session, last=last, turns=len(script)), "origin": origin})
+        record = os.environ.get("FAKE_CLAUDE_RECORD")
+        if record:  # what the session said in a turn of its own (nobody's answer)
+            appended(f"{record}.own", last)
 
     def background(self, session: str, step: int, item: dict[str, Any]) -> tuple[str, bool, bool]:
         """A call that leaves a task running in the background: an ``Agent`` call (or, with
