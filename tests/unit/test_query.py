@@ -127,6 +127,17 @@ def test_a_wrong_call_is_said(journal: Journal) -> None:
     assert given == "n\n2"  # a text given (a file Deep Agents saved in the state)
 
 
+def test_a_query_names_at_most_8_past_results(journal: Journal) -> None:
+    """Past 8 past results the call is refused, before any is read; 8 go on to be read."""
+
+    def asked(n: int) -> str:
+        refs = [f"msg_{k}" for k in range(n)]
+        return asyncio.run(query.query({"sql": "SELECT 1", "results": refs}))
+
+    assert "results names at most 8 past results" in asked(9)
+    assert asked(8) == "Error: past results are read from memory, which this run does not have."
+
+
 def test_outside_a_run_nothing_is_read() -> None:
     said = asyncio.run(query.query({"file_path": "/x", "sql": "SELECT 1"}, "a,b\n1,2"))
     assert said == "Error: File '/x' not found"
