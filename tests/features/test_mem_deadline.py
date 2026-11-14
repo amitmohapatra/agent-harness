@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.features.conftest import harness
+from tests.features.conftest import API_KEY, MEMORY_URL, harness
+from trellis.memory import MemoryClient
 
 pytestmark = pytest.mark.timeout(600)
 DEADLINE = 5.0
@@ -48,8 +49,11 @@ async def test_context_latency_against_its_deadline_under_concurrent_load(uid: s
 
         await asyncio.gather(*(seed(u) for u in users))
 
+    # each request asked once (no retry): its own latency, and a 504 is seen, not retried away
+    async with MemoryClient(MEMORY_URL, api_key=API_KEY, timeout=30, max_retries=0) as once:
+
         async def ask(user: str, n: int) -> tuple[float, int]:
-            ctx = client.bind(tenant_id=tenant, user_id=user, agent_id="load")
+            ctx = once.bind(tenant_id=tenant, user_id=user, agent_id="load")
             started = time.monotonic()
             try:
                 await ctx.context(QUESTIONS[n % len(QUESTIONS)], token_budget=8000)
