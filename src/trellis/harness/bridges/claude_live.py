@@ -90,7 +90,14 @@ from trellis.contracts import Interrupt, InterruptResolution, RunStatus
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges.claude import JournalSessions, TaskEnded, TaskStarted, ours, task_said
+from trellis.harness.bridges.claude import (
+    JournalSessions,
+    SessionCost,
+    TaskEnded,
+    TaskStarted,
+    ours,
+    task_said,
+)
 from trellis.harness.bridges.helpers import Kind, ended
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
@@ -672,8 +679,9 @@ class LiveSession:
         self.closed = False
         #: why the process ended, when it ended of itself with an error
         self.error: BaseException | None = None
-        #: the process's running cost as the last charged result carried it
-        self.billed = 0.0
+        #: the session's running cost as the last charged result carried it, shared with
+        #: the spending of the query it serves (``bridges.claude.SessionCost``)
+        self.cost = SessionCost()
         #: the turn left before its own result (paused, cancelled): the result that comes
         #: next is its own, what it spent its run's — never the conversation's next turn's
         self.left: Turn | None = None
@@ -1169,10 +1177,10 @@ class LiveSession:
     def charged(self, result: Any, *, own: bool = True, taken: bool = True) -> Any:
         """``result`` with the cost the turn it ends is charged (``taken``: the turn being
         served; ``own``: a turn a caller sent, not one the session injected). The cost a
-        result carries is the process's running total: what it grew by since the last result
-        charged (a total that did not grow is taken as the growth: never less than nothing)
-        is shared by the tokens each used since — the turn its own usage, each background
-        run what its subagent's replies used. The share of a turn no run is served for is
+        result carries is the session's running total: what it grew by since the last result
+        charged (``SessionCost.grew_by``: all of a total that was reset) is shared by the
+        tokens each used since — the turn its own usage, each background run what its
+        subagent's replies used. The share of a turn no run is served for is
         the run's whose task's end the session ran it for; with none, it stays for the
         conversation's next turn, as the whole does with no background run to charge."""
         open_ = [b for b in self.background.values() if not b.over]
@@ -1184,21 +1192,19 @@ class LiveSession:
         if result.total_cost_usd is None or not (taken or runs or after):
             return result
         total = float(result.total_cost_usd)
-        more = total - self.billed
-        more = more if more >= 0 else total
+        more = self.cost.grew_by(total)
         mine = _tokens(result.usage)
         whole = mine + sum(b.unbilled for b in runs)
         share = more * mine / whole if whole else more
         for found in runs:
             found.spent(None, more * found.unbilled / whole)
             found.unbilled = 0
-        self.billed = total
         if taken:
             return dataclasses.replace(result, total_cost_usd=share)
         if after is not None:
             after.spent(None, share)
         else:
-            self.billed -= share
+            self.cost.owed(share)
         return result
 
     # ------------------------------------------------------------------ its end

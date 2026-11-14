@@ -325,6 +325,11 @@ cancelled after its start (the task is cancelled with it). See
 - **What Claude Code says beside its replies is on the run's stream**: its rate limit, a
   retried model call, a compacted context, a model fallback, a session-store miss and a
   failed reply were dropped; each is a warning with its own code.
+- **A conversation reset is charged what the session cost since** (ARCH-13). A result
+  carries its session's running cost, which Claude Code zeroes when the conversation is
+  replaced: a turn in a process of its own counted the lower total as nothing spent, so the
+  spend escaped the run's budget. One `SessionCost` owns the rule for a query and for a
+  kept process: all of a total lower than the last seen is charged.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.

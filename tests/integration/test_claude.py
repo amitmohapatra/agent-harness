@@ -853,6 +853,33 @@ async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
     assert result.error.code == BUDGET_EXCEEDED and f"turn limit ({limit})" in result.error.message
 
 
+@pytest.mark.parametrize("kept", [False, True], ids=["own-process", "live"])
+async def test_a_conversation_reset_is_charged_what_the_session_cost_since(
+    harness: Harness, tmp_path: Path, kept: bool
+) -> None:
+    """ARCH-13: a result carries its session's running cost, and Claude Code zeroes it when
+    the conversation is replaced. Three turns of one conversation, 0.5 a step: three steps
+    (1.5), then a reset and one step (the total is 0.5: lower than the last seen), then one
+    more (1.0). Each turn is charged what it cost — the turn after the reset its 0.5, not
+    nothing — in a process kept for the conversation and in one process a turn alike."""
+    reads = [{"builtin": "Read", "args": {"file_path": f"f{n}"}} for n in range(2)]
+    turns = [[*reads, {"text": "one"}], [{"reset": True}, {"text": "two"}], [{"text": "three"}]]
+    own = {} if kept else {"max_budget_usd": 100.0}  # a budget of its own: a process a query
+    target = options(tmp_path, [], model="m", **own)
+    target.env.update(FAKE_CLAUDE_TURNS=json.dumps(turns), FAKE_CLAUDE_COST="0.5")
+    agent = harness.wrap(target, id="reset")
+    charged = []
+    for said in ("one", "two", "three"):
+        events = [e async for e in agent.stream("go on", user="u1", thread="t1")]
+        assert events[-1].data["result"] == said
+        charged.append(events[-1].data["spent"]["cost"])
+    assert charged == [1.5, 0.5, 0.5]
+    pids = {
+        json.loads(line)["pid"] for line in (tmp_path / "cli.json.turns").read_text().splitlines()
+    }
+    assert len(pids) == (1 if kept else 3)
+
+
 async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost_once(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -654,12 +654,13 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
     from trellis.harness import budget
     from trellis.harness.adapters.claude import Spending
     from trellis.harness.bounded import LRU
+    from trellis.harness.bridges.claude import SessionCost
     from trellis.harness.journal import Journal
 
     charged: list[dict[str, Any]] = []
     journal = Journal()
     runtime = SimpleNamespace(replay=SimpleNamespace(journal=journal))
-    costs: LRU[str, float] = LRU()
+    costs: LRU[str, SessionCost] = LRU()
     spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
     account = budget.account
     try:
@@ -671,6 +672,49 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
         budget.account = account
     assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
     assert journal.session_cost == 0.0 and "" not in costs
+
+
+def test_a_sessions_cost_grows_is_reset_and_grows_again() -> None:
+    """ARCH-13: a result carries its session's running total, and is charged what the total
+    grew by since the last one charged. A total lower than the last seen is a reset (Claude
+    Code zeroes its totals when the conversation is replaced): the whole new total is
+    charged — never nothing, which would hide spend from the budget."""
+    from trellis.harness.bridges.claude import SessionCost
+
+    cost = SessionCost(0.5)  # what the session cost before, as its journal kept it
+    assert cost.grew_by(1.25) == 0.75 and cost.total == 1.25
+    assert cost.grew_by(1.25) == 0.0  # a turn that cost nothing
+    assert cost.grew_by(0.25) == 0.25 and cost.total == 0.25  # a reset: all of it
+    assert cost.grew_by(1.0) == 0.75  # and growth from there
+    cost.owed(0.5)  # a share nobody was charged stays for the next result
+    assert cost.grew_by(1.0) == 0.5
+
+
+def test_the_budget_stops_a_run_at_its_limit_across_a_reset() -> None:
+    """ARCH-13: three results of one run, the session reset between them (0.6, then 0.2,
+    then 0.5): the run spent 0.6 + 0.2 + 0.3 and is past its 1.0, where counting a lower
+    total as nothing spent left it at 0.9, under its limit. The journal keeps the total."""
+    from types import SimpleNamespace
+
+    from trellis.harness import budget
+    from trellis.harness.adapters.claude import Spending
+    from trellis.harness.bounded import LRU
+    from trellis.harness.bridges.claude import SessionCost
+    from trellis.harness.journal import Journal
+
+    journal = Journal()
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=journal), budget=budget.Budget(max_cost=1.0), parent=None
+    )
+    costs: LRU[str, SessionCost] = LRU()
+    spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
+    for total in (0.6, 0.2, 0.5):
+        assert budget.reached(runtime) is None  # type: ignore[arg-type]
+        ended = SimpleNamespace(total_cost_usd=total, session_id="s1", usage={}, num_turns=1)
+        spending.ended(ended, None)
+    assert journal.spent["cost"] == pytest.approx(1.1)
+    assert budget.reached(runtime) is not None  # type: ignore[arg-type]
+    assert journal.session_cost == 0.5 and costs["s1"].total == 0.5
 
 
 def test_the_question_is_the_last_user_message_the_harness_put_after_the_context() -> None:

@@ -70,6 +70,35 @@ def ours(matcher: Any) -> bool:
     return bool(matcher.hooks) and all(hook in _OURS for hook in matcher.hooks)
 
 
+class SessionCost:
+    """One Claude session's running cost, as the last of its results that was charged carried
+    it. A result's ``total_cost_usd`` is its session's running total — its turns and the
+    attempts before it included, on whatever process — so a result is charged what the total
+    grew by since. One object owns that for a session: a query's spending
+    (``adapters.claude.Spending``) and the conversation's live session
+    (``claude_live.LiveSession``) share it, and the run's journal keeps its ``total``
+    (``Journal.session_cost``) for an attempt elsewhere."""
+
+    __slots__ = ("total",)
+
+    def __init__(self, total: float = 0.0) -> None:
+        self.total = total
+
+    def grew_by(self, total: float) -> float:
+        """What a result that carries ``total`` is charged, the total now the last charged. A
+        total lower than the last is a reset — Claude Code zeroes its totals when the
+        conversation is replaced (the SDK's ``ConversationResetMessage``) — and all of the
+        new total is charged: counted as nothing, the spend would escape the budget."""
+        more = total - self.total if total >= self.total else total
+        self.total = total
+        return more
+
+    def owed(self, share: float) -> None:
+        """``share`` of what a result was charged went to nobody (a turn no run was served
+        for): it is in what the session's next result is charged."""
+        self.total -= share
+
+
 #: The ``task_type`` of a dynamic workflow's task (it names no ``is_backgrounded``: it is
 #: always in the background).
 WORKFLOW_TASK: Final = "local_workflow"

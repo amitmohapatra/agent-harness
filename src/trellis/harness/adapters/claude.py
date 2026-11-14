@@ -110,6 +110,7 @@ from trellis.harness.adapters.base import (
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.claude import (
     JournalSessions,
+    SessionCost,
     TaskEnded,
     TaskStarted,
     after_theirs,
@@ -430,7 +431,7 @@ class ClaudeAdapter:
         self.live = LiveSessions()
         #: what each session cost so far, as its last result charged here carried it (the
         #: most recent): a process that resumes one reports the session's cost, not its own
-        self.costs: LRU[str, float] = LRU()
+        self.costs: LRU[str, SessionCost] = LRU()
 
     async def aclose(self) -> None:
         """The agent is closing: every conversation's live session ends."""
@@ -819,11 +820,13 @@ class ClaudeAdapter:
                 owner=(runtime.tenant, runtime.user),
                 among=list(among.values()),
             )
-            if found is not None and session is not None:
+            if found is not None:
                 # a process that resumes a session reports the session's cost: what its
                 # first turn is charged counts from what the session cost before (the
                 # journal's, on any worker)
-                found.billed = spending.billed
+                found.cost = spending.cost
+        else:  # the session's running cost is the one its process has been charged from
+            spending.cost = found.cost
         _said(self.live, runtime)
         if found is not None and unsent:
             await found.asks(runtime)
@@ -1085,16 +1088,17 @@ class Spending:
     bundled CLI's results, driven against a scripted model). So each reply's usage is kept
     by its message id until a result counts it — the main agent's are in the result's
     usage, its subagents' are counted with it — and a result is charged what the session's
-    cost grew by since the last one charged: this query's (it gives one for the turn and
-    one for every turn the session ran for a background task), an earlier query's of the
-    run (the journal's ``session_cost``), or the conversation's last turn's in this process
+    cost grew by since the last one charged (``bridges.claude.SessionCost``, which the live
+    session serving the query shares): this query's (it gives one for the turn and one for
+    every turn the session ran for a background task), an earlier query's of the run (the
+    journal's ``session_cost``), or the conversation's last turn's in this process
     (``ClaudeAdapter.costs``) — journaled as the query starts, so an attempt that resumes
     the session after a pause before any result is charged its own cost, on any worker."""
 
-    __slots__ = ("billed", "costs", "helped", "journal", "options", "own", "results", "runtime")
+    __slots__ = ("cost", "costs", "helped", "journal", "options", "own", "results", "runtime")
 
     def __init__(
-        self, runtime: Runtime, options: Any, costs: LRU[str, float], session: str | None
+        self, runtime: Runtime, options: Any, costs: LRU[str, SessionCost], session: str | None
     ) -> None:
         self.runtime = runtime
         self.options = options
@@ -1107,14 +1111,15 @@ class Spending:
         if session is None:  # a new session: nothing was spent in it
             self.journal.session_cost = None
         known = self.journal.session_cost
-        if known is None and session is not None:
-            known = costs.get(session)
-        #: the session's running cost, as the last result charged carried it
-        self.billed = known or 0.0
+        found = None if session is None or known is not None else costs.get(session)
+        #: the session's running cost (the journal's, an earlier attempt's of the run; else
+        #: the one its last turn in this process left): shared with the live session that
+        #: serves the query (``ClaudeAdapter._live``)
+        self.cost = found if found is not None else SessionCost(known or 0.0)
         if session is not None:
             # in the journal from the start: an attempt that pauses before its first result
             # leaves it to the one that resumes the session, on any worker
-            self.journal.session_cost = self.billed
+            self.journal.session_cost = self.cost.total
 
     def replied(self, message: Any) -> None:
         """An assistant message: its reply's usage (one reply comes as a message a block)."""
@@ -1124,16 +1129,14 @@ class Spending:
 
     def ended(self, result: Any, live: LiveSession | None) -> None:
         """A turn's result. One of a ``live`` session comes with what its turn is charged
-        (``claude_live.LiveSession.charged``, which keeps the running cost)."""
+        (``claude_live.LiveSession.charged``, which read the running cost they share)."""
         cost = result.total_cost_usd
-        if live is not None:
-            self.billed = live.billed
-        elif cost is not None:
-            cost, self.billed = max(0.0, cost - self.billed), cost
-        self.journal.session_cost = self.billed
+        if live is None and cost is not None:
+            cost = self.cost.grew_by(cost)
+        self.journal.session_cost = self.cost.total
         self.results += 1
         if result.session_id:
-            self.costs[result.session_id] = self.billed
+            self.costs[result.session_id] = self.cost
         # a turn no reply of the model's is in — one the CLI answered itself, a slash
         # command (``/compact``: ``num_turns`` 0) — is no model call: the run, its answer
         # empty, is one no model replied in (``pipeline._unanswered``)

@@ -303,6 +303,9 @@ class Cli:
         #: the session's (the bundled CLI's resumed query reports the cost of the turns
         #: before it too), while ``--max-budget-usd`` caps what this process spends
         self.before = 0
+        #: the steps taken when the conversation was last reset: the running cost counts from
+        #: there
+        self.zeroed = 0
 
     @property
     def working(self) -> dict[str, str]:
@@ -903,20 +906,26 @@ class Cli:
         own = self.steps - self.helped - self.began
         self.kept()
         if "--session-mirror" in sys.argv:  # the transcript holds what the session cost
-            entry = {"type": "progress", "uuid": f"{session}-spent-{self.before + self.steps}"}
+            entry = {"type": "progress", "uuid": f"{session}-spent-{self.total()}"}
             path = projects() / "fake-project" / f"{session}.jsonl"
-            mirrored_ = {**entry, "spent": self.before + self.steps}
+            mirrored_ = {**entry, "spent": self.total()}
             send({"type": "transcript_mirror", "filePath": str(path), "entries": [mirrored_]})
         structured, self.structured = self.structured, None
         if structured is not None and error is None:
             fields = {**fields, "last": json.dumps(structured), "structured": structured}
-        return result(session, error, steps=own, total=self.before + self.steps, **fields)
+        return result(session, error, steps=own, total=self.total(), **fields)
+
+    def total(self) -> int:
+        """The steps the session's running cost counts: all it took, before this process
+        and in it, since the conversation was last reset (``{"reset": true}``: the real CLI
+        zeroes its totals when the conversation is replaced)."""
+        return self.before + self.steps - self.zeroed
 
     def kept(self) -> None:
         """What the session cost so far, kept with it (also as the process ends: a query
         that paused has no result)."""
         if self.session is not None:
-            spent_file(self.session).write_text(str(self.before + self.steps))
+            spent_file(self.session).write_text(str(self.total()))
 
     def recorded(
         self, session: str, prompt: Any, context: str, earlier: list[str], *, first: bool
@@ -1016,8 +1025,14 @@ class Cli:
         if "stall" in item:  # the model says nothing for a while, then goes on
             self.wait(float(item["stall"]))
             return None, read, True, False, 0
-        if "frame" in item:  # a frame the CLI sends beside the model's replies, as given
-            send({**item["frame"], "session_id": session, "uuid": str(uuid.uuid4())})
+        if "reset" in item or "frame" in item:
+            # a frame the CLI sends beside the model's replies: the one given, or the
+            # conversation's reset (its running totals start again from here)
+            frame = item.get("frame")
+            if frame is None:
+                self.zeroed = self.before + self.steps
+                frame = {"type": "conversation_reset", "new_conversation_id": str(uuid.uuid4())}
+            send({**frame, "session_id": session, "uuid": str(uuid.uuid4())})
             return None, read, True, False, 0
         if "background" in item or "workflow" in item:
             read, completed, interrupted = self.background(session, step, item)

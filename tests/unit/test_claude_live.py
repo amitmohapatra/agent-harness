@@ -414,7 +414,7 @@ async def test_the_share_of_a_turn_no_run_is_served_for_stays_for_the_next_turn(
     assert charged.total_cost_usd == 0.003  # the result as it came
     [(usage, share)] = found._owed  # no attempt under way: the next one's
     assert usage is None and round(share, 6) == 0.001
-    assert round(session.billed, 6) == 0.001 and found.unbilled == 0
+    assert round(session.cost.total, 6) == 0.001 and found.unbilled == 0
     await ended(session, found, store)
 
 
