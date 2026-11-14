@@ -896,12 +896,16 @@ def test_a_querys_rows_past_what_a_query_loads_are_shown_and_not_kept(
 
     names = ["sku", "units"]
     assert query._whole(Cursor([("s1", 3)]), names) == ("sku,units\ns1,3", None)
+    two = "sku,units\ns1,3\ns2,4"
+    assert query._whole(Cursor([("s1", 3), ("s2", 4)]), names) == (two, two)
     many = [(f"s{n}", n) for n in range(query.ROWS + 5)]
     shown, kept = query._whole(Cursor(list(many)), names)
     assert shown.endswith(
         f"only the first {query.ROWS} rows: aggregate, or narrow it with WHERE / LIMIT]"
     )
     assert kept is not None and kept.splitlines()[-1] == f"s{query.ROWS + 4},{query.ROWS + 4}"
+    monkeypatch.setattr(query, "LOAD_CHARS", len(kept) + 1)  # exactly, with its last newline
+    assert query._whole(Cursor(list(many)), names) == (shown, kept)
     monkeypatch.setattr(query, "LOAD_CHARS", 100)
     again, dropped = query._whole(Cursor(list(many)), names)
     assert again == shown and dropped is None
