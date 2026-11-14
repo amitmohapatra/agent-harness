@@ -318,6 +318,10 @@ class Journal(BaseModel):
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
+    #: the reads a framework ran itself and reported (Claude Code's built-ins: ``bridge.observed``)
+    #: journaled since the run's last write, by call key: the write drops their records — a
+    #: read is not answered across a write with what it returned before it (``Replay.wrote``)
+    reread: list[str] = Field(default_factory=list)
     #: that session's running cost, as the last of its results this run was charged carried
     #: it (a Claude Agent SDK result's cost is its session's, the turns and the attempts
     #: before it included): its next result is charged what the cost grew by
@@ -736,6 +740,22 @@ class Replay:
         """The call ``key`` — one that does more than read — is made in the step under way
         (``Journal.effects``)."""
         self.journal.effects.append((self._here(), key))
+
+    def read(self, key: str) -> None:
+        """The record just made of ``key`` is a read's its framework ran: answered from the
+        journal when made again only until a write of the run (:meth:`wrote`)."""
+        if key not in self.journal.reread:
+            self.journal.reread.append(key)
+
+    def wrote(self) -> None:
+        """A write of the run ran. The reads journaled before it (:meth:`read`) may have read
+        what it changed: their records are dropped, so one made again — by a query run again
+        from its prompt, a subagent started again — runs again; the write's own record
+        stands, and it runs once."""
+        for key in self.journal.reread:
+            self.journal.calls.pop(key, None)
+            self.journal.reads.pop(key, None)
+        self.journal.reread.clear()
 
     def record_step(self, call: ToolCall, outcome: ToolOutcome) -> None:
         """A call that ran, and its outcome, on the run's trajectory (the call without the

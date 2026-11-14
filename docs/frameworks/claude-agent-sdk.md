@@ -266,7 +266,10 @@ the call (the approved call runs once). Every decision works: `approve`, `reject
 **On failure.** The CLI keeps its sessions on its machine (or in your `session_store`). A run
 resumed where the CLI does not hold the session (another worker's machine) gets a `warning`
 event (`claude_session`) and runs the query again from its prompt, against the journal — the
-harness calls already made are not made again; the built-ins run again.
+harness calls already made are not made again, and a built-in that already ran is answered
+with what it returned: a write runs once. A read is answered so only until a write of the
+run: one made before a later write runs again, since what it read may be what the write
+changed.
 
 ## The run's own options
 
@@ -428,6 +431,12 @@ turn the session runs by itself (a finished task's notification) is never a user
   the date once a session (and again when the day changes), so each turn the process serves
   is told the day and the hour it is with its prompt (the context hook's text, after
   memory's), whatever time has passed since its first.
+* Your own hooks go on running between the turns, as Claude Code runs them (seen with the
+  bundled CLI, 2.1.325): a background subagent's `SubagentStop`, then, for the turn the
+  session runs by itself once a task ended, `UserPromptSubmit` (the task's notification as
+  the prompt), the hooks of its calls and `Stop`. With no run under way they run in no run's
+  context (`trellis.current()` is `None`), once each; a tool call of such a turn is still
+  refused, since no run can decide or record it.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 in that server

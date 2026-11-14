@@ -361,13 +361,18 @@ async def observed(
         if not outcome.ok:
             span.set_status(StatusCode.ERROR, str(outcome.status.value))
     runtime.used.add(spec.name)
+    key = call_key(spec.name, args)
+    if spec.side_effects != "read":  # the reads before it are not answered across it
+        runtime.replay.wrote()
     if outcome.ok:  # made again (its framework begins that work again), it is not run twice
-        key, helpers = call_key(spec.name, args), runtime.helpers
+        helpers = runtime.helpers
         replays = helpers is not None and helpers.begun_again() is not None
         kept = (
             outcome if replays else outcome.model_copy(update={"output": preview(outcome.output)})
         )
         runtime.replay.record_call(key, journal_record(kept), scope=key)
+        if spec.side_effects == "read":
+            runtime.replay.read(key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
@@ -662,6 +667,8 @@ async def _record(
 ) -> None:
     """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
     attempt), saved, counted and recorded."""
+    if decision.risk != "read":  # what a framework read itself before it is read anew
+        runtime.replay.wrote()
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
         runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     elif decision.risk != "read":

@@ -52,6 +52,32 @@ def test_the_nth_occurrence_of_a_call_gets_the_nth_recorded_output() -> None:
     assert again.call("k") == (False, None)
 
 
+def test_a_read_its_framework_ran_is_answered_from_the_journal_until_a_write() -> None:
+    """The replay rule, by call identity: a read a framework ran itself and reported is
+    answered with its record when made again — until a write of the run, which drops the
+    reads journaled before it (each runs again) and keeps every write's own record (a write
+    runs once). A read journaled after the write is answered again; the journal round-trips
+    with what it keeps."""
+    journal = Journal()
+    first = Replay(journal)
+    for _ in range(2):  # the same read twice: two records of one call
+        first.record_call("read-notes", "old")
+        first.read("read-notes")
+    first.record_call("list-files", "a b")  # a call that says nothing of what it is: kept
+    assert journal.reread == ["read-notes"]
+    first.wrote()
+    first.record_call("write-notes", "written")
+    first.record_call("read-other", "x")
+    first.read("read-other")
+
+    again = Replay(Journal.model_validate(journal.model_dump(mode="json")))
+    assert again.call("read-notes") == (False, None)  # before the write: it runs again
+    assert again.call("write-notes") == (True, "written")  # the write ran once
+    assert again.call("list-files") == (True, "a b")
+    assert again.call("read-other") == (True, "x")  # journaled since the write
+    assert again.journal.reread == ["read-other"]
+
+
 def test_an_answer_is_filed_under_the_pending_question_and_survives_a_round_trip() -> None:
     interrupt = Interrupt(tenant_id="t", run_id="r", question="Which?")
     journal = Journal(pending=Pending(key="q", interrupt=interrupt))
