@@ -169,11 +169,13 @@ class Tool:
     #: made), its memory, a sub-agent (whose own calls are governed) — or a framework's own tool
     #: (Deep Agents' files and ``execute``). Set by the harness only.
     confined: bool = False
-    #: Tried again after an error that may pass (:func:`retries_of`): ``False`` for a framework's
-    #: own tool whose error goes back to a framework that could try it again itself (a LangGraph
-    #: graph's, through a wrapper around its tool node: its ``ToolRetryMiddleware``), whose
-    #: tries are then the call's. Set by the harness.
-    retried: bool = True
+    #: A framework's own tool whose error goes back to its framework (a LangGraph graph's: raised
+    #: into it), which may try the call again itself: the call is tried once here, and an error
+    #: it would be tried again after (:func:`retries_of`, :func:`may_pass`) is handed to this,
+    #: with how many tries again it is owed — the harness tries it again around the framework's
+    #: handling of it, where the framework did not (``middleware.govern_tool_nodes``). Set by the
+    #: harness.
+    deferring: Callable[[Exception, int], None] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
@@ -311,14 +313,16 @@ async def execute(
         return await tool.run(args)
 
     began = time.monotonic()
+    retries = retries_of(tool.spec, reads=reads)
     try:
         async with within or asyncio.timeout(tool.timeout):
-            retries = retries_of(tool.spec, reads=reads) if tool.retried else 0
-            output = await retried(once, retries=retries)
+            output = await retried(once, retries=0 if tool.deferring else retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
+            if tool.deferring is not None and retries and may_pass(exc):
+                tool.deferring(exc, retries)  # tried again around its framework's handling
             failed = ToolOutcome(
                 tool=tool.name,
                 status=ToolStatus.ERROR,
@@ -364,17 +368,11 @@ async def retried(
     raised. The caller's timeout bounds the whole of it."""
 
     def passes(exc: BaseException) -> bool:
-        if is_pause_signal(exc) or not isinstance(exc, Exception):
-            return False
-        if not AgentError.of(exc).retryable:
-            return False
-        after, remaining = retry_after(exc), (left or _left)()
-        return after is None or remaining is None or after <= remaining
+        return may_pass(exc, left)
 
     def wait(state: RetryCallState) -> float:
-        backoff = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (state.attempt_number - 1))
         error = state.outcome.exception() if state.outcome is not None else None
-        return max(backoff, (retry_after(error) if error is not None else None) or 0.0)
+        return backoff(state.attempt_number, error)
 
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(retries + 1),
@@ -386,6 +384,26 @@ async def retried(
         with attempt:
             return await call()
     raise AssertionError("unreachable: tenacity returns or raises")  # pragma: no cover
+
+
+def may_pass(exc: BaseException, left: Callable[[], float | None] | None = None) -> bool:
+    """Whether a call that raised ``exc`` is tried again: an error that may pass (its own
+    ``retryable``, or its category's) and does not say to come back later than the time
+    ``left`` (the run's, the call's). Never a pause."""
+    if is_pause_signal(exc) or not isinstance(exc, Exception):
+        return False
+    if not AgentError.of(exc).retryable:
+        return False
+    after, remaining = retry_after(exc), (left or _left)()
+    return after is None or remaining is None or after <= remaining
+
+
+def backoff(attempt: int, error: BaseException | None) -> float:
+    """How long to wait before trying a call again after its ``attempt``-th try failed with
+    ``error``: a random wait under :data:`RETRY_BACKOFF_SECONDS`, doubled for each try, or the
+    error's own ``Retry-After`` when longer."""
+    waited = random.uniform(0, RETRY_BACKOFF_SECONDS * 2 ** (attempt - 1))
+    return max(waited, (retry_after(error) if error is not None else None) or 0.0)
 
 
 def retry_after(exc: BaseException) -> float | None:

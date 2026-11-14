@@ -8,10 +8,12 @@ graph without the harness — unless the graph runs the harness's own middleware
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
+from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ToolErrorMiddleware,
@@ -23,6 +25,7 @@ from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.types import RetryPolicy
 
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
@@ -400,16 +403,71 @@ async def test_the_graphs_retry_policy_is_the_one_that_tries_the_call(
     assert result.answer == "down" and ran == ["stock a"] * 3
 
 
-async def test_a_graph_with_nothing_that_could_retry_its_tool_keeps_the_harnesss_retries(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A tool node with no wrapper around its calls (``create_agent`` with no tool-call
-    middleware): nothing of the graph's could try the call again, so a read whose error may
-    pass is tried again by the harness, as every harness call is."""
+@pytest.fixture
+def _quick_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(base, "RETRY_BACKOFF_SECONDS", 0.001)
-    fails.extend([httpx.ConnectError("shelf service refused the connection")] * 2)
+
+
+def refused(times: int) -> None:
+    """The shelf service refuses the next ``times`` connections: an error that may pass."""
+    fails.extend([httpx.ConnectError("shelf service refused the connection")] * times)
+
+
+@pytest.mark.usefixtures("_quick_retries")
+async def test_a_nodes_retry_policy_is_the_one_that_tries_the_call(harness: Harness) -> None:
+    """A tool node with no wrapper whose node has a ``RetryPolicy(max_attempts=3)``: the
+    graph runs the node again on the error, so the tool is called 3 times in all — the
+    harness tries none of the node's runs again itself."""
+    refused(10)
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "never"])
+    bound = model.bind_tools([stock])
+
+    async def think(state: Any) -> dict[str, Any]:
+        return {"messages": [await bound.ainvoke(state["messages"])]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("model", think)
+    policy = RetryPolicy(max_attempts=3, initial_interval=0.0, jitter=False)
+    graph.add_node("tools", ToolNode([stock]), retry_policy=policy)
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition)
+    graph.add_edge("tools", "model")
+    result = await harness.wrap(graph.compile(), id="policy").run("a?", user="u")
+    assert result.status is RunStatus.ERROR and ran == ["stock a"] * 3
+
+
+def plain(model: Any) -> Any:
+    return create_agent(model, [stock])
+
+
+def worded_errors(model: Any) -> Any:
+    def worded(exc: Exception, request: Any) -> str:
+        return f"stock is unavailable ({exc})"
+
+    return create_agent(model, [stock], middleware=[ToolErrorMiddleware(worded)])
+
+
+def deep(model: Any) -> Any:
+    return create_deep_agent(model=model, tools=[stock])
+
+
+def react(model: Any) -> Any:
+    return ReAct(system_prompt="Count.", model=model, tools=[stock])
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("graph_of", [plain, worded_errors, deep, react], ids=lambda f: f.__name__)
+async def test_where_the_graph_does_not_retry_its_tool_the_harnesss_retries_stand(
+    harness: Harness, graph_of: Callable[[Any], Any]
+) -> None:
+    """A read whose error may pass, in a graph that does not try it again itself — no
+    wrapper (``create_agent`` with no tool-call middleware), or wrappers that only handle the
+    error: ``ToolErrorMiddleware``, Deep Agents' own (its file middleware wraps every call),
+    ``ReAct``'s ``GovernTools`` over its own LangChain tool: the harness tries it again as it
+    tries any read, 3 times in all, and the model reads the result."""
+    refused(2)
     model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
-    result = await harness.wrap(create_agent(model, [stock]), id="shelf").run("a?", user="u")
+    result = await harness.wrap(graph_of(model), id="shelf").run("a?", user="u")
     assert result.answer == "7" and ran == ["stock a"] * 3
     assert told(model).content == "a: 7"
 
