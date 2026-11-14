@@ -13,7 +13,9 @@ worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``
 is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
 agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the time it already
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
-``CANCELLED`` with the reason.
+``CANCELLED`` with the reason. Either way the children it still has open — a sub-agent's run
+inside one of its calls, a helper a framework spawned in the foreground — end with it, as it
+ended (:func:`_children_ended`).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -189,9 +191,51 @@ async def attempt(
     A run of a conversation (its thread) waits while another run of the same conversation and
     agent works in this process: a second message to a busy conversation is answered after
     the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's are not held here. ``mode`` says
+    ``concurrency_key``). A sub-agent's run and a worker's do not wait here. ``mode`` says
     what a run sent while another holds the conversation's turn does instead of waiting
-    (``conversation.Mode``: :func:`_arrived`)."""
+    (``conversation.Mode``: :func:`_arrived`).
+
+    A run this process executes without a worker's lease — every run but a claimed one — is
+    held in the run store while its attempt is under way, waiting its turn included
+    (``holding``): a process that dies with it leaves a run the store ends, not one
+    ``RUNNING`` for ever. A claimed run is its lease's (its worker heartbeats it)."""
+    held: contextlib.AbstractAsyncContextManager[Any] = (
+        contextlib.nullcontext()
+        if job is not None
+        else agent.harness.holds.holding(record.run_id, record.tenant_id)
+    )
+    async with held:
+        return await _turned(
+            agent,
+            record,
+            input,
+            journal=journal,
+            resolution=resolution,
+            listener=listener,
+            job=job,
+            remaining=remaining,
+            observe=observe,
+            parent=parent,
+            mode=mode,
+        )
+
+
+async def _turned(
+    agent: Agent,
+    record: RunRecord,
+    input: Any,
+    *,
+    journal: Journal | None,
+    resolution: InterruptResolution | None,
+    listener: Callable[[RunEvent], None] | None,
+    job: Job | None,
+    remaining: float | None,
+    observe: Callable[[PromptContext | None], None] | None,
+    parent: Runtime | None,
+    mode: Mode,
+) -> Result:
+    """The attempt (:func:`attempt`): the conversation's turn taken — or what a run sent
+    while another holds it does instead — then :func:`_attempt`."""
     if job is not None or parent is not None:
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:
@@ -666,15 +710,59 @@ async def _cancelled(
     stalled = STALLED in exc.args and runtime.stalled is not None
     stopped = not stalled and _out_of_time(job, exc)
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
-        settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
+        # a sub-agent's run its parent's clock cut off ends with its parent, as it ends
+        # (``_children_ended``): out of time
+        settles = (job is None and not _parent_out_of_time(runtime)) or (
+            job is not None and job.cancel_requested and RELEASED not in exc.args
+        )
         identity, events = runtime.identity, runtime.events
         ended = settles and await _settle_cancelled(
-            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
+            agent,
+            identity,
+            events,
+            runtime.worker_id,
+            spent=budget.spent(runtime),
+            kept=journal.handed_on,
         )
         if ended:
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
+
+
+def _parent_out_of_time(runtime: Runtime) -> bool:
+    """Whether the run whose call this one works in (a sub-agent's parent) is past its time:
+    its clock is what cut this attempt off."""
+    parent = runtime.parent
+    return parent is not None and parent.ends_at is not None and time.monotonic() >= parent.ends_at
+
+
+async def _children_ended(
+    agent: Agent,
+    run_id: str,
+    tenant: str,
+    status: RunStatus,
+    *,
+    kept: Collection[str] = (),
+    error: AgentError | None = None,
+    reason: str | None = None,
+) -> None:
+    """The run ended out of time (``TIMEOUT``, its ``error``) or cancelled (``CANCELLED``, its
+    ``reason``) with children still open — a sub-agent's run its call was working on, a helper
+    a framework spawned in the foreground — that nothing else will end: each ends as the run
+    did, and so do theirs. A helper handed on past its attempt (``kept``: the run's
+    ``Journal.handed_on``, a Claude subagent working in the background of its session — only
+    a conversation's turn has one) is its keeper's to end, and goes on."""
+    runs = agent.harness.runs
+    async for child in runs.iterate(parent_run_id=run_id, status=RunStatus.RUNNING, tenant=tenant):
+        if child.run_id in kept:
+            continue
+        with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
+            if status is RunStatus.TIMEOUT:
+                await runs.finish(child.run_id, status, error=error, tenant=tenant)
+            else:
+                await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
 
 
 def _stalled(runtime: Runtime) -> Exception | None:
@@ -759,6 +847,7 @@ async def _concluded(
             runtime.worker_id,
             reason=runtime.cancelled,
             spent=budget.spent(runtime),
+            kept=journal.handed_on,
         )
         said = _transcript(runtime, extracted, RunStatus.CANCELLED)
         await agent.recorded_run(runtime, said)  # what it said so far
@@ -767,6 +856,14 @@ async def _concluded(
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
         await agent.hooks.failed("run", TimeoutError(timed_out.message))
         result = await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
+        await _children_ended(
+            agent,
+            runtime.run_id,
+            runtime.tenant,
+            RunStatus.TIMEOUT,
+            kept=journal.handed_on,
+            error=timed_out,
+        )
     elif error is not None:
         failure = AgentError.of(error, source=agent.adapter.name)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
@@ -1317,11 +1414,13 @@ async def _settle_cancelled(
     *,
     spent: dict[str, float],
     reason: str | None = None,
+    kept: Collection[str] = (),
 ) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
-    what it ``spent`` until then), and say whether it was ended here (not ended, or taken
-    over, elsewhere already)."""
+    what it ``spent`` until then), its open children with it but those handed on (``kept``:
+    :func:`_children_ended`), and say whether it was ended here (not ended, or taken over,
+    elsewhere already)."""
 
     async def write() -> bool:
         try:
@@ -1340,6 +1439,10 @@ async def _settle_cancelled(
         said["reason"] = reason
     ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
+    if ended:
+        await _children_ended(
+            agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, kept=kept, reason=reason
+        )
     return ended
 
 

@@ -44,7 +44,7 @@ from trellis.contracts import (
     RunStatus,
     ToolCall,
 )
-from trellis.harness import budget
+from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
@@ -742,46 +742,39 @@ async def test_a_background_subagents_run_has_its_turns_deadline_for_the_run_sto
     assert child.status is RunStatus.RUNNING and child.deadline == by
 
 
-async def test_today_a_background_subagents_run_a_restart_left_open_stays_running(
-    tmp_path: Path,
+async def test_a_background_subagents_run_is_held_in_the_run_store_while_its_session_lives(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Today: a server that stops without closing its harness (it was killed) leaves a
-    background subagent's child run ``RUNNING`` in the run store, its process and its task
-    gone. With a deadline, agent-runs ends it then (above), and with the service's own
-    limit (``RUNS__LIMITS__MAX_RUN_SECONDS``) once it has run that long; with neither,
-    nothing ends it: agent-runs ends a run whose worker stopped only for a run a worker
-    claimed from the queue (``requeue_lapsed``: a lease), and a child run is started, not
-    claimed; its time limit can be set only as it starts, before Claude Code says the
-    subagent works in the background, and a foreground subagent's run, ``RUNNING`` while
-    the run that started it waits for a person, must not be timed out by it; and the
-    conversation's next turn may be served by another server while the one that holds the
-    session still runs, so it cannot end the run either. What a user needs: a run nothing
-    works on is ended saying so — the run store would need to know who holds it."""
-    from trellis.contracts import RunStart
+    """The session holds its background subagent's run in the run store (``holding``: a
+    heartbeat every third of ``HOLD_SECONDS``, naming this harness) for as long as the run goes
+    on, past the turn that started it — whose own run was held while its attempt ran, and is no
+    more — so a server that dies without closing the session stops holding it
+    (``test_killed_server``). The holds end with the run."""
+    monkeypatch.setattr(holding, "HOLD_SECONDS", 1)
+    beats: list[tuple[str, str, int]] = []
+    beating = harness.runs.heartbeat
 
-    store = LocalRuns()
-    async with Harness(config=Settings(), runs=store) as before:
-        first = await before.wrap(options(tmp_path, [[{"text": "ok"}]]), id="chat").run(
-            "research the market", user="u1", thread="t1"
-        )
-    # what the killed server left of the subagent turn 1 started in the background
-    left = RunStart(
-        run_id="run_left_open",
-        tenant_id="default",
-        agent_id="chat",
-        parent_run_id=first.run_id,
-        thread_id="run_left_open",
-        user_id="u1",
-        input="research the market",
-        metadata={HELPER: {"framework": "claude_agent_sdk", "kind": "subagent", "name": "r"}},
-    )
-    await store.start(left)
-    async with Harness(config=Settings(), runs=store) as after:
-        agent = after.wrap(options(tmp_path, [[{"text": "back"}]]), id="chat")
-        events = [e async for e in agent.stream("and now?", user="u1", thread="t1")]
-        assert events[-1].data["result"] == "back" and warned(events) == []
-        child = await child_of(after, first.run_id)
-    assert child.status is RunStatus.RUNNING
+    async def heartbeat(run_id: str, worker_id: str, **given: Any) -> Any:
+        beats.append((run_id, worker_id, given["lease_seconds"]))
+        return await beating(run_id, worker_id, **given)
+
+    monkeypatch.setattr(harness.runs, "heartbeat", heartbeat)
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "ok"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="held")
+    first = await agent.run("research the market", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    assert (first.run_id, harness.holds.name, 1) in beats  # while its attempt ran
+    beats.clear()
+    await until(lambda: len(beats) >= 3)
+    assert set(beats) == {(child.run_id, harness.holds.name, 1)}
+    assert harness.holds.holds(child.run_id) and not harness.holds.holds(first.run_id)
+
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+    await until(lambda: not harness.holds.holds(child.run_id))
+    held = len(beats)
+    await asyncio.sleep(0.5)  # past a heartbeat's rhythm: no more
+    assert len(beats) == held
 
 
 async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_process(
@@ -1924,7 +1917,9 @@ async def test_a_session_with_work_is_kept_past_the_idle_bound_but_not_for_ever(
     await asyncio.sleep(0.4)
     assert open_sessions(agent) == 1 and alive(one["pid"])
     await until(lambda: open_sessions(agent) == 0)
-    await until(lambda: not alive(one["pid"]))
+    # Claude Code goes on with a subagent's work once its stdin closes (as the bundled CLI
+    # does); the SDK's close stops it 5 s later
+    await until(lambda: not alive(one["pid"]), seconds=15)
     events = [e async for e in agent.stream("and?", user="u1", thread="t1")]
     [said] = warned(events)
     assert "t1 (research the market)" in said  # the task that ended with it is not lost in silence

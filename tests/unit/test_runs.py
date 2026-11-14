@@ -20,6 +20,7 @@ from trellis.contracts import (
     RunStatus,
     ScheduleSpec,
 )
+from trellis.harness import runs as local_runs
 from trellis.harness.runs import LocalRuns
 from trellis.runs import ConflictError, Lease, LeaseLostError, NotFoundError
 
@@ -108,6 +109,81 @@ async def test_queued_runs_are_claimed_once_by_agent_and_leases_expire() -> None
     await runs.heartbeat("run_a", "w3")  # no checkpoint: the one there is kept
     kept = await runs.get("run_a")
     assert kept is not None and kept.checkpoint == {"calls": {"k": ["done"]}}
+
+
+async def test_a_run_kept_in_its_callers_process_is_held_and_ended_once_the_hold_lapses() -> None:
+    """As agent-runs holds it: a heartbeat on a run started ``RUNNING`` holds it for the
+    ``worker_id``, fencing none of its caller's writes; another holder's hold in force is a
+    lost lease; a pause lets go of it; and once a hold lapses the next sweep (at a claim, as for
+    a lapsed lease) ends the run ``ERROR``, never queueing it."""
+    runs = LocalRuns()
+    await runs.start(start("run_held"))
+    await runs.start(start("run_paused"))
+    await runs.start(start("run_kept"))
+    lease = await runs.heartbeat("run_held", "p1", lease_seconds=-1, checkpoint={"calls": {}})
+    assert (lease.run_id, lease.worker_id, lease.cancel_requested) == ("run_held", "p1", False)
+    held = await runs.get("run_held")
+    assert held is not None and held.checkpoint == {"calls": {}}
+    await runs.heartbeat("run_kept", "p2", lease_seconds=60)
+    with pytest.raises(LeaseLostError):  # p2's hold is in force
+        await runs.heartbeat("run_kept", "p1")
+    await runs.heartbeat("run_paused", "p1", lease_seconds=-1)
+    await runs.pause(interrupt("run_paused"))  # no worker named: holding fences nothing
+    with pytest.raises(LeaseLostError):
+        await runs.heartbeat("run_paused", "p1")  # nothing to hold while it waits
+
+    assert await runs.claim("w", ["a"]) is None
+    ended = await runs.get("run_held")
+    assert ended is not None and ended.status is RunStatus.ERROR and ended.error is not None
+    assert (ended.error.code, ended.error.retryable) == ("holder_lost", False)
+    assert "its holder stopped: p1" in ended.error.message
+    for left in ("run_paused", "run_kept"):  # waiting for a person; held by a live holder
+        record = await runs.get(left)
+        assert record is not None and record.status is not RunStatus.ERROR
+    with pytest.raises(LeaseLostError):
+        await runs.heartbeat("run_held", "p1")
+
+
+async def test_an_answered_run_held_when_it_paused_is_held_again_or_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As agent-runs: answered, a run held when it paused is whoever continues it's to hold —
+    another holder may — and one nobody holds within the grace ends ``ERROR``; a run never
+    held is left as it is."""
+    runs = LocalRuns()
+    for run_id in ("run_gone", "run_taken", "run_never"):
+        await runs.start(start(run_id))
+        if run_id != "run_never":
+            await runs.heartbeat(run_id, "p1", lease_seconds=60)
+        await runs.pause(interrupt(run_id))
+    await runs.resume(resolution("run_taken"))
+    await runs.heartbeat("run_taken", "p2", lease_seconds=60)  # another server continues it
+    await runs.resume(resolution("run_never"))
+    monkeypatch.setattr(local_runs, "RESUME_GRACE_SECONDS", -1.0)  # the grace already passed
+    await runs.resume(resolution("run_gone"))
+    assert await runs.claim("w", ["a"]) is None
+    gone = await runs.get("run_gone")
+    assert gone is not None and gone.status is RunStatus.ERROR and gone.error is not None
+    assert gone.error.code == "holder_lost"
+    assert "nobody took the run up after its answer" in gone.error.message
+    for kept in ("run_taken", "run_never"):
+        record = await runs.get(kept)
+        assert record is not None and record.status is RunStatus.RUNNING
+
+
+async def test_its_holder_lets_go_of_a_held_run_which_goes_on_unheld() -> None:
+    runs = LocalRuns()
+    await runs.start(start())
+    await runs.heartbeat("run_1", "p1", lease_seconds=-1)
+    with pytest.raises(LeaseLostError):
+        await runs.release("run_1", "p2")
+    released = await runs.release("run_1", "p1", checkpoint={"calls": {}})
+    assert released.status is RunStatus.RUNNING and released.checkpoint == {"calls": {}}
+    assert await runs.claim("w", ["a"]) is None  # its hold lapsed before: none now
+    record = await runs.get("run_1")
+    assert record is not None and record.status is RunStatus.RUNNING
+    with pytest.raises(LeaseLostError):
+        await runs.release("run_1", "p1")
 
 
 async def test_a_claim_for_a_tenant_takes_only_that_tenants_runs() -> None:

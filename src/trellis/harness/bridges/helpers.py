@@ -30,6 +30,10 @@ returned at once: :meth:`Helpers.attribute`) ends when the framework says its wo
 (:meth:`Helpers.settled`), not with its call; still at work when the attempt ends, it was cut
 off: ``ERROR``, whatever the run answered.
 
+While a helper is open its run is held in the run store (``holding``), so a process killed
+with it leaves a run the store ends; a pause lets go of it there, as of its run (the helper
+waits with it), and the attempt that takes it up again holds it again.
+
 A framework that runs several helpers at once says whose each tool call is by its own id of
 the worker (Claude Code's ``agent_id``: the task's id), which it ties to the call that started
 the helper (:meth:`Helpers.attribute`): :meth:`Helpers.of` is that helper.
@@ -222,6 +226,7 @@ class Helpers:
                 },
             )
         )
+        parent.agent.harness.holds.hold(run_id, parent.tenant)
         helper = Helper(run_id, parent.run_id, name, [Said(Speaker.USER, task)], kind=kind)
         if kind is Kind.SUBAGENT:  # its framework starts it again after a pause in its work
             helper.read = parent.replay.cursor()
@@ -264,6 +269,8 @@ class Helpers:
         if helper is not None:
             self._detached[key] = helper
             self.runtime.replay.journal.handed_on.append(helper.run_id)
+            # whoever keeps it going holds it (``claude_live.Background``)
+            self.runtime.agent.harness.holds.let_go(helper.run_id)
         return helper
 
     def named(self, name: str) -> Helper | None:
@@ -348,6 +355,7 @@ class Helpers:
         helper = self._open.pop(key, None)
         if helper is None:
             return
+        self.runtime.agent.harness.holds.let_go(helper.run_id)
         if output:
             helper.said.append(Said(Speaker.ASSISTANT, output))
         runs = self.runtime.agent.harness.runs
@@ -388,7 +396,9 @@ class Helpers:
         paused = self.runtime.pending is not None or (
             error is not None and (not isinstance(error, Exception) or is_pause_signal(error))
         )
-        if paused:
+        if paused:  # they wait with the run: let go of in the store, not left to lapse
+            for helper in self._open.values():
+                await self.runtime.agent.harness.holds.release(helper.run_id, self.runtime.tenant)
             return
         why = None if error is None else f"the run ended first: {type(error).__name__}"
         for key, helper in list(self._open.items()):

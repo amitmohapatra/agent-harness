@@ -107,7 +107,7 @@ from trellis.harness.bridges.claude import (
     session_store,
     with_context,
 )
-from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn
+from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn, gone
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -299,6 +299,9 @@ class ClaudeInput:
     #: the run paused before its prompt was sent — on the question of a background
     #: subagent's run of its conversation (``claude_live.LiveSession.asks``): it is sent now
     unsent: bool = False
+    #: that question's answer — the subagent's run, its interrupt, the person's resolution —
+    #: for when its session is not on this server (``claude_live.gone``)
+    background_answer: tuple[str, str, InterruptResolution] | None = None
 
 
 class ClaudeRunError(RuntimeError):
@@ -395,8 +398,10 @@ class ClaudeAdapter:
     ) -> Any:
         from trellis.harness.subagents import asked_by
 
-        if (asked_by(pending.interrupt) or {}).get("background"):
-            return dataclasses.replace(native_input, unsent=True)
+        named = asked_by(pending.interrupt) or {}
+        if named.get("background"):
+            answered = (str(named["run_id"]), str(named["interrupt_id"]), resolution)
+            return dataclasses.replace(native_input, unsent=True, background_answer=answered)
         return dataclasses.replace(
             native_input,
             answered=pending.call,
@@ -596,8 +601,7 @@ class ClaudeAdapter:
         target = dataclasses.replace(target, **given) if given else target
         # a skill source's plugin written for this run (its pinned skills), removed after it
         plugins, written = await skills.for_run(target.plugins)
-        if written:
-            target = dataclasses.replace(target, plugins=plugins)
+        target = dataclasses.replace(target, plugins=plugins) if written else target
         steps = Steps(runtime, self)
         # a conversation's turn is served by its live session (``bridges.claude_live``) — its
         # one last answer too, a turn of that session whose tool calls are refused (the live
@@ -625,6 +629,7 @@ class ClaudeAdapter:
         spending = Spending(runtime, options, self.costs, None if held else session)
         live: LiveSession | None = None
         turn = _turn(run, options)
+        await self._gone(runtime, native_input)
         try:
             if kept:
                 assert key is not None
@@ -655,6 +660,15 @@ class ClaudeAdapter:
             runtime.model_ended(STEP)
             skills.removed(written)
             await spending.closed(live, turn)
+
+    async def _gone(self, runtime: Runtime, native_input: Any) -> None:
+        """The answer this turn brings to a background subagent's question
+        (``background_answer``), when no live session here holds that subagent (a killed
+        server's): nothing continues it, so its run records the answer and ends
+        (``claude_live.gone``)."""
+        answered = native_input.background_answer
+        if answered is not None and answered[0] not in self.live.attended:
+            await gone(runtime, *answered)
 
     async def _held_elsewhere(self, runtime: Runtime) -> bool:
         """Whether the run's session is held by another process's live session: a background

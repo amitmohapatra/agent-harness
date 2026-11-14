@@ -320,7 +320,12 @@ the model steps of a `ReAct` or `middleware()` graph are not asked again (the gr
 (or re-run with its key when idempotent), the run's [sandbox](sandbox.md#automatic) is the one it
 had (attached, never replaced blindly), and the working time already spent still counts against
 `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
-after their process died. A [sub-agent](subagents.md)'s run working inside a call when the
+after their process died. Each is held in the run store while it executes instead
+(`holding`: the same heartbeat, naming the harness, every 20 s for 60; its sub-agents' child
+runs and the helpers a framework spawns in it too): when the process dies the holds stop, and
+about a minute later agent-runs ends each run `ERROR` (`holder_lost`) rather than leave it
+`RUNNING` for ever. A run waiting for a person is not held; whichever server continues it after
+the answer holds it again, and one nobody continues within 60 s of its answer is ended too. A [sub-agent](subagents.md)'s run working inside a call when the
 worker died is saved with its parent's progress, and the parent's next attempt continues it the
 same way.
 

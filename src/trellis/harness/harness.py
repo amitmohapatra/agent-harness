@@ -45,6 +45,7 @@ from trellis.harness.gateways import model_gateway
 from trellis.harness.governance import Governance
 from trellis.harness.governance.catalog import MemoryCatalog
 from trellis.harness.governance.decision import Action, Decision
+from trellis.harness.holding import Holds
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
 from trellis.harness.prompts import Prompts, Rendered, Stored
@@ -167,6 +168,8 @@ class Harness:
         if builds_runs:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
+        #: the runs this process executes, held in the run store while they do (``holding``)
+        self.holds = Holds(lambda: self.runs)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -435,15 +438,17 @@ class Harness:
         judge = judge if judge is not self.gateway else None
         clients = (*self._made, judge, self.evals.langfuse)
         failed: list[BaseException] = []
-        for parts in (
-            lambda: [a.aclose() for a in self.agents.values()],
-            lambda: [self.writes.aclose()],
-            lambda: [telemetry.flush()],
-            lambda: [s.aclose() for s in self._mcp_sources()],
-            lambda: [c.aclose() for c in clients if c is not None],
-        ):
-            closed = await asyncio.gather(*parts(), return_exceptions=True)
-            failed += [e for e in closed if isinstance(e, BaseException)]
+
+        async def close(*parts: Awaitable[Any]) -> None:
+            closed = await asyncio.gather(*parts, return_exceptions=True)
+            failed.extend(e for e in closed if isinstance(e, BaseException))
+
+        await close(*(a.aclose() for a in self.agents.values()))
+        self.holds.aclose()  # the runs held here: their agents ended them, or left them
+        await close(self.writes.aclose())
+        await close(telemetry.flush())
+        await close(*(s.aclose() for s in self._mcp_sources()))
+        await close(*(c.aclose() for c in clients if c is not None))
         for later in failed[1:]:
             log.warning("closing the harness: %s", later, exc_info=later)
         if failed:
