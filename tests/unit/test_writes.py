@@ -62,6 +62,50 @@ async def test_a_write_that_may_pass_is_tried_again() -> None:
     await writes.aclose()
 
 
+async def test_a_writes_retries_back_off_at_random_from_half_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # the module's own backoff, not this file's
+    ranges: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        ranges.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr(module.random, "uniform", uniform)
+    writes, tries = Writes(), []
+
+    async def flaky() -> None:
+        tries.append(1)
+        if len(tries) < 3:
+            raise DependencyUnavailableError("memory is restarting", retryable=True)
+
+    await writes.submit("memory.transcript", flaky)
+    await writes.drain()
+    assert len(tries) == 3 and ranges[:2] == [(0, 0.5), (0, 1.0)]  # full jitter, doubled
+    await writes.aclose()
+
+
+async def test_a_shutdown_waits_at_most_10_s_for_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()  # the module's own bound, not this file's
+    bounds: list[float] = []
+    timeout = asyncio.timeout
+
+    def bounded(delay: float | None) -> Any:
+        bounds.append(delay or 0.0)
+        return timeout(delay)
+
+    monkeypatch.setattr(module.asyncio, "timeout", bounded)
+    writes = Writes()
+
+    async def done() -> None:
+        return None
+
+    await writes.submit("memory.transcript", done)
+    await writes.aclose()
+    assert 10.0 in bounds  # the drain bound
+
+
 async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
     writes = Writes()
     events, seen = run_events()
