@@ -4,7 +4,8 @@
   server continues it, and the approved call runs once;
 * a server killed while it continues a turn after the answer (resuming): the run ends
   ``holder_lost``, never stuck, and the call approved before the kill is not run again;
-* ``interrupt`` sent to another server than the one working the turn (limitation L1, chat-order);
+* ``interrupt`` sent to another server than the one working the turn (limitation L1, fixed by
+  chat-order): the working turn is cancelled there;
 * a library's own retries inside a workflow (LangGraph's ``RetryPolicy`` on a node whose read
   fails once): the read runs exactly twice, whoever retried it.
 """
@@ -122,10 +123,6 @@ async def test_a_server_killed_while_it_continues_an_answered_turn(
 
 
 @pytest.mark.plan("CONV-04")
-@pytest.mark.xfail(
-    strict=True,
-    reason="chat-order: an interrupt sent to another server does not reach the working turn (L1)",
-)
 async def test_an_interrupt_sent_to_another_server(uid: str, tmp_path: Path) -> None:
     agent_id = f"s16i-{uid}"
     spec = _spec("react", agent_id, [])

@@ -19,7 +19,6 @@ from tests.scenarios import workflows
 from tests.scenarios.brains import command, parse, token, wrapped
 from tests.scenarios.conftest import harness
 from tests.scenarios.kit import TOOLS, Served, asked_id, eventually, ledger, record
-from tests.support.invariants import Invariants
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
 
@@ -109,18 +108,15 @@ def _book(tok: str, book: Path) -> list[str]:
 @pytest.mark.plan("WF-01", "WF-02", "WF-05", "WF-06")
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 @pytest.mark.parametrize("adapter", ALL)
-async def test_an_approval_mid_workflow_resumed_on_another_worker(  # noqa: PLR0917 - fixtures
+async def test_an_approval_mid_workflow_resumed_on_another_worker(
     adapter: str,
     decision: str,
     uid: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    invariants: Invariants,
 ) -> None:
     book = tmp_path / "ledger"
     monkeypatch.setenv("SCEN_LEDGER", str(book))
-    if adapter in GRAPHS:  # known, each with its own strict xfail (test_s15_findings.py)
-        invariants.allow("INV-10", "SCN-2 / SCN-3 (scn-fixes): call ids across a graph's attempts")
     agent_id = f"s12a-{adapter}-{uid}"
     tok = token(uid, 1)
     async with harness() as h:

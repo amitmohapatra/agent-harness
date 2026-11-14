@@ -17,7 +17,15 @@ import pytest
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
 from tests.scenarios.conftest import OTHER_KEY, harness
-from tests.scenarios.kit import TOOLS, answered, eventually, history, overlapped, user_scope
+from tests.scenarios.kit import (
+    TOOLS,
+    answered,
+    chat_app,
+    eventually,
+    history,
+    overlapped,
+    user_scope,
+)
 from trellis import Harness
 from trellis.contracts import RunStatus
 
@@ -145,8 +153,6 @@ async def test_two_users_approvals_files_schedules_and_runs_stay_apart(
     """Alice and Bob on one thread id: each pauses for an approval; each sees only their own in
     the inbox by assignee, can resume only their own over AG-UI, and their schedules made in
     chat are listed only to themselves; another tenant's key sees none of their runs."""
-    from fastapi import FastAPI, Request
-
     from trellis.harness.agui.sse import decode
 
     agent, _ = await wrapped(h, "react", TOOLS, tmp_path, id=f"s3b-{uid}")
@@ -167,14 +173,8 @@ async def test_two_users_approvals_files_schedules_and_runs_stay_apart(
     listed = [r.run_id for r in await h.inbox()]
     assert all(listed.count(paused[who].run_id) == 1 for who in (alice, bob)), listed
     # over AG-UI, Bob cannot answer Alice's pause (404), and Alice can
-    app = FastAPI()
-
-    def user_of(request: Request) -> str:
-        return request.headers["x-user"]
-
-    agent.serve_chat(app, identity=user_of)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://agui"
+        transport=httpx.ASGITransport(app=chat_app(agent)), base_url="http://agui"
     ) as client:
         entry = paused[alice].interrupt
         assert entry is not None

@@ -9,24 +9,23 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, asked_id, history, ledger, record, runs_of, waiting
+from tests.scenarios.kit import (
+    TOOLS,
+    Served,
+    asked_id,
+    chat_app,
+    history,
+    ledger,
+    record,
+    runs_of,
+    waiting,
+)
 from trellis import Harness
 from trellis.contracts import ConfigurationError, RunStatus
 
 pytestmark = pytest.mark.timeout(900)
-
-
-def _app(agent: object) -> FastAPI:
-    app = FastAPI()
-
-    def user_of(request: Request) -> str:
-        return request.headers["x-user"]
-
-    agent.serve_chat(app, identity=user_of)  # type: ignore[attr-defined]
-    return app
 
 
 @pytest.mark.plan("REL")
@@ -38,7 +37,7 @@ async def test_a_blank_message_opens_no_run(
     with pytest.raises(ConfigurationError):
         await agent.run(blank, user=f"ada-{uid}", thread=f"t-{uid}")
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(agent)), base_url="http://agui"
+        transport=httpx.ASGITransport(app=chat_app(agent)), base_url="http://agui"
     ) as c:
         sent = await c.post(
             "/agui/run",
@@ -117,9 +116,6 @@ async def test_cancel_a_queued_run(h: Harness, uid: str, tmp_path: Path) -> None
 
 
 @pytest.mark.plan("CONV-13")
-@pytest.mark.xfail(
-    strict=True, reason="SCN-8 (scn-fixes): a message cancelled while it waits its turn still runs"
-)
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_cancel_a_message_waiting_its_turn_and_a_running_one(
     h: Harness, adapter: str, uid: str, tmp_path: Path
@@ -202,7 +198,7 @@ async def test_the_same_message_submitted_twice_runs_once(
         ],
     }
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(agent)), base_url="http://agui", timeout=120
+        transport=httpx.ASGITransport(app=chat_app(agent)), base_url="http://agui", timeout=120
     ) as c:
         one, two = await asyncio.gather(
             c.post("/agui/run", headers={"x-user": user}, json=body),

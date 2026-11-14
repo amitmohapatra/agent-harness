@@ -208,7 +208,7 @@ class Served:
         current = invariants.current()
         self.out = current.traffic_file(name) if current is not None else tmp / f"{name}.traffic"
         self.log = tmp / f"{name}.log"
-        self.port = spec.get("port")
+        self.port = int(spec.get("port") or 0)
         env = {
             **os.environ,
             "SCEN_SPEC": json.dumps({"tmp": str(tmp / name), **spec}),
@@ -335,3 +335,17 @@ class ClaudeChat:
 
         assert await eventually(over, within=within), await record(self.h, run_id)
         return await record(self.h, run_id)
+
+
+def chat_app(agent: Any) -> Any:
+    """A FastAPI app serving ``agent``'s chat (AG-UI), the caller named by the ``x-user`` header
+    (a deployment's edge sets ``x-trellis-identity``)."""
+    from fastapi import FastAPI, Request
+
+    app = FastAPI()
+
+    def user_of(request: Request) -> str:
+        return request.headers["x-user"]
+
+    agent.serve_chat(app, identity=user_of)
+    return app

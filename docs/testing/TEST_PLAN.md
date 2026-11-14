@@ -326,14 +326,14 @@ Without `MEMORY_URL`/`RUNS_URL`/`TRELLIS_API_KEY` every scenario is skipped, nev
 
 | ID | Pri | Plan | What | Root cause | Status |
 |---|---|---|---|---|---|
-| SCN-1 | P1 | CONV-02 | A burst to one chat is not answered in the order sent (every adapter, bursts of 2, 5, 20) | the turn is taken (`pipeline.py:248` `Turns.taken`) only after `Agent._opened` (`agent.py:1490`, the run store's start) and the hold (`pipeline.py:203`): awaits that end in any order | failing test `tests/integration/test_scenario_findings.py::test_scn1…` (xfail strict); owner: chat-order |
-| SCN-2 | P2 | WF-02/03, INV-10 | A checkpointed graph resumed on another worker gives its new calls the ids of calls before the pause | `tools/bridge.py:359` `ref = call_id or f"{run_id}:{step}"`, `step` from `Runtime.next_step()` (`runtime.py:480`) restarting at 0 each attempt (`runtime.py:296`) | failing test `tests/scenarios/test_s15_findings.py::test_scn2…`; proposed: name such a call by its content key and occurrence (as the idempotency key at `bridge.py:355`) |
-| SCN-3 | P2 | WF-02, INV-10 | A graph run again from its input after a resume announces its replayed calls again (TOOL_CALL_START… a second time) | `tools/bridge.py:360-363`: a replayed outcome emits the call's events | failing test `test_s15_findings.py::test_scn3…`; proposed: emit nothing for a replay (or a result consumers dedupe) |
-| SCN-4 | P1 | CONV-01/02/07, MEM-01 | The next turn misses the previous turn when memory takes > 5 s to keep it (seen 21× under load: a chat's third turn without its second) | `agent.py:1296-1306` `recorded_run`: the transcript write waits `TURN_WRITE_SECONDS` (5 s, `agent.py:158`) then is queued and the run returns | failing test `test_scenario_findings.py::test_scn4…`; proposed: keep a queued turn in process and merge it into the next turn's history until delivered, or have the next turn wait (bounded) for it |
+| SCN-1 | P1 | CONV-02 | A burst to one chat is not answered in the order sent (every adapter, bursts of 2, 5, 20) | the turn is taken (`pipeline.py:248` `Turns.taken`) only after `Agent._opened` (`agent.py:1490`, the run store's start) and the hold (`pipeline.py:203`): awaits that end in any order | **fixed** by chat-order (in to-main); regression test `tests/integration/test_scenario_findings.py::test_scn1…` and the burst scenarios pass |
+| SCN-2 | P2 | WF-02/03, INV-10 | A checkpointed graph resumed on another worker gives its new calls the ids of calls before the pause | `tools/bridge.py:359` `ref = call_id or f"{run_id}:{step}"`, `step` from `Runtime.next_step()` (`runtime.py:480`) restarting at 0 each attempt (`runtime.py:296`) | **fixed** by scn-fixes (in to-main); `tests/scenarios/test_s15_findings.py::test_scn2…` passes |
+| SCN-3 | P2 | WF-02, INV-10 | A graph run again from its input after a resume announces its replayed calls again (TOOL_CALL_START… a second time) | `tools/bridge.py:360-363`: a replayed outcome emits the call's events | **fixed** by scn-fixes (in to-main); `test_s15_findings.py::test_scn3…` passes |
+| SCN-4 | P1 | CONV-01/02/07, MEM-01 | The next turn misses the previous turn when memory takes > 5 s to keep it (seen 21× under load: a chat's third turn without its second) | `agent.py:1296-1306` `recorded_run`: the transcript write waits `TURN_WRITE_SECONDS` (5 s, `agent.py:158`) then is queued and the run returns | **fixed** by scn-fixes (in to-main): `tests/integration/test_scenario_fixes.py` |
 | SCN-5 | P3 | APR | docs/api.md says the run's user is "its approvals' default assignee"; approvals have no assignee (anyone's, `runtime.py:737`), so `h.inbox("user:<user>")` lists none | docs drift | reported |
-| SCN-6 | P1 | MEM-10, INV-2 | Writes (transcripts, tool records, outcomes) are "failed and is lost" once the memory client's circuit opens (seen 27× in one file under 504s) | `writes.py:66/217`: 3 attempts, 0.5 s backoff (~3.5 s), no spool in a container (`settings.default_spool`) | failing test `test_scenario_findings.py::test_scn6…`; proposed: while the circuit is open keep writes queued and retry after its cool-down |
+| SCN-6 | P1 | MEM-10, INV-2 | Writes (transcripts, tool records, outcomes) are "failed and is lost" once the memory client's circuit opens (seen 27× in one file under 504s) | `writes.py:66/217`: 3 attempts, 0.5 s backoff (~3.5 s), no spool in a container (`settings.default_spool`) | **fixed** by scn-fixes (in to-main): `tests/integration/test_scenario_fixes.py` |
 | SCN-7 | P2 | MEM-01, INV-7 | A message over 4,000 characters: memory context refused (422) and tool records lost | the whole message sent as `ContextRequest.query` / `HintsRequest.task` / `ToolInvocationIn.task` (`maxLength` 4000) | **fixed** (`clients.memory.fitted`), test `tests/integration/test_long_questions_to_memory.py` |
-| SCN-8 | P1 | CONV-13 | Cancelling a message that waits its turn in process: the store says CANCELLED, but the run still runs when its turn comes and its finish fails (409) — `agent.run` raises `ConflictError` | `agent.py:601` cancels only runs in `self.running`; a run waiting in `Turns.taken` (`pipeline.py:248`) is not there, and nothing re-checks its record after it takes the turn | failing test `test_scenario_findings.py::test_scn8…` (and `test_s11_corners.py::test_cancel_a_message_waiting_its_turn…`); proposed: after taking the turn, end a run the store cancelled (or keep waiting runs where `cancel` finds them) |
+| SCN-8 | P1 | CONV-13 | Cancelling a message that waits its turn in process: the store says CANCELLED, but the run still runs when its turn comes and its finish fails (409) — `agent.run` raises `ConflictError` | `agent.py:601` cancels only runs in `self.running`; a run waiting in `Turns.taken` (`pipeline.py:248`) is not there, and nothing re-checks its record after it takes the turn | **fixed** in to-main: `test_scenario_findings.py::test_scn8…` and `test_s11_corners.py::test_cancel_a_message_waiting_its_turn…` pass |
 | SCN-9 | P1 | CONV-11 | AG-UI: the same `runId` posted twice at once started the run twice | `agui/__init__.py` checked the id before its awaits and marked it after | **fixed**, test `tests/integration/test_agui_retries.py` |
 | SCN-10 | P2 | SURF | AG-UI: a message with empty text and no `state` started a run that failed (`EmptyInputError`) instead of a 422 | `agui/__init__.py`: `latest_user_text() or state` fell back to `None` | **fixed**, same test file |
 | SCN-11 | P2 | WF-07 | A LangGraph node's `RetryPolicy` never retries a failed harness read: the tool's failure comes back as its result text (`flaky failed: …`), the node does not raise, and the harness did not try the read again either (`ConnectionError`) — the read ran once | the bridge answers a failed call as an outcome (`tools/bridge.py`, the framework tool built by `tools/convert`), not an exception | failing scenario `test_s16_reliability_more.py::test_a_nodes_retry_policy…` (xfail strict); owner: langchain-fixes |
@@ -343,3 +343,57 @@ Without `MEMORY_URL`/`RUNS_URL`/`TRELLIS_API_KEY` every scenario is skipped, nev
 Memory-service resident memory was sampled every 30 s for the whole run: 3.44-3.52 GB from
 start to end (its models), no growth. It was OOM-killed several times by the shared cgroup
 (other jobs' processes), never by its own growth.
+
+### Status per plan id (scenarios job; written = a test exists in tests/scenarios, tagged with the id)
+
+Run state: each file was run at least once against the private stack; after the merge of
+`claude/cool-maxwell-w5avo8-to-main` only the tests the merge touched were run again (the whole
+pass is the user's, once everything is merged).
+
+| Plan id | State | Where (tests/scenarios/) | Note |
+|---|---|---|---|
+| CONV-01 | written, passing | `test_s01::test_messages_one_after_another`, `test_a_message_to_a_busy_chat[queue]` | 10 adapters |
+| CONV-02 | written, passing after chat-order | `test_s01::test_a_burst_of_messages` (2, 5, 20) | re-run after the merge on function and ReAct only |
+| CONV-03 | written, passing after chat-order | `test_s14::test_one_chat_on_two_servers_is_one_turn_at_a_time` | |
+| CONV-04 | written, passing | `test_s01::test_a_message_to_a_busy_chat[interrupt]`; across servers `test_s16::test_an_interrupt_sent_to_another_server` | the cross-server case failed once in a combined run and passed 3 of 3 alone: watch it at the fold |
+| CONV-05 | written, passing | `test_s01::test_a_message_to_a_busy_chat[steer]` | function, Kimi, plain graphs fall back to queue |
+| CONV-06 | written | `test_s14::test_a_steer_after_the_last_step_is_its_own_turn` | passed on the pre-merge run; uses a timed stall (no gate on a model's last step) |
+| CONV-07 | written | `test_s02_s03::test_three_chats_at_once_stay_apart`, `test_recall_across_chats_is_user_level` | failed before the merge on SCN-4 (fixed since); not re-run |
+| CONV-08 | written, passing | `test_s02_s03::test_two_users_on_one_thread_id`, `…approvals_files_schedules_and_runs_stay_apart` | |
+| CONV-09 | written, passing | `test_s14::test_a_new_message_while_the_chat_waits_for_an_approval`, `test_s04::test_a_pause_while_another_chat_works` | |
+| CONV-10 | written, passing | `test_s06::test_a_server_killed_mid_turn`, `test_s16` (killed while paused; killed while resuming) | |
+| CONV-11 | written, passing (SCN-9 fixed here) | `test_s11::test_the_same_message_submitted_twice_runs_once`, `tests/integration/test_agui_retries.py` | |
+| CONV-12 | written, passing after chat-order | `test_s14::test_a_queued_turn_and_a_direct_one_in_one_chat` | |
+| CONV-13 | written, passing after the merge | `test_s11::test_cancel_a_queued_run`, `test_cancel_a_message_waiting_its_turn_and_a_running_one`, `test_cancel_a_paused_run_and_a_resuming_one` | |
+| CONV-14 | written | `test_s14::test_stress_many_chats_on_three_servers` (seeded, `SCEN_STRESS_CHATS`) | failed pre-merge under memory-service load (SCN-4/6, fixed since); not re-run: needs a quiet machine |
+| BG-01, BG-02, BG-10 | written, passing (Claude subagent; Deep Agents async tasks on ReAct and create_deep_agent) | `test_s05` | Kimi background shell: xfail(strict) "bg-kimi"; ReAct's own sub-agents in the background: xfail(strict) "react-background"; Claude Workflow: xfail(strict) "bg-claude-da" |
+| BG-03 | written, passing | `test_s17::test_an_approval_inside_a_background_task_reaches_the_parent_chat` | Claude |
+| BG-04, BG-06 | written, passing | `test_s17::test_two_background_tasks_one_cancelled_alone` | two at once; "ten at once" not written (admission limit is the features job's RUN/X07) |
+| BG-05 | written, passing | `test_s13::test_a_background_subagent_when_its_server_is_killed` | |
+| BG-07 | written, xfail | `test_s05::test_kimi_background_shell_result_reaches_a_later_turn` | "bg-kimi"; restart half not written |
+| BG-08 | not written | | covered in process by `tests/integration/test_claude_background_session.py` (budget / time stop a background run); no stack-level case |
+| BG-09 | written, passing | `test_s05::test_deep_agents_async_task_while_the_user_chats` | start and check; update / cancel / list not written (in process: `test_react_async_subagent.py`) |
+| BG-11 | not written | | needs a live Claude session moved across workers: pending bg-claude-da |
+| BG-12 | written, passing | `test_s17::test_a_result_that_arrives_while_the_chat_is_busy` | |
+| WF-01, WF-02 | written | `test_s12::test_an_approval_mid_workflow_resumed_on_another_worker`, `test_langgraphs_own_interrupt_mid_graph` | graph with Send, subgraph, branch; checkpointed and not; pre-merge failures were SCN-2/3 (fixed since); not re-run whole |
+| WF-03 | written | `test_s12::test_a_worker_killed_mid_workflow` | as above |
+| WF-04 | written | `test_s12::test_cancel_mid_workflow` | one node (the slow step), not every node |
+| WF-05 | written | `test_s12` (`wf_deepagents`: todos, a `task` sub-agent) | failed pre-merge on a scripted-model parsing error of the test's own (fixed); not re-run |
+| WF-06 | written | `test_s12` (`wf_handoffs` with a cycle, `wf_tools`) | handoff agents need their own tools (documented) |
+| WF-07 | written, xfail(strict) | `test_s16::test_a_nodes_retry_policy_runs_a_failed_read_exactly_twice` | SCN-11 (langchain-fixes) |
+| WF-08 | written, xfail(strict) | `test_s05::test_claude_workflow_is_one_child_run` | "bg-claude-da" |
+| LR-01 | written, passing | `test_s13::test_a_turn_working_for_minutes_at_real_length` (200 s, the product's own hold), `test_a_turn_working_well_past_its_hold` | |
+| LR-02 | written, passing | `test_s13::test_a_two_hundred_step_task`, `test_s06::test_a_step_limit…`, `test_s07` | |
+| LR-03 | written, passing | `test_s06` (time limit, budget), `test_s13` (budget, deadline queued and working) | |
+| LR-04, LR-05 | written | `test_s13::test_a_queued_long_task_across_workers` (graceful, killed) | not run after the pass was stopped by the machine's memory limit |
+| LR-06 | written, passing | `test_s07::test_fifty_five_turns` | 6 adapters; spending exact on ReAct and Kimi |
+| REL | written | `test_s06`, `test_s16`, `test_s11` | SIGKILL while running / paused / resuming / mid-workflow; memory down; agent-runs slow or down; model error; not written: disk full, clock skew, network partition, duplicate webhook delivery (need fault injection the stack script does not have), model 429/overflow (the provider route's, features job) |
+| APR-01/02/03/05/07, MEM-08 | written, passing | `test_s04` | Kimi re-run after a fix of the test's scripted model: one open observation, SCN-12 |
+| SCH | written, passing (react-fire re-run) | `test_s08` | one case waits for the real ticker |
+| FS | written, passing | `test_s09` | sandbox provider is the in-process stand-in (no Docker daemon) |
+| CON, INV-7 | written, passing | `test_s10`, the invariants on every test | |
+
+Open observation, not diagnosed: **SCN-12** — `test_s04::test_always_allow_in_one_chat_applies_in_another[kimi]`
+passes its assertions and breaks INV-4 ("note ran though it was rejected") on the probe run it
+rejects: either Kimi made the rejected call again and it ran under the standing approval learned
+meanwhile, or the invariant misreads Kimi's events. Owner to decide: bg-kimi / scn-fixes.

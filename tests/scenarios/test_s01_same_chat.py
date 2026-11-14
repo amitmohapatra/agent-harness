@@ -44,18 +44,7 @@ async def test_messages_one_after_another(
     assert answered(kept) == tokens, kept  # every answer once, in order
 
 
-SCN1 = "SCN-1 (chat-order): a burst to one chat is not answered in the order sent"
-
-
-@pytest.mark.parametrize(
-    "burst",
-    [
-        # two or five may come out in order by chance; twenty do not
-        pytest.param(2, marks=pytest.mark.xfail(strict=False, reason=SCN1)),
-        pytest.param(5, marks=pytest.mark.xfail(strict=False, reason=SCN1)),
-        pytest.param(20, marks=pytest.mark.xfail(strict=True, reason=SCN1)),
-    ],
-)
+@pytest.mark.parametrize("burst", [2, 5, 20])
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_a_burst_of_messages(
     h: Harness, adapter: str, burst: int, uid: str, tmp_path: Path

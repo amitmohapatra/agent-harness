@@ -471,7 +471,7 @@ class Invariants:
                 run = (e.request.get("scope") or {}).get("agent_run_id")
                 if run:
                     key = _call_key(e.request.get("tool"), e.request.get("args"))
-                    recorded[family.get(run, run)][key] += 1
+                    recorded[family.get(str(run), str(run))][key] += 1
         ran: dict[str, Counter[str]] = defaultdict(Counter)
         for run_id, evs in events.items():
             args: dict[str, Any] = {}

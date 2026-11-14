@@ -1,6 +1,5 @@
 """The scenario suite's findings that need agent-runs' own event log, each in its smallest failing
-form: ``xfail(strict=True)`` until fixed (the day a fix lands the test passes, and must be
-unmarked). Root causes and proposed fixes: docs/testing/TEST_PLAN.md, "Scenario findings"."""
+form (fixed on scn-fixes: they pass). Root causes and proposed fixes: docs/testing/TEST_PLAN.md, "Scenario findings"."""
 
 from __future__ import annotations
 
@@ -49,10 +48,6 @@ async def _on_two_workers(harness: Harness, build: Any) -> tuple[Any, Any]:
     return agent, done
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SCN-2: a checkpointed graph's calls after a resume reuse the ids of calls before it",
-)
 async def test_scn2_call_ids_are_unique_across_a_checkpointed_graphs_attempts(
     h: Harness, uid: str
 ) -> None:
@@ -93,9 +88,6 @@ async def test_scn2_call_ids_are_unique_across_a_checkpointed_graphs_attempts(
     assert len(ids) == len(set(ids)), started
 
 
-@pytest.mark.xfail(
-    strict=True, reason="SCN-3: a graph run again after a resume announces its replayed calls again"
-)
 async def test_scn3_a_replayed_call_is_not_announced_again(h: Harness, uid: str) -> None:
     """A graph with no checkpointer is run again from its input after an approval; the calls
     made before the pause are replayed from the journal (they do not run again) but each is

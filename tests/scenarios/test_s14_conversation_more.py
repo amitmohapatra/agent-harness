@@ -1,7 +1,7 @@
 """More of one conversation (CONV-03, CONV-06, CONV-09, CONV-12, CONV-14):
 
 * one chat's messages landing on two servers at once (a load balancer): still one turn at a
-  time, in order — limitation L1, being fixed on branch chat-order: ``xfail(strict=True)``;
+  time, in order (limitation L1, fixed by chat-order);
 * a steer that arrives after the working turn's last step runs as its own turn, never lost;
 * a new message to a chat whose turn waits for an approval: answered, and the approval still
   resumes its own turn;
@@ -49,10 +49,6 @@ async def _post(c: httpx.AsyncClient, agent_id: str, thread: str, text: str) -> 
 
 
 @pytest.mark.plan("CONV-03")
-@pytest.mark.xfail(
-    strict=True,
-    reason="pending branch chat-order: limitation L1, one chat on two servers can run two turns at once",
-)
 async def test_one_chat_on_two_servers_is_one_turn_at_a_time(uid: str, tmp_path: Path) -> None:
     agent_id = f"s14s-{uid}"
     spec = {"mode": "agui", "hold": 6, "agents": [{"adapter": "react", "id": agent_id}]}
@@ -152,10 +148,6 @@ async def test_a_new_message_while_the_chat_waits_for_an_approval(
 
 
 @pytest.mark.plan("CONV-12")
-@pytest.mark.xfail(
-    strict=True,
-    reason="chat-order: a worker's turn and a direct one of the same chat are not held across processes (L1)",
-)
 async def test_a_queued_turn_and_a_direct_one_in_one_chat(uid: str, tmp_path: Path) -> None:
     agent_id = f"s14q-{uid}"
     spec = {

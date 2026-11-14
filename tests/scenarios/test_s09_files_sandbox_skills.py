@@ -17,10 +17,9 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI, Request
 
 from tests.scenarios.brains import ADAPTERS, SYSTEM, BrainChat, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS
+from tests.scenarios.kit import TOOLS, chat_app
 from tests.support.arm import arm
 from tests.support.sandbox import FakeSandboxes
 from trellis import Harness, ReAct, current, sandbox, skills, tool
@@ -39,16 +38,6 @@ async def make_report(name: str, body: str) -> str:
     return f"made {name}"
 
 
-def _app(agent: object) -> FastAPI:
-    app = FastAPI()
-
-    def user_of(request: Request) -> str:
-        return request.headers["x-user"]
-
-    agent.serve_chat(app, identity=user_of)  # type: ignore[attr-defined]
-    return app
-
-
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_files_made_for_two_users_at_once(
     h: Harness, adapter: str, uid: str, tmp_path: Path
@@ -62,7 +51,7 @@ async def test_files_made_for_two_users_at_once(
     users = {"a": f"alice-{uid}", "b": f"bob-{uid}"}
     thread = f"shared-{uid}"
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(agent)), base_url="http://agui", timeout=300
+        transport=httpx.ASGITransport(app=chat_app(agent)), base_url="http://agui", timeout=300
     ) as c:
 
         async def make(who: str) -> tuple[str, list]:
@@ -118,7 +107,7 @@ async def test_an_uploaded_document_is_its_users_only(h: Harness, uid: str, tmp_
     assert done.status is RunStatus.SUCCESS, done.error
     assert "47 days" in built.model.said(), "the document did not reach the run"
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=_app(agent)), base_url="http://agui"
+        transport=httpx.ASGITransport(app=chat_app(agent)), base_url="http://agui"
     ) as c:
         part = {"type": "document", "source": {"type": "file", "value": doc.document_id}}
         refused = await c.post(
