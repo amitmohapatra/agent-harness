@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,8 +37,10 @@ import httpx
 import pytest
 
 from tests.support.invariants import Invariants, invariants  # noqa: F401 - an autouse fixture
+from tests.support.store_contract import CHECKS
 from trellis.contracts import RunStatus
 from trellis.harness.conversation import EARLIER_RUNS
+from trellis.harness.runs import RunStore
 from trellis.runs import RunsClient
 
 POSTGRES = os.environ.get("TRELLIS_LIVE_POSTGRES", "").strip()
@@ -296,31 +298,31 @@ async def test_a_burst_over_two_servers_is_answered_one_at_a_time_in_order(
     stack: Stack,
     http: httpx.AsyncClient,
     count: int,
-    invariants: Invariants,  # noqa: F811
 ) -> None:
     thread = chat()
     questions = [f"{thread} message {n}" for n in range(count)]
     assert stack.traffic is not None
-    servers_before = len(stack.traffic.read_text().splitlines())
-    mine_before = len(invariants.traffic.exchanges)
-    began = time.monotonic()
+    before = len(stack.traffic.read_text().splitlines())
     stack.hold(questions[0])
     sending = asyncio.create_task(burst(http, stack, questions, thread))
     await started(stack, questions[0])
     stack.release(questions[0])
     results = await sending
-    took = time.monotonic() - began
     assert all(r["status"] == "SUCCESS" for r in results), results
     assert len({t["server"] for t in of(stack, questions)}) == SERVERS
     one_at_a_time_in_order(stack, questions)
-    # what it asked of agent-runs (the servers' calls and the test's own), per minute: the
-    # turns waiting elsewhere follow the event log of the run ahead, not the line, again and
-    # again — well under the tenant's 3000 a minute
-    asked = len(stack.traffic.read_text().splitlines()) - servers_before
-    asked += len(invariants.traffic.exchanges) - mine_before
-    per_minute = asked / max(took, 60.0) * 60
-    print(f"{count} messages: {asked} calls to agent-runs in {took:.1f} s")
-    assert per_minute < 1000, f"{asked} calls in {took:.1f} s"
+    # what the servers asked of agent-runs for it: a turn waiting elsewhere follows the event
+    # log of the run ahead instead of reading the line again and again, so a message costs the
+    # same however many wait (its heartbeats aside: one a hold's renewal, by time) — a burst
+    # of 20 stays far under the tenant's 3000 requests a minute
+    asked = [
+        exchange["path"]
+        for line in stack.traffic.read_text().splitlines()[before:]
+        if (exchange := json.loads(line).get("exchange")) is not None
+    ]
+    working = [path for path in asked if not path.endswith("/heartbeat")]
+    print(f"{count} messages: {len(asked)} requests to agent-runs, {len(working)} not heartbeats")
+    assert len(working) <= 20 * count, f"{len(working)} requests for {count} messages"
 
 
 # --------------------------------------------------------------------------- modes
@@ -336,7 +338,8 @@ async def test_an_interrupt_cancels_the_turn_working_on_another_server(
     stack.release("long")
     assert stopped["status"] == "CANCELLED" and second["status"] == "SUCCESS"
     events = [(t["event"], t["question"]) for t in of(stack, ["long", "correction"])]
-    assert ("cancelled", "long") in events  # its server stopped it
+    # its server stopped it before the correction's turn began: the two never overlapped
+    assert events.index(("cancelled", "long")) < events.index(("start", "correction"))
     turn = next(t for t in stack.turns() if t["question"] == "correction")
     assert "long" in turn["history"]  # the conversation went on from the cancelled question
 
@@ -438,6 +441,16 @@ async def test_a_turn_cancelled_from_another_server_while_it_waits_never_runs(
     stack.release("working")
     assert (await first)["status"] == "SUCCESS"
     assert not [t for t in stack.turns() if t.get("question") == "never"]  # it never ran
+
+
+# --------------------------------------------------------------------------- the stores' contract
+@pytest.mark.parametrize("check", CHECKS, ids=lambda check: check.__name__)
+async def test_agent_runs_keeps_the_run_stores_contract(
+    stack: Stack, check: Callable[[RunStore], Awaitable[None]]
+) -> None:
+    """What ``LocalRuns`` and ``FileRuns`` are checked for (``test_store_contract.py``)."""
+    async with RunsClient(stack.runs_url, api_key=KEY) as runs:
+        await check(runs)
 
 
 # --------------------------------------------------------------------------- side by side

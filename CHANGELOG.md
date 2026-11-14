@@ -28,6 +28,10 @@ whichever replica each reaches.
   still waiting (a burst's waiting turns used to crowd the history out).
 - A process killed while it holds a turn frees it once its hold lapses; one killed after
   recording a turn and before holding it, 60 s later.
+- The in-process run store (`LocalRuns`) holds a run as agent-runs does: one heartbeat holds
+  it for 300 s at most, and the refusal another holder gets does not name the holder. One
+  suite of checks (`tests/support/store_contract.py`) runs against `LocalRuns`, the test
+  suite's `FileRuns` and agent-runs.
 
 Needs the agent-runs of this release (runs of a key created in their place; same wire). No
 argument, signature, endpoint or schema changed. [runs.md](docs/runs.md#queue-order-and-busy-conversations).

@@ -22,8 +22,10 @@ interchangeable. Both behave the same way:
   and is born to be held: nobody holding it within :data:`RESUME_GRACE_SECONDS` ends it
   ``ERROR`` (``holder_lost``), so a process that died before its first heartbeat blocks nobody;
 * a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
-  it for the ``worker_id`` (the process running it) instead: once the hold lapses the run ends
-  ``ERROR`` (``holder_lost``), never queued; a hold fences no write, and a pause lets go of it.
+  it for the ``worker_id`` (the process running it) instead, for at most
+  :data:`MAX_HOLD_SECONDS` a heartbeat: once the hold lapses the run ends ``ERROR``
+  (``holder_lost``), never queued; a hold fences no write, a pause lets go of it, and the
+  refusal another holder gets does not name the holder.
   Answered, a run held when it paused must be held again within :data:`RESUME_GRACE_SECONDS`
   (whoever continues it does so at once) or it ends so too; a ``release`` by its holder lets go
   of the hold, the run ``RUNNING``, unheld.
@@ -106,6 +108,9 @@ KEEP_FINISHED_SECONDS: Final = 3600.0
 #: How long an answered run that was held when it paused may run unheld before it is ended
 #: (agent-runs' ``RESUME_GRACE``): whoever continues it holds it at once.
 RESUME_GRACE_SECONDS: Final = 60.0
+#: The longest one heartbeat holds a run kept in its caller's process, as in agent-runs: five
+#: default leases (the lapse of a hold is how a dead process's run ends).
+MAX_HOLD_SECONDS: Final = 5 * LEASE_SECONDS
 
 
 class RunArtifacts(Protocol):
@@ -430,7 +435,7 @@ class LocalRuns:
         tenant: str | None = None,
     ) -> Lease:
         found = self._require(run_id, tenant)
-        if found.status is RunStatus.RUNNING and run_id not in (*self._leases, *self._queued):
+        if self._in_callers_process(found):
             return self._hold(found, worker_id, lease_seconds, checkpoint)
         record = self._fenced(run_id, worker_id, tenant)
         if checkpoint is not None:
@@ -448,7 +453,7 @@ class LocalRuns:
         tenant: str | None = None,
     ) -> RunRecord:
         found = self._require(run_id, tenant)
-        if found.status is RunStatus.RUNNING and run_id not in (*self._leases, *self._queued):
+        if self._in_callers_process(found):
             # kept in its caller's process: its holder lets go of it, and it goes on unheld
             if self._holds.get(run_id, (None, None))[0] != worker_id:
                 raise LeaseLostError(
@@ -604,6 +609,14 @@ class LocalRuns:
             raise NotFoundError(f"no run {run_id}", code="NOT_FOUND", status=404)
         return record
 
+    def _in_callers_process(self, record: RunRecord) -> bool:
+        """Whether the run is kept in its caller's process: ``RUNNING``, never queued, under
+        no worker's lease (a heartbeat holds it, a release lets go of it)."""
+        return record.status is RunStatus.RUNNING and record.run_id not in (
+            *self._leases,
+            *self._queued,
+        )
+
     def _hold(
         self,
         record: RunRecord,
@@ -612,16 +625,17 @@ class LocalRuns:
         checkpoint: dict[str, Any] | None,
     ) -> Lease:
         """Hold a run kept in its caller's process for ``holder``, as agent-runs does: another
-        holder's hold in force is ``LeaseLostError``."""
+        holder's hold in force is ``LeaseLostError`` (which does not name it), and a hold lasts
+        at most :data:`MAX_HOLD_SECONDS`, whatever was asked."""
         moment = datetime.now(UTC)
         held = self._holds.get(record.run_id)
         if held is not None and held[0] not in (None, holder) and held[1] >= moment:
             raise LeaseLostError(
-                f"{record.run_id} is held by {held[0]}", code="LEASE_LOST", status=409
+                f"{record.run_id} is held by another process", code="LEASE_LOST", status=409
             )
         if checkpoint is not None:
             record = self._move(record, record.status, checkpoint=checkpoint)
-        until = moment + timedelta(seconds=lease_seconds)
+        until = moment + timedelta(seconds=min(lease_seconds, MAX_HOLD_SECONDS))
         self._holds[record.run_id] = (holder, until)
         return self._leased(record, holder, until)
 
