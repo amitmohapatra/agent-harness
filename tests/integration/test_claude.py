@@ -701,6 +701,56 @@ async def test_the_hints_narrow_the_tools_for_the_run(
     ]
 
 
+async def test_the_hints_never_narrow_claudes_skills_slot_away(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
+) -> None:
+    """Claude Code's ``Skill`` tool is its skills slot: what a skill source's plugin and its own
+    skill folders reach it through. Narrowed, the run's skills stay usable, as the harness's own
+    ``list_skills`` and ``load_skill`` stay offered (``skills.told``); its other built-ins the
+    hints left out are disallowed for the query."""
+    memory_service.candidates = ["t2", "t5"]
+    target = options(tmp_path, [{"text": "done"}])
+    await arm(memory_harness.wrap(target, id="n", without={"schedules"}), lookups(6)).run(
+        "x", user="u1"
+    )
+    disallowed = started_with(tmp_path)["disallowed_tools"].split(",")
+    assert "Skill" not in disallowed and "WebFetch" in disallowed
+
+
+async def test_a_skill_claude_loads_is_a_call_of_the_run_and_asks_where_the_catalog_says(
+    tmp_path: Path,
+) -> None:
+    """Claude Code loads a skill of the run's plugin with its ``Skill`` tool — the SDK's
+    ``skills="all"`` allows it in Claude Code's own rules — and the call is the run's still:
+    recorded, a read that runs unasked; where the catalog says more, a person approves it
+    before it runs, and it runs once."""
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    store = SkillStore()
+    store.put("sql-review", "Check every JOIN.", description="Reviews SQL.")
+    load = {"builtin": "Skill", "args": {"skill": "trellis:sql-review"}}
+    ran = [{"tool": "Skill", "args": load["args"]}]
+
+    def target(folder: Path) -> ClaudeAgentOptions:
+        folder.mkdir()
+        return options(folder, [load, {"text": "said: {last}"}], **combine(store).claude())
+
+    async with with_governance(Harness(), Governance(FakeCatalog({}))) as h:
+        events = [e async for e in h.wrap(target(tmp_path / "a"), id="a").stream("go", user="u")]
+        assert events[-1].error is None and built_ins(tmp_path / "a") == ran
+        ended = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+        assert [(e["tool"], e["status"]) for e in ended] == [("Skill", "ok")]
+    strict = Governance(FakeCatalog({"Skill": Rule(risk="irreversible")}))
+    async with with_governance(Harness(), strict) as h:
+        agent = h.wrap(target(tmp_path / "b"), id="b")
+        asked = await agent.run("go", user="u")
+        assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+        assert asked.interrupt.tool_call.tool == "Skill" and built_ins(tmp_path / "b") == []
+        done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u")
+        assert done.answer == "said: Skill ran" and built_ins(tmp_path / "b") == ran
+
+
 async def test_claudes_built_in_tools_do_not_count_toward_narrowing_the_runs_own(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

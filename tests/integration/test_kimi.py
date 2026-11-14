@@ -445,6 +445,31 @@ async def test_kimi_reads_the_runs_skills(
     assert "sql-review" in sent and "Reviews SQL queries for joins." in sent
 
 
+async def test_kimis_own_skills_and_instructions_stay_beside_the_runs_skills(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """A run given skills works in a home of its own; what Kimi keeps in its usual home for
+    every session — its own skills (``skills/``, where the run's are written too), its
+    ``AGENTS.md`` — is still Kimi's there: the model is told both its own skill and the run's,
+    and the instructions."""
+    from tests.support.skills import SkillStore
+    from trellis.skills import combine
+
+    own = tmp_path / "kimi-home" / "skills" / "tone"
+    own.mkdir(parents=True)
+    (own / "SKILL.md").write_text("---\nname: tone\ndescription: How we write.\n---\nBe brief.\n")
+    (tmp_path / "kimi-home" / "AGENTS.md").write_text("Answer in metric units.\n")
+    store = SkillStore()
+    store.put("sql-review", "Check every JOIN.", description="Reviews SQL queries for joins.")
+    target = kimi_target(endpoint, tmp_path, **combine(store).kimi())
+    done = await harness.wrap(target, id="kimi-own-skills").run("review", user="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    sent = json.dumps(endpoint.requests[0])
+    assert "Reviews SQL queries for joins." in sent and "How we write." in sent
+    assert "Answer in metric units." in sent
+    assert (own / "SKILL.md").is_file()  # the run's home removed, Kimi's own skill kept
+
+
 async def test_a_conversations_next_turn_continues_kimis_session_when_its_runs_have_skills(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:

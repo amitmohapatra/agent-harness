@@ -264,6 +264,10 @@ OUTLIVES_THE_QUERY: Final = (
     "ScheduleWakeup",
     "RemoteTrigger",  # a claude.ai scheduled task: it fires with no run either
 )
+#: Claude Code's skills slot: the tool a skill source's plugin (``skills.for_run``) and its own
+#: skill folders reach the model through. The tool hints never narrow it away, as the harness's
+#: own ``list_skills`` and ``load_skill`` stay offered (``skills.told``): a run keeps its skills.
+SKILLS_SLOT: Final = "Skill"
 #: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
 #: too. ``SendMessage`` resumes a finished background subagent as a new task, whose messages
 #: carry the call that first started it (the bundled CLI, 2.1.283, driven against a scripted
@@ -1492,10 +1496,13 @@ def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
     those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), those that start agents
     no run holds (:data:`UNHELD_AGENTS`), and those the tool hints narrow away (Claude's
-    built-ins and MCP tools too, for the whole query)."""
+    built-ins and MCP tools too, for the whole query; never its skills slot,
+    :data:`SKILLS_SLOT`)."""
     given = list(denied or ())
     narrowed = (
-        [n for n in runtime.native if not runtime.offers(n)] if runtime.offered is not None else []
+        [n for n in runtime.native if n != SKILLS_SLOT and not runtime.offers(n)]
+        if runtime.offered is not None
+        else []
     )
     hidden = [n for n in (*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, *narrowed) if n not in given]
     return [*given, *dict.fromkeys(hidden)]

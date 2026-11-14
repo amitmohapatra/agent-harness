@@ -21,7 +21,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedModel
 from tests.support.sandbox import FakeSandboxes
-from tests.support.skills import SkillStore
+from tests.support.skills import SkillStore, kept_apart
 from trellis import Harness, ReAct, Runtime, Settings, deep_agent, sandbox, skills, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness.skills import SKILLS_ROOT, UNAVAILABLE, combine
@@ -158,29 +158,42 @@ async def test_two_tenants_and_two_users_each_get_their_own(
 ) -> None:
     memory_service.tenant = None  # a platform key: each run names its tenant
     harness = Harness(config=Settings(), memory=memory_service.client())
-    store = SkillStore()
-    store.put("sql-review", "Acme's rules.", owner="acme")
-    store.put("sql-review", "Globex's rules.", owner="globex")
-    store.put("sql-review", "Ada's own rules.", level="user", owner="ada")
-    src = combine(store)
-    seen: dict[str, str] = {}
 
-    async def reader(name: str, tenant: str, user: str) -> None:
+    async def seen(store: SkillStore, tenant: str, user: str) -> str:
         model = read_skill()
-        agent = harness.wrap(ReAct("s", model, skills=src), id=f"r-{name}")
+        agent = harness.wrap(ReAct("s", model, skills=combine(store)), id=f"r-{tenant}-{user}")
         result = await agent.run("go", user=user, tenant=tenant)
         assert result.answer == "read", result.error
-        seen[name] = tool_said(model)
+        return tool_said(model)
 
-    await asyncio.gather(
-        reader("acme-bob", "acme", "bob"),
-        reader("globex-bob", "globex", "bob"),
-        reader("acme-ada", "acme", "ada"),
-    )
-    assert "Acme's rules." in seen["acme-bob"]
-    assert "Globex's rules." in seen["globex-bob"] and "Acme" not in seen["globex-bob"]
-    assert "Ada's own rules." in seen["acme-ada"]  # her override wins over the tenant's
+    await kept_apart(seen)
     await harness.aclose()
+
+
+async def test_reacts_general_purpose_helper_reads_the_runs_skills(harness: Harness) -> None:
+    """Deep Agents gives its general-purpose helper the agent's skills (its own skills
+    middleware); ``ReAct``'s helper keeps that: handed a task, it is told the run's skills and
+    reads one through the same route. A helper of a run without skills is told none."""
+    model = ScriptedChatModel(
+        turns=[
+            ("task", {"description": "review the query", "subagent_type": "general-purpose"}),
+            ("read_file", {"file_path": SKILL, "limit": 1000}),
+            "reviewed",
+            "done",
+        ]
+    )
+    agent = harness.wrap(ReAct("s", model, skills=combine(store_with())), id="helped")
+    result = await agent.run("go", user="ada")
+    assert result.answer == "done", result.error
+    helper = model.seen[1]  # the helper's first model call
+    assert "Reviews SQL." in str(helper[0].content)  # Deep Agents' listing of the run's skills
+    assert "Check every JOIN." in tool_said(model)
+    plain = ScriptedChatModel(
+        turns=[("task", {"description": "x", "subagent_type": "general-purpose"}), "ok", "done"]
+    )
+    alone = harness.wrap(ReAct("s", plain, backend=sandbox(FakeSandboxes())), id="plain")
+    assert (await alone.run("go", user="ada")).answer == "done"
+    assert "Reviews SQL." not in str(plain.seen[1][0].content)
 
 
 async def test_react_with_a_sandbox_and_skills_works_in_both(harness: Harness) -> None:
@@ -300,6 +313,31 @@ async def test_a_resumed_claude_run_finds_its_skills_where_they_were(
     assert other.status is RunStatus.PAUSED and list(await asyncio.to_thread(started)) != [first]
 
 
+async def test_claudes_plugin_holds_each_tenants_and_users_own_skills(
+    memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """SEC: the plugin written for a Claude run holds the skills of that run's tenant and user."""
+    from dataclasses import replace
+
+    memory_service.tenant = None  # a platform key: each run names its tenant
+    harness = Harness(config=Settings(), memory=memory_service.client())
+
+    async def seen(store: SkillStore, tenant: str, user: str) -> str:
+        folder = tmp_path / f"{tenant}-{user}"
+        await asyncio.to_thread(folder.mkdir)
+        options, _ = await BUILDERS["claude_agent_sdk"](harness, [], folder, [])
+        options = replace(options, **combine(store).claude())
+        agent = harness.wrap(options, id=f"c-{tenant}-{user}")
+        result = await agent.run("go", user=user, tenant=tenant)
+        assert result.status is RunStatus.SUCCESS, result.error
+        record = Path(options.env["FAKE_CLAUDE_RECORD"])
+        [files] = json.loads(await asyncio.to_thread(record.read_text))["plugins"].values()
+        return files["skills/sql-review/SKILL.md"]
+
+    await kept_apart(seen)
+    await harness.aclose()
+
+
 # --------------------------------------------------------------------------- OpenAI
 async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: Harness) -> None:
     from agents import RunConfig
@@ -361,6 +399,46 @@ async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_go
     assert "no skill 'nope'" in str(events[-1].data.get("result"))  # the last result it read
     assert any("sql-review" in w and "cannot be read" in w for w in warnings_of(events))
     assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
+
+
+async def test_an_openai_sandbox_agent_loads_each_tenants_and_users_own_skill(
+    memory_service: FakeMemoryService,
+) -> None:
+    """SEC: the SDK's ``load_skill`` puts the skill of the run's tenant and user in its
+    sandbox."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    memory_service.tenant = None  # a platform key: each run names its tenant
+    harness = declaring(
+        Harness(config=Settings(), memory=memory_service.client()),
+        load_skill="read",
+        exec_command="read",
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+
+    async def seen(store: SkillStore, tenant: str, user: str) -> str:
+        model = PlannedModel(
+            [
+                ("load_skill", {"skill_name": "sql-review"}),
+                ("exec_command", {"cmd": "cat .agents/sql-review/SKILL.md"}),
+            ]
+        )
+        target = SandboxAgent(
+            name="box", instructions="Work.", model=model,
+            capabilities=[Shell(), combine(store).openai()],
+        )  # fmt: skip
+        agent = harness.wrap(
+            target, id=f"o-{tenant}-{user}", framework_options={"run_config": config}
+        )
+        result = await agent.run("go", user=user, tenant=tenant)
+        assert result.status is RunStatus.SUCCESS, result.error
+        return model.said()
+
+    await kept_apart(seen)
+    await harness.aclose()
 
 
 # --------------------------------------------------------------------------- no skills slot
