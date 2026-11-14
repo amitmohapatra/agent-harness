@@ -12,7 +12,8 @@ A call that does more than read is marked *started* before it runs (and the jour
 the attempt after a crash knows which call was running when the worker died: it was neither
 finished nor recorded, and whether it took effect is not known (``tools/bridge.py``). A call
 whose outcome is not an output — it timed out, its effect is unknown — is recorded as that
-outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs nothing.
+outcome, so a re-run tells the model the same thing and runs nothing: every call's record is
+kept in an envelope (:data:`RECORD`), so an output is never read as one.
 
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
@@ -90,8 +91,13 @@ if TYPE_CHECKING:
 #: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
 #: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
 MAX_SEGMENTS: Final = 16
-#: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
-#: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
+#: The key a call's record is filed under, whatever its outcome: ``{RECORD: {"status": ...,
+#: "output": ..., "metadata": ...}}`` (``tools.bridge.journal_record``; read back by its
+#: ``journal_outcome``) — an envelope around every output, so one a tool shapes like a record
+#: is still its output.
+RECORD: Final = "trellis_record"
+#: The key the release before filed an outcome that was not an output under, its outputs kept
+#: bare: read still (a run paused before an upgrade), never written.
 OUTCOME: Final = "trellis_outcome"
 
 
@@ -187,6 +193,14 @@ def content_key(kind: str, *parts: Any) -> str:
     """A stable key for a question or a call: same content, same key, across processes."""
     text = json.dumps([kind, *parts], sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
+
+
+def call_key(tool: str, args: Any) -> str:
+    """What a tool call is — ``tool`` called with ``args`` — as one key, wherever it is made:
+    the journal files the call's record under it, a pending question names its call by it,
+    and the call's id and idempotency key are the run's id, this key and which time the run
+    makes the call (``tools.bridge``)."""
+    return content_key("call", tool, args)
 
 
 class Made(BaseModel):
@@ -562,7 +576,7 @@ class Replay:
                 self.journal.place = 0  # run again from its input
             self._made = self.journal.place
         at, self._made = self._made, self._made + 1
-        key = content_key("call", tool, args)
+        key = call_key(tool, args)
         paused = next((m for m in self.journal.again if m.at == at and m.tool == tool), None)
         if paused is None or self.occurrence(key) < len(self.journal.calls.get(key, ())):
             return Made(tool=tool, args=args, at=at)

@@ -17,6 +17,117 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   taken after: it is taken before the first await, and the second request is a `422`.
 - **AG-UI: a user message with no text (`content: ""`) and no `state` started a run** that
   failed inside the framework (`EmptyInputError`); it is a `422`, as a blank message is.
+### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
+
+Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
+2.8.0, which it requires). What it changes through the harness:
+
+- **A tool's failure no longer tells the model the error.** The SDK's default failure text
+  is a fixed sentence from 0.23 (`An error occurred while running the tool. Please try
+  again.`): a function tool, an MCP server's tool and an agent called as a tool alike, and an
+  SDK tool given arguments that are not JSON (it no longer says they were not). The
+  harness records the call as failed with the error, on the stream and in the tool records,
+  and the child run of an agent tool keeps it in its error, as before; a tool's own
+  `failure_error_function` and the run's `after_tool` hooks still word what the model reads.
+- **The run's own `RunConfig.tool_error_formatter`** (0.24: the `tool_exception` kind, given
+  the error) words a governed tool's failure under the SDK's default policy, as without the
+  harness.
+- **Still no background agents** ([openai-agents.md](docs/frameworks/openai-agents.md#limits)):
+  0.24 has no background run, agent tool or handoff, and never polls a Responses `background`
+  request; `tests/integration/test_background_by_adapter.py` pins what it does.
+
+### Changed: an OpenAI agent's features work as the SDK does them
+
+The harness governs, records and counts an OpenAI agent; it no longer changes what the SDK
+does with your own tools and settings ([openai-agents.md](docs/frameworks/openai-agents.md)).
+
+- **A session on `h.wrap` is each conversation's own.** It was one session for every user and
+  thread: bob's model read alice's turns. Each run now uses a copy of it — the same class, the
+  same storage — whose `session_id` is yours followed by the conversation's key (tenant, user,
+  thread). A session that cannot be kept so (its id is a property, or its storage key was made
+  from the id) is refused at `h.wrap`. A live `SandboxRunConfig(session=...)` or a
+  `session_state` on `h.wrap`, one sandbox for every user, is refused too: give it per run.
+- **`run_config` as a dict works** (it raised `TypeError` on every run), as `Runner.run` takes
+  it and as a queued run keeps it.
+- **Your tool's result is the SDK's.** An image or a file a function tool returns reaches the
+  model as one (it was a Python repr string), and a typed result reaches `tool_use_behavior`,
+  output guardrails and hooks as the object. Results of your own tools are no longer rewritten
+  (tables, the 80,000-character stub): that is the harness tools' only.
+- **Your tools keep their order** (they were sorted by name); the harness's follow them.
+- **A call your reply repeats runs each time for your own tools**, as the SDK runs it; a harness
+  tool still runs a repeated call once.
+- **Your `tool_not_found_behavior` is respected.** The friendly default (`return_error_to_model`)
+  applies only when your `run_config` does not say; say `"raise_error"` in a dict.
+- **At `max_turns` the run ends `PARTIAL` with the SDK's outcome**, no extra model call (it was
+  one more paid call for a last answer): the answer is the last message the model wrote, the
+  error `BUDGET_EXCEEDED` names the limit. Your own `error_handlers` still answer it.
+- **The Responses API through Bifrost, where the gateway serves it.** A model name goes to
+  Bifrost on the SDK's default API (`/v1/responses`; it was forced to chat completions). A
+  gateway that does not serve the route for a model answers so on the model's first call: the
+  call falls back to `/v1/chat/completions`, once, and the model stays there (said once), so a
+  deployment that worked before still does. On a model that fell back, an agent that uses a
+  hosted tool, a stored prompt, a Responses setting, a sandbox capability needing them or a
+  server-side thread is refused with each feature named (it failed mid-run or was silently
+  ignored).
+- **Your model routing is kept**: a `MultiProvider(provider_map=...)` entry and the `litellm/`
+  and `any-llm/` prefixes keep their providers (Bifrost replaced them); a `RunConfig.model`
+  object is said once as not routed.
+- **A server-side thread the model ignores no longer drops the history**: with the SDK's chat
+  completions model, memory keeps the conversation as with no thread.
+- **A `SandboxAgent`'s capability tools are governed and recorded** (`exec_command`,
+  `write_stdin`, `view_image`, `apply_patch`, `load_skill`): the catalog's risk, approvals, the
+  journal, the record, the stream. They ran with no person asked. Say their risk in the
+  catalog: undeclared, each call asks.
+- **A sandbox `Memory`'s own model calls go through the run's model route and budget** (they
+  went straight to OpenAI). Its consolidation agent's file writes in the sandbox are the SDK's
+  own, not governed, which is said once at `h.wrap`.
+- **An agent tool's own `run_config` no longer escapes the harness**: its child run gets the
+  model route, the day, a made-up tool's error and the stall watch. Messages steered into the
+  conversation are no longer given to a child's model calls.
+- **An `Agent` subclass of your own is wrapped** (it was refused). A `RealtimeAgent` or a
+  `VoicePipeline` is refused with what to do instead.
+- **The SDK's own tracing is warned of, once, at `WARNING`** (it was `INFO`): it exports tool
+  inputs and outputs to OpenAI unless turned off; the message names the switches.
+- **"Allow for this conversation" sticks for the SDK's own `needs_approval` tools**: the tool's
+  later calls run unasked in the run (the SDK's `always_approve`) and in the conversation's
+  later runs.
+- **An MCP server that retries itself owns its tries** (`max_retry_attempts`): the harness's
+  read retries no longer multiply them.
+- **An edited computer action runs only an action of the SDK's computer interface**, with
+  that action's arguments. An approver's edit (or a hook's rewrite) that names another method
+  of your computer object, or arguments that are not the action's, is refused: nothing of the
+  computer is called, and the model is told the call was not run.
+
+### Fixed: a conversation's messages one at a time, in the order sent, on every replica
+
+Two messages of one chat that reached two server processes both ran, writing the same thread:
+only queued runs (`start`) waited across processes. And a burst of messages in one process
+kept its order only by luck. Now a turn of a conversation started with `run`, `stream`,
+`serve_chat` or `serve_a2a`, or continued after its answer, takes the conversation's
+`concurrency_key` and waits in the conversation's line (`trellis.harness.line`, the one
+ordering of a conversation's turns): one turn at a time, in the order the messages were sent,
+whichever replica each reaches.
+
+- A queued turn (`start`) holds its place: direct messages sent after it wait for it, and a
+  worker claims it only when no turn placed before it runs.
+- `interrupt` stops the working run wherever it works, and never works beside it: sent to
+  another replica, the message waits until the replica holding the turn has stopped it (at its
+  next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
+  once.
+- A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting behind a turn in another process follows that turn's events (one shared
+  stream a run ahead, at most 32 a process, on its own client) instead of polling.
+- A turn's earlier turns are read with one listing per ending, never paging past the messages
+  still waiting (a burst's waiting turns used to crowd the history out).
+- A process killed while it holds a turn frees it once its hold lapses; one killed after
+  recording a turn and before holding it, 60 s later.
+- The in-process run store (`LocalRuns`) holds a run as agent-runs does: one heartbeat holds
+  it for 300 s at most, and the refusal another holder gets does not name the holder. One
+  suite of checks (`tests/support/store_contract.py`) runs against `LocalRuns`, the test
+  suite's `FileRuns` and agent-runs.
+
+Needs the agent-runs of this release (runs of a key created in their place; same wire). No
+argument, signature, endpoint or schema changed. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
@@ -163,6 +274,77 @@ not hold:
 - **One call, one question.** A person's answer about a call covers its framework's own tries
   of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
   second time); an edited call, or the same call of a new model step, is asked about anew.
+
+### Fixed: a call across a run's attempts, and a turn while memory is slow or down
+
+Four findings of the user-scenario suite (SCN-2, SCN-3, SCN-4, SCN-6), each tested in process
+in `tests/integration/test_scenario_fixes.py`:
+
+- **Writes to memory were lost when the memory service was down for more than a few seconds.**
+  A background write had three tries half a second apart; once the memory client's circuit
+  opened each try was refused at once, and with no spool (none in a container) transcripts,
+  tool records and outcomes were "failed and is lost". While the circuit is open a write now
+  spends no attempt: it waits the circuit's cool-down, queued, and is sent when the service is
+  back — however long that takes, bounded by the queue (10,000 writes; past it a write is
+  spooled or lost and reported, as a full queue's always was). **A write now has six attempts,
+  not three**: one more than the five failed calls that open the circuit, so the first write
+  of an outage is still trying when it opens. Still lost: what waits in the queue when the
+  process is killed, with no spool what a clean stop cannot deliver in 10 s, and a write that
+  fails six times while the service answers other calls ([memory.md](docs/memory.md)).
+- **The next turn was answered without the turn before when memory took more than 5 s to keep
+  it.** Where memory's window comes as messages (LangGraph's graphs, `ReAct`), the
+  conversation's latest turns memory does not hold yet are added after it from the run store
+  (each one's question and answer), on whichever server the next turn runs; matched by message
+  id, so a turn memory holds is never given twice; with nothing in memory's window, the run
+  store's newest turns (at most 10, within the conversation's budget). A chat message's
+  `run_record` in memory now carries its `message_id`. One listing of the run store per turn
+  of a conversation.
+- **A call with no framework id had a different id in a later attempt, or another call's.**
+  A call a graph's node or a function makes itself was `<run>:<step>`, the step counted per
+  attempt: after a resume a checkpointed graph's payment took the id of a lookup made before
+  the pause. It is `<run>:<digest of the tool and arguments>:<which time>` — the call's
+  idempotency key — in every attempt. **The format of these ids changed**; a framework's own
+  call ids are as they were.
+- **A call replayed after a resume was announced again** (`TOOL_CALL_START`…`TOOL_CALL_RESULT`
+  with `cached`), so a run's event log, a reconnecting AG-UI client and a thread's replay
+  showed it twice. A replayed call emits nothing: the attempt that ran it announced it. The
+  AG-UI activity line counts a run's calls across its attempts on the replica that served them.
+
+### Fixed: a tool result shaped like the journal's record of a call is its result
+
+A run's journal kept a call's output bare and an outcome that was none (a timeout, an unknown
+effect) under the key `trellis_outcome`; a tool that returned a dict of that shape — third-party
+JSON passed on — was replayed as the harness's record after a pause: every resume of the run
+failed, or the tool's author chose the replayed status and metadata (security review, SEC-R-5).
+Every call's record is now kept in an envelope (`trellis_record`: status, output, metadata) and
+read back from those three fields only, so an output is never read as a record. A journal
+written before this release is still read (a run paused before the upgrade); a server of the
+release before does not read the new shape: resume a run where it paused, or upgrade every
+server before resuming.
+
+### Fixed: a run that fails leaves no child `RUNNING`
+
+A run whose model call stalled ends `ERROR`; a helper its framework had open in the foreground
+(a Claude subagent) was let go of as for a pause and never ended: `RUNNING` for ever, held by
+nothing (architecture review, ARCH-1). A run's open children — helpers, sub-agents' runs — now
+end with it whatever its final status, once, where the run is concluded: with its status and
+error when it failed or ran out of time, cancelled with its reason when it was cancelled, and
+cancelled ("the run that started it ended first") when it answered without them. A child handed
+on to its conversation's session (a Claude subagent working in the background) still goes on.
+One listing of the run's children at the end of every run.
+
+### Changed: what a turn costs the run store and the journal does not grow with the conversation
+
+- A call its framework ran itself (Claude Code's built-in tools, a provider's hosted tools, an
+  ACP agent's) is journaled as the stream previews its result (2,000 characters), not whole:
+  200 calls of 10 KB kept 2 MB in the journal and every pause checkpoint. Whole still while a
+  subagent works in the foreground — started again after a pause, it reads its calls' results
+  again (performance review, PERF-8).
+- Whether another server served a turn of the conversation since this one's last is read from
+  the newest runs only: two requests whatever the conversation's length, not one for each of
+  up to 50 turns (PERF-6).
+- The turns memory does not hold yet are read from the run store one run each; the turns it
+  holds are not read.
 
 ### Fixed: two failures a busy machine showed
 

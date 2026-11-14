@@ -38,8 +38,8 @@ SPENT: Final = (
     "This run's budget is spent. Do not call tools: answer now with what you have, and say "
     "that the budget was reached and what is left undone."
 )
-#: What a run's model is told when its step limit is reached (``ReAct``'s ``max_steps``, OpenAI
-#: Agents' ``max_turns``): its one last call, with no tool, answers.
+#: What a run's model is told when its step limit is reached (``ReAct``'s ``max_steps``): its
+#: one last call, with no tool, answers.
 LIMIT: Final = (
     "This run has reached its limit of {limit} steps. Do not call tools: answer now with what "
     "you found, and say what is left undone."

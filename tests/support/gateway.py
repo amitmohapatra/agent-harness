@@ -4,6 +4,8 @@ the harness calls, answered in the shapes the running gateway answers with.
 * ``/v1/chat/completions`` — each request recorded (:attr:`FakeGateway.completions`) and
   answered by :attr:`FakeGateway.chat`'s script (``tests/support/models.py``): the judge's
   calls, and a ``ReAct`` gateway model's once :meth:`FakeGateway.serve_models` routes them;
+* ``/v1/responses`` — an OpenAI agent's model calls (the SDK's default API), answered by
+  :attr:`FakeGateway.responses` (``tests/support/responses.py``) from the same turns;
 * ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
   :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
 * ``/api/mcp/clients`` — :attr:`FakeGateway.auto`, each client's ``tools_to_auto_execute``;
@@ -27,6 +29,7 @@ from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.support.models import ScriptedChat, Turn
+from tests.support.responses import ScriptedResponses
 from trellis.harness.clients.bifrost import Gateway
 
 URL = "http://gw.test/v1"
@@ -39,11 +42,18 @@ class FakeGateway:
     auto: dict[str, list[str]] = field(default_factory=dict)
     tools: list[str] = field(default_factory=list)
     down: tuple[str, ...] = ()
+    #: how many ``/v1/responses`` requests it serves before answering that it does not serve
+    #: the route (``404``): ``None``, every one; ``0``, a gateway with no Responses route
+    serves_responses: int | None = None
+    #: the ``/v1/responses`` requests it refused
+    refused: list[httpx.Request] = field(default_factory=list)
     completions: list[httpx.Request] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.chat = ScriptedChat(self.turns)
+        #: the Responses route, answering from the same turns as the chat completions one
+        self.responses = ScriptedResponses(self.chat.script.turns)
 
     def gateway(self) -> Gateway:
         transport = httpx.MockTransport(self.handle)
@@ -121,6 +131,8 @@ class FakeGateway:
         if path == "/v1/chat/completions":
             self.completions.append(request)
             return self.chat.script.handle(request)
+        if path == "/v1/responses":
+            return self._responded(request)
         if path == "/mcp":
             return self._rpc(json.loads(request.content))
         if path == "/api/prompt-repo/prompts":
@@ -131,6 +143,15 @@ class FakeGateway:
             return httpx.Response(200, json={"versions": rows})
         assert path == "/api/mcp/clients", path
         return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
+
+    def _responded(self, request: httpx.Request) -> httpx.Response:
+        """A Responses request answered, or — past :attr:`serves_responses` — refused as a
+        route this gateway does not serve."""
+        served = len(self.responses.requests)
+        if self.serves_responses is None or served < self.serves_responses:
+            return self.responses.handle(request)
+        self.refused.append(request)
+        return httpx.Response(404, json={"error": {"message": "no route /v1/responses"}})
 
     def _rpc(self, message: dict[str, Any]) -> httpx.Response:
         if message["method"] == "tools/list":

@@ -229,7 +229,10 @@ async def test_a_call_replayed_on_resume_is_counted_once(harness: Harness) -> No
     counted = [
         e["content"]["tools"] for e in [*first, *resumed] if e["type"] == "ACTIVITY_SNAPSHOT"
     ]
-    assert counted == [1, 1]  # the replayed lookup has the same id: the line says 1 again
+    # the replayed lookup is not announced again (SCN-3), so no line follows it: the one the
+    # first attempt sent (1 tool, under the run's one activity id) stands
+    assert counted == [1]
+    assert not [e for e in resumed if e["type"] == "TOOL_CALL_START"]
 
 
 # --------------------------------------------------------------------------- offered by itself

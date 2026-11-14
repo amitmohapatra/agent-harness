@@ -261,6 +261,9 @@ class Runtime:
     #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
     #: the repeat, which does not run (``tools.bridge.same``)
     repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: what the attempt keeps of the calls its framework carries out on this machine, made on
+    #: first use by the code that governs them (``tools.convert.openai_local.Local``)
+    local_calls: Any = field(default=None, repr=False)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None

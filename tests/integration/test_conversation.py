@@ -620,8 +620,6 @@ async def test_turns_give_each_message_to_the_run_holding_the_turn_once() -> Non
         assert turns.steered("c", "run_1") == []  # once
     assert await waiting is True and turns.live("c") is None
     assert turns.steered("c", "run_1") == []
-    async with turns.taken("c") as nobody:  # a turn without a run (as before)
-        assert nobody is None
 
 
 # --------------------------------------------------------------------------- message ids

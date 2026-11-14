@@ -138,9 +138,11 @@ a thread's requests to one replica: sticky sessions), else it is a `404`.
 `messageId` `<run>:activity` (one per run, `replace: true`), `activityType` `tools`, `content`
 `{"summary": "used 2 tools · ran 1 command", "tools": 2, "commands": 1}` — commands are the
 calls of `sandbox_exec`, Deep Agents' `execute` and Claude's `Bash`, tools the others, each call
-once by its id. It is derived from the stream's tool events and recorded nowhere: a reconnect
-derives it again (from agent-runs' event log on another replica), and its `id:` is the one of
-the result it follows, so the ids stay those of the run's events.
+once by its id, in every attempt of the run this replica served. It is derived from the
+stream's tool events and recorded nowhere: a reconnect derives it again (from agent-runs' event
+log on another replica), and its `id:` is the one of the result it follows, so the ids stay
+those of the run's events. A resume answered on a replica that did not serve the run's earlier
+attempts counts the calls from the resume on.
 
 Harness events map one to one onto AG-UI events (the contracts already use AG-UI's names):
 text and tool-call events carry their message and call ids, `CONTEXT_LOADED` becomes a

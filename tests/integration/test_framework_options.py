@@ -32,7 +32,7 @@ from trellis.harness.sandbox import DELIVERS_HERE
 TIGHT: Final[dict[str, tuple[dict[str, Any], str]]] = {
     "langgraph": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
-    "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    "openai_agents": ({"max_turns": 1}, "its turn limit (max_turns=1) was reached"),
     "claude_agent_sdk": ({"max_turns": 1}, "the turn limit (1) was reached"),
 }
 ROOMY: Final[dict[str, dict[str, Any]]] = {
@@ -45,10 +45,12 @@ PLAN: Final[list[Call]] = [("lookup", {"topic": "tides"})]
 
 
 def stopped(events: list[Any]) -> str:
-    """What a run its framework's limit stopped says: its error — or, where the run answers at
-    its limit (OpenAI Agents' ``max_turns``: one last answer), its ``step_limit`` warning."""
+    """What a run its framework's limit stopped says: its error — or, where the run ends
+    ``PARTIAL`` at its limit (OpenAI Agents' ``max_turns``: the SDK's outcome), its budget
+    warning."""
     error = events[-1].error
-    said = [e.data.get("message", "") for e in events if e.data.get("code") == "step_limit"]
+    codes = ("budget", "step_limit")
+    said = [e.data.get("message", "") for e in events if e.data.get("code") in codes]
     return error.message if error is not None else " ".join(said)
 
 
@@ -112,10 +114,11 @@ async def test_a_queued_runs_options_are_kept_for_its_worker_and_its_resume(
     await agent.resume(paused.awaiting.interrupt_id, "approve", reviewer="ops")
     assert await worker.run_once()
     ended = await handle.status()
-    # at the limit the model is asked for a last answer, offered no tool: its answer ends it
-    assert budget.LIMIT.format(limit=1) in json.dumps(seen[-1].inputs[-1])
-    assert seen[-1].tools[-1] == []
-    assert ended.status is RunStatus.SUCCESS and ended.output == "Done. confirmed go", ended
+    # at the limit the SDK stops the run: it ends PARTIAL with what it did, no model call more
+    assert ended.status is RunStatus.PARTIAL and ended.output is None, ended
+    assert len(seen[-1].inputs) == 1 and budget.LIMIT.format(limit=1) not in json.dumps(
+        seen[-1].inputs
+    )
 
 
 async def test_an_object_reaches_the_first_attempt_and_the_record_keeps_the_json(
@@ -254,7 +257,11 @@ async def test_an_openai_sandbox_agent_runs_wrapped_with_its_run_config_as_an_op
     agent = arm(
         harness.wrap(target, id="boxed", framework_options={"run_config": config}), [lookup]
     )
-    result = await agent.run("tides?", user="u")
+    # its shell is governed as the agent's own tools: undeclared, its call asks a person
+    asked = await agent.run("tides?", user="u")
+    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.tool == "exec_command"
+    result = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u")
     assert result.status is RunStatus.SUCCESS and "boxed" in str(result.answer), result
 
 
@@ -293,8 +300,8 @@ async def test_a_schedule_takes_what_start_takes_and_every_fired_run_carries_it(
     run = fired[0]
     assert run.metadata == {**schedule.metadata, "schedule_id": schedule.schedule_id}
     assert (run.timeout_seconds, run.priority, run.concurrency_key) == (30, 5, "nightly")
-    assert run.status is RunStatus.SUCCESS, run.error  # its options reached it: the limit's
-    assert budget.LIMIT.format(limit=1) in json.dumps(seen[-1].inputs[-1])  # last answer
+    assert run.status is RunStatus.PARTIAL, run.error  # its options reached it: the limit's
+    assert len(seen[-1].inputs) == 1  # the SDK's one turn, no call past it
     monkeypatch.setattr(agent_module, "SCHEDULES_QUEUE", False)  # contracts before 0.6.1
     with pytest.raises(ConfigurationError, match=r"schedule\(priority=\) needs trellis-contracts"):
         await agent.schedule("manual", user="ada", input="y", priority=1)

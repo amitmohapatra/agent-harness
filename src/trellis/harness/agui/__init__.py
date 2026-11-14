@@ -467,7 +467,7 @@ class _Surface:
         # window reads it) and runs its end hooks after it — a client that sends the next
         # message, or a resume, once the stream closed finds them done
         ended = False
-        activity = Activity()
+        activity = buffer.activity  # the run's calls, its earlier attempts' here included
 
         def listen(event: RunEvent) -> None:
             nonlocal ended

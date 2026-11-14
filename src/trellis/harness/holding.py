@@ -30,7 +30,7 @@ import logging
 import os
 import secrets
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
@@ -49,6 +49,14 @@ def name_of() -> str:
     """A name for one harness's holds: its host and process, and a token of its own (two
     harnesses in one process, or a process id the host gave again, are not the same holder)."""
     return f"trellis@{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"[:200]
+
+
+#: Who is told of a run held here (its id, its tenant).
+Told = Callable[[str, str], Awaitable[None]]
+
+
+async def _nobody(run_id: str, tenant: str) -> None:
+    """Nobody is told."""
 
 
 class Holding(Protocol):
@@ -73,10 +81,23 @@ class Holds:
     """The runs this harness holds in its run store, each renewed by a task of its own while
     anything holds it. ``runs`` is read at each heartbeat (the harness's store)."""
 
-    def __init__(self, runs: Callable[[], Holding], name: str | None = None) -> None:
+    def __init__(
+        self,
+        runs: Callable[[], Holding],
+        name: str | None = None,
+        *,
+        renewed: Told = _nobody,
+        lost: Told = _nobody,
+    ) -> None:
         self._runs = runs
         self.name = name or name_of()
         self._held: dict[str, _Held] = {}
+        #: told of a run each time its hold was renewed (its id, its tenant): what the run's
+        #: process looks at as often (a message asking to interrupt it, ``Harness._renewed``)
+        self._renewed = renewed
+        #: told of a run whose heartbeat was refused: it may have ended elsewhere — cancelled
+        #: from another process — while it works here (``Harness._lost``)
+        self._lost = lost
 
     def holds(self, run_id: str) -> bool:
         """Whether this harness holds ``run_id`` now."""
@@ -132,16 +153,18 @@ class Holds:
         self._held.clear()
 
     async def _beating(self, run_id: str, tenant: str) -> None:
-        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`. A refused one
-        (the run waits for a person, or ended) is tried again at the next; a store that cannot
-        be reached too, said in the log."""
+        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`, ``renewed`` told
+        after each. A refused one (the run waits for a person, or ended — cancelled elsewhere:
+        ``lost`` is told) is tried again at the next; a store that cannot be reached too, said
+        in the log."""
         while True:
             try:
                 await self._runs().heartbeat(
                     run_id, self.name, lease_seconds=HOLD_SECONDS, tenant=tenant
                 )
+                await self._renewed(run_id, tenant)
             except LeaseLostError:
-                pass
+                await self._lost(run_id, tenant)
             except RunsError as exc:
                 log.warning("run %s not held: %s", run_id, exc)
             await asyncio.sleep(HOLD_SECONDS / 3)

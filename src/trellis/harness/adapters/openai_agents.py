@@ -61,13 +61,11 @@ from trellis.contracts import (
     ConfigurationError,
     InterruptDecision,
     InterruptResolution,
-    ToolError,
     ToolOutcome,
     ToolSpec,
     ToolStatus,
 )
-from trellis.contracts.errors import is_pause_signal
-from trellis.harness import budget, snapshots
+from trellis.harness import snapshots
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -83,13 +81,13 @@ from trellis.harness.adapters.claude import resumed_call
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.bridges.helpers import Helpers
 from trellis.harness.bridges.session import MemorySession, input_items
+from trellis.harness.conversation import remembered
 from trellis.harness.features import MEMORY_TOOLS
 from trellis.harness.gateways import Capability, per_loop
 from trellis.harness.history import ASKED_WITH, MEMORY_THREAD, Called, Said, Speaker, answered
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool, data_of
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
@@ -122,6 +120,9 @@ class _Continue:
     #: an edit: the tool and its edited arguments, approved when the model calls it with them
     tool: str | None = None
     edited: dict[str, Any] | None = None
+    #: the person's decision covers the tool's later calls (``remember`` beyond ``"once"``):
+    #: the SDK's own ``always_approve``/``always_reject`` for the rest of its run
+    always: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,21 +141,31 @@ class ServerThread:
     key: str
 
 
+#: What the harness says once when the SDK's own tracing is on (:func:`sdk_tracing_said`).
+SDK_TRACING: Final = (
+    "the OpenAI Agents SDK's own tracing is on: it exports every run's spans to OpenAI, tool "
+    "inputs and outputs and model inputs included (RunConfig.trace_include_sensitive_data "
+    "defaults to True), outside the harness's redaction. The harness leaves the SDK's default "
+    "as it is; to turn it off call agents.set_tracing_disabled(True) or set "
+    "OPENAI_AGENTS_DISABLE_TRACING=1 (or RunConfig(tracing_disabled=True) per run; "
+    "RunConfig(trace_include_sensitive_data=False), or "
+    "OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=false, keeps the spans without the data). The "
+    "run's own trace is the harness's and the gateway's"
+)
+
+
 @functools.cache
 def sdk_tracing_said() -> bool:
-    """Say once, when an agent is wrapped, that the SDK's own tracing — which exports to
-    OpenAI unless turned off — is left as the application set it (``True`` when said)."""
+    """Warn once, when an agent is wrapped, that the SDK's own tracing — which exports to
+    OpenAI, tool inputs and outputs included, unless turned off — is left as the application
+    set it (:data:`SDK_TRACING`: the exact switches; ``True`` when said)."""
     from agents.tracing import get_trace_provider
 
     provider = get_trace_provider()
     disabled = getattr(provider, "_disabled", False)
     if disabled:
         return False
-    log.info(
-        "the OpenAI Agents SDK's own tracing is on and exports to OpenAI: the harness leaves it "
-        "as you set it (agents.set_tracing_disabled(True), or OPENAI_AGENTS_DISABLE_TRACING=1, "
-        "turns it off); the run's trace is the harness's and the gateway's"
-    )
+    log.warning(SDK_TRACING)
     return True
 
 
@@ -182,14 +193,38 @@ class OpenAIAgentsAdapter:
     def __init__(self, target: Any = None) -> None:
         #: the tools the agents declare (:meth:`native`), once read
         self._static: list[ToolSpec] | None = None
+        #: the harness's model route, once the agent is wrapped (:meth:`wrapped`)
+        self.gateway: Any = None
         if target is not None:  # every agent it reaches can be read, or ``h.wrap`` says why
             reachable(target)
 
+    def wrapped(self, target: Any, options: Mapping[str, Any], gateway: Any) -> None:
+        """Where the agent is wrapped (``h.wrap``), with the options every one of its runs is
+        given and the harness's model route (``gateway``, kept: who keeps a server-side thread
+        depends on it, :meth:`thread_store`): the SDK's own tracing said once
+        (:func:`sdk_tracing_said`); a ``session`` its runs would share made each
+        conversation's own, or refused when it cannot be (:func:`per_conversation`); a live
+        sandbox session or a sandbox state to resume, one sandbox for every user, refused
+        (:func:`_one_sandbox`); and what the agents use that their model route cannot carry
+        refused (:func:`unserved`)."""
+        self.gateway = gateway
+        sdk_tracing_said()
+        session = options.get("session")
+        if session is not None:
+            _scoped_id(session)  # refused here when it cannot be one per conversation
+        config = options.get("run_config")
+        if config is not None:
+            _one_sandbox(_coerced(config))
+        unserved(gateway, target, dict(options))
+        _memory_said(target)
+
     def thread_store(self, target: Any, options: Mapping[str, Any]) -> Any | None:
         """The run's ``session``, or the conversation OpenAI's servers keep
-        (:data:`SERVER_THREAD`); else the memory service's thread, the session a run with
-        memory on is given (``bridges.session``)."""
-        return _thread_store(options)
+        (:data:`SERVER_THREAD`) when the run's model route keeps it (:func:`keeps_thread`: a
+        route that ignores it keeps none, and memory keeps the history as with no thread);
+        else the memory service's thread, the session a run with memory on is given
+        (``bridges.session``)."""
+        return _thread_store(options, keeps_thread(self.gateway, target, options))
 
     def steers(self, target: Any) -> bool:
         """Every agent: a steered message joins the input of its next model call
@@ -212,11 +247,9 @@ class OpenAIAgentsAdapter:
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
         from agents import Runner
+        from agents.exceptions import MaxTurnsExceeded
 
-        helpers = Helpers(run.runtime, self.name)
-        agent = self._agent(target, run, helpers, await _gated(run))
-        options = _options(run.runtime, target, native_input)
-        hooks = _hooks(options.pop("hooks", None))
+        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
         try:
             given = await self._input(agent, native_input)
             result = await Runner.run(agent, given, hooks=hooks, **options)
@@ -224,21 +257,22 @@ class OpenAIAgentsAdapter:
             while (state := await _continued(result, resumed, run.runtime)) is not None:
                 resumed = None  # an edited call is approved once
                 result = await Runner.run(agent, state, hooks=hooks, **options)
+        except MaxTurnsExceeded as exc:
+            result = _at_turn_limit(run.runtime, exc, options)
         except BaseException as exc:
-            await helpers.closed(exc)
+            await helpers.closed(exc, paused=helpers.suspended(exc))
             raise
         await _closed(helpers, result)
         return result
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
         from agents import Runner
+        from agents.exceptions import MaxTurnsExceeded
 
-        helpers = Helpers(run.runtime, self.name)
-        agent = self._agent(target, run, helpers, await _gated(run))
-        options = _options(run.runtime, target, native_input)
-        hooks = _hooks(options.pop("hooks", None))
+        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
+        streamed = result
         error: BaseException | None = None
         try:
             async for delta in _deltas(result):
@@ -246,19 +280,21 @@ class OpenAIAgentsAdapter:
             resumed = native_input
             while (state := await _continued(result, resumed, run.runtime)) is not None:
                 resumed = None
-                result = Runner.run_streamed(agent, state, hooks=hooks, **options)
+                result = streamed = Runner.run_streamed(agent, state, hooks=hooks, **options)
                 async for delta in _deltas(result):
                     yield delta
+        except MaxTurnsExceeded as exc:
+            result = _at_turn_limit(run.runtime, exc, options)
         except BaseException as exc:
             error = exc
             raise
         finally:
             # cut short (cancelled, out of time), the SDK stops its run without waiting for
             # it: its tool calls end (on the run's stream too) before the run does
-            assert result.run_loop_task is not None  # set by run_streamed
-            await asyncio.wait({result.run_loop_task})
+            assert streamed.run_loop_task is not None  # set by run_streamed
+            await asyncio.wait({streamed.run_loop_task})
             if error is not None:
-                await helpers.closed(error)
+                await helpers.closed(error, paused=helpers.suspended(error))
         await _closed(helpers, result)
         yield Output(result)
 
@@ -291,8 +327,9 @@ class OpenAIAgentsAdapter:
             return _Again(native_input, resumed_call(call, call.tool, denied=False, asked=True))
         state, call_id = pending.native_state, pending.native_id
         decision = resolution.decision
+        always = remembered(pending.interrupt, resolution)
         if decision is InterruptDecision.APPROVE:
-            return _Continue(state, call_id, approve=True)
+            return _Continue(state, call_id, approve=True, always=always)
         if decision is InterruptDecision.EDIT and pending.interrupt.tool_call is not None:
             tool = pending.interrupt.tool_call.tool
             edited = resolution.payload or {}
@@ -304,7 +341,9 @@ class OpenAIAgentsAdapter:
             answer = resolution.answer
             message = answer if isinstance(answer, str) else json.dumps(answer, default=str)
             return _Continue(state, call_id, approve=False, message=message)
-        return _Continue(state, call_id, approve=False, message=reason_of(resolution))
+        return _Continue(
+            state, call_id, approve=False, message=reason_of(resolution), always=always
+        )
 
     def workdir(self, target: Any, options: Mapping[str, Any]) -> Path | None:
         return None  # no folder of its own: a sandbox's outputs/ are its outputs
@@ -348,21 +387,36 @@ class OpenAIAgentsAdapter:
             )
 
     # ------------------------------------------------------------------ internals
+    async def _prepared(
+        self, target: Any, native_input: Any, run: Invocation
+    ) -> tuple[Helpers, Any, Any, dict[str, Any]]:
+        """What an attempt runs with, streamed or not: its helpers, the governed copy of its
+        agent, the harness's ``RunHooks`` around the run's own, and ``Runner.run``'s options."""
+        helpers = Helpers(run.runtime, self.name)
+        options = _options(run.runtime, target, native_input)
+        agent = self._agent(target, run, helpers, await _gated(run))
+        return helpers, agent, _hooks(options.pop("hooks", None)), options
+
     @staticmethod
     def _agent(
-        target: Any, run: Invocation, helpers: Helpers, gated: Mapping[str, ToolSpec]
+        target: Any,
+        run: Invocation,
+        helpers: Helpers,
+        gated: Mapping[str, ToolSpec],
     ) -> Any:
         # the memory tools (pull, tool_search) go to every agent the run can reach: an agent
         # it hands off to answers from memory as the one it started with
         memory = {t.spec.name for t in run.tools if t.feature in MEMORY_TOOLS}
         shared = [t for t in run.native_tools or () if t.name in memory]
+        runtime = run.runtime
         return governed_agents(
             target,
             added=list(run.native_tools or ()),
             shared=shared,
-            agent_id=run.runtime.agent_id,
+            agent_id=runtime.agent_id,
             helpers=helpers,
             gated=gated,
+            nested=lambda agent, own: _child_config(runtime, agent, own),
         )
 
     @staticmethod
@@ -378,9 +432,11 @@ class OpenAIAgentsAdapter:
             if item.call_id != native_input.call_id:
                 continue  # still waiting: the run pauses on it next
             if native_input.approve:
-                state.approve(item)
+                state.approve(item, always_approve=native_input.always)
             else:
-                state.reject(item, rejection_message=native_input.message)
+                state.reject(
+                    item, always_reject=native_input.always, rejection_message=native_input.message
+                )
         return state
 
 
@@ -390,7 +446,7 @@ async def _closed(helpers: Helpers, result: Any) -> None:
     one inside it (``tools.convert.openai_agents.waits_inside``) stays open, and the resume,
     which makes its call again, ends it."""
     if not result.interruptions:
-        await helpers.closed(None)
+        await helpers.closed(None, paused=helpers.suspended(None))
 
 
 def governed_agents(
@@ -401,21 +457,27 @@ def governed_agents(
     shared: Sequence[Any] = (),
     helpers: Helpers | None = None,
     gated: Mapping[str, ToolSpec] | None = None,
+    nested: Callable[[Any, Any], Any],
 ) -> Any:
     """``target`` and every agent reachable through its handoffs and its agent tools
     (``Agent.as_tool``), each a copy whose own tools are governed
     (``tools.convert.openai_agents.governed``: hooks, the catalog's rules, the journal, and
     offered per turn only while the run offers them: the tool hints' narrowing), whose MCP
-    servers' calls are governed the same way (:class:`GovernedServer`) and whose agent tools
+    servers' calls are governed the same way (:class:`GovernedServer`), whose sandbox
+    capabilities' tools — made inside the SDK's run (``exec_command``, ``apply_patch``...) —
+    are governed as the SDK makes them (:func:`governed_capability`), and whose agent tools
     run the governed copy of their agent — recursively, each agent copied once, so handoffs that
     lead back are kept — ``added`` (the run's harness tools) on ``target``'s and ``shared``
-    (the run's memory tools) on every other's. A tool an agent carries already (built with
-    the harness) is not added twice. A ``Handoff`` object (``handoff(agent, ...)``) is kept
-    with all it gives the SDK — its name, its input filter, its callback — and hands off to the
-    governed copy of its agent (:func:`_handed`). With ``helpers``, each agent tool's call is
-    a helper of the run. The function tools ``gated`` names (those governance may ask about,
-    :func:`_gated`) are held at the SDK's own approval gate when it asks
-    (``tools.convert.openai_agents.held``). The agents you wrapped are not changed."""
+    (the run's memory tools) on every other's, after the agent's own, in the order the agent
+    gives them. A tool an agent carries already (built with the harness) is not added twice. A
+    ``Handoff`` object (``handoff(agent, ...)``) is kept with all it gives the SDK — its name,
+    its input filter, its callback — and hands off to the governed copy of its agent
+    (:func:`_handed`). With ``helpers``, each agent tool's call is a helper of the run; its
+    child run's config is the one ``nested`` makes of its agent and its own
+    (:func:`_child_config`), and its model calls are watched (:func:`_running`). The function
+    tools ``gated`` names (those governance may ask about, :func:`_gated`) are held at the
+    SDK's own approval gate when it asks (``tools.convert.openai_agents.held``). The agents you
+    wrapped are not changed."""
     from agents import Agent
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed, held
@@ -436,18 +498,18 @@ def governed_agents(
         own = []
         for tool in agent.tools:
             inner = getattr(tool, AGENT_OF_TOOL, None)
-            ran = _running(tool, copied(inner, shared)) if isinstance(inner, Agent) else None
+            ran = (
+                _running(tool, copied(inner, shared), nested) if isinstance(inner, Agent) else None
+            )
             if inner is not None and ran is None:
                 _ungoverned_inside(agent_id, tool)
             own.append(gate(governed(ran or tool, helpers)))
         carried = {getattr(t, "name", None) for t in agent.tools}
-        # in name order, as every other adapter offers them: a stable prefix for a prompt
-        # cache, and no tool first only because it was declared first
-        copy.tools = sorted(
-            [*own, *(gate(t) for t in extra if t.name not in carried)],
-            key=lambda t: str(getattr(t, "name", "")),
-        )
+        copy.tools = [*own, *(gate(t) for t in extra if t.name not in carried)]
         copy.mcp_servers = [GovernedServer.of(s) for s in agent.mcp_servers]
+        capabilities = getattr(agent, "capabilities", None)
+        if capabilities is not None:  # a SandboxAgent's
+            copy.capabilities = [governed_capability(c) for c in capabilities]
         handoffs = []
         for handoff in agent.handoffs:
             if isinstance(handoff, Agent):
@@ -458,6 +520,193 @@ def governed_agents(
         return copy
 
     return copied(target, added)
+
+
+def governed_capability(capability: Any) -> Any:
+    """A ``SandboxAgent``'s capability on the run's copy (the SDK's seam: what its ``tools()``
+    makes inside the SDK's run, bound to the run's sandbox — ``exec_command``, ``write_stdin``,
+    ``view_image``, ``apply_patch``, ``load_skill``...), each tool governed as the agent's own
+    are (``tools.convert.openai_agents.governed``: the catalog, a person when it asks, the
+    journal, the record, the stream) without changing what it does; refused before the first
+    model call when the model's route would drop it (:func:`_capability_served`). A sandbox
+    ``Memory``'s own model calls — its extraction and consolidation agents, run by the SDK when
+    the sandbox closes — are made through the run's model route with their usage counted
+    (:func:`through_run`). Everything else is the capability's own; the agent's capability is
+    not changed."""
+    from agents.sandbox.capabilities.memory import Memory
+
+    made = capability.model_copy()
+    if isinstance(made, Memory) and made.generate is not None:
+        generate = made.generate
+        runtime = current()
+        assert runtime is not None  # the run's copy of an agent is made inside the run
+        provider = _provider_of(runtime)
+        made.generate = dataclasses.replace(
+            generate,
+            phase_one_model=through_run(generate.phase_one_model, provider),
+            phase_two_model=through_run(generate.phase_two_model, provider),
+        )
+    object.__setattr__(made, "__class__", _governing(type(capability)))
+    return made
+
+
+#: How many sandbox capability classes are kept in their governed form (:func:`_governing`):
+#: the SDK has under ten; one left out is made again.
+CAPABILITY_KINDS: Final = 64
+
+
+@functools.lru_cache(maxsize=CAPABILITY_KINDS)
+def _governing(kind: type) -> type:
+    """``kind`` (a sandbox ``Capability`` class) whose tools are governed
+    (:func:`governed_capability`) and, like the agent's own (:func:`_gated`), held at the SDK's
+    approval gate when governance asks — the approved call continues the SDK's paused run, in
+    the same sandbox — unless the run has tool hooks (their question comes first: the call
+    pauses as a harness pause does)."""
+    from agents import FunctionTool
+
+    from trellis.harness.tools.convert.openai_agents import governed, held, own_spec
+
+    class Governing(kind):  # type: ignore[misc,valid-type]
+        def tools(self) -> list[Any]:
+            made = [governed(tool) for tool in super().tools()]
+            runtime = current()
+            if runtime is None or runtime.agent.hooks:
+                return made
+            return [
+                held(tool, own_spec(runtime, tool)) if isinstance(tool, FunctionTool) else tool
+                for tool in made
+            ]
+
+        def sampling_params(self, sampling_params: dict[str, Any]) -> dict[str, Any]:
+            asked = super().sampling_params(sampling_params)
+            _capability_served(self, sampling_params.get("model"), asked)
+            return asked
+
+    Governing.__name__ = Governing.__qualname__ = kind.__name__
+    return Governing
+
+
+def _capability_served(capability: Any, model: Any, asked: Mapping[str, Any]) -> None:
+    """Refuse, as the SDK prepares the run's sandbox agent (before its first model call), a
+    capability whose tools or request parameters (``asked``) its model's route drops: a name
+    the harness routes through Bifrost, which serves it on chat completions only
+    (:func:`_whole`), which keeps function tools only and no Responses parameter (a
+    ``Compaction``'s ``context_management``)."""
+    from agents.exceptions import UserError
+    from agents.models.chatcmpl_converter import Converter
+
+    if not isinstance(model, str):
+        return
+    runtime = current()
+    assert runtime is not None  # the SDK prepares the run's sandbox agent inside the run
+    gateway = runtime.agent.harness.model_gateway
+    route = _route_of(gateway, runtime.framework_options)
+    if route is None or not routes(route, model) or _whole(gateway, model):
+        return
+    found = [f"its request parameters ({', '.join(asked)})"] if asked else []
+    for tool in capability.tools():
+        try:
+            Converter.tool_to_openai(tool)
+        except UserError:
+            found.append(f"its tool {getattr(tool, 'name', type(tool).__name__)!r}")
+    if found:
+        raise ConfigurationError(
+            f"the sandbox capability {type(capability).__name__} needs the Responses API, and "
+            f"Bifrost serves {model!r} through chat completions, which would drop "
+            f"{' and '.join(found)}: use a model Bifrost serves on the Responses API "
+            "(openai/...), or leave the capability out"
+        )
+
+
+def through_run(model: Any, provider: Any) -> Any:
+    """A sandbox ``Memory``'s model (its ``phase_one_model``/``phase_two_model``) asked through
+    the model route of the run whose sandbox it summarises: a name, through ``provider`` (the
+    run's, :func:`_provider_of` — the route it was made with, so a sandbox you keep and close
+    after the run still asks through it), each reply's
+    usage counted toward the budget of the run it is asked in and its call watched for a
+    stall. Two of one name are the same model (the SDK compares a session's memory configs).
+    A model object is your own: as it is."""
+    return _through_run_class()(model, provider) if isinstance(model, str) else model
+
+
+def _provider_of(runtime: Runtime) -> Any:
+    """The model provider of ``runtime``'s run as the harness routes it (:func:`_routed`): its
+    ``RunConfig.model_provider``, on Bifrost for the names a ``MultiProvider`` leaves to its
+    default provider."""
+    from agents import RunConfig
+
+    gateway = runtime.agent.harness.model_gateway
+    route = _route_of(gateway, runtime.framework_options)
+    if route is not None:
+        return routed_provider(cast("Bifrost", gateway), route)
+    given = runtime.framework_options.get("run_config")
+    return (RunConfig() if given is None else _coerced(given)).model_provider
+
+
+@functools.cache
+def _through_run_class() -> type:
+    from agents.models.interface import Model
+
+    from trellis.harness.hooks.openai_agents import counted
+
+    class ThroughRun(Model):  # type: ignore[misc]
+        def __init__(self, name: str, provider: Any) -> None:
+            self.name = name
+            self._provider = provider
+
+        def __eq__(self, other: object) -> bool:
+            return isinstance(other, ThroughRun) and other.name == self.name
+
+        def __hash__(self) -> int:
+            return hash(self.name)
+
+        def _model(self) -> Any:
+            return self._provider.get_model(self.name)
+
+        async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+            runtime = current()
+            if runtime is None:  # after its run: asked through the run's route, no run to count
+                return await self._model().get_response(*args, **kwargs)
+            step = f"openai_agents:memory:{self.name}"
+            runtime.model_started(step)
+            try:
+                response = await self._model().get_response(*args, **kwargs)
+            finally:
+                runtime.model_ended(step)
+            counted(runtime, self.name, response.usage)
+            return response
+
+        def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            # the SDK's ``Model`` interface; its memory agents are not streamed
+            return cast("AsyncIterator[Any]", self._model().stream_response(*args, **kwargs))
+
+    return ThroughRun
+
+
+def _memory_said(target: Any) -> None:
+    """Say once, where an agent is wrapped, of a sandbox ``Memory`` that generates memories:
+    its consolidation agent writes the memory files in the sandbox with tools the SDK makes
+    for it outside any seam the harness has, so those writes are the SDK's own, not governed or
+    recorded (its model calls go through the run: :func:`through_run`)."""
+    from agents.sandbox.capabilities.memory import Memory
+
+    for agent in reachable(target):
+        for capability in getattr(agent, "capabilities", None) or ():
+            if isinstance(capability, Memory) and capability.generate is not None:
+                _said_memory(agent.name)
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent name, of the most recent
+def _said_memory(name: str) -> None:
+    log.warning(
+        "the sandbox agent %r has a Memory that generates memories: its model calls go through "
+        "the run's model route and budget, but the SDK's consolidation agent writes the memory "
+        "files in the sandbox itself, with tools the harness cannot reach, so those writes are "
+        "not governed or recorded (Memory(generate=None) reads memories only; the memory "
+        "service keeps long-term memory governed)",
+        name,
+        extra={"agent": name},
+    )
 
 
 async def _gated(run: Invocation) -> dict[str, ToolSpec]:
@@ -516,140 +765,72 @@ def _worded(error: BaseException) -> str | None:
     return None
 
 
+#: The SDK's ``MCPServer`` method that says how a failed call is told to the model, which the
+#: governed server wraps (a private name: checked where the class is made).
+FAILURE_FUNCTION: Final = "_get_failure_error_function"
+
+
+def _wraps_failure_function(server: type) -> None:
+    """Refuse an SDK whose ``MCPServer`` no longer has :data:`FAILURE_FUNCTION`: the governed
+    server's override of it would never be called, and a pause inside an MCP call would become
+    an error text the model reads instead of stopping the run."""
+    if not hasattr(server, FAILURE_FUNCTION):
+        raise ConfigurationError(
+            f"this OpenAI Agents SDK's MCPServer no longer has {FAILURE_FUNCTION}, which the "
+            "harness wraps so a pause inside an MCP call stops the run: use a tested SDK "
+            "release (docs/versioning.md)"
+        )
+
+
 @functools.cache
 def _governed_server() -> type:
+    """The governed server's class (``adapters.openai_sdk``: it subclasses the SDK's
+    ``MCPServer``, so it is loaded when first needed), on an SDK that still has the private
+    method it overrides (:func:`_wraps_failure_function`)."""
     from agents.mcp import MCPServer
-    from mcp.types import CallToolResult, TextContent
 
-    class Governed(MCPServer, GovernedServer):  # type: ignore[misc]
-        def __init__(self, inner: Any) -> None:  # the SDK's own state is the inner server's
-            self._inner = inner
-            self._annotations: dict[str, Any] = {}
+    from trellis.harness.adapters.openai_sdk import GovernedMCPServer
 
-        def _get_failure_error_function(self, agent_failure_error_function: Any) -> Any:
-            """The server's own way of telling the model a call failed (else its agent's),
-            except while the run is pausing: a pause raises out of the SDK's run rather than
-            becoming an error text."""
-            theirs = self._inner._get_failure_error_function(agent_failure_error_function)
-            if theirs is None:
-                return None
-
-            def told(context: Any, error: Exception) -> Any:
-                runtime = current()
-                if runtime is not None and runtime.pending is not None:
-                    raise error
-                text = theirs(context, error)  # the server's own way, which still runs
-                worded = _worded(error)
-                return text if worded is None else worded
-
-            return told
-
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self._inner, name)
-
-        @property
-        def name(self) -> str:
-            return str(self._inner.name)
-
-        async def connect(self) -> None:
-            await self._inner.connect()
-
-        async def cleanup(self) -> None:
-            await self._inner.cleanup()
-
-        async def list_tools(self, run_context: Any = None, agent: Any = None) -> Any:
-            tools = await self._inner.list_tools(run_context, agent)
-            self._annotations.update((t.name, t.annotations) for t in tools)
-            return tools
-
-        async def list_prompts(self) -> Any:
-            return await self._inner.list_prompts()
-
-        async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
-            return await self._inner.get_prompt(name, arguments)
-
-        # what the SDK's base class answers itself (no tools cached, no resources): the
-        # inner server's own
-        @property
-        def cached_tools(self) -> Any:
-            return self._inner.cached_tools
-
-        async def list_resources(self, cursor: str | None = None) -> Any:
-            return await self._inner.list_resources(cursor)
-
-        async def list_resource_templates(self, cursor: str | None = None) -> Any:
-            return await self._inner.list_resource_templates(cursor)
-
-        async def read_resource(self, uri: str) -> Any:
-            return await self._inner.read_resource(uri)
-
-        async def call_tool(
-            self, tool_name: str, arguments: dict[str, Any] | None, meta: Any = None
-        ) -> Any:
-            inner = self._inner
-            if current() is None:
-                return await inner.call_tool(tool_name, arguments, meta)
-
-            raised: list[Exception] = []
-
-            async def run(args: dict[str, Any]) -> Any:
-                try:
-                    result = await inner.call_tool(tool_name, args, meta)
-                except Exception as error:
-                    raised.append(error)
-                    raise
-                if result.is_error:
-                    said = "".join(getattr(c, "text", "") for c in result.content)
-                    raise ToolError(said or f"{tool_name} failed", source="mcp")
-                return result.model_dump(mode="json", by_alias=True, exclude_none=True)
-
-            spec = ToolSpec(
-                name=tool_name,
-                source="mcp",
-                server=self.name,
-                side_effects=side_effects_of(self._annotations.get(tool_name)),
-                **data_of(self._annotations.get(tool_name), strict=False),
-            )
-            outcome = await bridge.call(Tool(spec, run), dict(arguments or {}))
-            if outcome.ok and isinstance(outcome.output, dict):
-                return CallToolResult.model_validate(outcome.output)
-            text = outcome.output if isinstance(outcome.output, str) else json.dumps(outcome.output)
-            hooked = bridge.hooked(outcome)
-            if raised and not is_pause_signal(raised[-1]) and not (hooked and outcome.ok):
-                # the call itself failed: the SDK's to tell, or to raise — in the words of the
-                # run's after_tool hooks when they worded it (:func:`_worded`)
-                if hooked:
-                    setattr(raised[-1], WORDED, text)
-                raise raised[-1]
-            return CallToolResult(
-                content=[TextContent(type="text", text=text)], is_error=not outcome.ok
-            )
-
-    return Governed
+    _wraps_failure_function(MCPServer)
+    return GovernedMCPServer
 
 
 #: The name of the agent an agent tool's (``Agent.as_tool``) invoke runs, in its code.
 RUNS_AGENT: Final = "self"
+#: The names of the run config and the ``RunHooks`` its child run is given, in its code.
+CHILD_CONFIG: Final = "run_config"
+CHILD_HOOKS: Final = "hooks"
 
 
-def _running(tool: Any, agent: Any) -> Any | None:
+def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any]) -> Any | None:
     """An agent tool (``Agent.as_tool``) as a copy that runs ``agent`` — the governed copy of
     its own — with everything else as it was given (its input, its run options, its output
     extractor): ``None`` when its invoke is not of the shape this SDK release builds (its own
-    agent then runs as it is, said once)."""
+    agent then runs as it is, said once). Its child run is given the config ``nested`` makes
+    of ``agent`` and the tool's own ``run_config`` (:func:`_child_config`) in place of the
+    calling run's, and the harness's ``RunHooks`` around its own ``hooks`` —
+    every model call of the child watched for a stall (its usage the agent tool's helper
+    counts: ``tools.convert.openai_agents._helped``)."""
     from agents import FunctionTool
 
+    from trellis.harness.hooks.openai_agents import ChildModelHooks
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, AGENT_TOOL
 
     invoker = tool.on_invoke_tool
     impl = getattr(invoker, "_invoke_tool_impl", None)
     code = getattr(impl, "__code__", None)
-    if not isinstance(tool, FunctionTool) or code is None or RUNS_AGENT not in code.co_freevars:
+    closes = {RUNS_AGENT, CHILD_CONFIG, CHILD_HOOKS}
+    if not isinstance(tool, FunctionTool) or code is None or not closes <= set(code.co_freevars):
         return None
     assert impl is not None
     cells = dict(zip(code.co_freevars, impl.__closure__ or (), strict=True))
+    given = {
+        RUNS_AGENT: agent,
+        CHILD_CONFIG: nested(agent, cells[CHILD_CONFIG].cell_contents),
+        CHILD_HOOKS: ChildModelHooks(cells[CHILD_HOOKS].cell_contents),
+    }
     closure = tuple(
-        types.CellType(agent) if name == RUNS_AGENT else cell for name, cell in cells.items()
+        types.CellType(given[name]) if name in given else cell for name, cell in cells.items()
     )
     running = types.FunctionType(code, impl.__globals__, impl.__name__, impl.__defaults__, closure)
     running.__kwdefaults__ = impl.__kwdefaults__
@@ -837,72 +1018,105 @@ def _said_inside(agent_id: str, tool: str, tools: str) -> None:
 
 
 def _options(runtime: Runtime, target: Any, native_input: Any) -> dict[str, Any]:
-    """``Runner.run``'s options: the run's framework options, with the memory service's thread
-    as the session (``bridges.session``) when the run keeps no thread of its own and memory is
-    on, the model names routed through Bifrost when it serves the harness (:func:`_routed`),
-    and the model of a run resumed from its input told which call the person answered about
-    (:class:`_Again`)."""
+    """``Runner.run``'s options: the run's framework options — a ``run_config`` given as a dict
+    made the SDK's ``RunConfig`` as ``Runner.run`` makes it (:func:`_coerced`), a ``session``
+    the agent was wrapped with made the conversation's own (:func:`per_conversation`) — with
+    the memory service's thread as the session (``bridges.session``) when the run keeps no
+    thread of its own and memory is on, the model names routed through Bifrost when it serves
+    the harness (:func:`_routed`), and the model of a run resumed from its input told which
+    call the person answered about (:class:`_Again`)."""
     options = dict(runtime.framework_options)
-    if runtime.run_memory is not None and _thread_store(options) is MEMORY_THREAD:
+    given = options.get("run_config")
+    if given is not None:
+        options["run_config"] = _coerced(given)
+    session = options.get("session")
+    if session is not None and session is runtime.agent.framework_options.get("session"):
+        options["session"] = per_conversation(session, runtime.conversation)
+    gateway = runtime.agent.harness.model_gateway
+    kept = _thread_store(options, keeps_thread(gateway, target, options))
+    if runtime.run_memory is not None and kept is MEMORY_THREAD:
         options["session"] = MemorySession(runtime)
-    told = _told_unknown_tools(options)
+    told = _told_unknown_tools(options, given)
     question = _question(native_input, runtime.pushed_context)
     asked = _dated(runtime, _asked_with(runtime, told, question))
     again = native_input.told if isinstance(native_input, _Again) else None
-    return _at_turn_limit(runtime, _routed(runtime, target, _steering(runtime, asked, again)))
+    return _routed(runtime, target, _steering(runtime, asked, again))
 
 
-def _at_turn_limit(runtime: Runtime, options: dict[str, Any]) -> dict[str, Any]:
-    """The options with the SDK's own ``max_turns`` error handler (``Runner.run``'s
-    ``error_handlers``), unless the run gives its own: a run that reaches its turn limit ends
-    with one last answer, as a ``ReAct`` run at ``max_steps`` does (``middleware.AnswerAtLimit``) —
-    the last agent called once more, told the limit is reached (``budget.LIMIT``) and given no
-    tool, through the run's own config and hooks — not a ``MaxTurnsExceeded`` error with no
-    answer. An agent that answers in a structured type, or a last call that gives no answer,
-    leaves the SDK's error."""
-    from agents import Runner
+def _coerced(config: Any) -> Any:
+    """A ``run_config`` as ``Runner.run`` takes it: a ``RunConfig``, or a dict of its fields,
+    made one the SDK's way (its own ``TypeError`` for a field it does not have)."""
+    from agents.run_config import _coerce_run_config
+
+    return _coerce_run_config(config)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnLimit:
+    """A run the SDK stopped at its turn limit (``MaxTurnsExceeded``), as its outcome: what it
+    did up to there (``new_items``, the SDK's ``run_data``) and no final output of the SDK's —
+    the run ends ``PARTIAL`` (:func:`_at_turn_limit`), its answer the last thing its model
+    said, if it said anything."""
+
+    final_output: Any
+    new_items: list[Any]
+    interruptions: tuple[Any, ...] = ()
+
+
+def _at_turn_limit(runtime: Runtime, error: Any, options: Mapping[str, Any]) -> TurnLimit:
+    """The SDK's outcome of a run that reached its ``max_turns`` (``error``: its
+    ``MaxTurnsExceeded``; an ``error_handlers`` entry of the run's own answers it before this),
+    as the harness ends it: ``PARTIAL`` — the turn limit is the run's budget of turns, said as
+    the budget's warning — with no model call of the harness's, its answer the last message
+    the model wrote (``None`` when it wrote none)."""
     from agents.run_config import DEFAULT_MAX_TURNS
 
-    limit = options.get("max_turns") or DEFAULT_MAX_TURNS
-
-    async def last_answer(given: Any) -> str | None:
-        agent = given.run_data.last_agent
-        if agent.output_type not in (None, str):
-            return None
-        told: Any = {"role": "user", "content": budget.LIMIT.format(limit=limit)}
-        bare = agent.clone(tools=[], handoffs=[], mcp_servers=[])
-        try:
-            result = await Runner.run(
-                bare,
-                [*given.run_data.history, told],
-                max_turns=1,
-                hooks=_hooks(options.get("hooks")),
-                run_config=options.get("run_config"),
-                context=given.context.context,
-            )
-        except Exception as exc:
-            log.warning("run %s: no last answer at the turn limit: %s", runtime.run_id, exc)
-            return None
-        stopped = f"stopped: the turn limit ({limit}) was reached"
-        log.warning("run %s %s", runtime.run_id, stopped)
-        runtime.events.warning("step_limit", stopped)
-        return str(result.final_output)
-
-    handlers = dict(options.get("error_handlers") or {})
-    handlers.setdefault("max_turns", last_answer)
-    return {**options, "error_handlers": handlers}
+    limit = options.get("max_turns", DEFAULT_MAX_TURNS)
+    items = list(error.run_data.new_items)  # the SDK's, set wherever it raises the error
+    said = [s.content for s in said_in(items) if s.role is Speaker.ASSISTANT and s.content]
+    runtime.budget_spent = f"its turn limit (max_turns={limit}) was reached"
+    log.warning("run %s stopped: the turn limit (%s) was reached", runtime.run_id, limit)
+    return TurnLimit(final_output=said[-1] if said else None, new_items=items)
 
 
-def _told_unknown_tools(options: dict[str, Any]) -> dict[str, Any]:
+def _told_unknown_tools(options: dict[str, Any], given: Any) -> dict[str, Any]:
     """The options with a call to a tool the model made up answered as an error the model
     reads, so the run goes on — as on every other adapter — and not a ``ModelBehaviorError``
     that ends it: the SDK's own ``RunConfig.tool_not_found_behavior="return_error_to_model"``
-    (its message: ``Tool '<name>' not found.``)."""
+    (its message: ``Tool '<name>' not found.``) — unless the run says its own (``given``: the
+    ``run_config`` as it was given; a dict naming the field, or a ``RunConfig`` whose value is
+    not the field's default — the one value a ``RunConfig`` object cannot tell from unset)."""
     from agents import RunConfig
 
     config = options.get("run_config") or RunConfig()
+    default = next(f.default for f in dataclasses.fields(RunConfig) if f.name == UNKNOWN_TOOLS)
+    if (isinstance(given, Mapping) and UNKNOWN_TOOLS in given) or getattr(
+        config, UNKNOWN_TOOLS
+    ) != default:
+        return options
     told = dataclasses.replace(config, tool_not_found_behavior="return_error_to_model")
     return {**options, "run_config": told}
+
+
+#: The ``RunConfig`` field that says what a call to a tool the model made up does.
+UNKNOWN_TOOLS: Final = "tool_not_found_behavior"
+
+
+def _child_config(runtime: Runtime, agent: Any, own: Any) -> Any:
+    """The run config of an agent tool's child run (``Agent.as_tool``): the tool's own
+    ``run_config`` — else the calling run's as it was given, as the SDK passes it on — with
+    what the harness gives every model call of the run that is not the calling conversation's:
+    the model route (:func:`_routed`), the day (:func:`_dated`) and a made-up tool's error
+    (:func:`_told_unknown_tools`, unless it says its own). The messages steered into the
+    conversation, the memory context the run was pushed and why a computer action did not run
+    are the calling run's, and are not given to the child (its helper is given its own
+    memory context, ``bridges.helpers``)."""
+    from agents import RunConfig
+
+    theirs = runtime.framework_options.get("run_config") if own is None else own
+    options: dict[str, Any] = {"run_config": RunConfig() if theirs is None else _coerced(theirs)}
+    told = _told_unknown_tools(options, theirs)
+    return _routed(runtime, agent, _dated(runtime, told))["run_config"]
 
 
 def _filtered(options: dict[str, Any], change: Callable[[Any], Any]) -> dict[str, Any]:
@@ -1033,26 +1247,32 @@ def _steering(runtime: Runtime, options: dict[str, Any], again: str | None) -> d
 
 
 def _routed(runtime: Runtime, target: Any, options: dict[str, Any]) -> dict[str, Any]:
-    """With Bifrost serving the harness (a route with ``Capability.ATTRIBUTION``), every model
-    name of the run's agents goes through it
-    (``RunConfig.model_provider``: :func:`bifrost_provider`, the name mapped to Bifrost's
-    ``provider/model``) — unless the run's own ``run_config`` names a model provider of its
-    own (code over the environment). An agent whose model is an object of its own calls its
-    provider directly, which is said once per agent."""
+    """With Bifrost serving the harness (a route with ``Capability.ATTRIBUTION``), the model
+    names the run leaves to the SDK's default provider go through it
+    (``RunConfig.model_provider``: :func:`routed_provider` over the run's ``MultiProvider``,
+    the name mapped to Bifrost's ``provider/model``) — every other choice of the run's kept: a
+    model provider of its own (code over the environment), the ``MultiProvider``'s own
+    ``provider_map`` and its ``litellm/`` and ``any-llm/`` prefixes. A model object (an
+    agent's, or ``RunConfig.model``) calls its provider directly, which is said once. What an
+    agent uses that its route cannot carry is refused before the run's first model call
+    (:func:`unserved`)."""
     from agents import Agent, RunConfig
     from agents.models.multi_provider import MultiProvider
 
     gateway = runtime.agent.harness.model_gateway
+    unserved(gateway, target, options)
     if not gateway.has(Capability.ATTRIBUTION):
         return options
     config = options.get("run_config") or RunConfig()
+    if config.model is not None and not isinstance(config.model, str):
+        _unrouted(runtime.agent_id, "RunConfig.model", type(config.model).__name__)
     if not isinstance(config.model_provider, MultiProvider):
         return options  # the run's own provider
     for agent in reachable(target):
         model = agent.model if isinstance(agent, Agent) else None
         if model is not None and not isinstance(model, str):
             _unrouted(runtime.agent_id, agent.name, type(model).__name__)
-    provider = bifrost_provider(cast("Bifrost", gateway))
+    provider = routed_provider(cast("Bifrost", gateway), config.model_provider)
     return {**options, "run_config": dataclasses.replace(config, model_provider=provider)}
 
 
@@ -1068,12 +1288,59 @@ def _unrouted(agent_id: str, name: str, model: str) -> None:
     )
 
 
+def routed_provider(gateway: Bifrost, theirs: Any) -> Any:
+    """The run's model provider on Bifrost: ``theirs`` (the run's ``MultiProvider``) for every
+    name it gives a provider of its own, Bifrost (:func:`bifrost_provider`) for the names it
+    leaves to its OpenAI provider (:meth:`_Routed.routes`)."""
+    return _routed_class()(theirs, bifrost_provider(gateway))
+
+
+@functools.cache
+def _routed_class() -> type:
+    from agents.models.interface import ModelProvider
+
+    class Routed(ModelProvider):  # type: ignore[misc]
+        def __init__(self, theirs: Any, bifrost: Any) -> None:
+            self.theirs = theirs
+            self.bifrost = bifrost
+
+        def get_model(self, model_name: str | None) -> Any:
+            if routes(self.theirs, model_name):
+                return self.bifrost.get_model(model_name)
+            return self.theirs.get_model(model_name)
+
+    return Routed
+
+
+def routes(theirs: Any, name: str | None) -> bool:
+    """Whether the run's ``MultiProvider`` (``theirs``) leaves the model ``name`` to its
+    default provider, which Bifrost stands in for: a bare name, an ``openai/`` one, or a name
+    whose prefix it gives no provider of its own (a name in Bifrost's ``provider/model``
+    form) — and not one its ``provider_map``, ``litellm/`` or ``any-llm/`` gives a provider
+    (the SDK's own resolution, ``MultiProvider._resolve_prefixed_model``)."""
+    from agents.exceptions import UserError
+
+    prefix, stripped = theirs._get_prefix_and_model_name(name)
+    if prefix is None:
+        return True
+    try:
+        provider, _ = theirs._resolve_prefixed_model(
+            original_model_name=name, prefix=prefix, stripped_model_name=stripped
+        )
+    except UserError:  # a prefix it cannot place: the gateway's provider
+        return True
+    return bool(provider is theirs.openai_provider)
+
+
 def bifrost_provider(gateway: Bifrost) -> Any:
     """The OpenAI Agents SDK's model provider for Bifrost: each model name (the SDK's default
-    for an agent naming none) mapped to Bifrost's form, asked on its chat completions with the
-    virtual key, the deny-all MCP scope and the run's dimensions and ``traceparent`` (read per
-    request), no retries of the client's own (the gateway retries). One per gateway and event
-    loop (a client's pooled connections belong to the loop that opened them)."""
+    for an agent naming none) mapped to Bifrost's form, asked on the SDK's default API — the
+    Responses API (``/v1/responses``), or chat completions for a model the gateway answers it
+    does not serve there (``_learning_class``), unless the application set another
+    (``set_default_openai_api``) — with the virtual key,
+    the deny-all MCP scope and the run's dimensions and ``traceparent`` (read per request), no
+    retries of the client's own (the gateway retries). One per gateway and event loop (a
+    client's pooled connections belong to the loop that opened them)."""
     providers = per_loop(_PROVIDERS, PROVIDERS_KEPT)
     key = (gateway.url, gateway.key)
     found = providers.get(key)
@@ -1086,6 +1353,7 @@ def bifrost_provider(gateway: Bifrost) -> Any:
 def _bifrost_provider_class() -> type:
     import openai
     from agents.models import get_default_model
+    from agents.models._openai_shared import get_use_responses_by_default
     from agents.models.interface import ModelProvider
     from agents.models.openai_provider import OpenAIProvider
 
@@ -1101,27 +1369,272 @@ def _bifrost_provider_class() -> type:
                 default_headers=GatewayHeaders(),  # type: ignore[arg-type] # read per request
                 max_retries=BIFROST_CLIENT_RETRIES,
             )
-            self.inner = OpenAIProvider(openai_client=client, use_responses=False)
+            self.inner = OpenAIProvider(openai_client=client)  # the SDK's default API
+            self.chat = OpenAIProvider(openai_client=client, use_responses=False)
 
         def get_model(self, model_name: str | None) -> Any:
-            return self.inner.get_model(self.gateway.routed(model_name or get_default_model()))
+            name = self.gateway.routed(model_name or get_default_model())
+            model = self.inner.get_model(name)
+            if not get_use_responses_by_default():  # the application's own choice of API
+                return model
+            return _learning_class()(self.gateway, name, model, self.chat.get_model(name))
 
     return BifrostProvider
 
 
-def _thread_store(options: Mapping[str, Any]) -> Any:
-    """The thread store of a run with these options (``OpenAIAgentsAdapter.thread_store``)."""
+#: What a gateway answers a request on a route it does not serve (no such route, no such
+#: method on it, not implemented): the model is then asked on chat completions.
+NOT_SERVED: Final = frozenset({404, 405, 501})
+
+
+def _learning_class() -> type:
+    """The class of a model name on Bifrost that learns its route (``adapters.openai_sdk``:
+    it subclasses the SDK's ``Model``, so it is loaded when first needed)."""
+    from trellis.harness.adapters.openai_sdk import Learning
+
+    return Learning
+
+
+def _whole(gateway: Any, name: str | None) -> bool:
+    """Whether a model name the harness routes through Bifrost is asked with all a Responses
+    request carries kept — hosted tools, a stored prompt, server-side threads, compaction: the
+    SDK's default API is the Responses API (else the application chose chat completions, whose
+    limits are the SDK's own) and the gateway has not answered that it serves the model on
+    chat completions only (``Bifrost.keeps_responses``: learned from its first call)."""
+    from agents.models import _openai_shared, get_default_model
+
+    if not _openai_shared.get_use_responses_by_default():
+        return True
+    return cast("Bifrost", gateway).keeps_responses(name or get_default_model())
+
+
+def _route_of(gateway: Any, options: Mapping[str, Any]) -> Any | None:
+    """The run's ``MultiProvider`` when the harness routes its default names through Bifrost
+    (:func:`_routed`); ``None`` when it routes none (another route, a provider of the run's)."""
+    from agents import RunConfig
+    from agents.models.multi_provider import MultiProvider
+
+    if gateway is None or not gateway.has(Capability.ATTRIBUTION):
+        return None
+    given = options.get("run_config")
+    config = RunConfig() if given is None else _coerced(given)
+    provider = config.model_provider
+    return provider if isinstance(provider, MultiProvider) else None
+
+
+def _model_of(agent: Any, options: Mapping[str, Any]) -> Any:
+    """The model ``agent`` is called with in a run with these options: ``RunConfig.model``,
+    else its own."""
+    given = options.get("run_config")
+    model = _coerced(given).model if given is not None else None
+    return model if model is not None else getattr(agent, "model", None)
+
+
+def keeps_thread(gateway: Any, target: Any, options: Mapping[str, Any]) -> bool:
+    """Whether the model the run starts with keeps a conversation OpenAI's servers hold
+    (:data:`SERVER_THREAD`): not the SDK's chat completions model, which ignores the ids (and
+    says so) — a model object of that class, or a name the SDK's OpenAI provider answers on
+    chat completions (the application's default API, or the provider's own) — nor a name the
+    harness routes through Bifrost to a provider it converts to chat completions
+    (:func:`_whole`). Any other model or provider is taken at its word, as a thread store the
+    harness cannot see into is (``history``)."""
+    from agents import RunConfig
+    from agents.models import _openai_shared
+    from agents.models.multi_provider import MultiProvider
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+
+    model = _model_of(target, options)
+    if model is not None and not isinstance(model, str):
+        return not isinstance(model, OpenAIChatCompletionsModel)
+    given = options.get("run_config")
+    provider = (RunConfig() if given is None else _coerced(given)).model_provider
+    if not isinstance(provider, MultiProvider) or not routes(provider, model):
+        return True
+    if _route_of(gateway, options) is None:  # the SDK's OpenAI provider, on the API it was given
+        return bool(provider.openai_provider._use_responses)
+    return _openai_shared.get_use_responses_by_default() and _whole(gateway, model)
+
+
+def _converted(gateway: Any, route: Any, agent: Any, options: Mapping[str, Any]) -> bool:
+    """Whether ``agent``'s model is a name the harness routes through Bifrost (``route``: the
+    run's ``MultiProvider``) which the gateway serves on chat completions only (:func:`_whole`)."""
+    model = _model_of(agent, options)
+    named = model is None or isinstance(model, str)
+    return named and routes(route, model) and not _whole(gateway, model)
+
+
+#: A ``ModelSettings`` field a Responses request carries and a chat completions one does not.
+RESPONSES_SETTINGS: Final = ("truncation", "response_include", "context_management")
+
+
+def unserved(gateway: Any, target: Any, options: Mapping[str, Any]) -> None:
+    """Refuse, before any model call, what a run's agents use that their model route drops: on
+    Bifrost, a provider it calls by converting the request to chat completions (:func:`_whole`)
+    keeps function tools only, and no stored prompt, Responses settings, sandbox request
+    parameters or server-side thread — each named, with what to do, rather than dropped
+    without a word or failing mid-run."""
+    route = _route_of(gateway, options)
+    if route is None:
+        return
+    found: list[str] = []
+    for agent in reachable(target):
+        if _converted(gateway, route, agent, options):
+            found.extend(f"{agent.name!r}: {said}" for said in _chat_only(agent, options))
+    server = [key for key in SERVER_THREAD if options.get(key)]
+    if server and _converted(gateway, route, target, options):
+        found.append(f"{target.name!r}: {', '.join(server)} (a server thread)")
+    if found:
+        raise ConfigurationError(DROPPED.format(found="; ".join(found)))
+
+
+#: What a refusal says of what a chat completions request would drop (:func:`unserved`).
+DROPPED: Final = (
+    "the gateway serves these models on chat completions only (it answered that it does not "
+    "serve them on /v1/responses), which would drop: {found}. Use a model the gateway serves "
+    "on the Responses API, a model object of your own, or leave these out"
+)
+
+
+def _chat_only(agent: Any, options: Mapping[str, Any]) -> list[str]:
+    """What ``agent`` uses that a chat completions request cannot carry (:func:`_dropped`):
+    its tools, its stored prompt and its model settings as the run resolves them."""
+    from agents import RunConfig
+
+    given = options.get("run_config")
+    config = RunConfig() if given is None else _coerced(given)
+    settings = agent.model_settings.resolve(config.model_settings)
+    return _dropped(agent.tools, agent.prompt, settings)
+
+
+def _dropped(tools: Sequence[Any], prompt: Any, settings: Any) -> list[str]:
+    """What a chat completions request cannot carry of a model call: each tool the SDK's own
+    chat completions converter refuses (a hosted tool, a shell, a patch editor, a computer, a
+    custom tool, a deferred or namespaced function tool: its words), a stored prompt and
+    Responses settings (:data:`RESPONSES_SETTINGS`, ``reasoning.mode``/``context``)."""
+    from agents.exceptions import UserError
+    from agents.models.chatcmpl_converter import Converter
+
+    found = []
+    for tool in tools:
+        try:
+            Converter.tool_to_openai(tool)
+        except UserError as exc:
+            found.append(f"tool {getattr(tool, 'name', type(tool).__name__)!r} ({exc})")
+    if prompt is not None:
+        found.append("a stored prompt (Agent.prompt)")
+    found += [f"ModelSettings.{name}" for name in RESPONSES_SETTINGS if getattr(settings, name)]
+    reasoning = settings.reasoning
+    found += [
+        f"ModelSettings.reasoning.{name}"
+        for name in ("mode", "context")
+        if getattr(reasoning, name, None) is not None
+    ]
+    return found
+
+
+def _refused_on_chat(model: str, asked: Mapping[str, Any]) -> None:
+    """Refuse a model call about to fall back to chat completions (``_learning_class``) when
+    that request cannot carry it: what the call's tools, prompt and settings need
+    (:func:`_dropped`) and a server-side thread (``asked``: the call's arguments by name, as
+    the SDK's ``Model.get_response`` takes them), each named."""
+    found = _dropped(asked["tools"], asked["prompt"], asked["model_settings"])
+    server = [key for key in SERVER_THREAD if asked.get(key)]
+    if server:
+        found.append(f"{', '.join(server)} (a server thread)")
+    if found:
+        raise ConfigurationError(DROPPED.format(found=f"{model!r}: " + "; ".join(found)))
+
+
+def _thread_store(options: Mapping[str, Any], keeps: bool) -> Any:
+    """The thread store of a run with these options (``OpenAIAgentsAdapter.thread_store``):
+    ``keeps``, whether the run's model keeps a server-side thread (:func:`keeps_thread`) —
+    when it does not, the ids are not a thread, and none is kept (``None``)."""
     if options.get("session") is not None:
         return options["session"]
     server = next((key for key in SERVER_THREAD if options.get(key)), None)
-    return ServerThread(server) if server is not None else MEMORY_THREAD
+    if server is None:
+        return MEMORY_THREAD
+    return ServerThread(server) if keeps else None
+
+
+def per_conversation(session: Any, conversation: str) -> Any:
+    """A session the agent was wrapped with (``h.wrap(framework_options={"session": ...})``,
+    one object for every run) as the conversation's own: a copy of it — its class, its storage
+    — whose ``session_id`` is its own and the conversation's key (``Runtime.conversation``:
+    the tenant's, the user's and the thread's; a run with no thread, its own), and a session
+    it wraps (an encrypted session's) made the conversation's the same way, so two users, or
+    two threads, never read each other's turns (:func:`_scoped_id` refuses a session that
+    cannot be made so, where it is wrapped)."""
+    from agents.memory.session import Session
+
+    # its attributes on a new object of its class: ``copy.copy`` asks a blank object for its
+    # ``__setstate__``, which a session that hands unknown attributes on to the one it wraps
+    # (the SDK's ``EncryptedSession``) answers by recursing
+    scoped = object.__new__(type(session))
+    scoped.__dict__.update(vars(session))
+    for name, value in vars(session).items():
+        if isinstance(value, Session) and value is not session:
+            setattr(scoped, name, per_conversation(value, conversation))
+    scoped.session_id = _scoped_id(session) + f":{conversation}"
+    return scoped
+
+
+def _scoped_id(session: Any) -> str:
+    """The ``session_id`` a session given on ``h.wrap`` keeps each conversation under, after
+    its own (:func:`per_conversation`) — refused (``ConfigurationError``) when a copy with
+    another id would still share its storage: its id is not a plain attribute of it (a
+    property, a server's conversation), or it keeps a value made from its id when it was made
+    (a key prefix), which a copy keeps too. A session it wraps is checked the same way."""
+    from agents.memory.session import Session
+
+    held = getattr(session, "__dict__", {})
+    own = held.get("session_id")
+    if not isinstance(own, str):
+        raise ConfigurationError(_SHARED.format(kind=type(session).__name__, why=_NOT_ITS_OWN))
+    for name, value in held.items():
+        if isinstance(value, Session) and value is not session:
+            _scoped_id(value)
+        elif name != "session_id" and own and isinstance(value, str) and own in value:
+            why = _MADE_FROM.format(name=name)
+            raise ConfigurationError(_SHARED.format(kind=type(session).__name__, why=why))
+    return own
+
+
+#: Why a session given on ``h.wrap`` cannot be kept per conversation (:func:`_scoped_id`).
+_SHARED: Final = (
+    "framework_options 'session': a session given on h.wrap is every run's, so the harness "
+    "keeps each conversation (tenant, user, thread) under its own session_id in it, and a "
+    "{kind} cannot be: {why}. Give it per run instead (agent.run(..., framework_options="
+    "{{'session': ...}}), one per conversation), or leave it out (memory keeps the thread)"
+)
+_NOT_ITS_OWN: Final = "its session_id is not a plain attribute a copy can change"
+_MADE_FROM: Final = "its {name} was made from its session_id, and a copy would keep it"
+
+
+def _one_sandbox(config: Any) -> None:
+    """Refuse a sandbox that would be every user's: a ``SandboxRunConfig`` given on ``h.wrap``
+    with a live ``session`` (one sandbox, its files and processes, for every run) or a
+    ``session_state`` (every run resumed into the same one)."""
+    sandbox = getattr(config, "sandbox", None)
+    pinned = [
+        name for name in ("session", "session_state") if getattr(sandbox, name, None) is not None
+    ]
+    if pinned:
+        raise ConfigurationError(
+            f"framework_options 'run_config': a SandboxRunConfig({pinned[0]}=...) on h.wrap "
+            "is one sandbox — its files and its processes — for every user and thread. Give "
+            "the sandbox client on h.wrap (SandboxRunConfig(client=...): the SDK makes a "
+            "sandbox for each run), or the session you keep for a conversation per run "
+            "(agent.run(..., framework_options={'run_config': RunConfig(sandbox="
+            "SandboxRunConfig(session=...))}))"
+        )
 
 
 def _hooks(theirs: Any = None) -> Any:
     """The harness's ``RunHooks``, always: every model call watched for a stall, its hosted
-    tool calls recorded, and its usage counted toward the run's budget (``budget.py``) — and
-    the run's own ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with
-    everything the SDK reports."""
+    tool calls recorded, its usage counted toward the run's budget (``budget.py``) — and the
+    run's own ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with everything
+    the SDK reports."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
     return ModelHooks(theirs)
@@ -1149,16 +1662,25 @@ async def _decided(result: Any, runtime: Runtime) -> Any | None:
     reply (``tools.convert.openai_agents.asked_again``) — the SDK keeps their pending
     approvals on a resume and does not ask the gate again: each is decided now, in order,
     after the answer to the one before (an approval for the conversation lets the rest of its
-    tool's calls run). ``None`` when none waits, or the first asks: its pause is governance's,
-    as the first call's was."""
+    tool's calls run). A call the SDK's own ``needs_approval`` holds runs unasked, its tool's
+    later calls in the run too (``always_approve``), when the person allowed that tool beyond
+    one call (``bridge.unasked``: for the conversation, its schedule or always, never an
+    ``irreversible`` tool — the one rule governance's own questions follow). ``None`` when
+    none waits, or the first asks: its pause is governance's, as the first call's was."""
     from trellis.harness.tools.convert.openai_agents import asked_again
+    from trellis.harness.tools.convert.openai_local import spec_of
 
     if runtime.pending is not None:  # a call of this attempt's reply asked: the run's pause
         return None
     for item in result.interruptions:
         asks = await asked_again(item, result.context_wrapper)
-        if asks is None:
-            continue
+        if asks is None:  # the SDK's own gate: unasked when its tool was allowed beyond a call
+            spec = spec_of(runtime, item.name)
+            if not await bridge.unasked(spec, _asked_about(item)):
+                continue
+            state = result.to_state()
+            state.approve(item, always_approve=True)
+            return state
         if asks:
             return None
         state = result.to_state()

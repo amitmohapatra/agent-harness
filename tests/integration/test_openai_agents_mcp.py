@@ -308,8 +308,9 @@ async def test_a_call_the_server_could_not_take_is_told_as_its_failure_function_
     memory_harness: Harness, memory_service: FakeMemoryService, policy: str
 ) -> None:
     """A call that raises (the transport, not the tool): recorded as the call's failure, then
-    the SDK's to tell — its default text, the server's own ``failure_error_function``'s, or
-    with ``failure_error_function=None`` the run ends with the error."""
+    the SDK's to tell — its default text (from openai-agents 0.23 without the error's detail),
+    the server's own ``failure_error_function``'s, or with ``failure_error_function=None`` the
+    run ends with the error."""
     settings: dict[str, Any] = {
         "default": {},
         "custom": {"failure_error_function": lambda _context, error: "the CRM is down"},
@@ -331,7 +332,11 @@ async def test_a_call_the_server_could_not_take_is_told_as_its_failure_function_
         return
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     [told] = results(model)
-    assert (told == "the CRM is down") if policy == "custom" else ("the server hung up" in told)
+    assert told == (
+        "the CRM is down"
+        if policy == "custom"
+        else "An error occurred while running the tool. Please try again."
+    )
 
 
 class Withheld(Hooks):
@@ -392,3 +397,16 @@ async def test_a_failed_call_a_hook_makes_a_result_is_read_as_one(harness: Harne
     result = await agent.run("find o1", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "it is open"
     assert results(model) == ["o1: open"]
+
+
+def test_an_sdk_whose_mcp_server_lost_its_failure_function_is_refused() -> None:
+    """The governed server wraps a private method of the SDK's ``MCPServer``: an SDK release
+    without it is refused loudly, not run with a pause that becomes an error text."""
+    from trellis.contracts import ConfigurationError
+    from trellis.harness.adapters.openai_agents import _wraps_failure_function
+
+    class Renamed:
+        pass
+
+    with pytest.raises(ConfigurationError, match="no longer has _get_failure_error_function"):
+        _wraps_failure_function(Renamed)

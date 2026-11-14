@@ -57,7 +57,7 @@ react = [
   "langchain-openai>=1.6,<1.7",
   "deepagents>=0.7.19,<0.8",
 ]
-openai-agents = ["openai-agents>=0.22.3,<0.23"]
+openai-agents = ["openai-agents>=0.24,<0.25"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
 # ``kimi()``: Kimi Code over the Agent Client Protocol (``adapters.acp``): the ACP SDK, and the MCP
 # SDK that serves the harness's tools to it. The agent itself is the ``kimi`` program

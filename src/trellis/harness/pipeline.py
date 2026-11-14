@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import time
@@ -69,12 +70,14 @@ from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.conversation import (
+    INTERRUPTED,
     Live,
     Mode,
     answer_id,
     identified,
     question_id,
     steering,
+    steering_elsewhere,
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
@@ -82,7 +85,8 @@ from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
+from trellis.harness.journal import Journal, Pending, Replay, call_key, governance_held
+from trellis.harness.line import Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
@@ -108,6 +112,8 @@ UNANSWERED_CUT: Final = (
     "the model's last reply reached its output limit (its max_tokens) before it gave an answer"
 )
 UNANSWERED: Final = "the model's last reply had no text"
+#: Why a child still open when the run that started it answered is cancelled.
+ENDED_FIRST: Final = "the run that started it ended first"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,11 +195,12 @@ async def attempt(
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace).
 
     A run of a conversation (its thread) waits while another run of the same conversation and
-    agent works in this process: a second message to a busy conversation is answered after
-    the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's do not wait here. ``mode`` says
-    what a run sent while another holds the conversation's turn does instead of waiting
-    (``conversation.Mode``: :func:`_arrived`).
+    agent works, in this process or another: a second message to a busy conversation is
+    answered after the first, never beside it, in the order of the run store's line
+    (``line``; queued runs wait the same way in the run store, by their ``concurrency_key``).
+    A sub-agent's run and a worker's do not wait here. ``mode`` says what a run sent while
+    another holds the conversation's turn does instead of waiting (``conversation.Mode``:
+    :func:`_arrived`; a turn held in another process: ``line``).
 
     A run this process executes without a worker's lease — every run but a claimed one — is
     held in the run store while its attempt is under way, waiting its turn included
@@ -235,37 +242,43 @@ async def _turned(
     mode: Mode,
 ) -> Result:
     """The attempt (:func:`attempt`): the conversation's turn taken — or what a run sent
-    while another holds it does instead — then :func:`_attempt`."""
+    while another holds it does instead — then :func:`_attempt`. A worker's run and a
+    sub-agent's take none: the queue's claim, and the parent's call, are their turns."""
+    work = functools.partial(
+        _attempt,
+        agent,
+        record,
+        input,
+        journal=journal,
+        resolution=resolution,
+        listener=listener,
+        job=job,
+        remaining=remaining,
+        observe=observe,
+        parent=parent,
+    )
     if job is not None or parent is not None:
-        turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
-    else:
-        key = Identity.of(record).conversation
-        live = agent.turns.live(key)
-        if live is not None and mode is not Mode.QUEUE:
-            answered = await _arrived(agent, record, input, live, mode=mode, listener=listener)
-            if answered is not None:
-                return answered
-        turn = agent.turns.taken(key, record.run_id, steers=agent.adapter.steers(agent.target))
-    async with turn as live:
-        result = await _attempt(
-            agent,
-            record,
-            input,
-            journal=journal,
-            resolution=resolution,
-            listener=listener,
-            job=job,
-            remaining=remaining,
-            observe=observe,
-            parent=parent,
-        )
-        if live is not None:
-            live.result = result
-        return result
-
-
-#: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
-INTERRUPTED: Final = "interrupted by a newer message of the conversation"
+        return await work()
+    key = Identity.of(record).conversation
+    h = agent.harness
+    line = (
+        None
+        if record.concurrency_key is None
+        else Line(h.runs, record, agent.turns.seen, h.followers)
+    )
+    working = agent.turns.live(key)
+    if working is not None and mode is not Mode.QUEUE:
+        answered = await _arrived(agent, record, input, working, mode=mode, listener=listener)
+        if answered is not None:
+            return answered
+    elif line is not None and mode is Mode.STEER and await line.ahead():
+        steering_elsewhere(agent.id)  # nothing carries a message to a run working elsewhere
+    steers = agent.adapter.steers(agent.target)
+    async with agent.turns.taken(key, record.run_id, steers=steers, line=line) as live:
+        if live is None:
+            return await _left_the_line(agent, record, journal, listener)
+        live.result = await work()
+        return live.result
 
 
 async def _arrived(
@@ -294,6 +307,37 @@ async def _arrived(
     if not taken or answered is None or answered.status not in conversation.ANSWERED:
         return None  # it ended first, or without an answer: the message takes its own turn
     return await _answered_by(agent, record, answered, listener)
+
+
+async def _left_the_line(
+    agent: Agent,
+    record: RunRecord,
+    journal: Journal | None,
+    listener: Callable[[RunEvent], None] | None,
+) -> Result:
+    """A run that takes no turn — cancelled while it waited in its conversation's line
+    (``agent.cancel``, here or on another process), or ended in the run store before its turn
+    came (its deadline, its time limit) — runs nothing: one cancelled is ended ``CANCELLED``
+    here (with the sandbox a paused attempt left it), one ended is as the store says, and its
+    stream is its start and that ending."""
+    identity = Identity.of(record)
+    events = _emitter(agent, identity, record.attempt, listener, None)
+    events.emit(RunEventType.RUN_STARTED, data={"agent_id": agent.id})
+    reason = agent.turns.cancelled(record.run_id)
+    if reason is not None:
+        if await _settle_cancelled(agent, identity, events, None, spent={}, reason=reason):
+            await sandbox.ended(agent, journal.sandbox if journal else None, record.run_id)
+        return Result(run_id=record.run_id, status=RunStatus.CANCELLED)
+    found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
+    assert found is not None
+    outcome = RunOutcome.from_status(found.status)
+
+    async def written() -> None:
+        """Nothing to write: the run store ended it."""
+
+    await events.settle(lambda: events.finished(outcome, error=found.error), written)
+    metrics.run_finished(agent.id, outcome.value)
+    return Result.of(found)
 
 
 async def _answered_by(
@@ -468,7 +512,10 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool
     """Whether a turn of the conversation was started after ``mine`` — the latest this
     process served — and not here: by another worker, whose framework session this
     process's never saw (the run store's turns of the thread, of this user and agent; a
-    queued one has not started yet)."""
+    queued one has not started yet). The listing is newest first: it is read up to ``mine``,
+    or the first run last touched before ``mine`` began — the turns after are older — so a
+    conversation of any length costs its own read and one page, and one read more for each
+    run touched since."""
     runs, tenant = agent.harness.runs, identity.tenant
     served = await runs.get(mine, tenant=tenant)
     if served is None:
@@ -476,7 +523,9 @@ async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool
     async for summary in runs.iterate(
         thread_id=identity.thread, agent_id=identity.agent_id, tenant=tenant, max_pages=1
     ):
-        if summary.run_id in (mine, identity.run_id) or summary.status is RunStatus.QUEUED:
+        if summary.run_id == mine or summary.updated_at < served.created_at:
+            break
+        if summary.run_id == identity.run_id or summary.status is RunStatus.QUEUED:
             continue
         turn = await runs.get(summary.run_id, tenant=tenant)
         if (
@@ -717,14 +766,12 @@ async def _cancelled(
         )
         identity, events = runtime.identity, runtime.events
         ended = settles and await _settle_cancelled(
-            agent,
-            identity,
-            events,
-            runtime.worker_id,
-            spent=budget.spent(runtime),
-            kept=journal.handed_on,
+            agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
         )
         if ended:
+            await _children_ended(
+                agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, kept=journal.handed_on
+            )
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
@@ -747,10 +794,12 @@ async def _children_ended(
     error: AgentError | None = None,
     reason: str | None = None,
 ) -> None:
-    """The run ended out of time (``TIMEOUT``, its ``error``) or cancelled (``CANCELLED``, its
-    ``reason``) with children still open — a sub-agent's run its call was working on, a helper
-    a framework spawned in the foreground — that nothing else will end: each ends as the run
-    did, and so do theirs. A helper handed on past its attempt (``kept``: the run's
+    """The run ended — whatever its final ``status`` — with children still open — a
+    sub-agent's run its call was working on, a helper a framework spawned in the foreground —
+    that nothing else will end: each ends as the run did, and so do theirs. Out of time or
+    failed (its ``error``: a stalled model call's too), they end with that status and error;
+    cancelled, they are cancelled with its ``reason``; answered without them, they are
+    cancelled (:data:`ENDED_FIRST`). A helper handed on past its attempt (``kept``: the run's
     ``Journal.handed_on``, a Claude subagent working in the background of its session — only
     a conversation's turn has one) is its keeper's to end, and goes on."""
     runs = agent.harness.runs
@@ -758,7 +807,7 @@ async def _children_ended(
         if child.run_id in kept:
             continue
         with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
-            if status is RunStatus.TIMEOUT:
+            if error is not None:
                 await runs.finish(child.run_id, status, error=error, tenant=tenant)
             else:
                 await runs.cancel(child.run_id, reason=reason, tenant=tenant)
@@ -839,15 +888,15 @@ async def _concluded(
     if paused is not None:
         await sandbox.paused(runtime)
         return await _paused(agent, runtime, journal, paused, extracted)
+    ended = True  # here: not ended, or taken over, elsewhere already
     if runtime.cancelled is not None:
-        await _settle_cancelled(
+        ended = await _settle_cancelled(
             agent,
             runtime.identity,
             runtime.events,
             runtime.worker_id,
             reason=runtime.cancelled,
             spent=budget.spent(runtime),
-            kept=journal.handed_on,
         )
         said = _transcript(runtime, extracted, RunStatus.CANCELLED)
         await agent.recorded_run(runtime, said)  # what it said so far
@@ -856,14 +905,6 @@ async def _concluded(
         log.warning("run %s timed out: %s", runtime.run_id, timed_out.message)
         await agent.hooks.failed("run", TimeoutError(timed_out.message))
         result = await _failed(agent, runtime, timed_out, extracted, status=RunStatus.TIMEOUT)
-        await _children_ended(
-            agent,
-            runtime.run_id,
-            runtime.tenant,
-            RunStatus.TIMEOUT,
-            kept=journal.handed_on,
-            error=timed_out,
-        )
     elif error is not None:
         failure = AgentError.of(error, source=agent.adapter.name)
         log.warning("run %s failed: %s", runtime.run_id, failure.message, exc_info=error)
@@ -878,8 +919,30 @@ async def _concluded(
         await sandbox.delivered(runtime)
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
+        if ended:  # the run's end is final: its open children end with it, as it ended
+            await _open_children_ended(agent, runtime, journal, result)
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
+
+
+async def _open_children_ended(
+    agent: Agent, runtime: Runtime, journal: Journal, result: Result
+) -> None:
+    """The children the run still has open end with it, as ``result`` says it ended
+    (:func:`_children_ended`), but those handed on. The run has ended already: a run store
+    that cannot be read now is logged, and the run's result stands."""
+    try:
+        await _children_ended(
+            agent,
+            runtime.run_id,
+            runtime.tenant,
+            result.status,
+            kept=journal.handed_on,
+            error=result.error,
+            reason=ENDED_FIRST if runtime.cancelled is None else runtime.cancelled,
+        )
+    except Exception as exc:
+        log.warning("run %s: its open children could not be ended: %s", runtime.run_id, exc)
 
 
 def _unanswered(agent: Agent, runtime: Runtime, extracted: Extracted | None) -> AgentError | None:
@@ -941,8 +1004,18 @@ def _emitter(
     store = event_log(agent.harness.runs)
     if store is not None:
         worker = None if job is None else job.worker_id
+        ended = (
+            None
+            if job is not None
+            else functools.partial(agent.harness._lost, identity.run_id, identity.tenant)
+        )
         log_ = RunLog(
-            store, identity.run_id, tenant=identity.tenant, worker_id=worker, events=events
+            store,
+            identity.run_id,
+            tenant=identity.tenant,
+            worker_id=worker,
+            events=events,
+            ended=ended,
         )
         events.record(log_)
     return events
@@ -1359,16 +1432,12 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
     journal = runtime.replay.journal
     outcomes: dict[str, list[ToolOutcome]] = {}
     for call, outcome in journal.trajectory:
-        outcomes.setdefault(content_key("call", call.tool, call.args), []).append(outcome)
+        outcomes.setdefault(call_key(call.tool, call.args), []).append(outcome)
     calls = {c.id: c for s in said for c in s.tool_calls}
     out: list[Said] = []
     for s in said:
         called = calls.get(s.tool_call_id or "")
-        found = (
-            outcomes.get(content_key("call", called.name, dict(called.arguments)))
-            if called
-            else None
-        )
+        found = outcomes.get(call_key(called.name, dict(called.arguments))) if called else None
         if s.role is not Speaker.TOOL or not found:
             out.append(s)
             continue
@@ -1414,13 +1483,12 @@ async def _settle_cancelled(
     *,
     spent: dict[str, float],
     reason: str | None = None,
-    kept: Collection[str] = (),
 ) -> bool:
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
-    what it ``spent`` until then), its open children with it but those handed on (``kept``:
-    :func:`_children_ended`), and say whether it was ended here (not ended, or taken over,
-    elsewhere already)."""
+    what it ``spent`` until then), and say whether it was ended here (not ended, or taken
+    over, elsewhere already): its open children then end with it (:func:`_children_ended`,
+    its caller's to call)."""
 
     async def write() -> bool:
         try:
@@ -1439,10 +1507,6 @@ async def _settle_cancelled(
         said["reason"] = reason
     ended = await events.settle(lambda: events.finished(RunOutcome.CANCELLED, **said), write)
     metrics.run_finished(identity.agent_id, RunOutcome.CANCELLED.value)
-    if ended:
-        await _children_ended(
-            agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, kept=kept, reason=reason
-        )
     return ended
 
 

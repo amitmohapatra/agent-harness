@@ -27,31 +27,43 @@ import dataclasses
 import functools
 import inspect
 import json
-import weakref
 from collections import deque
-from collections.abc import Callable, Hashable, Sequence
-from typing import Any, Final
+from collections.abc import Callable, Collection, Hashable, Sequence
+from typing import Any, Final, cast
 
 from trellis.contracts import ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool
+from trellis.harness.tools.base import Tool, not_run
 
 #: The fields of a call item that say which call it is, not what it does: left out of what a
 #: person is shown and what governance decides on (the call's id is the bridge's own).
 IDENTITY: Final = frozenset({"id", "call_id", "status", "type"})
 
-#: A pause raised inside a call whose code the SDK runs within a ``try`` of its own (it turns
-#: an exception into a failed output and goes on), by run: raised again from the run's hooks
-#: as the run's next step begins (:func:`paused_inside`).
-_PAUSED: weakref.WeakKeyDictionary[Runtime, BaseException] = weakref.WeakKeyDictionary()
-#: Per run: the computer calls of its latest model reply not yet carried out, in order; the one
-#: being carried out (:func:`computer_started`); and what the model is to be told of computer
-#: actions that did not run (:func:`unsaid`).
-_COMPUTER_CALLS: weakref.WeakKeyDictionary[Runtime, deque[str]] = weakref.WeakKeyDictionary()
-_COMPUTER_CALL: weakref.WeakKeyDictionary[Runtime, Hashable] = weakref.WeakKeyDictionary()
-_UNSAID: weakref.WeakKeyDictionary[Runtime, list[str]] = weakref.WeakKeyDictionary()
+
+@dataclasses.dataclass(slots=True)
+class Local:
+    """What one attempt keeps of the calls the SDK carries out on this machine: on its
+    ``Runtime`` (``Runtime.local_calls``, :func:`_local`), gone with it."""
+
+    #: a pause raised inside a call whose code the SDK runs within a ``try`` of its own (it
+    #: turns an exception into a failed output and goes on): raised again from the run's hooks
+    #: as the run's next step begins (:func:`paused_inside`)
+    paused: BaseException | None = None
+    #: the computer calls of the latest model reply not yet carried out, in order
+    computer_calls: deque[str] = dataclasses.field(default_factory=deque)
+    #: the computer call being carried out (:func:`computer_started`): one model decision
+    computer_call: Hashable | None = None
+    #: what the model is to be told of computer actions that did not run (:func:`unsaid`)
+    unsaid: list[str] = dataclasses.field(default_factory=list)
+
+
+def _local(runtime: Runtime) -> Local:
+    """The attempt's :class:`Local`, made on its first use."""
+    if runtime.local_calls is None:
+        runtime.local_calls = Local()
+    return cast("Local", runtime.local_calls)
 
 
 def call_args(raw: Any) -> dict[str, Any]:
@@ -73,7 +85,11 @@ def _plain(value: Any) -> Any:
 def paused_inside(runtime: Runtime | None) -> BaseException | None:
     """The pause a call of a tool the SDK runs here raised inside the SDK's own ``try`` (once):
     the run's hooks raise it, so the run stops there."""
-    return _PAUSED.pop(runtime, None) if runtime is not None else None
+    if runtime is None:
+        return None
+    local = _local(runtime)
+    paused, local.paused = local.paused, None
+    return paused
 
 
 def run_here(tool: Any) -> Any:
@@ -82,14 +98,55 @@ def run_here(tool: Any) -> Any:
     from agents import ApplyPatchTool, ComputerTool, CustomTool, LocalShellTool, ShellTool
 
     if isinstance(tool, LocalShellTool | ShellTool) and getattr(tool, "executor", None):
-        return dataclasses.replace(tool, executor=_executor(tool))
+        return with_fields(tool, executor=_executor(tool))
     if isinstance(tool, CustomTool):
-        return dataclasses.replace(tool, on_invoke_tool=_custom(tool))
+        return with_fields(tool, on_invoke_tool=_custom(tool))
     if isinstance(tool, ApplyPatchTool):
-        return dataclasses.replace(tool, editor=_Editor(tool))
+        return with_fields(tool, editor=_Editor(tool))
     if isinstance(tool, ComputerTool):
         return _computing(tool)
     return tool
+
+
+def with_fields(tool: Any, **fields: Any) -> Any:
+    """A copy of ``tool`` (one of the SDK's tool dataclasses) with ``fields`` changed: made
+    again as the SDK makes it (``dataclasses.replace``), or — a subclass whose constructor
+    takes fields of its own (a sandbox capability's ``exec_command``, its ``apply_patch``) —
+    copied as it is."""
+    if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
+        return dataclasses.replace(tool, **fields)
+    made = copy.copy(tool)
+    for name, value in fields.items():
+        setattr(made, name, value)
+    return made
+
+
+def spec_of(runtime: Runtime, name: str, **said: Any) -> ToolSpec:
+    """The SDK's tool ``name`` as the run's tool set has it, else undeclared: what it ``said``
+    of itself (its description, its schema), no risk."""
+    return runtime.native.get(name) or ToolSpec(name=name, **said)
+
+
+@dataclasses.dataclass(slots=True)
+class Carried:
+    """A call's own code (``run``) as the bridge runs it (``Tool.run``): what it returned kept
+    (``live``: as the SDK takes it from the tool itself) and what it raised (``raised``: a
+    pause is no failure), for the SDK to be handed once the bridge has governed, journaled
+    and recorded the call."""
+
+    run: Callable[[dict[str, Any]], Any]
+    live: list[Any] = dataclasses.field(default_factory=list)
+    raised: list[Exception] = dataclasses.field(default_factory=list)
+
+    async def __call__(self, given: dict[str, Any]) -> Any:
+        try:
+            answer = await _awaited(self.run(given))
+        except Exception as error:
+            if not is_pause_signal(error):
+                self.raised.append(error)
+            raise
+        self.live.append(answer)
+        return answer
 
 
 async def through(
@@ -115,25 +172,18 @@ async def through(
     runtime = current()
     if runtime is None:
         return await _awaited(run(args))
-    live: list[Any] = []
-    raised: list[Exception] = []
+    carried = Carried(run)
+    live, raised = carried.live, carried.raised
 
     async def ran(given: dict[str, Any]) -> Any:
-        try:
-            answer = await _awaited(run(given))
-        except Exception as error:
-            if not is_pause_signal(error):
-                raised.append(error)
-            raise
-        live.append(answer)
-        return _recorded(answer)
+        return _recorded(await carried(given))
 
-    spec = runtime.native.get(name) or ToolSpec(name=name)
+    spec = spec_of(runtime, name)
     try:
         outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
     except Exception as error:
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
-            _PAUSED[runtime] = error
+            _local(runtime).paused = error
         raise
     if bridge.hooked(outcome):  # the run's after_tool hooks have the last word on the call
         if outcome.ok:
@@ -300,8 +350,8 @@ def _computer_class() -> type:
         act.__name__ = name
         return act
 
-    actions = sorted(AsyncComputer.__abstractmethods__)
-    body: dict[str, Any] = {name: acting(name) for name in actions}
+    actions = AsyncComputer.__abstractmethods__  # the interface's actions: nothing else runs
+    body: dict[str, Any] = {name: acting(name) for name in sorted(actions)}
 
     def __init__(self: Any, inner: Any, tool: Any) -> None:
         self._inner, self._tool = inner, tool
@@ -316,17 +366,20 @@ def _computer_class() -> type:
         def run(given: dict[str, Any]) -> Any:
             if given == {"action": action}:
                 return method(*args, **kwargs)
-            edited = dict(given.get("action") or {})
-            return getattr(self._inner, str(edited.pop("type", name)))(**edited)
+            edited = {"type": name, **(given.get("action") or {})}
+            return _edited_action(self._inner, edited, actions, self._tool.name)
 
         runtime = current()
-        return await through(
-            self._tool.name,
-            {"action": action},
-            run,
-            decision=None if runtime is None else _COMPUTER_CALL.get(runtime),
-            on_refusal=_skipped,
-        )
+        try:
+            return await through(
+                self._tool.name,
+                {"action": action},
+                run,
+                decision=None if runtime is None else _local(runtime).computer_call,
+                on_refusal=_skipped,
+            )
+        except NotAnAction as refused:  # recorded as failed; nothing of the computer called
+            return _skipped(refused.message)
 
     body.update(
         __init__=__init__,
@@ -337,20 +390,44 @@ def _computer_class() -> type:
     return type("GovernedComputer", (AsyncComputer,), body)
 
 
+class NotAnAction(ToolError):
+    """A computer call edited (a person's edit, a hook's rewrite) into what is no action of the
+    SDK's computer interface, or an action with arguments that are not its own: not carried
+    out."""
+
+
+def _edited_action(inner: Any, edited: dict[str, Any], actions: Collection[str], tool: str) -> Any:
+    """An edited computer action carried out on ``inner``: only one of the interface's own
+    ``actions`` (the SDK's ``AsyncComputer`` abstract methods — never another method or
+    attribute of the team's computer object), its arguments bound to that method's signature;
+    anything else is :class:`NotAnAction`, raised before the computer is touched."""
+    kind = str(edited.pop("type"))
+    if kind not in actions:
+        raise NotAnAction(not_run(tool, f"{kind!r} is not an action of the computer"))
+    method = getattr(inner, kind)
+    try:
+        bound = inspect.signature(method).bind(**edited)
+    except TypeError as exc:
+        raise NotAnAction(not_run(tool, f"the arguments of {kind} do not fit ({exc})")) from exc
+    return method(*bound.args, **bound.kwargs)
+
+
 def _skipped(said: str) -> None:
     """A computer action that may not run: nothing done — the model sees the screen as it is,
     and is told why in the input of its next model call (:func:`unsaid`: a computer call's
     output is a screenshot, with nowhere to say it)."""
     runtime = current()
     assert runtime is not None  # a call is refused only inside a run (:func:`through`)
-    _UNSAID.setdefault(runtime, []).append(said)
+    _local(runtime).unsaid.append(said)
 
 
 def unsaid(runtime: Runtime) -> list[str]:
     """What the model is to be told of the computer actions that did not run since its last
     model call (why each did not: the bridge's words), once: the adapter tells it in its next
     model call's input (``adapters.openai_agents``)."""
-    return _UNSAID.pop(runtime, [])
+    local = _local(runtime)
+    said, local.unsaid = local.unsaid, []
+    return said
 
 
 def computer_replied(runtime: Runtime, items: Sequence[Any]) -> None:
@@ -359,7 +436,7 @@ def computer_replied(runtime: Runtime, items: Sequence[Any]) -> None:
     from openai.types.responses import ResponseComputerToolCall
 
     calls = [i.call_id for i in items if isinstance(i, ResponseComputerToolCall)]
-    _COMPUTER_CALLS[runtime] = deque(calls)
+    _local(runtime).computer_calls = deque(calls)
 
 
 def computer_started(runtime: Runtime) -> None:
@@ -369,8 +446,9 @@ def computer_started(runtime: Runtime) -> None:
     ``Down`` presses as one decision, not a model looping, and a person's answer about an
     action covers the same action again in it. A call carried out with no reply read before it
     (a resumed run's) is a decision of its own all the same."""
-    pending = _COMPUTER_CALLS.get(runtime)
-    _COMPUTER_CALL[runtime] = ("computer", pending.popleft() if pending else object())
+    local = _local(runtime)
+    pending = local.computer_calls
+    local.computer_call = ("computer", pending.popleft() if pending else object())
 
 
 __all__ = [

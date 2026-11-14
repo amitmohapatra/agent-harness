@@ -483,7 +483,8 @@ async def test_an_agent_tool_paused_inside_is_the_same_child_after_the_resume(
 
 async def test_an_agent_tool_that_fails_is_a_failed_child(harness: Harness) -> None:
     """Under the SDK's default failure policy an agent tool that fails is a failed child run,
-    and the run goes on: the calling model reads the SDK's default text."""
+    and the run goes on: the calling model reads the SDK's default text, which from
+    openai-agents 0.23 names no detail of the error; the child run's error keeps it."""
     broken = Agent(name="checker", model=ScriptedModel([], ids="checker_"))  # no reply to give
     tool_ = broken.as_tool("check", "Check.")
     model = ScriptedModel([("check", {"input": "check o1"}), "it failed"])
@@ -493,10 +494,11 @@ async def test_an_agent_tool_that_fails_is_a_failed_child(harness: Harness) -> N
     assert result.status is RunStatus.SUCCESS and result.answer == "it failed"
     [child] = await children(harness, result.run_id)
     assert child.status is RunStatus.ERROR
+    record = await harness.runs.get(child.run_id)
+    assert record is not None and record.error is not None
+    assert "pop from empty list" in record.error.message
     told = [i["output"] for i in model.inputs[-1] if i.get("type") == "function_call_output"]
-    assert told == [
-        "An error occurred while running the tool. Please try again. Error: pop from empty list"
-    ]
+    assert told == ["An error occurred while running the tool. Please try again."]
 
 
 async def test_an_agent_tool_that_asks_to_raise_ends_the_run_as_the_sdk_does(
