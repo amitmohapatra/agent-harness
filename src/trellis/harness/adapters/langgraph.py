@@ -698,14 +698,19 @@ def checkpointing(target: Any) -> Any:
     run's tools per model call) and compiled without a checkpointer, as a copy checkpointing
     into its run (``middleware.RunCheckpointer``: a resume continues where it stopped) — the
     graph itself left as it is; any other as it is (a checkpointer of its own, or
-    ``checkpointer=False``, stays the graph's)."""
-    if HARNESS_TOOLS not in (getattr(target, "channels", None) or {}):
-        return target
-    if getattr(target, "checkpointer", False) is not None:
-        return target
-    from trellis.harness.middleware import RunCheckpointer
+    ``checkpointer=False``, stays the graph's). A graph checkpointing into its run — so, or
+    built with a ``RunCheckpointer`` — reads its checkpoint back strictly
+    (``middleware.STRICT_SERDE``), its own state's types allowed (``state_types``)."""
+    from trellis.harness.middleware import RunCheckpointer, state_types
 
-    return target.copy({"checkpointer": RunCheckpointer()})
+    saver = getattr(target, "checkpointer", False)
+    if saver is None and HARNESS_TOOLS in (getattr(target, "channels", None) or {}):
+        saver = RunCheckpointer()
+    if not isinstance(saver, RunCheckpointer):
+        return target
+    # its strict serializer is told the graph's own state types, by LangGraph's own means
+    typed = saver.with_allowlist(state_types(target))
+    return target if typed is target.checkpointer else target.copy({"checkpointer": typed})
 
 
 async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:

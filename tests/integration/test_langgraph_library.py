@@ -14,10 +14,10 @@ import asyncio
 import operator
 import time
 from dataclasses import dataclass
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 import pytest
-from langchain_core.messages import AnyMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -33,6 +33,7 @@ from tests.support.memory import FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Interrupt, RunEventType, RunStatus
 from trellis.harness.harness import LOCAL_TENANT
+from trellis.harness.middleware import RunCheckpointer
 from trellis.harness.tools.bridge import MAX_REPEATS, STALLED
 
 ran: list[str] = []
@@ -471,6 +472,66 @@ async def test_an_entrypoint_and_its_tasks_run_and_pause_as_a_graph_does(harness
     assert done.status is RunStatus.SUCCESS
     assert ran == ["draft tides"]  # the task's result came from its checkpoint, not a second run
     assert await state_of(harness, workflow, "t") == {"text": "about tides", "verdict": "yes"}
+
+
+# ------------------------------------------------------- the run's checkpoint, read back strictly
+class Finding(BaseModel):
+    """A type of the graph's own, kept in its state."""
+
+    topic: str
+    weight: int = 1
+
+
+class Research(TypedDict):
+    topics: list[str]
+    finding: NotRequired[Finding]
+    notes: NotRequired[Annotated[list[str], operator.add]]
+    messages: NotRequired[Annotated[list[AnyMessage], add_messages]]
+
+
+async def test_a_run_checkpointed_into_its_run_resumes_with_its_own_state_type(
+    harness: Harness,
+) -> None:
+    """SEC: the run's checkpoint is read back by a serializer that makes only LangGraph's and
+    LangChain's own types and the types the graph's state declares. A run paused after a
+    ``Command``, a ``Send`` fan-out and a message resumes where it stopped (no node runs
+    again), its state's own type still that type."""
+
+    reviewed: list[Any] = []
+
+    def plan(state: Research) -> Command[Any]:
+        ran.append("plan")
+        said = AIMessage(f"looking into {len(state['topics'])} topics")
+        return Command(
+            update={"finding": Finding(topic=state["topics"][0], weight=3), "messages": [said]},
+            goto=[Send("look", {"topic": t}) for t in state["topics"]],
+        )
+
+    def look(given: dict[str, str]) -> dict[str, Any]:  # what the plan's Send hands it
+        ran.append(f"look {given['topic']}")
+        return {"notes": [f"on {given['topic']}"]}
+
+    def review(state: Research) -> dict[str, Any]:
+        verdict = interrupt({"question": "Publish?"})
+        reviewed.append((verdict, state.get("finding"), state.get("notes")))
+        return {"notes": [verdict]}
+
+    graph = StateGraph(Research)
+    graph.add_node("plan", plan)
+    graph.add_node("look", cast(Any, look))  # its input is the Send's, not the state
+    graph.add_node("review", review)
+    graph.add_edge(START, "plan")
+    graph.add_edge("look", "review")
+    graph.add_edge("review", END)
+    agent = harness.wrap(graph.compile(checkpointer=RunCheckpointer()), id="research")
+    paused = await agent.run({"topics": ["tides", "moons"]}, user="u")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert sorted(ran) == ["look moons", "look tides", "plan"]  # nothing ran again
+    # read back from the run's checkpoint: the state's own type is that type, not its data
+    assert reviewed == [("yes", Finding(topic="tides", weight=3), ["on tides", "on moons"])]
+    assert done.answer == "looking into 2 topics"
 
 
 # ---------------------------------------------------------------- an interrupt's answer schema

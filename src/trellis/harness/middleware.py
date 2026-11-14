@@ -112,6 +112,7 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
@@ -642,8 +643,15 @@ def _answered(
 #: The journal's mark, in a call's record, of what a framework's own tool returned in a
 #: message's place (:func:`_kept_update`): a ``Command``, or a list of them and messages.
 UPDATE: Final = "trellis_update"
-#: LangGraph's own serializer, as its checkpointers keep a step's writes.
-_SERDE: Final = JsonPlusSerializer()
+#: LangGraph's own serializer for what a run keeps of its graph — its checkpoint
+#: (:class:`RunCheckpointer`) and what a tool returned in a message's place
+#: (:func:`_kept_update`) — in LangGraph's strict mode: read back, stored data is made only
+#: into the types LangGraph itself lists as safe (its messages, ``Command``, ``Send``,
+#: ``Interrupt``...), and anything else is left as the data it holds, never imported or
+#: called. A run's journal and checkpoint are written by whoever holds a key of the run
+#: store: no trust to construct with. A graph's own state types are added by LangGraph's own
+#: means, per graph (``adapters.langgraph.checkpointing``: ``with_allowlist``).
+STRICT_SERDE: Final = JsonPlusSerializer(allowed_msgpack_modules=None)
 
 
 async def _update(
@@ -659,7 +667,7 @@ async def _update(
         await _kept_update(runtime, call, outcome, produced[-1])
         return produced[-1]
     if outcome.cached and UPDATE in outcome.metadata:
-        kept = _update_of(outcome.metadata[UPDATE], str(call["id"]))
+        kept = _kept(runtime, outcome, call)
         return None if isinstance(kept, ToolMessage) else kept  # a message: :func:`_made`
     return None
 
@@ -680,8 +688,15 @@ async def _made(
             await _kept_update(runtime, call, outcome, done)  # its text alone is recorded
         return done
     if outcome.cached and UPDATE in outcome.metadata:  # a message (:func:`_update`: no other)
-        return _update_of(outcome.metadata[UPDATE], str(call["id"]))
+        return _kept(runtime, outcome, call)
     return None
+
+
+def _kept(runtime: Runtime, outcome: ToolOutcome, call: Mapping[str, Any]) -> Any:
+    """What was kept of a call replayed from the journal (:func:`_update_of`), read back as
+    the run's graph may be: strictly, its own state types allowed."""
+    serde = STRICT_SERDE.with_msgpack_allowlist(state_types(runtime.agent.target))
+    return _update_of(outcome.metadata[UPDATE], str(call["id"]), serde)
 
 
 async def _kept_update(
@@ -698,7 +713,7 @@ async def _kept_update(
     if not recorded or recorded[-1] != outcome.output:
         return  # not journaled as this call's (the paused call made again in other words)
     try:
-        kind, data = _SERDE.dumps_typed(made)
+        kind, data = STRICT_SERDE.dumps_typed(made)
     except Exception as exc:
         log.warning(
             "run %s: what %s returned in a message's place cannot be kept for a replay (%s: %s)",
@@ -714,11 +729,25 @@ async def _kept_update(
     await runtime.progress(now=True)  # saved with the call it is the result of
 
 
-def _update_of(kept: Sequence[str], call_id: str) -> Any:
-    """What :func:`_kept_update` kept, for the call ``call_id`` now: the messages answering
-    the call it was made for answer this one (a model asked again gives its call another id)."""
+def state_types(graph: Any) -> set[tuple[str, ...]]:
+    """The types ``graph``'s own state declares (its schemas' and channels': a Pydantic model,
+    a dataclass, an enum a state key holds), as LangGraph itself lists them for its strict
+    serializer (``build_serde_allowlist``, what a graph compiled under
+    ``LANGGRAPH_STRICT_MSGPACK`` is given): what :data:`STRICT_SERDE` may also make of the
+    run's stored data for this graph."""
+    from langgraph._internal._serde import build_serde_allowlist  # noqa: PLC0415 - LangGraph's own
+
+    schemas: list[type[Any]] = list(getattr(getattr(graph, "builder", None), "schemas", ()))
+    return build_serde_allowlist(schemas=schemas, channels=getattr(graph, "channels", None))
+
+
+def _update_of(kept: Sequence[str], call_id: str, serde: SerializerProtocol) -> Any:
+    """What :func:`_kept_update` kept, read back with ``serde`` (:data:`STRICT_SERDE`, told
+    the graph's own :func:`state_types`), for the call ``call_id`` now: the messages answering
+    the call it was made for answer this one (a model asked again gives its call another
+    id)."""
     kind, data, was = kept
-    made = _SERDE.loads_typed((kind, base64.b64decode(data)))
+    made = serde.loads_typed((kind, base64.b64decode(data)))
 
     def answering(found: Any) -> None:
         for message in found if isinstance(found, list) else ():
@@ -3291,7 +3320,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     each checkpoint as it is kept (``Runtime.carried``)."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(serde=STRICT_SERDE)
         #: outside a run: the threads' latest checkpoints, the least recently used forgotten
         #: past the bound (an in-memory checkpointer; inside a run, the run's journal)
         self._threads: LRU[str, dict[str, Any]] = LRU(THREADS_KEPT)

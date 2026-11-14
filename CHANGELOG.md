@@ -28,6 +28,10 @@ A library's feature works as the library does it; the harness governs, records a
   sends with the question passes the same rule (redacted, masked or hashed; `block` ends the
   run before a model call), and the turn recorded in memory holds the question as the graph
   kept it, not the raw input.
+- **Security.** What a run keeps of its graph — the checkpoint a `RunCheckpointer` keeps in
+  the run's journal, and a tool's `Command` kept for a replay — is read back in LangGraph's
+  strict mode: only LangGraph's and LangChain's own types and the types the graph's state
+  declares are made of stored data; anything else stays data and is never imported or called.
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks

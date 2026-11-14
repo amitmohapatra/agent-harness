@@ -88,6 +88,13 @@ resume after a pause or a crash continues where it stopped
 ([react.md](react.md#middleware-on-your-own-graph), [runs.md](../runs.md#continuing-where-a-run-stopped)). A `create_agent` graph wrapped without it
 is still narrowed and governed, said once at `h.wrap`.
 
+A checkpoint kept in the run is read back in LangGraph's strict mode: stored data becomes
+only LangGraph's and LangChain's own types (messages, `Command`, `Send`...) and the types
+your graph's state declares (its schemas' fields: a Pydantic model, a dataclass, an enum);
+any other type named in it stays plain data and is never imported or called. A value of a
+type your state does not declare (kept under an `Any` key, say) therefore comes back as its
+data after a resume: declare the type in the state, or use a checkpointer of your own.
+
 ## What is automatic
 
 | | |
