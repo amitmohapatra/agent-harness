@@ -89,8 +89,10 @@ def test_the_allow_rules_of_kimis_own_configuration_are_found_wherever_kimi_read
     local.mkdir()
     (local / "local.toml").write_text(
         '[[permission.rules]]\ndecision = "allow"\npattern = "Write"\n'
+        '[[permission.rules]]\ndecision = "ask"\npattern = "Edit"\n'
     )
-    assert acp.kimi_allows(env, str(work))[-1] == "Write"
+    # an ``ask`` rule of the same pattern stands before an ``allow`` rule: that call asks
+    assert acp.kimi_allows(env, str(work)) == ["Bash(ls *)", "Bash(git status)", "Write"]
     (home / "config.toml").write_text("not = toml =")  # Kimi itself refuses to start on it
     assert acp.kimi_allows(env, str(work)) == ["Write"]
 

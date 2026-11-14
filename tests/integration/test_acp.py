@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from tests.support.arm import arm
+from tests.support.kimi import kimi_home_of
 from tests.support.memory import FakeMemoryService
 from tests.support.sandbox import FakeSandboxes
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
@@ -612,14 +613,40 @@ async def test_with_no_log_of_the_agent_a_sub_agents_call_is_asked_about_as_its_
     assert asked.interrupt.tool_call.args == {"request": "Requesting approval to Running: rm a"}
 
 
-async def test_an_allow_rule_in_the_agents_own_configuration_stops_the_run_before_its_prompt(
+async def test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """APR-01. Kimi applies its config's ``allow`` rules without asking (2.6): the run is not
-    started, and says which rules."""
+    """SEC (DECISIONS A2, for Kimi). Kimi is started in its user's own home: the team's login
+    and setup linked, its config the team's with an ``ask`` rule after it for each ``allow``
+    rule that would let a call run unasked, its sessions its user's alone."""
+    team = tmp_path / "home"
+    team.mkdir()
+    (team / "credentials").mkdir()
+    rules = '[[permission.allow]]\ntool = "Bash"\nmatch = "rm *"\n'
+    (team / "config.toml").write_text(rules)
+    agent = harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="homes")
+    for user in ("ada", "bob"):
+        assert (await agent.run("x", user=user)).status is RunStatus.SUCCESS
+    homes = [Path(started["env"]["KIMI_CODE_HOME"]) for started in recorded(tmp_path)["started"]]
+    assert homes == [kimi_home_of("ada"), kimi_home_of("bob")]
+    for home in homes:
+        assert (home / "credentials").resolve() == team / "credentials"
+        asked = (home / "config.toml").read_text().removeprefix(rules)
+        assert asked == '\n[[permission.rules]]\ndecision = "ask"\npattern = "Bash(rm *)"\n'
+        assert len(list(home.glob("sessions/*/session_*"))) == 1
+    assert (team / "config.toml").read_text() == rules and not (team / "sessions").exists()
+
+
+async def test_a_config_whose_allow_rules_take_no_rule_after_them_stops_the_run_before_its_prompt(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """APR-01. A config that writes its ``[permission]`` rules inline takes none after them:
+    its ``allow`` rule would let a call run unasked, so the run is not started, and says
+    which rules."""
     home = tmp_path / "home"
     home.mkdir()
-    (home / "config.toml").write_text('[[permission.allow]]\ntool = "Bash"\nmatch = "rm *"\n')
+    inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(rm *)" }]\n'
+    (home / "config.toml").write_text(inline)
     done = await harness.wrap(fake(tmp_path, [{"text": "ok"}]), id="allows").run("x", user="u1")
     assert done.status is RunStatus.ERROR and done.error is not None
     assert "Bash(rm *)" in done.error.message and "prompts" not in recorded(tmp_path)
@@ -802,7 +829,7 @@ async def test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt(
     agent = arm(harness.wrap(fake(tmp_path, script), id="moved"), [refund])
     paused = await agent.run("refund o4", user="u1")
     assert paused.interrupt is not None
-    for kept in (tmp_path / "home").rglob("state.json"):
+    for kept in kimi_home_of("u1").rglob("state.json"):
         kept.unlink()  # resumed on a machine whose agent never held the session
     events: list[Any] = []
     record = await harness.runs.get(paused.run_id)
@@ -1489,10 +1516,10 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     [seen] = recorded(tmp_path)["skills"]
     assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]
     assert seen["files"]["sql-review/rules.md"] == "No SELECT *."
-    # its own configuration (no credentials kept here), and its sessions: kept in its usual
-    # home, where the conversation's next turn finds the one this run ended in
+    # its own configuration (no credentials kept here), and its sessions: kept in its user's
+    # Kimi home, where the conversation's next turn finds the one this run ended in
     assert seen["linked"] == ["config.toml", "sessions"]
-    assert (usual / "sessions").is_dir()
+    assert (kimi_home_of("ada") / "sessions").is_dir() and not (usual / "sessions").exists()
     started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
     gone = not Path(started).exists()  # noqa: ASYNC240
     assert started != str(usual) and gone  # the run's, removed with it

@@ -21,6 +21,7 @@ from tests.support.catalog import FakeCatalog
 from tests.support.kimi import (
     KIMI_BIN,
     PlannedEndpoint,
+    kimi_home_of,
     kimi_target,
     needs_kimi,
     result_text,
@@ -211,23 +212,75 @@ async def test_a_command_that_only_reads_runs_without_asking_a_person(
     ],
     ids=["a-rule", "an-allow-entry"],
 )
-async def test_a_rule_of_kimis_own_config_that_allows_a_call_stops_the_run_before_it(
+async def test_a_call_kimis_own_config_allows_is_still_asked_about_once(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, rules: str
 ) -> None:
-    """APR-01. Since Kimi Code 2.6 the ``[permission]`` rules of its ``config.toml`` apply
-    over ACP: a call an ``allow`` rule covers runs without Kimi asking, and ACP gives a client
-    no way to be asked first. The harness governs only what Kimi asks about, so a run whose
-    Kimi holds such a rule gets no prompt: it fails naming the rule, and nothing ran."""
+    """APR-01. Since Kimi Code 2.6 the ``allow`` rules of its ``config.toml`` apply over ACP: a
+    call one covers would run with nobody asked, and ACP gives a client no way to be asked
+    first. A run's Kimi works in its user's own home, whose config is the team's with an
+    ``ask`` rule for each such ``allow`` rule (Kimi reads those first): Kimi asks, governance
+    decides, a person is asked once, and the call runs once approved."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
-    (home / "config.toml").write_text(rules)
+    (home / "config.toml").write_text("default_thinking = false\n" + rules)
     endpoint.plan = [("Bash", {"command": "touch made.txt"})]
-    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed").run(
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed")
+    paused = await agent.run("make it", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.args == {"command": "touch made.txt"}
+    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
+    assert (tmp_path / "kimi-work" / "made.txt").exists()
+    # the team's config is as it was; the user's has it whole, and the rule that asks
+    assert (home / "config.toml").read_text() == "default_thinking = false\n" + rules
+    own = (kimi_home_of("u1") / "config.toml").read_text()
+    assert own.startswith("default_thinking = false\n" + rules) and 'decision = "ask"' in own
+
+
+async def test_a_config_whose_allow_rules_cannot_be_asked_over_stops_the_run_before_its_prompt(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """APR-01. A team's config that writes its ``[permission]`` rules inline takes no rule
+    after them (TOML): its ``allow`` rule would let the call run unasked, so the run gets no
+    prompt and fails naming the rule."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    inline = '[permission]\nrules = [{ decision = "allow", pattern = "Bash(touch *)" }]\n'
+    (home / "config.toml").write_text(inline)
+    endpoint.plan = [("Bash", {"command": "touch made.txt"})]
+    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-inline").run(
         "make it", user="u1"
     )
     assert done.status is RunStatus.ERROR and done.error is not None
     assert "Bash(touch *)" in done.error.message and "config.toml" in done.error.message
     assert not endpoint.requests and not (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+async def test_two_users_never_share_a_kimi_home(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """SEC (DECISIONS A2, for Kimi). Each tenant's user has a Kimi home of their own on a
+    worker: their sessions and Kimi's logs and caches are in it, never in another user's or
+    in the team's; the team's login and setup are linked into both."""
+    team = tmp_path / "kimi-home"
+    team.mkdir(parents=True)
+    (team / "AGENTS.md").write_text("Answer briefly.\n")
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-homes")
+    for user in ("ada", "bob"):
+        done = await agent.run("hi", user=user)
+        assert done.status is RunStatus.SUCCESS, done.error
+    ada, bob = kimi_home_of("ada"), kimi_home_of("bob")
+    assert ada != bob and not (team / "sessions").exists()
+    # each home holds its user's one session (its folder, and Kimi's own files beside it)
+    held = [
+        {p.name.partition(".")[0] for p in home.glob("sessions/*/session_*")} for home in (ada, bob)
+    ]
+    assert [len(ids) for ids in held] == [1, 1] and held[0] != held[1]
+    assert all((home / "AGENTS.md").resolve() == team / "AGENTS.md" for home in (ada, bob))
+    assert all(not (home / "config.toml").is_symlink() for home in (ada, bob))
+    assert ada.stat().st_mode & 0o777 == 0o700
 
 
 async def test_a_write_inside_a_git_working_tree_is_kimis_own_to_approve(
@@ -292,7 +345,7 @@ async def test_a_command_allowed_for_the_conversation_is_approved_for_kimis_sess
     assert done.status is RunStatus.SUCCESS, done.error
     work = tmp_path / "kimi-work"
     assert (work / "made.txt").exists() and (work / "too.txt").exists()
-    [log] = (tmp_path / "kimi-home").glob("sessions/*/*/agents/main/wire.jsonl")
+    [log] = kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl")
     resolved = [
         json.loads(line) for line in log.read_text().splitlines() if "interaction.resolved" in line
     ]
@@ -589,7 +642,7 @@ async def test_kimis_usage_log_is_the_contract_the_budget_reads(
         target = kimi_target(endpoint, tmp_path)
         agent = arm(harness.wrap(target, id="kimi-spend", budget=Budget(max_tokens=20)), [lookup])
         result = await agent.run("look three times", user="u1")
-    [log] = list((tmp_path / "kimi-home").glob("sessions/*/*/agents/main/wire.jsonl"))
+    [log] = list(kimi_home_of("u1").glob("sessions/*/*/agents/main/wire.jsonl"))
     records = [json.loads(line) for line in log.read_text().splitlines() if "usage.record" in line]
     assert records, "Kimi logs a usage.record per model request"
     for record in records:
@@ -1073,7 +1126,7 @@ async def test_a_conversations_next_turn_continues_kimis_session_when_its_runs_h
     lost = [e.data for e in events if e.data.get("code") == "acp_session"]
     assert lost == [] and events[-1].error is None
     assert "My order is o-17." in json.dumps(endpoint.requests[-1])
-    assert (tmp_path / "kimi-home" / "sessions").is_dir()  # kept where Kimi keeps them
+    assert (kimi_home_of("ada") / "sessions").is_dir()  # kept in its user's own Kimi home
 
 
 @pytest.mark.parametrize("boxed", [False, True], ids=["on-this-machine", "sandboxed"])

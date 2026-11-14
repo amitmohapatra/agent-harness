@@ -96,6 +96,7 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    stable_id,
 )
 from trellis.harness import admission, budget, compat
 from trellis.harness.adapters.base import (
@@ -354,6 +355,10 @@ class Profile:
     #: an environment and a working folder: a run of an agent that holds any is not started
     #: (:data:`UNASKED`)
     allows: Callable[[Mapping[str, str], str], list[str]] | None = None
+    #: the agent's home of a tenant's user (its ``home`` variable's value), for an
+    #: environment, a working folder and whose it is: every run that is not sandboxed gets its
+    #: user's own, never one shared with another user's (sessions, caches)
+    homed: Callable[[Mapping[str, str], str, tuple[str, str]], str] | None = None
     label: str = THE_AGENT
 
 
@@ -524,27 +529,77 @@ def _kimi_usage(env: Mapping[str, str], session_id: str) -> UsageLog:
     return UsageLog(Path(home).expanduser(), session_id)
 
 
-def kimi_allows(env: Mapping[str, str], cwd: str) -> list[str]:
-    """The rules of Kimi's own configuration that let it run a call without asking, by their
-    pattern: the ``allow`` rules of its ``config.toml`` (``[permission]``: a ``rules`` entry
-    with that decision, an ``allow`` entry — a pattern, or a tool with what it matches) and of
-    a project's ``.kimi-code/local.toml``, in ``cwd`` or a folder above it (Kimi reads its
-    project's: every one above is looked at, which misses none). Since Kimi Code 2.6 they
-    apply over ACP. A file that is not TOML holds none: Kimi itself refuses to start on it."""
+def _kimi_rules(env: Mapping[str, str], cwd: str) -> dict[str, list[str]]:
+    """The permission rules of Kimi's own configuration, by decision (``allow``, ``ask``,
+    ``deny``), each by its pattern: those of its ``config.toml`` (``[permission]``: a ``rules``
+    entry with its decision; an ``allow``, ``ask`` or ``deny`` entry — a pattern, or a tool with
+    what it matches) and of a project's ``.kimi-code/local.toml``, in ``cwd`` or a folder above
+    it (Kimi reads its project's: every one above is looked at, which misses none). A file
+    that is not TOML holds none: Kimi itself refuses to start on it."""
     home = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
     above = [Path(cwd), *Path(cwd).parents]
-    found: list[str] = []
+    found: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
     for path in (home / "config.toml", *(folder / ".kimi-code" / "local.toml" for folder in above)):
         try:
             permission = tomllib.loads(path.read_text()).get("permission")
         except (OSError, tomllib.TOMLDecodeError):
             continue
         section = permission if isinstance(permission, dict) else {}
-        rules = [r for r in section.get("rules") or () if r.get("decision") == "allow"]
-        for rule in (*rules, *(section.get("allow") or ())):
+        rules = [(r.get("decision"), r) for r in section.get("rules") or ()]
+        rules += [(decision, r) for decision in found for r in section.get(decision) or ()]
+        for decision, rule in rules:
             tool, matches = rule.get("tool"), rule.get("match") or rule.get("pattern")
-            found.append(f"{tool}({matches})" if tool and matches else str(tool or matches))
+            pattern = f"{tool}({matches})" if tool and matches else str(tool or matches)
+            found.setdefault(str(decision), []).append(pattern)
     return found
+
+
+def kimi_allows(env: Mapping[str, str], cwd: str) -> list[str]:
+    """The rules of Kimi's own configuration that let it run a call without asking, by their
+    pattern: its ``allow`` rules (:func:`_kimi_rules`; since Kimi Code 2.6 they apply over
+    ACP) that no ``ask`` rule of the same pattern stands before — Kimi's policy reads its
+    ``ask`` rules first, so such a call is asked about."""
+    rules = _kimi_rules(env, cwd)
+    return [pattern for pattern in rules["allow"] if pattern not in rules["ask"]]
+
+
+#: What of the team's Kimi home a user's own links to: its login, and what it set Kimi up
+#: with. Its sessions, its logs and what Kimi caches are the user's own.
+KIMI_SHARED: Final = ("credentials", "skills", "agents", "plugins", "AGENTS.md", "mcp.json")
+
+
+def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
+    """The Kimi home of a tenant's user (``owner``) on this worker, made for them alone under
+    the XDG data folder (``$XDG_DATA_HOME/trellis/kimi``, else ``~/.local/share/trellis/kimi``;
+    as Claude Code's config folder is): its sessions and what Kimi caches are theirs, never
+    another user's. It is an overlay of the team's home (``env``'s ``KIMI_CODE_HOME``, else
+    ``~/.kimi-code``): the team's login and setup are linked (:data:`KIMI_SHARED`), and its
+    ``config.toml`` is the team's, as it is, with an ``ask`` rule after it for each ``allow``
+    rule that would let a call run unasked (:func:`kimi_allows`, the project's too: Kimi reads
+    ``ask`` rules first) — so Kimi asks, and governance decides. A config those rules cannot be
+    added to (its ``[permission]`` rules written inline) is copied as it is: the run is then
+    not started (:data:`UNASKED`)."""
+    team = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    home = Path(base) / "trellis" / "kimi" / stable_id(*owner, prefix="u_")
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in KIMI_SHARED:
+        if (team / name).exists() and not (home / name).is_symlink():
+            (home / name).symlink_to(team / name)
+    config = team / "config.toml"
+    given = config.read_text() if config.exists() else ""
+    asks = "".join(
+        f'\n[[permission.rules]]\ndecision = "ask"\npattern = {json.dumps(pattern)}\n'
+        for pattern in kimi_allows(env, cwd)
+    )
+    try:
+        tomllib.loads(given + asks)
+    except tomllib.TOMLDecodeError:
+        asks = ""
+    part = home / "config.toml.part"
+    part.write_text(given + asks)
+    part.replace(home / "config.toml")
+    return str(home)
 
 
 #: Why a run of an agent whose own configuration lets it run calls without asking got no
@@ -569,6 +624,7 @@ KIMI: Final = Profile(
     env=KIMI_ENV,
     env_why=KIMI_ENV_WHY,
     allows=kimi_allows,
+    homed=kimi_home,
     label=KIMI_CODE,
 )
 
@@ -879,6 +935,11 @@ class ACPAdapter:
         runtime = run.runtime
         target = given(target, runtime.framework_options)
         profile = target.profile
+        if profile is not None and profile.homed and profile.home and target.sandbox is None:
+            # its user's own home of the agent's, an overlay of the team's (``kimi_home``)
+            team, owner = {**os.environ, **target.env}, (runtime.tenant, runtime.user)
+            homed = profile.homed(team, target.cwd or os.getcwd(), owner)
+            target = dataclasses.replace(target, env={**target.env, profile.home: homed})
         own = target.sandbox is not None or target.skills is not None
         home = RunHome(target, runtime) if own else None
         boxed = Sandboxed(target, runtime, home) if home is not None and target.sandbox else None
@@ -1759,8 +1820,6 @@ class RunHome:
     SESSIONS: Final = "sessions"
 
     def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
-        from trellis.contracts import stable_id
-
         self.target = target
         self.runtime = runtime
         self.root = Path(tempfile.gettempdir()) / SANDBOXED_ROOT / stable_id(runtime.run_id)

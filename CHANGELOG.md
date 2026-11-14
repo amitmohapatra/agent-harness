@@ -5,6 +5,16 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Changed: Kimi Code runs in a home of its user's own; a team's allow rules no longer stop the run
+
+Every run of `kimi()` that is not sandboxed starts Kimi with `KIMI_CODE_HOME` set to a
+folder of the run's tenant and user (`$XDG_DATA_HOME/trellis/kimi/...`, mode 0700): their
+sessions, Kimi's logs and caches are theirs alone. It is an overlay of the team's Kimi home:
+login and setup are linked, and `config.toml` is the team's with an `ask` rule added for
+each `allow` rule, so a call a team rule allows is asked about and governance decides
+(before, such a run was refused). A config whose rules are written inline is still refused.
+Sessions are now kept per user on the worker, not in the team's `~/.kimi-code/sessions`.
+
 ### Added: a conversation's Kimi Code process stays between its turns while work in its background goes on
 
 Kimi's background work (`Agent` with `run_in_background`, a `Bash` command run in the

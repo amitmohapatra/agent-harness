@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from tests.support.planned import CUT, CUT_REPLY, FINAL, Call, worded
+from trellis.contracts import stable_id
 from trellis.harness.adapters.acp import KIMI_BUILTINS, KIMI_OUTLIVES_THE_TURN, ACPAgent, kimi
 from trellis.harness.tools.bridge import STALLED, TURN_STALLED
 
@@ -416,6 +417,17 @@ def _told_to_answer(body: dict[str, Any]) -> bool:
     users = [m for m in body["messages"] if m.get("role") == "user"]
     return any(
         _system_reminders(text_of(m.get("content"))).startswith(_TOLD_TO_ANSWER) for m in users[1:]
+    )
+
+
+def kimi_home_of(user: str, tenant: str = "default") -> Path:
+    """Kimi's home of ``tenant``'s ``user`` under the harness (``adapters.acp.kimi_home``): its
+    sessions and its logs; the test's own XDG data folder holds it (``tests/conftest.py``)."""
+    return (
+        Path(os.environ["XDG_DATA_HOME"])
+        / "trellis"
+        / "kimi"
+        / stable_id(tenant, user, prefix="u_")
     )
 
 
