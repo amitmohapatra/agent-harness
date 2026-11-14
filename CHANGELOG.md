@@ -38,7 +38,10 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   policy of its node that retries the error. `ToolRetryMiddleware(max_retries=2)` and
   `RetryPolicy(max_attempts=3)` call the tool 3 times; under a wrapper that only handles the
   error (`ToolErrorMiddleware`, Deep Agents' file middleware, `ReAct`'s `GovernTools`), or none,
-  the harness's 3 tries stand, each a call of the run.
+  the harness's 3 tries stand — one call of the run, as before, its tries its attempts: one
+  start and one result on the stream, one record, one count against `max_tool_calls`, one
+  question for a call that asks, and the `on_error` hooks told once if its last try fails
+  (the `after_tool` hooks see each try, whose words the graph's handling of it carries).
 - **An OpenAI function tool's own `timeout` is always that tool's timed-out call.** Counted
   from when its task began, a call whose task began late (another call holding the loop) was
   recorded as cut by a cancelled run, its start left open; it is counted from when the SDK

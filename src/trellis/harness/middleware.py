@@ -481,9 +481,7 @@ async def governed_call(
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
     # Deep Agents' files: its own. In a tool node, tried again around the graph's handling
-    calling = _CALLING.get()
-    owing = calling.owe if calling is not None else None
-    made = Tool(spec, run, confined=framework_made(own), deferring=owing)
+    made = Tool(spec, run, confined=framework_made(own), deferring=_CALLING.get())
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
@@ -604,20 +602,34 @@ class _Calling:
     #: the message the run's after_tool hooks made of its latest governed try, which failed:
     #: the failed message the graph makes of that error is this one (:func:`govern_tool_nodes`)
     said: ToolMessage | None = None
-    #: the error of its latest try that the harness would try it again after, and how many
-    #: times (``Tool.deferring``); and how often the graph ran the call in that try — a
-    #: second time is the graph trying it again itself (a wrapper calling its handler again)
-    owed: tuple[Exception, int] | None = None
+    #: the error of its latest try that the harness would try it again after, how many times,
+    #: and what ends that try on the run's stream and records it, when no try follows
+    #: (``tools.base.Deferring``); how often the graph ran the call in that try — a second time
+    #: is the graph trying it again itself (a wrapper calling its handler again); and the
+    #: harness's tries of it before this one
+    owed: tuple[Exception, int, Callable[[], Awaitable[None]]] | None = None
     entries: int = 0
+    tried: int = 0
     owned: bool = False
     waiting: bool = False
     ended: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def owe(self, error: Exception, times: int) -> None:
-        self.owed = (error, times)
+    async def owe(
+        self, error: Exception, times: int, finish: Callable[[], Awaitable[None]]
+    ) -> None:
+        await self.ended_try()  # the graph's own try before this one: a call of its own
+        self.owed = (error, times, finish)
+
+    async def ended_try(self) -> None:
+        """The latest failed try that was to be tried again, ended and recorded as it was:
+        none follows it (the graph tried the call again itself, or the harness will not)."""
+        owed, self.owed = self.owed, None
+        if owed is not None:
+            await owed[2]()
 
     def trying(self) -> None:
-        """A try of the call begins: what an earlier one left is not this one's."""
+        """A try of the call begins: what an earlier one left is not this one's (a failed
+        try the harness tries again is an attempt of the call, not ended on its own)."""
         self.failed, self.said, self.owed, self.entries = None, None, None, 0
 
 
@@ -1084,7 +1096,10 @@ def govern_tool_nodes() -> None:
         async def handler(given: ToolCallRequest) -> Any:
             return await execute(self, given, input_type, config)
 
-        _under_way().entries += 1  # the graph running the call: again, its own retry
+        calling = _under_way()
+        calling.entries += 1  # the graph running the call: again, its own retry
+        if calling.entries > 1:
+            await calling.ended_try()  # its earlier try a call of its own, ended first
         return await governed_call(request, handler)
 
     run_one = ToolNode._arun_one
@@ -1099,7 +1114,6 @@ def govern_tool_nodes() -> None:
         beside = _BESIDE.setdefault(step, set())
         beside.add(calling)
         try:
-            tries = 0
             while True:
                 calling.trying()
                 done: Any = None
@@ -1110,11 +1124,12 @@ def govern_tool_nodes() -> None:
                     )
                 except Exception as exc:
                     error = exc
-                if not await _again(calling, tries, error, tool_runtime.config):
+                if not await _again(calling, error, tool_runtime.config):
+                    await calling.ended_try()
                     if error is not None:
                         raise error
                     return done
-                tries += 1
+                calling.tried += 1
         finally:
             _CALLING.reset(token)
             calling.ended.set()
@@ -1146,9 +1161,7 @@ async def _tried(calling: _Calling, beside: Collection[_Calling], running: Await
     return said if said is not None and failed else done
 
 
-async def _again(
-    calling: _Calling, tries: int, error: Exception | None, config: RunnableConfig
-) -> bool:
+async def _again(calling: _Calling, error: Exception | None, config: RunnableConfig) -> bool:
     """Whether a tool node's call is tried again (after a wait, when so), as the harness tries
     any read whose error may pass (``tools.base.retried``): its try failed with such an error
     (``_Calling.owed``), it has tries again left, and the graph did not — and will not — try it
@@ -1158,11 +1171,11 @@ async def _again(
     error (``ToolErrorMiddleware``, Deep Agents' file middleware, ``GovernTools``) leaves the
     harness's tries standing: each try runs through it, as the graph runs a call."""
     owed = calling.owed
-    if owed is None or tries >= owed[1] or calling.entries > 1:
+    if owed is None or calling.tried >= owed[1] or calling.entries > 1:
         return False
     if error is not None and _node_retries(config, error):
         return False
-    await asyncio.sleep(backoff(tries + 1, owed[0]))
+    await asyncio.sleep(backoff(calling.tried + 1, owed[0]))
     return True
 
 

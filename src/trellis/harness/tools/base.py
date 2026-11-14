@@ -170,12 +170,10 @@ class Tool:
     #: (Deep Agents' files and ``execute``). Set by the harness only.
     confined: bool = False
     #: A framework's own tool whose error goes back to its framework (a LangGraph graph's: raised
-    #: into it), which may try the call again itself: the call is tried once here, and an error
-    #: it would be tried again after (:func:`retries_of`, :func:`may_pass`) is handed to this,
-    #: with how many tries again it is owed — the harness tries it again around the framework's
-    #: handling of it, where the framework did not (``middleware.govern_tool_nodes``). Set by the
-    #: harness.
-    deferring: Callable[[Exception, int], None] | None = field(default=None, repr=False)
+    #: into it), which may try the call again itself: tried once here, the harness trying it
+    #: again around the framework's handling where the framework did not (:class:`Deferring`).
+    #: Set by the harness.
+    deferring: Deferring | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
@@ -261,6 +259,23 @@ def _duration(seconds: float) -> str:
     return f"{count} second{'s' if count != 1 else ''}"
 
 
+class Deferring(Protocol):
+    """Where the tries again of a framework's own tool are made (``Tool.deferring``): around
+    the framework's handling of its error (``middleware.govern_tool_nodes``), each try one
+    attempt of the one call of the run — started once, counted once against the run's budget,
+    ended and recorded once, with the attempts it took (``tools.bridge``)."""
+
+    #: the tries of the call made before this one (0: this is its first)
+    tried: int
+
+    async def owe(
+        self, error: Exception, times: int, finish: Callable[[], Awaitable[None]]
+    ) -> None:
+        """This try failed with ``error``, after which the call is tried again up to ``times``
+        times (:func:`retries_of`, :func:`may_pass`): ``finish`` ends it on the run's stream and
+        records it — awaited when no try follows."""
+
+
 class Source(Protocol):
     """Something ``tools=[...]`` accepts. Resolved again each time the toolbox lists its
     definitions (``toolbox.TOOLS_TTL_SECONDS``)."""
@@ -321,8 +336,6 @@ async def execute(
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc
         if AgentError.of(exc).category is not ErrorCategory.TIMEOUT:
-            if tool.deferring is not None and retries and may_pass(exc):
-                tool.deferring(exc, retries)  # tried again around its framework's handling
             failed = ToolOutcome(
                 tool=tool.name,
                 status=ToolStatus.ERROR,

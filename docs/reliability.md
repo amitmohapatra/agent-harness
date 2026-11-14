@@ -200,7 +200,9 @@ policy of its node that retries the error (`RetryPolicy`) — its tries are the 
 (`ToolRetryMiddleware(max_retries=2)`, `RetryPolicy(max_attempts=3)`: 3 calls); when it does
 not (no wrapper, or one that only handles the error: `ToolErrorMiddleware`, Deep Agents' file
 middleware, `ReAct`'s `GovernTools`), the harness tries it again around the graph's handling,
-each try a call of the run.
+one call of the run, its tries its attempts (one start and one result on the stream, one
+record, one count against `max_tool_calls`, one question; `on_error` told once if the last try
+fails; `after_tool` sees each try).
 
 **How it decides.** An error may pass when it says so (`AgentError.of(exc).retryable`: its own
 `retryable`, or its category — a timeout, a rate limit, a dependency down). An OpenAPI
