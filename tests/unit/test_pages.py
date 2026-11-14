@@ -41,6 +41,26 @@ async def test_every_page_is_fetched_and_merged_into_one_result() -> None:
     assert run.asked == [None, "1", "2"]
 
 
+async def test_each_cursor_argument_next_key_and_rows_key_is_known() -> None:
+    """The cursor arguments, next-page keys and rows keys of the APIs people page through:
+    each known, the rows key before a list that comes first."""
+
+    async def fetched(arg: str, next_key: str, rows_key: str) -> Any:
+        async def run(args: dict[str, Any]) -> Any:
+            at = int(args.get(arg) or 0)
+            return {"tags": ["t"], rows_key: [at], next_key: "1" if at == 0 else None}
+
+        spec = ToolSpec(name="t", input_schema={"properties": {arg: {}}}, **{PAGED: True})  # type: ignore[arg-type]
+        return await pages.every_page(spec, {}, run)
+
+    for arg in ("cursor", "page_token", "pageToken", "next_cursor", "after", "page"):
+        assert (await fetched(arg, "next_cursor", "items"))["items"] == [0, 1], arg
+    for key in ("next_cursor", "nextCursor", "next_page_token", "nextPageToken", "next_page"):
+        assert (await fetched("cursor", key, "items"))["items"] == [0, 1], key
+    for rows in ("items", "data", "results", "records", "rows"):
+        assert (await fetched("cursor", "next_cursor", rows))[rows] == [0, 1], rows
+
+
 async def test_pages_as_json_text_with_rows_under_any_list_key() -> None:
     merged = await pages.every_page(paged(), {}, book(2, text=True, key="skus"))
     assert merged["skus"] == [{"n": i} for i in range(4)] and merged["pages"] == 2
