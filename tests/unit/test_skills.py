@@ -515,6 +515,22 @@ async def test_a_run_is_told_nothing_without_the_skill_tools_or_without_a_skill(
         assert not hasattr(run, "context") and run.offered == {"other"}
 
 
+async def test_a_listing_of_8000_characters_exactly_is_told_whole() -> None:
+    async def told(longest: int) -> list[str]:
+        store = SkillStore()
+        for n in range(80):  # "- skill-NNN: " and its description: 100 characters a line
+            store.put(f"skill-{n:03d}", "x", description="d" * (longest if n == 79 else 87))
+        tools = {t.name: t for t in await combine(store).tools(ADA).resolve()}
+        run = SimpleNamespace(toolbox=tools, offered=None, pushed_context=None)
+        await module.told(run)  # type: ignore[arg-type]
+        return run.context.splitlines()
+
+    whole = await told(87)
+    assert whole[-1].startswith("- skill-079: ") and "more" not in whole[-1]
+    cut = await told(88)  # one character past 8,000
+    assert cut[-1] == "- and 1 more: list_skills() lists them all"
+
+
 async def test_the_listing_a_run_is_told_is_cut_at_its_cap_saying_how_many_more() -> None:
     store = SkillStore()
     for n in range(300):
