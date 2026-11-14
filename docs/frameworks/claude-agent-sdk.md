@@ -420,7 +420,11 @@ turn the session runs by itself (a finished task's notification) is never a user
   memory's), whatever time has passed since its first.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
-* The process is one per conversation, in one server process, at most 16 per agent. It closes
+* The process is one per conversation, in one server process, at most 16 in that server
+  process over all its agents (each is a CLI process; the place is taken before the process
+  starts, so turns that start together start no more). With every place taken, an idle
+  session gives its own — of the user who holds the most, the one used longest ago — and
+  with none idle the turn runs in a process of its own, as a run with no `thread` does. It closes
   5 minutes after its last activity when nothing works in it (no background task, and no turn
   of its own for a finished one due or under way), 6 hours after its last turn
   whatever does, when a turn's options are not the ones it was started with

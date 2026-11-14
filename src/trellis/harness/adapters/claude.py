@@ -793,7 +793,18 @@ class ClaudeAdapter:
                 found = None
         if found is None:
             transcripts = runtime.replay.journal.transcripts
-            found = await self.live.open(key, shape, options, transcripts)
+            # the places are the server process's: every agent's sessions count (``KEPT``)
+            adapters = (a.adapter for a in runtime.agent.harness.agents.values())
+            among = {id(a): a.live for a in adapters if isinstance(a, ClaudeAdapter)}
+            among[id(self)] = self.live
+            found = await self.live.open(
+                key,
+                shape,
+                options,
+                transcripts,
+                owner=(runtime.tenant, runtime.user),
+                among=list(among.values()),
+            )
             if found is not None and session is not None:
                 # a process that resumes a session reports the session's cost: what its
                 # first turn is charged counts from what the session cost before (the

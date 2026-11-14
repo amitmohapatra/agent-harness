@@ -309,6 +309,10 @@ cancelled after its start (the task is cancelled with it). See
 - **A conversation's kept process names no single run to the gateway**: it sent its first
   turn's run id and `traceparent` with every later turn's model calls (booked to the wrong
   run). It carries the dimensions that hold for all its turns.
+- **No more than 16 kept Claude processes in a server process** (PERF-3): the cap was
+  checked before the process started and counted per agent, so a hundred first turns at once
+  kept a hundred. The place is taken first and counted over all agents; the idle session
+  that gives its place is the one used longest ago of the user who holds the most.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.

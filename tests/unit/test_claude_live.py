@@ -16,6 +16,7 @@ from claude_agent_sdk._internal.message_parser import parse_message
 
 from trellis.contracts import RunStatus
 from trellis.harness.bounded import LRU
+from trellis.harness.bridges import claude_live
 from trellis.harness.bridges.claude_live import (
     _NUDGE,
     _OVER,
@@ -52,7 +53,7 @@ async def test_with_no_turn_to_take_it_a_tool_call_is_refused_and_counted() -> N
     async def never(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of no turn's")
 
-    session = LiveSession("conversation", (), LiveSessions())
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
     hooks = session._hooks(
         {"PreToolUse": [HookMatcher(hooks=[never])], "Stop": [HookMatcher(hooks=[never])]}
     )
@@ -73,7 +74,7 @@ async def test_the_main_agents_call_in_a_turn_that_was_left_ends_that_turn() -> 
     async def never(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of no turn's")
 
-    session = LiveSession("conversation", (), LiveSessions())
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
     session.owed = 1
     relay = session._hooks({"PreToolUse": [HookMatcher(hooks=[never])]})["PreToolUse"][0].hooks[0]
     ended = await relay({"tool_name": "Bash"}, "toolu_1", None)
@@ -104,7 +105,7 @@ async def test_a_request_under_way_when_its_turn_is_left_is_refused() -> None:
         session_store=None,
     )
     runtime: Any = SimpleNamespace(agent=SimpleNamespace(sessions=LRU()))
-    session = LiveSession("conversation", (), LiveSessions())
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
     turn = Turn(runtime, options, None, contextvars.copy_context())
     session._attach(turn)
     relay = session._hooks(options.hooks)["PreToolUse"][0].hooks[0]
@@ -144,7 +145,7 @@ def result(cost: float | None, **usage: Any) -> Any:
 def test_a_turn_is_charged_what_the_processs_running_cost_grew_by() -> None:
     """As the bundled CLI reports: a result's cost is its process's running total, its usage
     the turn's own."""
-    session = LiveSession("conversation", (), LiveSessions())
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
     first = session.charged(result(0.0012, input_tokens=200, output_tokens=40))
     assert (first.total_cost_usd, first.usage["input_tokens"]) == (0.0012, 200)
     second = session.charged(result(0.0016, input_tokens=100, output_tokens=20))
@@ -219,7 +220,7 @@ async def background() -> tuple[LiveSession, Background, Store]:
         sessions=LRU(),
         adapter=SimpleNamespace(name="claude"),
     )
-    session = LiveSession("conversation", (), LiveSessions())
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
     session.turn = turn_of(agent, "turn")
     helper = SimpleNamespace(
         run_id="child", parent_run_id="turn", name="researcher", began=0.0, kind=None
@@ -485,3 +486,82 @@ async def test_a_workflow_agents_call_is_the_workflows_run_only_while_one_works(
     assert await session._working("a1") is None and not session.background
     session.background["t1"] = found
     await ended(session, found, store)
+
+
+# --------------------------------------------------------------------------- room (PERF-3)
+def _rooms(monkeypatch: pytest.MonkeyPatch, cap: int) -> list[str]:
+    """Sessions that start no process: the keys ``start`` was called for; the cap is ``cap``."""
+    started: list[str] = []
+
+    async def start(self: LiveSession, options: Any, transcripts: Any) -> None:
+        started.append(self.key)
+        await asyncio.sleep(0)  # the process starts: other turns' opens run meanwhile
+
+    async def close(self: LiveSession) -> None:
+        self.closed = True
+
+    monkeypatch.setattr(LiveSession, "start", start)
+    monkeypatch.setattr(LiveSession, "close", close)
+    monkeypatch.setattr(claude_live, "KEPT", cap)
+    return started
+
+
+async def test_first_turns_at_once_start_no_more_processes_than_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PERF-3: a hundred conversations' first turns at once. The place is taken before the
+    process starts, so no more than the cap are started or kept — over one agent's sessions
+    and another's of the same server alike; the rest run without one (``None``)."""
+    started = _rooms(monkeypatch, 16)
+    one, two = LiveSessions(), LiveSessions()
+    among = [one, two]
+    opened = await asyncio.gather(
+        *(
+            (one if n % 2 else two).open(f"c{n}", (), None, {}, owner=f"u{n}", among=among)
+            for n in range(100)
+        )
+    )
+    assert len(started) == 16 and len(one) + len(two) == 16
+    assert sum(found is not None for found in opened) == 16
+    for found in opened:  # each of them serves a turn: none is idle to give its place
+        if found is not None:
+            found.turn = SimpleNamespace()  # type: ignore[assignment]
+    assert await one.open("late", (), None, {}, owner="late", among=among) is None
+    assert len(started) == 16
+
+
+async def test_a_place_goes_from_who_holds_most_the_one_used_longest_ago(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PERF-3, fairness: with every place taken, a newcomer takes the idle session of the
+    user who holds the most — of theirs, the one used longest ago — so one user's many
+    conversations cost that user a place, not another's only one. A session at work (a turn,
+    background work) keeps its place."""
+    _rooms(monkeypatch, 4)
+    sessions = LiveSessions()
+    among = [sessions]
+    for key, owner in [("b1", "bob"), ("a1", "ada"), ("a2", "ada"), ("a3", "ada")]:
+        assert await sessions.open(key, (), None, {}, owner=owner, among=among) is not None
+    assert sessions.get("a1") is not None  # used again: a2 is ada's least recently used
+    assert await sessions.open("c1", (), None, {}, owner="cy", among=among) is not None
+    assert sorted(s.key for s in among[0]) == ["a1", "a3", "b1", "c1"]
+    held = sessions.get("a1")
+    assert held is not None
+    held.working["t1"] = "research"  # at work in the background: not given up
+    assert await sessions.open("c2", (), None, {}, owner="cy", among=among) is not None
+    assert sorted(s.key for s in among[0]) == ["a1", "b1", "c1", "c2"]  # a3 went, not a1
+
+
+async def test_a_session_that_fails_to_start_gives_its_place_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _rooms(monkeypatch, 1)
+
+    async def broken(self: LiveSession, options: Any, transcripts: Any) -> None:
+        raise RuntimeError("no CLI")
+
+    sessions = LiveSessions()
+    monkeypatch.setattr(LiveSession, "start", broken)
+    with pytest.raises(RuntimeError, match="no CLI"):
+        await sessions.open("c1", (), None, {}, owner="u", among=[sessions])
+    assert len(sessions) == 0 and sessions.starting == 0

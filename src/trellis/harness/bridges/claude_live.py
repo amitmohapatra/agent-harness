@@ -75,7 +75,16 @@ import dataclasses
 import logging
 import time
 from collections import Counter, deque
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Hashable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import Interrupt, InterruptResolution, RunStatus
@@ -96,7 +105,8 @@ log = logging.getLogger("trellis.harness")
 IDLE_SECONDS: Final = 300.0
 #: How long a session is kept after its last turn, whatever still works in it.
 WORKING_SECONDS: Final = 6 * 3600.0
-#: The most sessions an agent keeps in this process (each is a CLI process).
+#: The most sessions kept in this server process, over all its agents (each is a CLI
+#: process, some 70 MB of its own).
 KEPT: Final = 16
 #: How long a turn waits for the result of an earlier turn that was left (paused, cancelled)
 #: before its own prompt is sent; past it the session is closed and the turn runs without.
@@ -646,8 +656,12 @@ class Mirror:
 class LiveSession:
     """One conversation's CLI process and what reads it."""
 
-    def __init__(self, key: str, shape: Any, sessions: LiveSessions) -> None:
+    def __init__(self, key: str, shape: Any, sessions: LiveSessions, *, owner: Hashable) -> None:
         self.key = key
+        #: whose conversation it is (its tenant and user), and when it was last asked for:
+        #: what decides which idle session gives its place (:func:`_yielding`)
+        self.owner = owner
+        self.used = time.monotonic_ns()
         #: what the process was started with and has for good (``adapters.claude._shape``)
         self.shape = shape
         self.sessions = sessions
@@ -1297,6 +1311,8 @@ class LiveSessions:
 
     def __init__(self) -> None:
         self._open: dict[str, LiveSession] = {}
+        #: the places taken by sessions whose process is starting
+        self.starting = 0
         #: the background subagents' runs under way in them, by run (:class:`Background`)
         self.attended: dict[str, Background] = {}
         #: what each conversation's next run is told of work that ended with its session
@@ -1305,8 +1321,16 @@ class LiveSessions:
     def __len__(self) -> int:
         return len(self._open)
 
+    def __iter__(self) -> Iterator[LiveSession]:
+        return iter(list(self._open.values()))
+
     def get(self, key: str) -> LiveSession | None:
-        return self._open.get(key)
+        """``key``'s session, asked for now (the one asked for longest ago gives its place
+        first: :func:`_yielding`)."""
+        found = self._open.get(key)
+        if found is not None:
+            found.used = time.monotonic_ns()
+        return found
 
     async def open(
         self,
@@ -1314,16 +1338,29 @@ class LiveSessions:
         shape: Any,
         options: Any,
         transcripts: Mapping[str, list[dict[str, Any]]],
+        *,
+        owner: Hashable,
+        among: Sequence[LiveSessions],
     ) -> LiveSession | None:
-        """A session started for ``key`` (``None``: :data:`KEPT` are open and each serves a
-        turn or has work under way — the turn runs without one, as it always did)."""
-        if len(self._open) >= KEPT:
-            idle = [s for s in self._open.values() if s.turn is None and not s.working]
-            if not idle:
+        """A session started for ``key``, ``owner``'s conversation. :data:`KEPT` processes are
+        kept by the server process, over every agent's sessions (``among``, these included):
+        the place is taken before the process starts, so turns that start together start no
+        more; with every place taken an idle session gives its own (:func:`_yielding`), and
+        with none idle the turn runs without one (``None``), as it always did."""
+        yielding = None
+        if sum(len(sessions) + sessions.starting for sessions in among) >= KEPT:
+            yielding = _yielding(among)
+            if yielding is None:
                 return None
-            await self.close(idle[0].key, "another conversation needed its place")
-        session = LiveSession(key, shape, self)
-        await session.start(options, transcripts)
+        self.starting += 1
+        try:
+            if yielding is not None:
+                why = "another conversation needed its place"
+                await yielding.sessions.close(yielding.key, why)
+            session = LiveSession(key, shape, self, owner=owner)
+            await session.start(options, transcripts)
+        finally:
+            self.starting -= 1
         self._open[key] = session
         return session
 
@@ -1359,6 +1396,17 @@ class LiveSessions:
         failed = next((e for e in closed if isinstance(e, BaseException)), None)
         if failed is not None:
             raise failed
+
+
+def _yielding(among: Sequence[LiveSessions]) -> LiveSession | None:
+    """The idle session (no turn, no work under way) that gives its place to another
+    conversation: of the user who holds the most sessions — one user's many conversations
+    cost that user a place, not another user's only one — the one asked for longest ago.
+    ``None``: none is idle."""
+    kept = [session for sessions in among for session in sessions]
+    held = Counter(session.owner for session in kept)
+    idle = [session for session in kept if session.turn is None and not session.working]
+    return min(idle, key=lambda session: (-held[session.owner], session.used), default=None)
 
 
 def _handler(at: Turn, name: str) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:

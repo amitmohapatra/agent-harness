@@ -1767,7 +1767,7 @@ async def test_a_left_turns_result_is_read_past_what_came_before_it() -> None:
 
     from claude_agent_sdk import AssistantMessage, TextBlock
 
-    session = LiveSession("k", None, claude_live.LiveSessions())
+    session = LiveSession("k", None, claude_live.LiveSessions(), owner="u")
     turn = claude_live.Turn(None, None, None, contextvars.copy_context(), stopped=True)
     said = AssistantMessage(content=[TextBlock("…")], model="m")
     ended = ResultMessage("success", 1, 1, False, 1, "s")

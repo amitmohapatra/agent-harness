@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -413,7 +412,8 @@ async def test_a_kept_claude_process_names_no_one_turns_run_to_the_gateway(tmp_p
         for _ in range(2):
             assert (await agent.run("x", user="ada", thread="t1")).answer == "ok"
         alone = await agent.run("x", user="ada")
-    one, two, own = (json.loads(line) for line in Path(f"{record}.turns").read_text().splitlines())
+    turns = (tmp_path / "cli.json.turns").read_text().splitlines()
+    one, two, own = (json.loads(line) for line in turns)
     assert one["pid"] == two["pid"] != own["pid"]
     kept = dict(line.split(": ", 1) for line in two["custom_headers"].splitlines())
     assert kept["x-bf-dim-agent"] == "claude" and "x-bf-dim-user" in kept
