@@ -25,6 +25,8 @@ import pytest
 
 from tests.features.conftest import (
     ADAPTERS,
+    ADMIN_KEY,
+    MEMORY_URL,
     Traffic,
     eventually,
     harness,
@@ -40,7 +42,6 @@ from tests.features.kit import (
 )
 from tests.support.planned import PlannedChat
 from trellis import ReAct
-from tests.features.conftest import ADMIN_KEY, MEMORY_URL
 from trellis.contracts import RunStatus
 from trellis.memory import MemoryClient
 from trellis.memory.errors import NotFoundError
@@ -65,7 +66,9 @@ def _no_duplicates(user: str) -> None:
         assert len(hashes) == len(set(hashes)), rows
 
 
-async def tell(adapter: str, tmp: Path, agent_id: str, user: str, thread: str, text: str) -> None:
+async def tell(  # noqa: PLR0917 - a chat turn: who says what, where
+    adapter: str, tmp: Path, agent_id: str, user: str, thread: str, text: str
+) -> None:
     async with harness() as h:
         agent, _ = await armed(adapter, h, tmp, [], id=agent_id)
         done = await agent.run(text, user=user, thread=thread)

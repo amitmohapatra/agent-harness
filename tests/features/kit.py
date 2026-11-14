@@ -171,7 +171,7 @@ async def inventory_text(h: Harness, user: str) -> str:
                       [p.model_dump(mode="json") for p in page], default=str)
 
 
-async def scope_of(h: Harness, user: str, *, agent: str | None = None, thread: str | None = None):  # noqa: ANN201
+async def scope_of(h: Harness, user: str, *, agent: str | None = None, thread: str | None = None):
     """The memory SDK bound to a user (and an agent, a conversation) of ``h``'s tenant."""
     from tests.features.conftest import scope
 

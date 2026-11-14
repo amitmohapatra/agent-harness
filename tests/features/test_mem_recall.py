@@ -6,9 +6,8 @@ fact is stored once, as the user's, in their tenant."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
+from pathlib import Path
 
 import pytest
 

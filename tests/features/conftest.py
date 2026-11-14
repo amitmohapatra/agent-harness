@@ -448,3 +448,41 @@ def memory_proxy() -> Iterator[FaultProxy]:
     proxy.up()
     yield proxy
     proxy.down()
+
+
+def move_clock(dsn: str | None, statement: str, *params: str) -> None:
+    """The one write a test makes to a service's database: moving a row's time back (a
+    schedule's next fire, an ended run's age), where waiting the real hours or days is the only
+    other way. Never anything else."""
+    assert dsn is not None
+    assert statement.lstrip().lower().startswith("update"), statement
+    for i, value in enumerate(params, 1):
+        statement = statement.replace(f":{i}", "'" + value.replace("'", "''") + "'")
+    subprocess.run(
+        ["psql", dsn, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", statement],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+
+@pytest.fixture(autouse=True)
+def claude_sessions_of_this_test(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The scripted Claude CLI keeps its sessions in the test's own folder (INV-9)."""
+    monkeypatch.setenv("FAKE_CLAUDE_SESSIONS", str(tmp_path))
+
+
+def run_periodic_now(task: str, queue: str) -> None:
+    """Run one of the memory service's periodic jobs now, as an operator would run it on
+    demand: one row in its job queue (Procrastinate's ``procrastinate_jobs``, which its worker
+    listens on), the arguments a periodic fire carries. The retention sweep is daily and the
+    archive purge hourly: waiting for their schedule is the only other way."""
+    assert MEMORY_DSN is not None
+    statement = (
+        "insert into procrastinate_jobs (queue_name, task_name, args, priority) values"
+        f" ('{queue}', '{task}', jsonb_build_object('timestamp', extract(epoch from now())::int),"
+        " 40)"
+    )
+    subprocess.run(["psql", MEMORY_DSN, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", statement],
+                   capture_output=True, text=True, check=True, timeout=60)

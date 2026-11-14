@@ -29,11 +29,10 @@ from tests.features.conftest import (
     FaultProxy,
     eventually,
     harness,
-    memory_sql,
 )
 from tests.features.kit import armed, feedback_rows, messages_of_run, tool_records
 from tests.support.openapi import MEMORY_OPENAPI
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 
 pytestmark = pytest.mark.timeout(400)
 
@@ -55,26 +54,27 @@ def warnings(events: list[Any]) -> list[str]:
 async def test_memory_down_mid_chat_the_turn_answers_and_its_writes_arrive_once_it_is_back(
     memory_proxy: FaultProxy, tmp_path: Path, uid: str, invariants: Any
 ) -> None:
+    """One process serving a chat: memory goes away between two turns. The second turn still
+    answers, says memory was unavailable, reads the first turn from the run store; its
+    transcript, refused while memory is away, is spooled and delivered once when it is back."""
     user, agent_id, spool = f"mo-{uid}", f"down-{uid}", tmp_path / "spool"
     spool.mkdir()
-    async with harness(memory_url=memory_proxy.url, spool_dir=str(spool)) as h:
-        agent, _ = await armed("react", h, tmp_path, [], id=agent_id)
-        first = await agent.run("I store pallets in bay 12.", user=user, thread="c")
-        assert first.status is RunStatus.SUCCESS
-        await h.writes.drain()
-    memory_proxy.down()  # memory unreachable from here on
     invariants.allow("INV-2", "the outage is injected: the turn is delivered after it")
     async with harness(memory_url=memory_proxy.url, spool_dir=str(spool)) as h:
         agent, built = await armed("react", h, tmp_path, [], id=agent_id)
+        first = await agent.run("I store pallets in bay 12.", user=user, thread="c")
+        assert first.status is RunStatus.SUCCESS
+        await h.writes.drain()
+        memory_proxy.down()  # memory unreachable from here on
         events = [e async for e in agent.stream("Which bay was it?", user=user, thread="c")]
         ended = [e for e in events if e.type is RunEventType.RUN_FINISHED]
-        assert ended, [e.type for e in events]
+        assert ended and ended[-1].data.get("result") == "Done. ", [e.type for e in events]
         run_id = events[0].run_id
         said = json.dumps([e.data for e in events], default=str)
         assert "memory_unavailable" in said, said[:2000]  # said, not silent
         assert "bay 12" in built.said()  # the earlier turn, from the run store
-    spooled = list(spool.glob("*.jsonl"))
-    assert spooled and spooled[0].read_text().strip(), list(spool.iterdir())
+    spooled = [p for p in spool.rglob("*.jsonl") if p.read_text().strip()]
+    assert spooled, list(spool.rglob("*"))
     memory_proxy.up()
     async with harness(memory_url=memory_proxy.url, spool_dir=str(spool)) as h:
         agent, _ = await armed("react", h, tmp_path, [], id=agent_id)
@@ -87,7 +87,21 @@ async def test_memory_down_mid_chat_the_turn_answers_and_its_writes_arrive_once_
 
     rows = await eventually(delivered, within=90)
     assert [r["content"] for r in rows if r["role"] == "USER"] == ["Which bay was it?"], rows
-    assert not any(p.read_text().strip() for p in spool.glob("*.jsonl"))  # nothing left
+    assert not any(p.read_text().strip() for p in spool.rglob("*.jsonl"))  # nothing left
+
+
+@pytest.mark.plan("MEM-10")
+async def test_a_process_started_while_memory_is_down_runs_nothing(
+    memory_proxy: FaultProxy, tmp_path: Path, uid: str
+) -> None:
+    """A limitation, documented here: the tenant a key speaks for is the memory service's word
+    (``GET /v1/keys/self``), so a harness process started while memory is away cannot run at
+    all — a restarted worker or server waits for memory, whatever the run needs."""
+    memory_proxy.down()
+    async with harness(memory_url=memory_proxy.url) as h:
+        agent, _ = await armed("react", h, tmp_path, [], id=f"cold-{uid}")
+        with pytest.raises(ConfigurationError, match="could not be reached"):
+            await agent.run("Hello?", user=f"np-{uid}", thread="c")
 
 
 @pytest.mark.plan("MEM-10")
@@ -97,7 +111,7 @@ async def test_a_context_answered_504_once_is_retried_and_reaches_the_model(
     user = f"np-{uid}"
     async with harness() as h:  # a fact to find
         ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)  # type: ignore[union-attr]
-        await ctx.remember("My forklift licence number is FL-%s." % uid)
+        await ctx.remember(f"My forklift licence number is FL-{uid}.")
     memory_proxy.rules[("POST", "/v1/context")] = ("504", 1)
     async with harness(memory_url=memory_proxy.url) as h:
         agent, built = await armed("react", h, tmp_path, [], id=f"ctx504-{uid}")
@@ -117,7 +131,8 @@ async def test_a_context_that_stays_504_is_a_warning_and_the_run_answers(
         agent, _ = await armed("react", h, tmp_path, [], id=f"ctx504b-{uid}")
         events = [e async for e in agent.stream("Hello?", user=f"oq-{uid}", thread="c")]
     finished = [e for e in events if e.type is RunEventType.RUN_FINISHED]
-    assert finished and "success" in json.dumps(finished[-1].data).lower(), finished
+    assert finished and finished[-1].data.get("result") == "Done. ", events
+    assert not [e for e in events if e.type is RunEventType.RUN_ERROR]
     assert "memory_unavailable" in json.dumps([e.data for e in events], default=str)
 
 
@@ -200,7 +215,8 @@ def concrete(path: str) -> str:
 
 
 @pytest.mark.plan("MEM-11", "SEC-06")
-async def test_every_route_but_the_probes_refuses_a_missing_or_unknown_key() -> None:
+async def test_every_route_but_the_probes_refuses_a_missing_or_unknown_key(invariants: Any) -> None:
+    invariants.allow("INV-7", "requests made malformed on purpose: only the key is probed")
     async with httpx.AsyncClient(base_url=MEMORY_URL or "", timeout=30) as c:
         for method, path in operations():
             if path in OPEN:
@@ -211,7 +227,8 @@ async def test_every_route_but_the_probes_refuses_a_missing_or_unknown_key() -> 
 
 
 @pytest.mark.plan("MEM-11", "SEC-06")
-async def test_the_platform_and_admin_routes_refuse_lesser_keys() -> None:
+async def test_the_platform_and_admin_routes_refuse_lesser_keys(invariants: Any) -> None:
+    invariants.allow("INV-7", "requests made malformed on purpose: only the role is probed")
     async with httpx.AsyncClient(base_url=MEMORY_URL or "", timeout=30) as c:
         for method, path in operations():
             if path in PLATFORM:

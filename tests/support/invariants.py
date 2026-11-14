@@ -72,6 +72,16 @@ SECRET_VARIABLES: Final = (
     "OPENAI_API_KEY",
 )
 CREDENTIAL_HEADERS: Final = ("authorization", "x-api-key", "x-trellis-api-key")
+#: the routes whose answer is a new credential, shown once (a tenant's first admin key, an
+#: issued key, a webhook's signing secret): a key there is the route's purpose (INV-8)
+ISSUES_SECRETS: Final = frozenset(
+    {
+        ("POST", "/v1/admin/tenants"),
+        ("POST", "/v1/keys"),
+        ("POST", "/v1/webhooks"),
+        ("POST", "/v1/webhooks/{id}/rotate-secret"),
+    }
+)
 #: the memory service's own agent tools: the service logs their calls itself, the harness
 #: records none (docs/memory.md, "What is recorded")
 SERVICE_LOGGED: Final = frozenset(
@@ -386,7 +396,9 @@ class Invariants:
                 ev = p.get("event", p)
                 if ev.get("type") == "TOOL_CALL_ARGS":
                     args[ev.get("tool_call_id")] = (ev.get("data") or {}).get("args")
-                if ev.get("type") == "TOOL_CALL_RESULT":
+                if ev.get("type") == "TOOL_CALL_RESULT" and (ev.get("data") or {}).get(
+                    "status"
+                ) != "rejected":
                     tool = (ev.get("data") or {}).get("tool")
                     ran[_call_key(tool, args.get(ev.get("tool_call_id")))] += 1
             if run_id not in recorded and not any(
@@ -499,8 +511,12 @@ class Invariants:
                     continue
                 if records.get(run_id, {}).get("status") != "SUCCESS":
                     continue
+                edited = (decided.get(interrupt.get("interrupt_id", "")) or {}).get("payload")
                 starts = _starts(
-                    events.get(run_id, []), call.get("tool"), call.get("idempotency_key")
+                    events.get(run_id, []),
+                    call.get("tool"),
+                    call.get("idempotency_key"),
+                    edited if decision == "EDIT" and isinstance(edited, dict) else call.get("args"),
                 )
                 if decision == "REJECT" and starts:
                     out.append(f"INV-4 run {run_id}: {call.get('tool')} ran though it was rejected")
@@ -587,6 +603,8 @@ class Invariants:
         out = []
         for e in self.traffic.exchanges:
             for what, text in (("request", e.raw_request), ("answer", e.raw_response)):
+                if what == "answer" and (e.method, _route(e.path)) in ISSUES_SECRETS:
+                    continue  # the one answer that shows a new key or secret, once
                 if any(s in text for s in secrets):
                     out.append(f"INV-8 a key in the {what} of {e.service} {e.method} {e.path}")
         for path in self.tmp.rglob("*.log"):
@@ -638,7 +656,9 @@ def _call_key(tool: Any, args: Any) -> str:
     return f"{tool}:{json.dumps(args, sort_keys=True, default=str)}"
 
 
-def _starts(evs: list[dict[str, Any]], tool: Any, call_id: Any) -> list[Any]:
+def _starts(
+    evs: list[dict[str, Any]], tool: Any, call_id: Any, wanted: Any = None
+) -> list[Any]:
     """The arguments of each start of ``tool``'s call ``call_id`` in a run's events (by its id,
     else by its tool)."""
     args: dict[Any, Any] = {}
@@ -647,18 +667,41 @@ def _starts(evs: list[dict[str, Any]], tool: Any, call_id: Any) -> list[Any]:
         ev = p.get("event", p)
         if ev.get("type") == "TOOL_CALL_ARGS":
             args[ev.get("tool_call_id")] = (ev.get("data") or {}).get("args")
+    unrun = _never_ran(evs)
     for p in evs:
         ev = p.get("event", p)
         named = call_id is None or ev.get("tool_call_id") == call_id
         if (
             ev.get("type") == "TOOL_CALL_START"
+            and ev.get("tool_call_id") not in unrun
             and (ev.get("data") or {}).get("tool") == tool
             and named
         ):
             started.append(args.get(ev.get("tool_call_id")))
     if not started and call_id is not None:  # a framework that names its calls otherwise
-        return _starts(evs, tool, None)
+        return _starts(evs, tool, None, wanted)
+    if call_id is None and wanted is not None:  # by its tool: only the calls with its arguments
+        started = [a for a in started if a is None or a == wanted]
     return started
+
+
+def _route(path: str) -> str:
+    """A path with its last id segment as ``{id}`` where the route takes one."""
+    parts = path.split("/")
+    if len(parts) == 5 and parts[2] == "webhooks":
+        parts[3] = "{id}"
+    return "/".join(parts)
+
+
+def _never_ran(evs: list[dict[str, Any]]) -> set[Any]:
+    """The calls a run's events announce though they never ran: a rejected call is started,
+    its arguments said and its result the rejection (``status: rejected``), so the model reads
+    why."""
+    return {
+        ev.get("tool_call_id")
+        for ev in (p.get("event", p) for p in evs)
+        if ev.get("type") == "TOOL_CALL_RESULT" and (ev.get("data") or {}).get("status") == "rejected"
+    }
 
 
 def _fields(value: Any, names: tuple[str, ...]) -> Iterator[tuple[str, Any]]:
