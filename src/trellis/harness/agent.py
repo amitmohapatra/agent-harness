@@ -79,7 +79,7 @@ from trellis.harness.clients.memory import (
     context_budget,
     documents,
 )
-from trellis.harness.conversation import STEERED_INTO, Mode, Turns
+from trellis.harness.conversation import STEERED_INTO, Mode, Turn, Turns
 from trellis.harness.evals import (
     GROUNDING_SAMPLE,
     EvalCase,
@@ -390,6 +390,8 @@ class Agent:
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
+        #: the conversations' ended turns ``conversation.earlier`` read (each ended run once)
+        self.earlier_turns: LRU[str, Turn] = LRU()
         #: the session its framework kept for each conversation's last turn in this process
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
@@ -1485,8 +1487,9 @@ class Agent:
         ``run_id`` when the protocol names the run, and what its front end gave it, ``app``.)"""
         # the messages of a conversation sent here reach the run store in the order they were
         # sent, which places each after the one before: their turns' order (``line``)
+        tenant = await self.harness._tenant(tenant or (parent.tenant if parent else None))
         accepting = (
-            self.turns.accepting(f"{tenant}\0{user}\0{thread}")
+            self.turns.accepting(conversation_key(tenant, user, thread))
             if thread and parent is None
             else contextlib.nullcontext()
         )
@@ -1529,8 +1532,8 @@ class Agent:
         if mode is Mode.STEER and live is not None and live.steers:
             named = {STEERED_INTO: live.run_id}
         elif mode is Mode.INTERRUPT and live is None:
-            line = Line(self.harness.runs, RunRecord.from_start(start), self.turns.seen)
-            named = {INTERRUPTS: await line.holder()}
+            h, asking = self.harness, RunRecord.from_start(start)
+            named = {INTERRUPTS: await Line(h.runs, asking, self.turns.seen, h.followers).holder()}
         else:
             return start
         return start.model_copy(update={"metadata": {**start.metadata, **named}})

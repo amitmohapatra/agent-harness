@@ -18,6 +18,9 @@ interchangeable. Both behave the same way:
 * a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
   the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
   run is cancelled when its lease runs out;
+* a run started ``RUNNING`` with a ``concurrency_key`` takes its key's place (:func:`place`)
+  and is born to be held: nobody holding it within :data:`RESUME_GRACE_SECONDS` ends it
+  ``ERROR`` (``holder_lost``), so a process that died before its first heartbeat blocks nobody;
 * a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
   it for the ``worker_id`` (the process running it) instead: once the hold lapses the run ends
   ``ERROR`` (``holder_lost``), never queued; a hold fences no write, and a pause lets go of it.
@@ -365,6 +368,9 @@ class LocalRuns:
             self._enqueue(record.run_id)
         else:
             self._running_since[record.run_id] = record.created_at
+            if record.concurrency_key is not None:  # it takes its key's place: born to be held
+                grace = timedelta(seconds=RESUME_GRACE_SECONDS)
+                self._holds[record.run_id] = (None, record.created_at + grace)
         return record
 
     async def claim(

@@ -49,8 +49,10 @@ from trellis.harness.governance.decision import Action, Decision
 from trellis.harness.holding import Holds
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
+from trellis.harness.line import Followers
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
+from trellis.harness.runlog import event_log
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.schedules import LimitsHook, schedule_tools
@@ -169,9 +171,14 @@ class Harness:
         if builds_memory:
             memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
         self.memory = Memory(memory) if memory else None
+        streams: RunsClient | None = None
         if builds_runs:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
+            streams = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
+        #: the event logs followed of runs ahead in a conversation's line (``line``), on a
+        #: client of their own: an open stream never takes a connection a heartbeat needs
+        self.followers = Followers(lambda: event_log(streams or self.runs))
         #: the runs this process executes, held in the run store while they do (``holding``)
         self.holds = Holds(lambda: self.runs, renewed=self._renewed, lost=self._lost)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)

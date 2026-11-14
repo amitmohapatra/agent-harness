@@ -38,10 +38,11 @@ import hashlib
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import InterruptDecision, RunRecord, RunStatus
+from trellis.contracts import InterruptDecision, RunStatus
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
@@ -56,6 +57,9 @@ log = logging.getLogger("trellis.harness")
 
 #: The most earlier runs of a conversation :func:`earlier` reads from the run store.
 EARLIER_RUNS: Final = 10
+#: How many of the store's newest runs of a thread and an ending :func:`earlier` lists (one
+#: listing an ending: other users' threads named alike are among them).
+EARLIER_PAGE: Final = 50
 #: A run's answered interrupts read at once, for what the person allowed (:func:`allowed`).
 RESOLUTIONS_PAGE: Final = 50
 #: The endings whose question and answer are a turn of the conversation; a cancelled run's
@@ -210,21 +214,7 @@ async def earlier(
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
-    runs, tenant, ended = runtime.agent.harness.runs, runtime.tenant, runtime.agent.turns.ended
-    records = []
-    async for summary in runs.iterate(
-        agent_id=runtime.agent_id, thread_id=thread, tenant=tenant, limit=EARLIER_RUNS
-    ):
-        if summary.run_id == runtime.run_id or summary.status not in ASKED:
-            continue  # (the turns sent after it wait their turn: not earlier, not answered)
-        record = ended.get(summary.run_id) or await runs.get(summary.run_id, tenant=tenant)
-        if record is not None:
-            ended[record.run_id] = record  # it ended: read once
-        if record is not None and record.user_id == runtime.user and not record.parent_run_id:
-            records.append(record)
-            if len(records) == EARLIER_RUNS:
-                break
-    records.sort(key=lambda r: r.created_at)
+    records = sorted(await _asked(runtime, thread), key=lambda r: r.created_at)[-EARLIER_RUNS:]
     conversation = runtime.conversation
     kept = runtime.agent.results.turns(conversation) if whole else {}
     turns: list[list[Said]] = []
@@ -240,7 +230,7 @@ async def earlier(
         answer = record.output if record.status in ANSWERED else None
         if (
             previous is not None
-            and record.metadata.get(STEERED_INTO) == previous.run_id
+            and record.steered_into == previous.run_id
             and answer == previous.output
         ):
             # given to that run: its answer is this one's
@@ -253,6 +243,64 @@ async def earlier(
             )
         previous = record if answer not in (None, "") else None
     return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
+
+
+@dataclass(frozen=True, slots=True)
+class Turn:
+    """An ended turn of a conversation as :func:`earlier` keeps it (``Agent.earlier_turns``):
+    what it reads of the run's record, and no more (its checkpoint, its error, its metadata
+    are not kept)."""
+
+    run_id: str
+    created_at: datetime
+    status: RunStatus
+    #: whose turn it is (another user's thread named alike is not this conversation's), and
+    #: whether it is a child run (a sub-agent's: no turn)
+    user: str | None
+    child: bool
+    input: Any
+    output: Any
+    steered_into: str | None
+
+
+async def _asked(runtime: Runtime, thread: str) -> list[Turn]:
+    """The conversation's turns that ended asked (:data:`ASKED`), the newest
+    :data:`EARLIER_RUNS` of each ending: one listing an ending, of the store's newest
+    :data:`EARLIER_PAGE` — the messages sent after this one, waiting their turn, are never
+    listed — and each ended run read once (``Agent.earlier_turns``)."""
+    agent, tenant = runtime.agent, runtime.tenant
+    found: list[Turn] = []
+    for status in sorted(ASKED):
+        mine = 0
+        async for summary in agent.harness.runs.iterate(
+            agent_id=runtime.agent_id,
+            thread_id=thread,
+            status=status,
+            tenant=tenant,
+            limit=EARLIER_PAGE,
+            max_pages=1,
+        ):
+            turn = agent.earlier_turns.get(summary.run_id)
+            if turn is None:
+                record = await agent.harness.runs.get(summary.run_id, tenant=tenant)
+                if record is None:
+                    continue
+                turn = agent.earlier_turns[record.run_id] = Turn(
+                    run_id=record.run_id,
+                    created_at=record.created_at,
+                    status=record.status,
+                    user=record.user_id,
+                    child=bool(record.parent_run_id),
+                    input=record.input,
+                    output=record.output,
+                    steered_into=record.metadata.get(STEERED_INTO),
+                )
+            if turn.user == runtime.user and not turn.child and turn.run_id != runtime.run_id:
+                found.append(turn)
+                mine += 1
+                if mine == EARLIER_RUNS:
+                    break
+    return found
 
 
 def _fitted(turns: Sequence[Sequence[Said]], budget: int) -> list[Sequence[Said]]:
@@ -354,8 +402,6 @@ class Turns:
         self._accepting: dict[str, tuple[asyncio.Lock, int]] = {}
         #: what the lines of this process read of the runs in them (each run read once)
         self.seen: Cache = LRU()
-        #: the conversations' ended turns read here (``earlier``): an ended run is read once
-        self.ended: LRU[str, RunRecord] = LRU()
 
     @contextlib.asynccontextmanager
     async def accepting(self, key: str) -> AsyncIterator[None]:

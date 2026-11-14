@@ -258,8 +258,12 @@ async def _turned(
     if job is not None or parent is not None:
         return await work()
     key = Identity.of(record).conversation
-    runs, seen = agent.harness.runs, agent.turns.seen
-    line = None if record.concurrency_key is None else Line(runs, record, seen)
+    h = agent.harness
+    line = (
+        None
+        if record.concurrency_key is None
+        else Line(h.runs, record, agent.turns.seen, h.followers)
+    )
     working = agent.turns.live(key)
     if working is not None and mode is not Mode.QUEUE:
         answered = await _arrived(agent, record, input, working, mode=mode, listener=listener)

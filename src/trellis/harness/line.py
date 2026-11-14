@@ -19,9 +19,10 @@ person or whose process died (its hold lapsed, and the store ended it) has left 
 cancelled while it waited, or ended in the store before its turn came, takes none. It waits for
 the run just ahead of it: one of this process until it leaves the line here; one elsewhere
 (another process's, a worker's) by following its event log, which says when its attempt ends or
-pauses (agent-runs' event stream), then reads the line again — at the latest after
-:data:`STILL_SECONDS`. Only when that log cannot be followed (the stream dropped; a store that
-keeps none) does it read the line again after a pause: :data:`DROPPED_SECONDS`, doubling with
+pauses (agent-runs' event stream: one stream a run ahead, shared, :class:`Followers`), then
+reads the line again — at the latest after :data:`STILL_SECONDS`. Only when that log cannot be
+followed (the stream dropped, a store that keeps none, or :data:`MAX_FOLLOWED` streams open)
+does it read the line again after a pause: :data:`DROPPED_SECONDS`, doubling with
 each failure in a row up to :data:`DROPPED_MAX_SECONDS`, jittered.
 """
 
@@ -29,14 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 
 from trellis.contracts import RunEventType, RunRecord, RunStatus
 from trellis.harness.bounded import LRU
-from trellis.harness.runlog import EventLog, event_log
+from trellis.harness.runlog import EventLog
 from trellis.harness.runs import Place, RunStore, place
 from trellis.runs import RunsError
 
@@ -47,6 +48,9 @@ STILL_SECONDS: Final = 30.0
 #: this, doubling with each failure in a row, up to :data:`DROPPED_MAX_SECONDS`, jittered.
 DROPPED_SECONDS: Final = 0.05
 DROPPED_MAX_SECONDS: Final = 5.0
+#: The most runs ahead whose event logs one process follows at once (each an open stream): a
+#: run waiting behind another one elsewhere reads the line again after a pause instead.
+MAX_FOLLOWED: Final = 32
 #: The statuses of the runs in a line.
 IN_LINE: Final = (RunStatus.RUNNING, RunStatus.QUEUED)
 
@@ -89,6 +93,49 @@ class Here:
     cancelled: str | None = None
 
 
+class Followers:
+    """The event logs this process follows of the runs ahead in its conversations' lines that
+    work elsewhere: one stream a run, shared by every run waiting behind it here, at most
+    :data:`MAX_FOLLOWED` at once — on ``log``, a client of its own where the harness builds its
+    clients, so that streams never take the connections heartbeats and writes need."""
+
+    def __init__(self, log: Callable[[], EventLog | None]) -> None:
+        self._log = log
+        self._following: dict[str, asyncio.Future[bool]] = {}
+        #: how far each run's event log was read (its position)
+        self._read: LRU[str, int] = LRU()
+
+    async def left(self, run_id: str, attempt: int, tenant: str) -> bool:
+        """Until the event log of run ``run_id`` says its ``attempt`` ended (or paused), the
+        run ended, or :data:`STILL_SECONDS` passed; ``False`` when it cannot be followed now
+        (no event log, the stream dropped, or :data:`MAX_FOLLOWED` are followed already)."""
+        following = self._following.get(run_id)
+        if following is None:
+            log = self._log()
+            if log is None or len(self._following) >= MAX_FOLLOWED:
+                return False
+            following = asyncio.ensure_future(self._followed(log, run_id, attempt, tenant))
+            self._following[run_id] = following
+            following.add_done_callback(lambda _: self._following.pop(run_id, None))
+        return await asyncio.shield(following)  # (the stream is every waiter's)
+
+    async def _followed(self, log: EventLog, run_id: str, attempt: int, tenant: str) -> bool:
+        try:
+            async with asyncio.timeout(STILL_SECONDS):
+                async for entry in log.stream_events(
+                    run_id, after=self._read.get(run_id) or 0, tenant=tenant
+                ):
+                    self._read[run_id] = entry.position
+                    ended = entry.event.type is RunEventType.RUN_FINISHED
+                    if ended and entry.event.attempt >= attempt:
+                        break
+        except TimeoutError:
+            pass
+        except RunsError:
+            return False
+        return True
+
+
 async def placed(runs: RunStore, record: RunRecord) -> Place:
     """The place of the run ``record`` is (``runs.place``), its answers read from the store."""
     if record.last_resolution is None:
@@ -106,14 +153,14 @@ async def placed(runs: RunStore, record: RunRecord) -> Place:
 class Line:
     """The line the run ``record`` waits in: the ``RUNNING`` and ``QUEUED`` runs of its agent
     and conversation (its ``concurrency_key``) in the run store, by their places. ``seen`` is
-    what this process's lines read of the runs (``Turns.seen``)."""
+    what this process's lines read of the runs (``Turns.seen``), ``followers`` the event logs it
+    follows (``Harness.followers``)."""
 
     runs: RunStore
     record: RunRecord
     seen: Cache
-    #: how far each run ahead's event log was read (its position)
-    _read: dict[str, int] = field(default_factory=dict)
-    #: the failures in a row to follow an event log
+    followers: Followers
+    #: the times in a row the event log of the run ahead could not be followed
     _dropped: int = 0
 
     async def ahead(self) -> list[str] | None:
@@ -181,35 +228,16 @@ class Line:
 
     async def _left(self, run_id: str) -> None:
         """Until the run ``run_id``, ahead in the line elsewhere, may have left it: its event
-        log followed to its attempt's end (:meth:`_followed`); a log that cannot be followed,
+        log followed to its attempt's end (``Followers.left``); where it cannot be followed,
         after a pause that grows with each failure in a row."""
-        log = event_log(self.runs)
-        if log is not None and await self._followed(log, run_id):
+        seen = self.seen.get(run_id)
+        attempt = 1 if seen is None else seen.attempt
+        if await self.followers.left(run_id, attempt, self.record.tenant_id):
             self._dropped = 0
             return
         pause = min(DROPPED_MAX_SECONDS, DROPPED_SECONDS * 2**self._dropped)
         self._dropped += 1
         await asyncio.sleep(pause * random.uniform(0.5, 1.0))  # jittered
-
-    async def _followed(self, log: EventLog, run_id: str) -> bool:
-        """Follow the event log of run ``run_id`` until it says the attempt the line saw ended
-        (or paused), the run ended, or :data:`STILL_SECONDS` passed; ``False`` when the log
-        cannot be followed now."""
-        seen = self.seen.get(run_id)
-        try:
-            async with asyncio.timeout(STILL_SECONDS):
-                async for entry in log.stream_events(
-                    run_id, after=self._read.get(run_id, 0), tenant=self.record.tenant_id
-                ):
-                    self._read[run_id] = entry.position
-                    ended = entry.event.type is RunEventType.RUN_FINISHED
-                    if ended and (seen is None or entry.event.attempt >= seen.attempt):
-                        break
-        except TimeoutError:
-            pass
-        except RunsError:
-            return False
-        return True
 
     async def _seen(self, run_id: str, updated_at: datetime) -> Seen:
         found = await self.runs.get(run_id, tenant=self.record.tenant_id)
@@ -231,8 +259,10 @@ __all__ = [
     "DROPPED_SECONDS",
     "INTERRUPTS",
     "IN_LINE",
+    "MAX_FOLLOWED",
     "STILL_SECONDS",
     "Cache",
+    "Followers",
     "Here",
     "Line",
     "Seen",

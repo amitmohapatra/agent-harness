@@ -15,6 +15,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,10 +33,13 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
+from trellis.contracts.ids import new_id
 from trellis.harness import holding
+from trellis.harness import runs as local_runs
 from trellis.harness.agent import Agent
 from trellis.harness.bounded import LRU
-from trellis.harness.conversation import EARLIER_RUNS
+from trellis.harness.conversation import EARLIER_RUNS, earlier
+from trellis.harness.identity import conversation_key
 from trellis.harness.line import Line, placed
 from trellis.harness.runlog import RunLog
 from trellis.harness.runs import LocalRuns
@@ -249,7 +253,7 @@ async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     assert continued is not None
     at, _ = await placed(runs, continued)
     assert at > record.created_at and at - continued.updated_at < timedelta(seconds=1)
-    assert await Line(runs, continued, LRU()).ahead() == []
+    assert await Line(runs, continued, LRU(), servers[0].followers).ahead() == []
 
 
 class Laggy(LocalRuns):
@@ -388,7 +392,9 @@ async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nob
     ended = await runs.finish(record.run_id, RunStatus.SUCCESS)
     same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
     assert same.status is RunStatus.RUNNING
-    assert await Line(runs, ended, LRU()).ahead() is None  # it no longer runs: it left the line
+    assert (
+        await Line(runs, ended, LRU(), servers[0].followers).ahead() is None
+    )  # it no longer runs: it left the line
 
 
 async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
@@ -592,3 +598,140 @@ async def test_conv04_a_cancel_from_another_server_stops_the_call_at_the_next_he
     assert cancelled.status is RunStatus.CANCELLED and stopped.status is RunStatus.CANCELLED
     assert ("cancelled", "one") in log
     assert len(beats) - before <= 1  # the first heartbeat after the cancel stopped it
+
+
+async def test_perf1_runs_waiting_behind_runs_elsewhere_follow_few_streams_and_stay_held() -> None:
+    """PERF-1: 200 chats each with a message waiting behind a run another server holds: this
+    server follows at most 32 event streams at once (the others read their line again after a
+    pause), every waiting run's hold heartbeat is still sent, and all are answered."""
+    runs = LoggedRuns()
+    following = [0, 0]  # open now, the most at once
+    stream, heartbeat = runs.stream_events, runs.heartbeat
+    held: set[str] = set()
+
+    async def counted(run_id: str, **kwargs: Any) -> Any:
+        following[0] += 1
+        following[1] = max(following)
+        try:
+            async for entry in stream(run_id, **kwargs):
+                yield entry
+        finally:
+            following[0] -= 1
+
+    async def beating(run_id: str, *args: Any, **kwargs: Any) -> Any:
+        held.add(run_id)
+        return await heartbeat(run_id, *args, **kwargs)
+
+    runs.stream_events, runs.heartbeat = counted, beating  # type: ignore[method-assign]
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = chat(h, [], {})
+        elsewhere = []
+        for n in range(200):  # a turn of each chat held by another server
+            key = f"thread:{conversation_key('default', 'ada', f'chat-{n}')}"
+            start = RunStart(tenant_id="default", agent_id="chat", user_id="ada")
+            start = start.model_copy(update={"thread_id": f"chat-{n}", "concurrency_key": key})
+            elsewhere.append((await runs.start(start)).run_id)
+            await heartbeat(elsewhere[-1], "another-server", lease_seconds=600)
+        sent = [
+            asyncio.create_task(agent.run("hello", user="ada", thread=f"chat-{n}"))
+            for n in range(200)
+        ]
+        async with asyncio.timeout(30):
+            while len(held) < 200:  # every waiting run was held  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+        assert 0 < following[1] <= 32
+        for run_id in elsewhere:
+            await runs.finish(run_id, RunStatus.SUCCESS)
+        results = await asyncio.wait_for(asyncio.gather(*sent), 60)
+    assert all(r.status is RunStatus.SUCCESS for r in results) and following[1] <= 32
+    await runs.aclose()
+
+
+async def test_perf6_a_turn_reads_its_earlier_turns_in_three_listings_however_many_wait(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """PERF-6: a turn with 1,000 newer messages of its chat waiting reads the earlier turns
+    with one listing a status (answered, cut short, cancelled), never paging past the waiting
+    ones."""
+    runs = servers[0].runs
+    log: Log = []
+    agent = chat(servers[0], log, {})
+    assert (await agent.run("first", user="ada", thread=THREAD)).answer == "re: first"
+    key = f"thread:{conversation_key('default', 'ada', THREAD)}"
+    waiting = RunStart(tenant_id="default", agent_id="chat", user_id="ada", thread_id=THREAD)
+    for _ in range(1000):  # newer messages, waiting their turn on another server
+        await runs.start(waiting.model_copy(update={"run_id": new_id("run_")}))
+    listings: list[Any] = []
+    iterate = runs.iterate
+
+    def counted(**kwargs: Any) -> Any:
+        listings.append(kwargs.get("status"))
+        return iterate(**kwargs)
+
+    runs.iterate = counted  # type: ignore[method-assign]
+    record = await runs.start(waiting.model_copy(update={"run_id": "run_asking"}))
+    runtime = SimpleNamespace(
+        agent=agent,
+        parent=None,
+        thread=THREAD,
+        run_id=record.run_id,
+        tenant="default",
+        agent_id="chat",
+        user="ada",
+        conversation=key.removeprefix("thread:"),
+    )
+    said = await earlier(runtime)  # type: ignore[arg-type]
+    assert [s.content for s in said] == ["first", "re: first"]
+    assert len(listings) <= 3 and None not in listings
+
+
+async def test_arch5_a_chats_turn_nobody_ever_held_is_ended_and_frees_the_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARCH-5: a server killed between recording a chat's turn and holding it leaves a run
+    nobody holds: the store ends it after the grace it gives an answered run (60 s; 0.2 s
+    here) — agent-runs' ticker, this store's sweep at a claim — and the chat's next message
+    runs."""
+    monkeypatch.setattr(local_runs, "RESUME_GRACE_SECONDS", 0.2)
+    runs = LocalRuns()
+    key = f"thread:{conversation_key('default', 'ada', THREAD)}"
+    start = RunStart(tenant_id="default", agent_id="chat", user_id="ada", thread_id=THREAD)
+    orphan = await runs.start(start.model_copy(update={"concurrency_key": key}))
+    keyless = await runs.start(start.model_copy(update={"run_id": "run_keyless"}))
+    async with Harness(config=Settings(), runs=runs) as h:
+        sent = asyncio.create_task(chat(h, [], {}).run("next", user="ada", thread=THREAD))
+        async with asyncio.timeout(10):
+            while (await runs.get(orphan.run_id)).status is RunStatus.RUNNING:  # type: ignore[union-attr]
+                await runs.claim("sweeper", ["nobody"])  # this store sweeps lapsed holds at a claim
+                await asyncio.sleep(0.02)
+        answered = await asyncio.wait_for(sent, 10)
+    assert answered.answer == "re: next"
+    ended, kept = await runs.get(orphan.run_id), await runs.get(keyless.run_id)
+    assert ended is not None and ended.error is not None and ended.error.code == "holder_lost"
+    assert kept is not None and kept.status is RunStatus.RUNNING  # a run with no key: as before
+    await runs.aclose()
+
+
+async def test_arch19_a_chats_messages_keep_their_order_whether_or_not_the_tenant_is_named() -> (
+    None
+):
+    """ARCH-19: two callers of one chat, one naming the tenant and one not, send in order."""
+    turns: list[str] = []
+
+    async def answer(input: str, agent: Runtime) -> str:
+        turns.append(input)
+        return input
+
+    questions = [f"message {n}" for n in range(10)]
+    runs = Laggy()
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = h.wrap(answer, id="chat")
+        sent = [
+            asyncio.create_task(
+                agent.run(q, user="ada", thread=THREAD, tenant=(None, "default")[n % 2])
+            )
+            for n, q in enumerate(questions)
+        ]
+        await asyncio.wait_for(asyncio.gather(*sent), 30)
+    assert turns == questions
+    await runs.aclose()
