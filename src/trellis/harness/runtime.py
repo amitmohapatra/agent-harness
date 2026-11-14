@@ -544,6 +544,8 @@ class Runtime:
         attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
         ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
         run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        if self._elsewhere(self.model_started, key, seconds):
+            return
         self.model_ended(key)
         bound = STALL_SECONDS if seconds is None else seconds
         loop = asyncio.get_running_loop()
@@ -551,9 +553,23 @@ class Runtime:
 
     def model_ended(self, key: str) -> None:
         """The model call ``key`` answered (or failed): its watchdog is off."""
+        if self._elsewhere(self.model_ended, key):
+            return
         found = self._watched.pop(key, None)
         if found is not None:
             found.cancel()
+
+    def _elsewhere(self, then: Callable[..., None], *args: Any) -> bool:
+        """Whether this is called outside the run's event loop — a model called in a graph's
+        sync node, which LangGraph runs in a thread — and ``then(*args)`` was handed to the
+        run's loop to do there."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            assert self.running_in is not None  # a run's runtime runs in its task
+            self.running_in.get_loop().call_soon_threadsafe(then, *args)
+            return True
+        return False
 
     def unwatched(self) -> None:
         """The attempt ended: every watchdog still on is off."""

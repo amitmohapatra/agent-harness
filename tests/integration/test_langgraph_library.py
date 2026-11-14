@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import operator
+import time
 from dataclasses import dataclass
 from typing import Annotated, Any, NotRequired, TypedDict
 
@@ -573,6 +574,46 @@ async def test_a_return_direct_tools_result_is_the_answer(
     result = await harness.wrap(graph, id="direct").run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "a: 7 in stock"
     assert len(model.seen) == 1
+
+
+class SlowSync(ScriptedChatModel):
+    """A chat model called synchronously that takes ``stall`` seconds to answer."""
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any) -> Any:
+        time.sleep(self.stall)
+        return super()._generate(messages, stop, run_manager, **kw)
+
+
+def asking(model: ScriptedChatModel) -> Any:
+    """A graph whose sync node calls ``model`` synchronously (LangGraph runs it in a thread)."""
+
+    def summarize(state: Summary) -> dict[str, Any]:
+        return {"summary": model.invoke(state["topic"]).text}
+
+    graph = StateGraph(Summary)
+    graph.add_node("summarize", summarize)
+    graph.add_edge(START, "summarize")
+    graph.add_edge("summarize", END)
+    return graph.compile()
+
+
+async def test_a_model_called_in_a_sync_node_is_accounted_and_watched(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sync node's model call runs in LangGraph's thread: it is accounted to the run's
+    budget, and watched for a stall as an async one is — a call slower than the stall bound
+    ends the run with a timeout."""
+    from trellis.harness import runtime as runtime_module
+
+    agent = harness.wrap(asking(ScriptedChatModel(turns=["a summary"], spends=(5, 3))), id="s")
+    done = await agent.run({"topic": "tides"}, user="u")
+    assert done.status is RunStatus.SUCCESS and done.answer["summary"] == "a summary"
+    assert not [r for r in caplog.records if "UsageAccounting" in r.getMessage()]
+    monkeypatch.setattr(runtime_module, "STALL_SECONDS", 0.2)
+    slow = harness.wrap(asking(SlowSync(turns=["late"], stall=1.0)), id="slow")
+    stalled = await slow.run({"topic": "tides"}, user="u")
+    assert stalled.status is RunStatus.ERROR and stalled.error is not None
+    assert stalled.error.code == "MODEL_TIMEOUT"
 
 
 # ------------------------------------------------------------------------------ time travel
