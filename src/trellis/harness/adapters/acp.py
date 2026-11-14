@@ -153,6 +153,15 @@ SEEN_KEPT: Final = 1024
 #: The session modes the harness governs every call in: a mode that approves on its own
 #: (Kimi's ``auto``, ``yolo``) never asks, and governance would never see the calls.
 GOVERNED_MODES: Final = frozenset({"default", "plan"})
+#: Kimi's log lines of a session's modes (``agents/main/wire.jsonl``): its permission mode
+#: (:data:`KIMI_ASKS`: the one that asks before a call), and its plan mode going on and off.
+PERMISSION_SET: Final = "permission.set_mode"
+KIMI_ASKS: Final = "manual"
+PLAN_MODE: Final[Mapping[str, bool]] = {
+    "plan_mode.enter": True,
+    "plan_mode.cancel": False,
+    "plan_mode.exit": False,
+}
 #: The framework options a run may give: :class:`ACPAgent` fields (``command`` and ``profile``
 #: are the agent's own).
 OPTIONS: Final = ("env", "cwd", "mcp_servers", "mode", "model")
@@ -375,6 +384,27 @@ class UsageLog:
                 if entry.get("type") == PROFILE_BOUND:
                     return str(entry.get("profileName") or "") or None
         return None
+
+    def mode(self) -> tuple[str, str | None]:
+        """The session mode Kimi's log says the main agent is in, as its ACP server names it
+        (``plan`` while its plan mode is on, else ``default``), and the permission mode it
+        approves on its own in there (``auto``, ``yolo``: it asks about nothing) — ``None``
+        when it asks before a call (``manual``). Kimi's ``config.toml`` starts a session in
+        either (``default_plan_mode``, ``default_permission_mode``) and its ACP server still
+        answers ``default``: the log is what says. Read whole, once a session is opened."""
+        planning, permission = False, KIMI_ASKS
+        for path in self._files("main"):
+            with path.open("rb") as file:
+                for line in file:
+                    entry = _json_line(line)
+                    kind = entry.get("type")
+                    if kind == PERMISSION_SET:
+                        permission = str(entry.get("mode"))
+                    elif kind in PLAN_MODE:
+                        planning = PLAN_MODE[kind]
+        return ("plan" if planning else "default"), (
+            None if permission == KIMI_ASKS else permission
+        )
 
     def start(self) -> None:
         for path in self._files():
@@ -869,13 +899,13 @@ class ACPAdapter:
                 found = init.agent_info.version if init.agent_info is not None else ""
                 compat.require_binary(profile.name, found, command=target.command[0])
             servers = [*(_server(s) for s in target.mcp_servers), *session.servers]
-            opened = await session.opened(
-                init, started.cwd, servers, runtime, mode=target.mode, fork=started.fork
-            )
-            if profile is not None and profile.usage is not None:
-                session.usage = profile.usage(env, opened)
+            opened = await session.opened(init, started.cwd, servers, runtime, fork=started.fork)
+            usage = profile.usage if profile is not None else None
+            await session.asking(target.mode, usage(env, opened) if usage is not None else None)
+            if usage is not None:
+                session.usage = usage(env, opened)
                 session.usage.start()
-                session.watch(profile.usage(env, opened))
+                session.watch(usage(env, opened))
         except BaseException:
             await session.close()
             raise

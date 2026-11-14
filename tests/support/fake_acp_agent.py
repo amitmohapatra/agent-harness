@@ -51,6 +51,11 @@ session's MCP servers and how it began, the prompts, the permission answers).
 ``FAKE_ACP_VERSION`` is the version it reports (``2.1.1``); ``FAKE_ACP_RESUME=0`` offers no
 ``session/resume`` (only ``session/load``, which replays the session's text) and no
 ``session/fork`` (which copies a session into a new one, as Kimi's does).
+``FAKE_ACP_CONFIG`` (JSON) is what its ``config.toml`` starts every session in, as Kimi's does
+(``default_permission_mode``: ``auto`` or ``yolo``, in which it asks about no call;
+``default_plan_mode``): in its log (``permission.set_mode``, ``plan_mode.enter``) while ACP
+goes on saying ``default``. ``session/set_mode`` sets both (logged so) —
+``FAKE_ACP_MODE_STUCK=1``: it answers and changes nothing.
 """
 
 from __future__ import annotations
@@ -86,6 +91,8 @@ from acp.schema import (
     ResourceContentBlock,
     ResumeSessionResponse,
     SessionInfoUpdate,
+    SessionMode,
+    SessionModeState,
     SetSessionModeResponse,
     ToolCallProgress,
     ToolCallStart,
@@ -105,6 +112,15 @@ CANONICAL = [
     ),
     PermissionOption(option_id="reject", name="Reject", kind="reject_once"),
 ]
+CONFIG: dict[str, Any] = json.loads(os.environ.get("FAKE_ACP_CONFIG", "{}"))
+#: Kimi's session modes over ACP, and what each sets (``acpModeToToggles``): plan mode, and the
+#: permission mode.
+MODES = {
+    "default": (False, "manual"),
+    "plan": (True, "manual"),
+    "auto": (False, "auto"),
+    "yolo": (False, "yolo"),
+}
 EDITED = re.compile(r"Call (?P<tool>\S+) again now with exactly these arguments: (?P<args>\{.*\})$")
 
 #: This process, in its calls' ids.
@@ -156,6 +172,26 @@ def logged(session_id: str, agent: str, line: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as file:
         file.write(json.dumps(line) + "\n")
+
+
+def modes() -> SessionModeState:
+    """What Kimi says of a session's mode when it opens: ``default``, whatever its config
+    started the session in."""
+    return SessionModeState(
+        current_mode_id="default",
+        available_modes=[SessionMode(id=mode, name=mode.title()) for mode in MODES],
+    )
+
+
+def asks(session_id: str) -> bool:
+    """Whether the session's permission mode asks before a call (``manual``), by its log."""
+    path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
+    mode = "manual"
+    for line in path.read_text().splitlines() if path.exists() else ():
+        entry = json.loads(line) if line.startswith("{") else {}
+        if entry.get("type") == "permission.set_mode":
+            mode = entry["mode"]
+    return mode == "manual"
 
 
 def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
@@ -227,6 +263,13 @@ class FakeAgent:
         session = f"session_{uuid.uuid4().hex[:8]}"
         self.servers[session] = list(mcp_servers or [])
         save(session, state(session))
+        if CONFIG.get("default_permission_mode"):
+            mode = CONFIG["default_permission_mode"]
+            logged(
+                session, "main", {"type": "permission.set_mode", "agentId": "main", "mode": mode}
+            )
+        if CONFIG.get("default_plan_mode"):
+            logged(session, "main", {"type": "plan_mode.enter", "agentId": "main", "id": "p0"})
         record(
             "sessions",
             {
@@ -235,7 +278,7 @@ class FakeAgent:
                 "servers": [s.model_dump(by_alias=True) for s in mcp_servers or []],
             },
         )
-        return NewSessionResponse(session_id=session)
+        return NewSessionResponse(session_id=session, modes=modes())
 
     async def resume_session(
         self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, **kw: Any
@@ -244,7 +287,7 @@ class FakeAgent:
             raise RequestError.resource_not_found(session_id)
         self.servers[session_id] = list(mcp_servers or [])
         record("sessions", {"how": "resume", "id": session_id})
-        return ResumeSessionResponse()
+        return ResumeSessionResponse(modes=modes())
 
     async def fork_session(
         self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, **kw: Any
@@ -255,7 +298,7 @@ class FakeAgent:
         self.servers[forked] = list(mcp_servers or [])
         save(forked, state(session_id))
         record("sessions", {"how": "fork", "id": forked, "from": session_id})
-        return ForkSessionResponse(session_id=forked)
+        return ForkSessionResponse(session_id=forked, modes=modes())
 
     async def load_session(
         self, cwd: str, session_id: str, mcp_servers: list[Any] | None = None, **kw: Any
@@ -269,10 +312,16 @@ class FakeAgent:
                 AgentMessageChunk(session_update="agent_message_chunk", content=text_block(said)),
             )
         record("sessions", {"how": "load", "id": session_id})
-        return LoadSessionResponse()
+        return LoadSessionResponse(modes=modes())
 
     async def set_session_mode(self, mode_id: str, session_id: str, **kw: Any) -> Any:
         record("modes", mode_id)
+        if os.environ.get("FAKE_ACP_MODE_STUCK") != "1":
+            plan, permission = MODES[mode_id]
+            kind = "plan_mode.enter" if plan else "plan_mode.cancel"
+            logged(session_id, "main", {"type": kind, "agentId": "main"})
+            line = {"type": "permission.set_mode", "agentId": "main", "mode": permission}
+            logged(session_id, "main", line)
         return SetSessionModeResponse()
 
     async def cancel(self, session_id: str, **kw: Any) -> None:
@@ -459,7 +508,11 @@ class FakeAgent:
     async def permitted(
         self, session_id: str, call_id: str, title: str, text: str, options: list[Any] | None = None
     ) -> str:
-        """The client's answer: the option chosen, or ``cancelled``."""
+        """The client's answer: the option chosen, or ``cancelled`` — its own, in a permission
+        mode that asks about nothing."""
+        if not asks(session_id):
+            record("permissions", {"title": title, "answer": "unasked"})
+            return "approve_once"
         answer = await self.conn.request_permission(
             options=options or CANONICAL,
             session_id=session_id,

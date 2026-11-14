@@ -599,8 +599,93 @@ async def test_the_session_mode_is_set_and_one_that_asks_nothing_refused(
         "x", user="u1"
     )
     assert recorded(tmp_path)["modes"] == ["plan"]
+    (tmp_path / "plain").mkdir()
+    await harness.wrap(fake(tmp_path / "plain", [{"text": "ok"}]), id="plain").run("x", user="u1")
+    assert recorded(tmp_path / "plain")["modes"] == ["default"]
     with pytest.raises(ConfigurationError, match="a mode that approves on its own"):
         kimi(mode="yolo")
+
+
+@pytest.mark.parametrize("starts_in", ["auto", "yolo"])
+async def test_a_session_asks_whatever_the_agents_config_starts_it_in(
+    harness: Harness, tmp_path: Path, starts_in: str
+) -> None:
+    """APR-01, L46. Kimi's ``config.toml`` can start every session in a mode that asks about
+    nothing (``default_permission_mode``) while ACP says ``default``: the harness sets the mode
+    that asks on every session it opens — a new one, and the one a resume continues — so the
+    call still asks a person and runs once, approved."""
+    script = [
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "gone"},
+        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "gone too"},
+        {"text": "done: {last}"},
+    ]
+    config = {"FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": starts_in})}
+    agent = harness.wrap(fake(tmp_path, script, env=config), id="asks")
+    asked = await agent.run("tidy up", user="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.tool_call is not None
+    assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
+    again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert again.status is RunStatus.PAUSED and again.interrupt is not None
+    assert again.interrupt.tool_call is not None
+    assert again.interrupt.tool_call.args == {"command": "rm b.txt"}
+    done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done: gone too"
+    record = recorded(tmp_path)
+    assert record["modes"] == ["default"] * 3  # each process's session, before its prompt
+    assert "unasked" not in [p["answer"] for p in record["permissions"]]
+
+
+async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """APR-01, L46. Fails closed: the agent answered ``session/set_mode`` but its log says the
+    session still approves on its own, so no prompt is sent and the run fails saying so."""
+    script = [{"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True}, {"text": "done"}]
+    env = {
+        "FAKE_ACP_CONFIG": json.dumps({"default_permission_mode": "auto"}),
+        "FAKE_ACP_MODE_STUCK": "1",
+    }
+    result = await harness.wrap(fake(tmp_path, script, env=env), id="stuck").run("x", user="u1")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert "session mode was set to 'default'" in result.error.message
+    assert "permission mode 'auto'" in result.error.message
+    assert "prompts" not in recorded(tmp_path)
+
+
+async def test_a_session_keeps_the_plan_mode_it_is_in(harness: Harness, tmp_path: Path) -> None:
+    """L47. Kimi's own plan mode is the session's: one its config starts in plan mode
+    (``default_plan_mode``) stays in it, set so that it asks; a session the run started in plan
+    mode (``mode="plan"``) is still in it when a resume continues it."""
+    asks = {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "gone"}
+    for name in "ab":
+        (tmp_path / name).mkdir()
+    config = json.dumps({"default_plan_mode": True, "default_permission_mode": "auto"})
+    configured = fake(tmp_path / "a", [asks, {"text": "ok"}], env={"FAKE_ACP_CONFIG": config})
+    asked = await harness.wrap(configured, id="configured").run("x", user="u1")
+    assert asked.status is RunStatus.PAUSED
+    assert recorded(tmp_path / "a")["modes"] == ["plan"]
+    planner = harness.wrap(fake(tmp_path / "b", [asks, {"text": "ok"}], mode="plan"), id="plans")
+    asked = await planner.run("x", user="u1")
+    assert asked.interrupt is not None
+    done = await planner.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS
+    assert recorded(tmp_path / "b")["modes"] == ["plan", "plan"]
+
+
+async def test_an_agent_the_harness_does_not_know_keeps_the_mode_it_starts_in(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An ACP agent with no profile names its own modes: the harness sets only the one the
+    target gives (``mode=``), on the session it starts."""
+    for name in "ab":
+        (tmp_path / name).mkdir()
+    plain = fake(tmp_path / "a", [{"text": "ok"}], profile=None)
+    assert (await harness.wrap(plain, id="plain").run("x", user="u1")).answer == "ok"
+    assert "modes" not in recorded(tmp_path / "a")
+    given = fake(tmp_path / "b", [{"text": "ok"}], profile=None, mode="plan")
+    assert (await harness.wrap(given, id="given").run("x", user="u1")).answer == "ok"
+    assert recorded(tmp_path / "b")["modes"] == ["plan"]
 
 
 async def test_kimis_built_in_tools_do_not_count_toward_narrowing_the_runs_own(

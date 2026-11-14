@@ -50,7 +50,7 @@ command="kimi", reads=())`:
 | `cwd` | where Kimi works (this process's working directory by default) |
 | `env` | over this process's environment, for the `kimi` process (`KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY`, `KIMI_LOOP_MAX_STEPS_PER_TURN`...) |
 | `mcp_servers` | Kimi's own MCP servers, as ACP takes them: `{"name", "command", "args", "env"}` (stdio) or `{"type": "http", "name", "url", "headers"}`, beside the harness's |
-| `mode` | Kimi's session mode: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call |
+| `mode` | Kimi's session mode for a session the run starts: `"default"` or `"plan"`. `"auto"` and `"yolo"` are refused: they approve on their own, and governance would see no call. Whatever is given, every session is set to ask ([below](#the-session-mode)) |
 | `sandbox` | `sandbox()`: Kimi's `Bash` and file writes go to the run's sandbox (below) |
 | `skills` | a skill set, `**src.kimi()`: the run's skills in Kimi's own skills folder (below) |
 | `reads` | folders besides `cwd` a `Bash` command may read without asking a person (below) |
@@ -117,6 +117,29 @@ Kimi's own tools run again.
   `on_run_start`, `on_run_end`, `on_error`, `on_output`) apply to the harness's tools and to every
   call Kimi asks permission for. Kimi's own hooks (`hooks` in its `config.toml`: shell commands
   on `PreToolUse`, `Stop`...) stay Kimi's. ACP shows no model call, so there is no model hook.
+
+## The session mode
+
+Kimi's `config.toml` can start every session in a mode of its own: `default_permission_mode =
+"auto"` or `"yolo"` (Kimi approves its own calls and asks about none) and `default_plan_mode =
+true`. Kimi's ACP server still answers `default` for such a session, so nothing in the protocol
+says the approvals are off. The harness governs only the calls Kimi asks about, so before the
+first prompt of every session it opens — a new one, one a resume or a conversation's next turn
+continues, a forked one — it sets the mode itself (`session/set_mode`) and reads Kimi's own log
+of the session to see that it took:
+
+* **The permission mode is always the one that asks** (Kimi's `manual`). A `config.toml` that
+  says `auto` or `yolo` does not turn the approvals off: this is the one Kimi setting a run
+  overrides, since a person's approval is the harness's to ask for.
+* **Plan mode is Kimi's own, kept as the session has it.** `mode="plan"` starts a session in
+  plan mode; so does Kimi's `default_plan_mode`. A session that is in plan mode when a run
+  continues it stays in it, and one whose plan was approved stays out of it.
+* **A session whose log does not confirm the mode gets no prompt**: the run fails saying which
+  mode was set and what Kimi's log says (within 5 s of Kimi's answer; Kimi writes its log a
+  moment after).
+
+An ACP agent with no profile (`ACPAgent(profile=None)`) names its own modes and keeps the one
+it starts in; only the `mode=` the target gives is set, on a session the run starts.
 
 ## What ACP does not show
 

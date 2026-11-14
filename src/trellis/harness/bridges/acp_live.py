@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from trellis.harness.asking import RunCancelled
@@ -86,6 +86,14 @@ QUEUED: Final = (
     "prompt reached it: it queued the prompt behind that turn and runs it out of the "
     "harness's sight, so this turn cannot be followed"
 )
+#: Why a run failed before its first prompt: the agent's log does not say its session is in
+#: the mode the harness set, asking before a call.
+UNGOVERNED: Final = (
+    "the agent's session mode was set to {wanted!r}, but its log says the session is in "
+    "{found!r} with the permission mode {alone!r} (None: it asks before a call). The harness "
+    "governs only the calls the agent asks about, so no prompt was sent: check the agent's own "
+    "configuration (Kimi's default_permission_mode)"
+)
 #: What the session says on a run's stream is under this code.
 CODE: Final = "acp_session"
 #: Kimi's statuses of a task that ended (``task.terminated``): it completed; it was stopped
@@ -95,6 +103,19 @@ TASK_KILLED: Final = "killed"
 #: A request relayed to a background sub-agent's run that its run paused on
 #: (``adapters.acp.Deciding``): it waits for the attempt that follows the person's answer.
 WAITS: Final = object()
+
+
+async def _logged_in_time(said: Callable[[], Awaitable[bool]]) -> bool:
+    """Whether Kimi's log ``said`` so within :data:`ATTRIBUTED_SECONDS`, asked again as it is
+    written: Kimi logs an event a moment after it answers for it. A file of this machine's,
+    read at most a hundred times."""
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(ATTRIBUTED_SECONDS):
+            while True:
+                if await said():
+                    return True
+                await asyncio.sleep(0.05)
+    return False
 
 
 class Background(Kept):
@@ -276,12 +297,11 @@ class ACPSession(Keeper[Background]):
         servers: list[Any],
         runtime: Runtime,
         *,
-        mode: str | None,
         fork: bool,
     ) -> str:
         """The session the turn runs in: the one an earlier attempt kept, resumed (else
         loaded) when the agent still holds it — forked (``fork``) when another worker's process
-        holds it — else a new one (in ``mode``, when one is given); the journal's: its id."""
+        holds it — else a new one; the journal's: its id."""
         from acp import RequestError
 
         journal = runtime.replay.journal
@@ -313,11 +333,33 @@ class ACPSession(Keeper[Background]):
                 journal.session = None
         created = await self.answered(self.conn.new_session(cwd=cwd, mcp_servers=servers))
         self.session_id = journal.session = created.session_id
-        if mode is not None:
-            await self.answered(
-                self.conn.set_session_mode(session_id=created.session_id, mode_id=mode)
-            )
         return created.session_id
+
+    async def asking(self, mode: str | None, log: Any) -> None:
+        """The session put in a mode that asks before a call, before its first prompt:
+        ``mode`` on a session the run started; else, for an agent whose log says the mode a
+        session is in (``UsageLog.mode``), that one — its plan mode kept on, a resumed
+        session's too — asking, whatever the agent's own configuration started it in (Kimi's
+        ``default_permission_mode`` approves on its own behind ACP's ``default``). The log
+        must then say so, or the run fails (:data:`UNGOVERNED`): no call is governed in a
+        session that asks about none. An agent with no such log keeps the mode it starts in."""
+        from trellis.harness.adapters.acp import ACPRunError
+
+        wanted = mode if mode is not None and not self.continued else None
+        if wanted is None and log is not None:
+            wanted = log.mode()[0]
+        if wanted is None:
+            return
+        await self.answered(self.conn.set_session_mode(session_id=self.session_id, mode_id=wanted))
+        if log is None:
+            return
+
+        async def confirmed() -> bool:
+            return log.mode() == (wanted, None)
+
+        if not await _logged_in_time(confirmed):
+            found, alone = log.mode()
+            raise ACPRunError(UNGOVERNED.format(wanted=wanted, found=found, alone=alone))
 
     # ------------------------------------------------------------------ a turn
     async def served(self, attempt: Any, native_input: Any) -> AsyncGenerator[Any, None]:
@@ -464,11 +506,12 @@ class ACPSession(Keeper[Background]):
         (``interaction.request``: its id is the request's less its turn), waited for while it
         is not written yet (:data:`ATTRIBUTED_SECONDS`); ``None``: no log says."""
         raw = call_id.partition(":")[2] or call_id
-        with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(ATTRIBUTED_SECONDS):
-                while raw not in self._asked:
-                    await self.read()
-                    await asyncio.sleep(0.05)
+
+        async def asked() -> bool:
+            await self.read()
+            return raw in self._asked
+
+        await _logged_in_time(asked)
         return self._asked.get(raw)
 
     # ------------------------------------------------------------------ the agent's requests

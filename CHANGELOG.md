@@ -5,6 +5,17 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: Kimi Code's own configuration cannot turn the approvals off
+
+Kimi's `config.toml` can start every session approving on its own (`default_permission_mode =
+"auto"` or `"yolo"`) or in plan mode (`default_plan_mode = true`), and Kimi's ACP server still
+reports the session as `default`. The harness set a session's mode only when the target named
+one, so with such a config Kimi asked about no call and governance saw none: a `Bash` command
+ran with nobody asked. Every session a run opens (new, resumed, loaded, forked) is now set to
+the mode that asks before its first prompt, its plan mode kept as the session has it, and
+Kimi's own log of the session must confirm it or the run fails without sending a prompt
+([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

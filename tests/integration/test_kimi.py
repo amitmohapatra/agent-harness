@@ -199,6 +199,34 @@ async def test_kimi_still_asks_about_a_command_its_config_allows_and_so_a_person
     assert not (tmp_path / "kimi-work" / "made.txt").exists()
 
 
+@pytest.mark.parametrize("starts_in", ["auto", "yolo"])
+async def test_a_config_that_approves_on_its_own_does_not_turn_the_approvals_off(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, starts_in: str
+) -> None:
+    """APR-01, L46. ``default_permission_mode`` in Kimi's ``config.toml`` starts every session
+    approving on its own, and Kimi's ACP server still says ``default``. The harness sets the
+    mode that asks on each session — the first, and the one each resume continues in a new
+    process — so each command asks a person and runs only once approved."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    (home / "config.toml").write_text(f'default_permission_mode = "{starts_in}"\n')
+    endpoint.plan = [
+        ("Bash", {"command": "touch made.txt"}),
+        ("Bash", {"command": "touch too.txt"}),
+    ]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-config-mode")
+    work = tmp_path / "kimi-work"
+    paused = await agent.run("make them", user="u1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert not (work / "made.txt").exists()
+    again = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert again.status is RunStatus.PAUSED and again.interrupt is not None
+    assert (work / "made.txt").exists() and not (work / "too.txt").exists()
+    done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert (work / "too.txt").exists()
+
+
 @pytest.mark.parametrize(
     "rule", [Rule(risk="irreversible"), Rule(risk="write", approve_when="true")], ids=str
 )
