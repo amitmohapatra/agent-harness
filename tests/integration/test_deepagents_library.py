@@ -536,22 +536,16 @@ async def test_deep_agents_summarizes_a_long_conversation_and_keeps_its_history_
     assert [path.rpartition("/")[0] for path in files] == ["/conversation_history"]
 
 
-async def test_the_compaction_tool_asks_as_any_tool_that_says_nothing_then_runs(
-    harness: Harness,
-) -> None:
+async def test_the_compaction_tool_is_the_graphs_own_and_asks_nobody(harness: Harness) -> None:
     """``compact_conversation`` (Deep Agents' ``SummarizationToolMiddleware``) declares no side
-    effects and is not one of the state tools the harness knows by name: a call asks a person
-    first, then the library's tool answers."""
+    effects itself; the harness knows it by name as it knows Deep Agents' other tools
+    (``middleware.declare_files``): the graph's own state, a read, so the library's tool
+    answers with nobody asked."""
     model = ScriptedChatModel(turns=[("compact_conversation", {}), "nothing to compact"])
     compacts = create_summarization_tool_middleware(model, StateBackend())
     graph = create_deep_agent(model=model, middleware=[compacts], checkpointer=InMemorySaver())
-    agent = harness.wrap(graph, id="deep")
-    paused = await agent.run("compact", user="u", thread="t")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.tool_call is not None
-    assert paused.interrupt.tool_call.tool == "compact_conversation"
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
-    assert done.answer == "nothing to compact"
+    done = await harness.wrap(graph, id="deep").run("compact", user="u", thread="t")
+    assert done.status is RunStatus.SUCCESS and done.answer == "nothing to compact"
     assert "Nothing to compact yet" in str(model.seen[-1][-1].content)
 
 

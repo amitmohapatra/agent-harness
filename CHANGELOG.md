@@ -5,6 +5,67 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a provider's own tools in `ReAct`
+
+`ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
+search, web fetch or code execution, given as LangChain's `dict` tool and bound to the model as
+it is (it was refused as "not a tool"). Each server call the reply reports is the run's tool
+call, and the catalog's risk decides whether the tool is offered: one that would ask a person
+is held back, since no approval can stand before a call the provider makes inside its step
+([react.md](docs/frameworks/react.md#a-providers-own-tools-web-search-web-fetch-code-execution)).
+
+### Added: plan mode for `ReAct`
+
+`ReAct(middleware=[PlanMode()])` (`trellis.harness.plan_mode`), entered on request with
+`framework_options={"configurable": {"plan_mode": True}}` — never by default, as Claude's and
+Kimi's is not. The run reads only, presents its plan with LangChain's `write_todos`, a person
+approves it once (LangChain's `HumanInTheLoopMiddleware`), then it acts under the usual
+governance ([react.md](docs/frameworks/react.md#plan-mode)).
+
+### Changed: `RunCheckpointer` keeps every checkpoint
+
+As LangGraph's own savers do: `get_state_history`, `update_state` and a thread continued from
+a `checkpoint_id` work on a `ReAct` or `middleware()` graph. In a harness run the history is in
+the run's journal (about 2 KB a checkpoint, 17 checkpoints for a one-tool turn) until the run
+ends (the run store clears a run's checkpoint with its ending); a journal written by an
+earlier release is read as it is, and an earlier release reads this one's (the latest
+checkpoint's record is unchanged). A run's own thread forked from an earlier checkpoint by
+code inside the run is refused (`RewindRefused`)
+([react.md](docs/frameworks/react.md#checkpoint-history-langgraphs-time-travel)).
+
+### Added: `agent.checkpoints` and `agent.rewind`
+
+`agent.checkpoints(run_id)` lists a paused `ReAct` (or `middleware()`) run's checkpoints,
+newest first, as LangGraph's `StateSnapshot`s. `agent.rewind(run_id, checkpoint_id, *,
+values=None, reviewer, tenant=None)` continues the run's conversation from one of them in a new
+run the run store records (`metadata["rewound"]`: the run, the checkpoint, who, when); the run
+rewound stays as it was. A call that did more than read past the checkpoint asks a person
+before it is made again, whatever was allowed before; what was spent stays counted. Refused:
+a run at work or ended, a reviewer who is not the run's user, a checkpoint of another run, an
+agent with no checkpoint history. Claude's file checkpoints are not driven by this API
+([react.md](docs/frameworks/react.md#rewinding-a-paused-run)).
+
+### Added: handoffs between agents, with `langgraph-swarm`
+
+`langgraph-swarm` (`>=0.1,<0.2`, in the `react` extra) used as it is: a `create_handoff_tool`
+among a `ReAct`'s tools is a governed, recorded hand-over that asks nobody; the agent handed to
+answers, governed as ever; the conversation's next turn is that agent's (`active_agent` carried
+from turn to turn), said on the run's stream; a pause resumes in place
+([react.md](docs/frameworks/react.md#handoffs-langgraph-swarm)).
+
+### Changed: Deep Agents' `compact_conversation` asks nobody
+
+Deep Agents' `SummarizationToolMiddleware`, given to `ReAct(middleware=)` or a graph of your
+own, compacts the conversation when the model asks: its tool is declared a read (it had
+declared nothing, so every call asked a person)
+([react.md](docs/frameworks/react.md#compaction-on-request)).
+
+### Changed: `ReAct`'s general-purpose helper has the agent's skills
+
+With `skills=`, the general-purpose helper (`task`) is given the agent's skills, as Deep
+Agents gives the one it builds itself: its instructions list them and it reads them. Without
+`skills=` nothing changes.
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

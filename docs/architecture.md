@@ -166,7 +166,7 @@ src/trellis/
     hooks/             Hooks and how they chain; openai_agents: the RunHooks that watch model calls
     middleware.py      LangChain v1 middleware: HarnessTools, GovernTools, ModelHooks, step_limit,
                        StallGuard, ReadTools, FitWindow;
-                       RunCheckpointer (the latest checkpoint, delta channels' history beside it)
+                       RunCheckpointer (every checkpoint of the run, delta channels' history beside the latest)
     react.py           ReAct(...): create_agent (create_deep_agent on demand) with middleware()
     automatic.py       what a long task is offered (planning, scratch tools), the budget's stop
     subagents.py       a wrapped agent in tools=[...]: a tool, each call a child run

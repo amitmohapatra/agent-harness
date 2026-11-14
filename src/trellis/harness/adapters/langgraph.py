@@ -84,6 +84,7 @@ from pydantic import BaseModel
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
+    PROVIDER_TOOLS,
     Extracted,
     HistoryIn,
     Invocation,
@@ -151,8 +152,11 @@ PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
 #: its files kept in the graph's state (``StateBackend``: "persists across turns"), and its
 #: todos. Never the conversation itself (``messages``: the memory window's, or the graph's).
 #: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
-#: in the process and, up to ``pipeline.CARRIED_BYTES``, in the file store: ``pipeline``).
-CARRIED: Final = ("async_tasks", "files", "todos")
+#: in the process and, up to ``pipeline.CARRIED_BYTES``, in the file store: ``pipeline``). So
+#: does the agent a langgraph-swarm graph last handed the conversation to (:data:`ACTIVE_AGENT`):
+#: its next turn is that agent's.
+ACTIVE_AGENT: Final = "active_agent"  # langgraph-swarm's ``SwarmState.active_agent``
+CARRIED: Final = ("async_tasks", "files", "todos", ACTIVE_AGENT)
 
 
 class LangGraphAdapter:
@@ -429,7 +433,8 @@ class LangGraphAdapter:
                 and not (t.metadata or {}).get(MACHINERY)
                 and not made(t)
             )
-            self._native = unique(found)
+            provided = getattr(target, PROVIDER_TOOLS, None) or []  # ``ReAct``'s provider tools
+            self._native = unique([*found, *provided])
         return self._native
 
     def _graph(self, target: Any, runtime: Runtime) -> Any:
@@ -796,6 +801,8 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     started = (
         {**native_input, **carried} if carried and isinstance(native_input, dict) else native_input
     )
+    if carried and ACTIVE_AGENT in carried:  # whose turn it is, on the run's stream
+        runtime.events.custom(ACTIVE_AGENT, agent=carried[ACTIVE_AGENT])
     if not _checkpointed(target):
         return started
     replay = runtime.replay

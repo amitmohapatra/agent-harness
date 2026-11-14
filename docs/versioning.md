@@ -22,6 +22,7 @@ too).
 | `langchain-core` | `langgraph` | `>=1.8,<1.9` | 1.8.0 |
 | `langchain-openai` | `react` | `>=1.6,<1.7` | 1.6.6 |
 | `deepagents` | `deepagents`, `react` | `>=0.7.38,<0.8` | 0.7.38 |
+| `langgraph-swarm` | `react` | `>=0.1,<0.2` | 0.1.0 |
 | `openai-agents` | `openai-agents` | `>=0.24,<0.25` | 0.24.0 |
 | `claude-agent-sdk` | `claude-agent-sdk` | `>=0.2.182,<0.3` | 0.2.182 |
 | `a2a-sdk` | `a2a` | `>=1.1,<1.2` | 1.1.5 |
