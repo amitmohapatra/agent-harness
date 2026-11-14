@@ -377,7 +377,10 @@ class Cli:
                 unanswered = {"result": "no answer from the SDK: the call did not run", "ok": False}
                 (Path(folder) / f"{task_id}.called").write_text(json.dumps(unanswered))
             elif call.exists():
-                item = json.loads(call.read_text())
+                asked = call.read_text()
+                if not asked:  # the test is still writing it (created, not yet written)
+                    continue
+                item = json.loads(asked)
                 call.unlink()
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
                 if task["agent"] == WORKFLOW_AGENT:  # its agents work beside the main turn
