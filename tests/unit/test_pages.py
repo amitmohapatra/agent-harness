@@ -90,6 +90,7 @@ def test_paging_is_declared_as_data_beside_freshness() -> None:
     assert data_of({"paged": "yes"}) == {}  # only true pages
     assert data_of({"paged": True, "freshness": "live"}) == {"max_age": 0.0, PAGED: True}
     assert data_of({"paged": True, "max_age": 5}) == {"max_age": 5.0, PAGED: True}
+    assert data_of({"max_age": 0}) == {"max_age": 0.0}  # 0 s: as live, a number 0 or more
 
     @tool(side_effects="read", paged=True)
     def rows(cursor: str | None = None) -> dict[str, Any]:

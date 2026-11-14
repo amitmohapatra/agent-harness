@@ -206,6 +206,14 @@ def test_pairs_a_model_cannot_tell_apart() -> None:
     )
 
 
+def test_two_tools_sharing_three_quarters_of_their_words_are_said_alike() -> None:
+    same = spec("a", "Reads the ledger totals.")
+    alike = spec("b", "Reads the ledger lines.")  # 2 shared of 4 in all with a: 50%
+    three = spec("c", "Reads ledger totals now.")  # 3 shared of 4 in all with a: 75%
+    assert "overlapping_descriptions" in [f.code for f in lint([same, three])]
+    assert "overlapping_descriptions" not in [f.code for f in lint([same, alike])]
+
+
 def test_too_many_tools_at_once() -> None:
     many = [
         spec(f"t{n}", f"Report number {n} of the ledger, its totals and its lines.")
