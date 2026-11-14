@@ -87,7 +87,7 @@ async def test_a_handoff_is_recorded_asks_nobody_and_the_other_agent_answers(
 
 
 async def test_the_next_turn_is_the_agent_handed_to_and_says_so(harness: Harness) -> None:
-    agent, desk, billing = team(
+    agent, desk, _ = team(
         harness, [("transfer_to_billing", {})], ["Billing here.", "Still billing."]
     )
     await agent.run("I need a refund", user="u", thread="t")

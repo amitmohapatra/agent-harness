@@ -819,6 +819,64 @@ The agents' own tools are LangChain tools (their tool nodes run them, governed b
 declares in its `metadata`, else the catalog); the functions given to an inner `ReAct`'s
 `tools=` are the run's only when the graph wrapped is that `ReAct`.
 
+### Fan-out: many sub-agents at once (a recipe)
+
+Kimi's `AgentSwarm` — one sub-agent an item, all at once — is LangGraph's `Send` over the
+items, given to `ReAct` as a sub-agent of its own (Deep Agents' `CompiledSubAgent`). It needs
+no harness code: a wrapped agent run from a node is the run's child
+([Sub-agents and child runs](#sub-agents-and-child-runs)), so each item has a run record of
+its own (its parent, its thread, its spend counted to the parent's budget), governed as any
+run, and they work at once only as far as the harness's admission limit lets them (4 at
+first, up to 16, fewer under load: `trellis.harness.admission`).
+
+```python
+import operator
+from typing import Annotated, TypedDict
+
+import trellis
+from langchain_core.messages import AIMessage, AnyMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.types import Send
+
+researcher = h.wrap(ReAct("You research one item.", model, tools=[search]), id="researcher")
+
+
+class Fan(TypedDict, total=False):
+    messages: Annotated[list[AnyMessage], add_messages]
+    item: str
+    found: Annotated[list[str], operator.add]
+
+
+def items(state: Fan) -> list[Send]:  # one Send a line of the task
+    return [Send("work", {"item": line}) for line in str(state["messages"][-1].content).splitlines()]
+
+
+async def work(state: Fan) -> Fan:
+    result = await researcher.run(state["item"], user=trellis.current().user)  # a child run
+    return {"found": [str(result.answer)]}
+
+
+def gather(state: Fan) -> Fan:
+    return {"messages": [AIMessage("\n".join(state["found"]))]}
+
+
+builder = StateGraph(Fan)
+builder.add_node("work", work)
+builder.add_node("gather", gather)
+builder.add_conditional_edges(START, items, ["work"])
+builder.add_edge("work", "gather")
+builder.add_edge("gather", END)
+
+lead = ReAct("You lead the research.", model, subagents=[{
+    "name": "fan_out",
+    "description": "Researches many items at once: give one item a line.",
+    "runnable": builder.compile(),
+}])
+```
+
+Tested in `tests/integration/test_react_fan_out.py`.
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
