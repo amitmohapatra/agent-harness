@@ -279,17 +279,18 @@ async def test_from_agent_runs_log_a_scheduled_runs_events_are_held_and_a_quiet_
         assert await chunks(NO_REPORT, fired=True) == []
         assert len(await chunks(NO_REPORT, fired=False)) == len(shown)
         # in process, a run followed as it runs: its text is said from its record at the end
-        said = logged["hi"][0].model_copy(update={"type": RunEventType.TEXT_MESSAGE_CONTENT})
+        text = ("TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END")
+        said = [logged["hi"][0].model_copy(update={"type": RunEventType(t)}) for t in text]
 
         async def live(run_id: str, *, tenant: str) -> Any:
-            for event in [said, *logged["hi"]]:
+            for event in [*said, *logged["hi"]]:
                 yield event
 
         monkeypatch.setattr(threads_module, "event_log", lambda store: None)
         monkeypatch.setattr(agent, "events", live)
         running = record("hi", fired=False).model_copy(update={"status": RunStatus.RUNNING})
         followed = [c async for c in threads._run(running, -1)]
-        assert '"TEXT_MESSAGE_CONTENT"' not in "".join(followed)
+        assert not [t for t in text if f'"{t}"' in "".join(followed)]  # no message said twice
 
 
 def test_a_reply_from_a_record_and_the_last_event_id() -> None:
