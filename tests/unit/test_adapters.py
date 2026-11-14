@@ -279,6 +279,7 @@ async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -
         run_memory=None,
         attempt=1,
         pending=None,
+        cancelled=None,
         worker_id=None,
         events=SimpleNamespace(custom=lambda name, **data: written.append((name, data))),
     )
