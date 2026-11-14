@@ -81,10 +81,7 @@ async def test_tool_arguments_at_their_limits(
     for n in range(30):
         deep = {f"l{n}": deep, "list": [n, None, True, 1.5]}
     long_key = "k" * 20_000
-    claude = [
-        {"tool": "lookup", "args": {"key": long_key}},
-        {"tool": "note", "args": {"text": "x"}},
-    ]
+    claude = [{"tool": "lookup", "args": {"key": long_key}}]
     agent, _ = await wrapped(h, adapter, TOOLS, tmp_path, id=f"s11a-{adapter}-{uid}", claude=claude)
     done = await agent.run(
         f"{token(uid, 1)} {command('lookup', key=long_key)}", user=f"ada-{uid}", thread=f"t-{uid}"
