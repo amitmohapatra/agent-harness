@@ -347,10 +347,10 @@ async def test_a_listing_that_fails_keeps_the_last_good_one(clock: Clock) -> Non
     gateway.tools = unreachable  # type: ignore[method-assign]
     clock.now += toolbox.TOOLS_TTL_SECONDS + 1
     assert [t.name for t in await made.tools()] == [t.name for t in first]
-    clock.now += toolbox.TOOLS_RETRY_SECONDS / 2
+    clock.now += 29
     await made.tools()
-    assert down.listed == 1  # not asked again before the retry interval
-    clock.now += toolbox.TOOLS_RETRY_SECONDS
+    assert down.listed == 1  # not asked again before the retry interval (30 s)
+    clock.now += 2
     await made.tools()
     assert down.listed == 2
     await writes.aclose()

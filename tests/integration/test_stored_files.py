@@ -367,6 +367,19 @@ async def test_the_note_names_the_newest_and_counts_the_rest(
     assert not stored.looks(run)  # type: ignore[arg-type]  # its parent was told
 
 
+async def test_the_note_names_the_20_newest_with_no_count_when_there_are_20(run: Run) -> None:
+    files = run.agent.harness.files
+    for n in range(21):
+        await files.put("t/u/c_1/r0", f"f{n:02d}.csv", b"a\n1", source="sandbox_exec")
+        if n == 19:
+            twenty = await stored.note(run)  # type: ignore[arg-type]
+    assert twenty is not None and len(twenty.splitlines()[1:]) == 20  # all named, no count
+    said = await stored.note(run)  # type: ignore[arg-type]
+    assert said is not None
+    assert said.splitlines()[-1] == '- and 1 more: read_file(file_path="/files")'
+    assert len(said.splitlines()[1:]) == 21  # the 20 newest, then the count
+
+
 async def test_how_a_file_was_made_says_what_is_known(run: Run) -> None:
     record = {
         "run": "r0",
