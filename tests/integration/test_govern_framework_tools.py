@@ -169,6 +169,28 @@ async def test_an_own_write_repeated_in_one_step_never_runs_more_than_was_approv
     assert told(model) == [(f"call_1_{n}", "refunded o1") for n in range(2)]
 
 
+@pytest.mark.xfail(strict=True, reason="call identity lands at the fold")
+async def test_each_identical_write_of_one_step_is_asked_about_once_and_runs_once(
+    harness: Harness,
+) -> None:
+    """APR, the intended behaviour: N identical writes of the graph's own in one model step
+    are N calls — each asked about once, each run once when approved — and the stall rule
+    (the same call made step after step) refuses none of them: they are one step's. Today
+    the journal takes identical calls of a step for one across a pause (a call's identity is
+    its tool and arguments: ``tools.bridge``), so fewer run than were approved."""
+    model = ScriptedChatModel(turns=[[("refund", {"order": "o1"})] * 3, "refunded"])
+    agent = harness.wrap(graph(model, refund), id="g")
+    result = await agent.run("refund o1", user="u", thread="t")
+    questions = 0
+    while result.status is RunStatus.PAUSED and questions < 4:
+        assert result.interrupt is not None
+        questions += 1
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert (questions, ran) == (3, ["refund o1"] * 3)
+    assert told(model) == [(f"call_1_{n}", "refunded o1") for n in range(3)]
+
+
 async def test_the_harness_tools_repeated_in_one_step_of_a_plain_graph_run_once(
     harness: Harness,
 ) -> None:

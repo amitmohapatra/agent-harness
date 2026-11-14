@@ -1367,7 +1367,7 @@ def _node_retries(config: RunnableConfig, error: Exception) -> bool:
     if call is None and not any(key.startswith(PREGEL_KEYS) for key in configurable):
         return False
     referred = next(iter(getattr(call, "args", ())), None)  # a weak reference to the task
-    task = referred() if isinstance(referred, weakref.ref) else None
+    task: Any = referred() if isinstance(referred, weakref.ref) else None
     graphs = getattr(call, "keywords", None)
     if task is None or not hasattr(task, "retry_policy") or not isinstance(graphs, Mapping):
         raise _internals_moved(f"the call a node's config holds is {type(call).__name__}")
