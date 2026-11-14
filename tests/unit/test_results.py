@@ -43,14 +43,14 @@ def test_outside_a_run_nothing_is_cut_or_kept() -> None:
 
 
 def test_a_large_result_is_kept_and_previewed_by_its_head_and_tail(journal: Journal) -> None:
-    text = "\n".join(f"line {n} " + "y" * 900 for n in range(1, 201))
+    text = "\n".join(f"line {n:03} " + "y" * 991 for n in range(1, 201))  # 1,000 each: whole
     stub = readable(text)
     path = kept_path(stub)
     assert path.startswith("/large_tool_results/") and journal.results == {path: text}
     assert kept() and len(stub) < 25_000
     assert "the read_file tool" in stub and "showing the head and tail" in stub
     assert "... [190 lines truncated] ..." in stub and "longer than" not in stub
-    assert "\n1  line 1 " in stub and "\n200  line 200 " in stub and "line 6 " not in stub
+    assert "\n1  line 001 " in stub and "\n200  line 200 " in stub and "line 006 " not in stub
     assert readable(text) == stub  # the same result, the same path: kept once
 
 
