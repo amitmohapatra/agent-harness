@@ -64,11 +64,14 @@ INTERRUPTS: Final = "interrupts"
 @dataclass(frozen=True, slots=True)
 class Seen:
     """A run as the line read it: its ``updated_at`` then (a run that moved is read again),
-    its place (``None``: outside the line — another user's thread named alike, a child run),
-    its attempt (the one whose end its event log says) and the run it asks to interrupt."""
+    its place (``None``: in no line — a child run), the line it is in (its ``concurrency_key``:
+    shared by the lines of every conversation of a thread named alike, each reads only its
+    own), its attempt (the one whose end its event log says) and the run it asks to
+    interrupt."""
 
     updated_at: datetime
     place: Place | None
+    key: str | None
     attempt: int
     interrupts: str | None = None
 
@@ -199,7 +202,7 @@ class Line:
                 seen = self.seen.get(summary.run_id)
                 if seen is None or seen.updated_at != summary.updated_at:
                     seen = await self._seen(summary.run_id, summary.updated_at)
-                if seen.place is not None:
+                if seen.place is not None and seen.key == record.concurrency_key:
                     standing[seen.place] = seen
         return standing
 
@@ -243,15 +246,12 @@ class Line:
 
     async def _seen(self, run_id: str, updated_at: datetime) -> Seen:
         found = await self.runs.get(run_id, tenant=self.record.tenant_id)
-        if (
-            found is None
-            or found.status not in IN_LINE
-            or found.concurrency_key != self.record.concurrency_key
-        ):
-            seen = Seen(updated_at, None, 1)
+        if found is None or found.status not in IN_LINE:
+            seen = Seen(updated_at, None, None, 1)
         else:
             asks = found.metadata.get(INTERRUPTS)
-            seen = Seen(updated_at, await placed(self.runs, found), found.attempt, asks)
+            place = await placed(self.runs, found)
+            seen = Seen(updated_at, place, found.concurrency_key, found.attempt, asks)
         self.seen[run_id] = seen
         return seen
 
