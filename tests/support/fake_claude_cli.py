@@ -572,27 +572,37 @@ class Cli:
             if pattern not in (None, "", "*") and not re.fullmatch(pattern, name):
                 continue
             for callback in matcher.get("hookCallbackIds") or []:
-                answer = self.control(
-                    {
-                        "subtype": "hook_callback",
-                        "callback_id": callback,
-                        "input": {
-                            "session_id": session,
-                            "transcript_path": "",
-                            "cwd": os.getcwd(),
-                            "hook_event_name": "PreToolUse",
-                            "tool_name": name,
-                            "tool_input": args,
-                            "tool_use_id": tool_id,
-                            **self.working,
-                        },
-                        "tool_use_id": tool_id,
-                    }
-                )
+                try:
+                    answer = self.pre_tool_hook(session, callback, name, args, tool_id)
+                except RuntimeError:  # a hook that failed decides nothing: the CLI goes on
+                    continue
                 said = answer.get("hookSpecificOutput") or {}
                 if said.get("permissionDecision") or answer.get("continue") is False:
                     return answer
         return {}
+
+    def pre_tool_hook(
+        self, session: str, callback: str, name: str, args: dict[str, Any], tool_id: str
+    ) -> dict[str, Any]:
+        """One ``PreToolUse`` hook's answer (an error raised: the hook failed — the bundled
+        CLI, 2.1.283, then goes on as if it had decided nothing)."""
+        return self.control(
+            {
+                "subtype": "hook_callback",
+                "callback_id": callback,
+                "input": {
+                    "session_id": session,
+                    "transcript_path": "",
+                    "cwd": os.getcwd(),
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": name,
+                    "tool_input": args,
+                    "tool_use_id": tool_id,
+                    **self.working,
+                },
+                "tool_use_id": tool_id,
+            }
+        )
 
     def post_tool_use(
         self,

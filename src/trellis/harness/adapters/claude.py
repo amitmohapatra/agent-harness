@@ -281,6 +281,9 @@ OWNED: Final[dict[str, str]] = {
 #: Why a conversation's live session is closed before a query that runs in a process of its
 #: own (two processes do not hold one session).
 OWN_PROCESS: Final = "this query runs in a process of its own"
+#: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
+#: would let a call whose hook failed through to its own permission check.
+UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
 #: What a tool call in the one last answer at the turn limit is refused with, in a live
 #: session (whose process keeps the tools it started with).
 AT_LIMIT: Final = (
@@ -1373,7 +1376,14 @@ def _governance(steps: Steps) -> Any:
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         if steps.last:  # the one last answer, in a live session that has its tools
             return _decided("deny", AT_LIMIT)
-        return await decide(given, tool_use_id)
+        try:
+            return await decide(given, tool_use_id)
+        except Exception as exc:
+            # Claude Code goes on with a call whose hook failed as if nothing had decided it
+            # (ungoverned, under bypassPermissions): a call governance cannot decide is refused
+            log.warning("the call to %s was refused: %s", given.get("tool_name"), exc)
+            steps.helped.pop(tool_use_id or "", None)
+            return _decided("deny", UNDECIDED.format(why=f"{type(exc).__name__}: {exc}"))
 
     async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
         runtime = current()

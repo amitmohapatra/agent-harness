@@ -24,6 +24,7 @@ from trellis.contracts import (
     ToolCall,
     ToolSpec,
 )
+from trellis.harness.adapters import claude as claude_adapter
 from trellis.harness.adapters.claude import (
     BUILTIN_SIDE_EFFECTS,
     RESUMED_ASKED,
@@ -971,6 +972,26 @@ async def test_built_in_tools_are_governed_in_every_permission_mode(
     result = await agent.run("work", user="u1")
     assert result.answer == "said: Bash was not run: nothing runs here"
     assert built_ins(tmp_path) == []  # neither ran
+
+
+async def test_a_call_governance_cannot_decide_is_refused_never_let_through(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code goes on with a call whose ``PreToolUse`` hook failed as if the hook had
+    decided nothing — under ``bypassPermissions`` the call would run ungoverned. The
+    harness's hook never fails so: a call it cannot decide (here governance itself raises) is
+    refused, saying why, and does not run."""
+
+    async def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the catalog is out of reach")
+
+    monkeypatch.setattr(claude_adapter.bridge, "permitted", broken)
+    script = [{"builtin": "Write", "args": {"file_path": "a.txt"}}, {"text": "said: {last}"}]
+    target = options(tmp_path, script, permission_mode="bypassPermissions")
+    result = await harness.wrap(target, id="fails-closed").run("work", user="u1")
+    assert result.answer.startswith("said: The harness could not decide this call")
+    assert "the catalog is out of reach" in result.answer
+    assert built_ins(tmp_path) == []  # it did not run
 
 
 async def test_calls_claude_runs_itself_are_recorded_with_their_result_and_duration(
