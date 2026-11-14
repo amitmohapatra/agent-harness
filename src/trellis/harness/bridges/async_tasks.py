@@ -7,9 +7,9 @@ turn, as the task does — kept as a Claude subagent working in the background i
 * **its record** — started when the start's result names the task: its input the task's text,
   its metadata the task's id, its server's ``url`` and its ``graph_id`` (never the spec's
   headers); its id derived from the agent and the task (:func:`run_of`), so whoever learns
-  how the task ended finds it, on another server that shares the run store too. A follow-up (``update_async_task``) to a task at work goes on as its
-  run; one to a task that ended runs it again on its server: a run of its own here too, the
-  child of the turn that sent it;
+  how the task ended finds it, on another server that shares the run store too. A follow-up
+  (``update_async_task``) to a task at work goes on as its run; one to a task that ended runs
+  it again on its server: a run of its own here too, the child of the turn that sent it;
 * **held and read** — handed on past the turn's attempt (``Helpers.detached``) and held in the
   run store from this process (``holding``) while the task runs: a process that dies with it
   leaves a run the store ends (cut off). Every :data:`WATCH_SECONDS` this process reads the
