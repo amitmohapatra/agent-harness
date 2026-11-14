@@ -35,6 +35,9 @@ def test_an_lru_forgets_the_least_recently_used_past_its_bound() -> None:
     assert lru.pop("d") == 4 and lru.pop("zz") is None
     with pytest.raises(ValueError, match="at least one"):
         LRU(0)
+    one: LRU[str, int] = LRU(1)  # the smallest bound: one entry
+    one["a"], one["b"] = 1, 2
+    assert list(one) == ["b"]
     seen = LRUSet(["x", "y", "z"], maxsize=2)
     assert list(seen) == ["y", "z"] and "x" not in seen and len(seen) == 2
     seen.discard("y")
