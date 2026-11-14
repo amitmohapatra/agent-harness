@@ -626,6 +626,33 @@ def test_after_a_summarization_every_result_the_run_keeps_is_still_named(
     assert middleware._held_named(run, plain) is plain  # no summary: as it was
 
 
+def test_past_the_most_held_results_named_after_a_summary_the_rest_are_counted(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Up to :data:`HELD_MOST` results no message names are named after the summary, with no
+    count; past it, those and how many more."""
+    from langchain.agents.middleware import ModelRequest
+    from langchain_core.messages import HumanMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness import middleware
+
+    monkeypatch.setattr(middleware, "HELD_MOST", 2)
+    run = runtime_module._current.get()
+    run.kept_from = {}  # type: ignore[union-attr]
+    summary = HumanMessage("A summary.", additional_kwargs={"lc_source": "summarization"})
+    given = ModelRequest(model=ScriptedChatModel(turns=[]), messages=[summary], tools=[])  # type: ignore[arg-type]
+
+    def said() -> str:
+        return middleware._held_named(run, given).messages[0].text  # type: ignore[arg-type]
+
+    for n in range(2):
+        assert results.keep(f"a,b\n{n},2\n" * 40, tool="stock") is not None
+    assert "more" not in said()
+    assert results.keep("a,b\n9,2\n" * 40, tool="stock") is not None
+    assert said().endswith("; and 1 more.")
+
+
 def test_a_page_whose_call_the_request_no_longer_holds_is_shortened_as_it_stands(
     journal: Journal,
 ) -> None:
