@@ -172,7 +172,7 @@ class Harness:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
         #: the runs this process executes, held in the run store while they do (``holding``)
-        self.holds = Holds(lambda: self.runs, lost=self._lost)
+        self.holds = Holds(lambda: self.runs, lost=self._lost, asked=self._stop)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -471,23 +471,23 @@ class Harness:
     # ------------------------------------------------------------------ who we are
     async def _lost(self, run_id: str, tenant: str) -> None:
         """A run held here whose heartbeat or event the run store refused: when it was
-        cancelled — ``agent.cancel`` on another process, a newer message of its conversation
-        sent there with ``mode="interrupt"`` among them — its attempt under way here stops and
-        ends ``CANCELLED``, as one cancelled here does (``agent.cancel``), and one waiting its
-        turn here takes none."""
+        cancelled there (before this harness held it, or by a run store that does not ask a
+        holder first), what works on it here stops (:meth:`_stop`)."""
         try:
             record = await self.runs.get(run_id, tenant=tenant)
         except RunsError as exc:
             log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
             return
-        if record is None or record.status is not RunStatus.CANCELLED:
-            return
+        if record is not None and record.status is RunStatus.CANCELLED:
+            self._stop(run_id)
+
+    def _stop(self, run_id: str) -> None:
+        """A run held here was cancelled from elsewhere — ``agent.cancel`` on another process,
+        a newer message of its conversation sent there with ``mode="interrupt"`` among them:
+        its attempt under way here stops and ends it ``CANCELLED``, one waiting its turn here
+        takes none (``Agent.stop``)."""
         for agent in self.agents.values():
-            agent.turns.wake(run_id)  # waiting its turn here: it takes none
-            runtime = agent.running.get(run_id)
-            if runtime is not None and runtime.cancelled is None and runtime.running_in:
-                runtime.cancelled = CANCELLED_ELSEWHERE
-                runtime.running_in.cancel()
+            agent.stop(run_id, CANCELLED_ELSEWHERE)
 
     async def _key_info(self) -> KeyInfo:
         """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then

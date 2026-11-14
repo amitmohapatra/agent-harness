@@ -68,6 +68,7 @@ from trellis.runs import ConflictError
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.budget import Budget
+    from trellis.harness.holding import Holds
     from trellis.harness.runs import RunStore
 
 #: The key of a parent's interrupt payload naming the child that asked:
@@ -300,15 +301,18 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
     return named if isinstance(named, dict) else None
 
 
-async def cancel_children(runs: RunStore, run_id: str, *, reason: str | None, tenant: str) -> None:
+async def cancel_children(
+    holds: Holds, runs: RunStore, run_id: str, *, reason: str | None, tenant: str
+) -> None:
     """Cancel the children of ``run_id`` that have not ended, and theirs: a child paused for a
-    person waits on nobody once its parent is cancelled."""
+    person waits on nobody once its parent is cancelled, and one this harness holds ends now
+    (``Holds.cancel``)."""
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final:
             continue
         with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await runs.cancel(child.run_id, reason=reason, tenant=tenant)
-        await cancel_children(runs, child.run_id, reason=reason, tenant=tenant)
+            await holds.cancel(child.run_id, tenant, reason=reason)
+        await cancel_children(holds, runs, child.run_id, reason=reason, tenant=tenant)
 
 
 async def _side_effects(agent: Agent) -> SideEffects:

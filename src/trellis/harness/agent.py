@@ -592,10 +592,12 @@ class Agent:
         self, run_id: str, *, reason: str | None = None, tenant: str | None = None
     ) -> RunRecord:
         """Cancel a run, whatever it is doing, keeping ``reason`` with it: a queued or paused
-        run is ``CANCELLED`` at once; one running in this process stops now and ends
-        ``CANCELLED``; one a worker elsewhere runs is stopped by that worker at its next
-        heartbeat (agent-runs). Its sub-agents' runs that have not ended are cancelled with
-        it. A run that already ended raises ``ConflictError``. The run's record is returned.
+        run is ``CANCELLED`` at once; one running in this process, or waiting its
+        conversation's turn here, stops now and ends ``CANCELLED``; one a worker or another
+        process runs is asked to stop — still ``RUNNING`` in the record returned — and is
+        stopped by its holder at its next heartbeat (agent-runs). Its sub-agents' runs that
+        have not ended are cancelled with it. A run that already ended raises
+        ``ConflictError``. The run's record is returned.
         ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness._tenant(tenant)
         runs = self.harness.runs
@@ -603,20 +605,31 @@ class Agent:
         # read first: its ending clears the checkpoint, which names the run's sandbox
         held = await runs.get(run_id, tenant=tenant) if runtime is None else None
         record = await runs.cancel(run_id, reason=reason, tenant=tenant)
-        if runtime is not None:
-            runtime.cancelled = reason or "cancelled"
-            assert runtime.running_in is not None
-            runtime.running_in.cancel()
-            await asyncio.wait({runtime.running_in})
+        ending = self.stop(run_id, reason or "cancelled")
+        if ending is not None:  # it works, or waits its turn, here: it ends itself
+            await asyncio.wait({ending})
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
         elif held is not None and record.status is RunStatus.CANCELLED:  # no attempt ends it
             await sandbox.ended(self, await _sandbox_of(runs, held), run_id)
             self._unwatched(run_id)
-            self.turns.wake(run_id)  # waiting its turn here: it takes none
-        await cancel_children(runs, run_id, reason=reason, tenant=tenant)
+        await cancel_children(self.harness.holds, runs, run_id, reason=reason, tenant=tenant)
         return record
+
+    def stop(self, run_id: str, reason: str) -> asyncio.Future[Any] | None:
+        """Stop what this process does for run ``run_id``, cancelled for ``reason``: its
+        attempt under way stops now and ends it ``CANCELLED``; one waiting its conversation's
+        turn takes none and ends so too (``Turns.cancel``). What is done once it ended here;
+        ``None`` when the run neither works nor waits here."""
+        runtime = self.running.get(run_id)
+        if runtime is None:
+            return self.turns.cancel(run_id, reason)
+        assert runtime.running_in is not None
+        if runtime.cancelled is None:
+            runtime.cancelled = reason
+            runtime.running_in.cancel()
+        return runtime.running_in
 
     async def resume(
         self,
@@ -813,6 +826,7 @@ class Agent:
         journal, resumed = await self._resumed(record, resolution)
         if resumed.status is RunStatus.CANCELLED:  # its children wait on nobody now
             await cancel_children(
+                self.harness.holds,
                 self.harness.runs,
                 record.run_id,
                 reason=reason_of(resolution),

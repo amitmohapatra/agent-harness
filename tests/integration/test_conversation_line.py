@@ -34,6 +34,7 @@ from trellis.contracts import (
 )
 from trellis.harness import holding
 from trellis.harness.agent import Agent
+from trellis.harness.bounded import LRU
 from trellis.harness.conversation import EARLIER_RUNS
 from trellis.harness.line import Line, placed
 from trellis.harness.runlog import RunLog
@@ -234,7 +235,8 @@ async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     asked = await agent.run("o-1", user="ada", thread=THREAD)
     assert asked.interrupt is not None
     record = await runs.get(asked.run_id)
-    assert record is not None and await placed(runs, record) == record.created_at
+    assert record is not None
+    assert await placed(runs, record) == (record.created_at, record.run_id)
     await runs.resume(
         InterruptResolution(
             interrupt_id=asked.interrupt.interrupt_id,
@@ -245,9 +247,9 @@ async def test_a_run_continued_after_its_answer_is_placed_when_it_continued(
     )
     continued = await runs.get(asked.run_id)
     assert continued is not None
-    place = await placed(runs, continued)
-    assert place > record.created_at and place - continued.updated_at < timedelta(seconds=1)
-    assert await Line(runs, continued).ahead() == []
+    at, _ = await placed(runs, continued)
+    assert at > record.created_at and at - continued.updated_at < timedelta(seconds=1)
+    assert await Line(runs, continued, LRU()).ahead() == []
 
 
 class Laggy(LocalRuns):
@@ -303,9 +305,10 @@ async def test_a_burst_of_messages_is_answered_in_the_order_it_was_sent(
             assert asked == questions[max(0, n - EARLIER_RUNS) : n]
 
 
-async def test_a_run_cancelled_elsewhere_stops_at_its_next_event() -> None:
-    """With agent-runs' event log, the run's next event is refused once it was cancelled on
-    another server: it stops then, long before its next heartbeat."""
+async def test_a_run_the_store_cancelled_unheld_stops_at_its_next_event() -> None:
+    """A run cancelled before the store had its server's hold (its first heartbeat still on its
+    way) is ``CANCELLED`` there at once: with agent-runs' event log its next event is refused,
+    and it stops then, long before its next heartbeat."""
     runs = LoggedRuns()
     cancelled: list[str] = []
 
@@ -330,6 +333,7 @@ async def test_a_run_cancelled_elsewhere_stops_at_its_next_event() -> None:
             while not runs.logs:  # noqa: ASYNC110
                 await asyncio.sleep(0.01)
         [run_id] = runs.logs
+        await runs.release(run_id, a.holds.name)  # the store has no hold of it (yet)
         await b.wrap(chatty, id="chat").cancel(run_id, reason="from b")
         stopped = await asyncio.wait_for(working, 5)  # a hold heartbeat is 20 s away
     assert stopped.status is RunStatus.CANCELLED and cancelled == ["one"]
@@ -380,11 +384,11 @@ async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nob
         return pages(items=answers[n : n + 1], next_cursor=str(n + 1) if n < 2 else None)
 
     runs.resolutions = paged  # type: ignore[method-assign]
-    assert await placed(runs, answered) == answers[-1].recorded_at
+    assert await placed(runs, answered) == (answers[-1].recorded_at, record.run_id)
     ended = await runs.finish(record.run_id, RunStatus.SUCCESS)
     same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
     assert same.status is RunStatus.RUNNING
-    assert await Line(runs, ended).ahead() is None  # it no longer runs: it left the line
+    assert await Line(runs, ended, LRU()).ahead() is None  # it no longer runs: it left the line
 
 
 async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
@@ -508,3 +512,69 @@ async def test_a_run_waiting_behind_another_servers_run_follows_its_events_not_t
     assert [r.answer for r in results] == ["re: one", "re: two"]
     assert during == 0, f"{during} listings of the line while it waited"
     await runs.aclose()
+
+
+async def test_conv04_an_interrupt_from_another_server_never_overlaps_the_turn_it_stops(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """CONV-04: a turn stuck in one long, silent tool call on one server is interrupted from
+    the other: its call is cancelled and its run ended before the interrupting turn starts —
+    the run store asks the server holding it to stop, and keeps it ``RUNNING`` until it has."""
+    log: Log = []
+    never = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def wait() -> str:
+        """Wait for something that never comes."""
+        log.append(("tool", "started"))
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            record = await servers[0].runs.get(first_run[0])
+            log.append(("tool", "cancelled", record.status if record else None))
+            raise
+        return "done"
+
+    async def answer(input: str, agent: Runtime) -> str:
+        log.append(("start", input))
+        if input == "one":
+            first_run.append(agent.run_id)
+            await agent.tools.call("wait")
+        return f"re: {input}"
+
+    first_run: list[str] = []
+    a, b = (arm(h.wrap(answer, id="chat"), [wait]) for h in servers)
+    first = asyncio.create_task(a.run("one", user="ada", thread=THREAD))
+    async with asyncio.timeout(10):
+        while ("tool", "started") not in log:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
+    second = await asyncio.wait_for(b.run("two", user="ada", thread=THREAD, mode="interrupt"), 10)
+    stopped = await asyncio.wait_for(first, 10)
+    assert (stopped.status, second.status) == (RunStatus.CANCELLED, RunStatus.SUCCESS)
+    # the call was cancelled while its run still held the turn, and only then did "two" start
+    assert log == [
+        ("start", "one"),
+        ("tool", "started"),
+        ("tool", "cancelled", RunStatus.RUNNING),
+        ("start", "two"),
+    ]
+    ended = await servers[0].runs.get(stopped.run_id)
+    assert ended is not None and ended.status is RunStatus.CANCELLED
+
+
+async def test_conv13_a_run_nobody_holds_is_cancelled_at_once_as_before(
+    servers: tuple[Harness, Harness],
+) -> None:
+    """A caller that holds no runs (it only records them) sees its cancel at once."""
+    runs = servers[0].runs
+    record = await runs.start(RunStart(tenant_id="default", agent_id="chat", user_id="ada"))
+    assert (await runs.cancel(record.run_id)).status is RunStatus.CANCELLED
+    held = await runs.start(RunStart(tenant_id="default", agent_id="chat", user_id="ada"))
+    await runs.heartbeat(held.run_id, "server-1", lease_seconds=30)
+    asked = await runs.cancel(held.run_id, reason="enough")
+    assert asked.status is RunStatus.RUNNING  # asked of its holder
+    lease = await runs.heartbeat(held.run_id, "server-1", lease_seconds=600)
+    assert lease.cancel_requested
+    again = await runs.heartbeat(held.run_id, "server-1", lease_seconds=600)
+    assert again.expires_at == lease.expires_at  # no longer extended
+    assert (await runs.release(held.run_id, "server-1")).status is RunStatus.CANCELLED

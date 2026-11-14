@@ -19,6 +19,11 @@ of it with the pause, refuses one while it waits, and the attempt that continues
 answer — on this server or another — takes it again. A helper left open while its run waits for
 a person is let go of in the store (:meth:`Holds.release`), not left to lapse: it is not dead,
 only waiting with its run.
+
+A held run cancelled from elsewhere (``agent.cancel`` on another process) is asked to stop: the
+store keeps it ``RUNNING`` and its hold's next heartbeat says ``cancel_requested`` — what works
+on it here stops and ends it ``CANCELLED`` (``asked``), so nothing that waits for it to end runs
+beside it. A run this harness holds and cancels itself is its own to end (:meth:`Holds.cancel`).
 """
 
 from __future__ import annotations
@@ -51,8 +56,21 @@ def name_of() -> str:
     return f"trellis@{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"[:200]
 
 
+async def _nothing(run_id: str, tenant: str) -> None:
+    """Nobody is told of a refused heartbeat."""
+
+
+def _no_one(run_id: str) -> None:
+    """Nobody is told of a run asked to stop."""
+
+
 class Holding(Protocol):
-    """What holding needs of a run store (``RunStore``'s ``heartbeat`` and ``release``)."""
+    """What holding needs of a run store (``RunStore``'s ``heartbeat``, ``release`` and
+    ``cancel``)."""
+
+    async def cancel(
+        self, run_id: str, *, reason: str | None = ..., tenant: str | None = ...
+    ) -> Any: ...
 
     async def heartbeat(
         self, run_id: str, worker_id: str, *, lease_seconds: int = ..., tenant: str | None = ...
@@ -78,14 +96,18 @@ class Holds:
         runs: Callable[[], Holding],
         name: str | None = None,
         *,
-        lost: Callable[[str, str], Awaitable[None]] | None = None,
+        lost: Callable[[str, str], Awaitable[None]] = _nothing,
+        asked: Callable[[str], None] = _no_one,
     ) -> None:
         self._runs = runs
         self.name = name or name_of()
         self._held: dict[str, _Held] = {}
         #: told of a run whose heartbeat was refused (its id, its tenant): it may have ended
-        #: elsewhere — cancelled from another process — while it works here
+        #: elsewhere while it works here
         self._lost = lost
+        #: told of a run whose hold says its cancel was asked for (``agent.cancel`` on another
+        #: process): its work here stops, and ends it
+        self._asked = asked
 
     def holds(self, run_id: str) -> bool:
         """Whether this harness holds ``run_id`` now."""
@@ -134,6 +156,21 @@ class Holds:
             except RunsError as exc:  # the hold lapses instead
                 log.warning("run %s not let go of: %s", run_id, exc)
 
+    async def cancel(self, run_id: str, tenant: str, *, reason: str | None) -> Any:
+        """Cancel ``run_id`` in the store, for its record. The store asks the process holding
+        a run to stop it, and keeps it ``RUNNING`` until it has: one this harness holds is its
+        own to end, so it lets go of it (the store ends it ``CANCELLED`` then) and tells
+        ``asked`` — what works on it here stops."""
+        record = await self._runs().cancel(run_id, reason=reason, tenant=tenant)
+        held = self._held.pop(run_id, None)
+        if held is None or record.final:
+            return record
+        held.task.cancel()
+        self._asked(run_id)
+        with contextlib.suppress(LeaseLostError):  # its first heartbeat had not held it yet
+            record = await self._runs().release(run_id, self.name, tenant=tenant)
+        return record
+
     def aclose(self) -> None:
         """Every hold ends here (the harness is closing; what it ran ended or was left)."""
         for held in self._held.values():
@@ -141,17 +178,19 @@ class Holds:
         self._held.clear()
 
     async def _beating(self, run_id: str, tenant: str) -> None:
-        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`. A refused one
-        (the run waits for a person, or ended — cancelled elsewhere, ``lost`` is told) is tried
-        again at the next; a store that cannot be reached too, said in the log."""
+        """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`. One that says
+        the run's cancel was asked for tells ``asked`` (its work here stops); a refused one
+        (the run waits for a person, or ended: ``lost`` is told) is tried again at the next; a
+        store that cannot be reached too, said in the log."""
         while True:
             try:
-                await self._runs().heartbeat(
+                hold = await self._runs().heartbeat(
                     run_id, self.name, lease_seconds=HOLD_SECONDS, tenant=tenant
                 )
+                if hold.cancel_requested:
+                    self._asked(run_id)
             except LeaseLostError:
-                if self._lost is not None:
-                    await self._lost(run_id, tenant)
+                await self._lost(run_id, tenant)
             except RunsError as exc:
                 log.warning("run %s not held: %s", run_id, exc)
             await asyncio.sleep(HOLD_SECONDS / 3)

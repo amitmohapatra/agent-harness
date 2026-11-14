@@ -1,26 +1,28 @@
-"""A conversation's line in the run store: its runs answered one at a time, in the order they
-arrived, on whichever process each arrives (ADR 0005).
+"""A conversation's line: its runs answered one at a time, in the order they arrived, on
+whichever process each arrives (ADR 0005). The one ordering of a conversation's turns: the run
+store keeps the order, and ``conversation.Turns`` is its part in this process (which runs wait
+or work here, and who wakes whom).
 
 A turn of a conversation that a process executes outside the queue — ``agent.run``, ``stream``,
 ``serve_chat``, ``serve_a2a``, or a run continued after its answer — is recorded ``RUNNING``
 with the conversation's ``concurrency_key`` (``thread:<conversation>``, the key a queued turn
 gets), and held while it waits and while it works (``holding``). Its place in the line
-(:func:`placed`) is when it took its place: its ``created_at``, or the ``recorded_at`` of its
-latest answer — set by agent-runs, which places a run of a key after every run of that key
-already running or queued, in the order they commit. A queued turn (``start``) holds its place
-the same way while it waits for a worker, and a worker claims it only once no run placed before
-it runs (agent-runs' claim): a stream of messages cannot keep it waiting.
+(``runs.place``) is when it took it: its ``created_at``, or the ``recorded_at`` of its latest
+answer — set by agent-runs, which places a run of a key after every run of that key already
+running or queued, in the order they commit. A queued turn (``start``) holds its place the same
+way while it waits for a worker, and a worker claims it only once no run placed before it runs
+(the run store's claim): a stream of messages cannot keep it waiting.
 
 A run takes its turn once no run of the same agent and conversation that is ``RUNNING`` or
 ``QUEUED`` in the store is placed before it (:meth:`Line.turn`): a run that ended, paused for a
-person or whose process died (its hold lapsed, and the store ended it ``holder_lost``) has left
-the line. A run that left the line before its turn came — cancelled while it waited, here or on
-another process — takes no turn (:meth:`Line.turn` says so). A run waits for the run just ahead
-of it: one of this process until it leaves the line here; one elsewhere (another process's, a
-worker's) by following its event log, which says when it ends or pauses (agent-runs' event stream),
-reading the line again then — and at the latest every :data:`STILL_SECONDS`, or after a pause
-growing with each failure when the stream cannot be followed. A store with no event log
-(``LocalRuns``: one process) is read again every :data:`POLL_SECONDS`.
+person or whose process died (its hold lapsed, and the store ended it) has left the line. A run
+cancelled while it waited, or ended in the store before its turn came, takes none. It waits for
+the run just ahead of it: one of this process until it leaves the line here; one elsewhere
+(another process's, a worker's) by following its event log, which says when its attempt ends or
+pauses (agent-runs' event stream), then reads the line again — at the latest after
+:data:`STILL_SECONDS`. Only when that log cannot be followed (the stream dropped; a store that
+keeps none) does it read the line again after a pause: :data:`DROPPED_SECONDS`, doubling with
+each failure in a row up to :data:`DROPPED_MAX_SECONDS`, jittered.
 """
 
 from __future__ import annotations
@@ -30,31 +32,23 @@ import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from trellis.contracts import RunEventType, RunRecord, RunStatus
 from trellis.harness.bounded import LRU
-from trellis.harness.runlog import event_log
+from trellis.harness.runlog import EventLog, event_log
+from trellis.harness.runs import Place, RunStore, place
 from trellis.runs import RunsError
 
-if TYPE_CHECKING:
-    from trellis.harness.runs import RunStore
-
-#: How often a run waiting behind another reads the line again where the store keeps no event
-#: log to follow (``LocalRuns``, in this process).
-POLL_SECONDS: Final = 0.5
 #: The longest a run following the event log of the run ahead goes without reading the line
-#: again (a pause whose event never reached the log).
+#: again (the log is best-effort: a pause whose event never reached it).
 STILL_SECONDS: Final = 30.0
 #: The pause before the line is read again when the run ahead's event log cannot be followed:
 #: this, doubling with each failure in a row, up to :data:`DROPPED_MAX_SECONDS`, jittered.
-DROPPED_SECONDS: Final = 0.5
-DROPPED_MAX_SECONDS: Final = 10.0
+DROPPED_SECONDS: Final = 0.05
+DROPPED_MAX_SECONDS: Final = 5.0
 #: The statuses of the runs in a line.
 IN_LINE: Final = (RunStatus.RUNNING, RunStatus.QUEUED)
-
-#: A run's place: when it took it, then its id (two placed at once).
-Place = tuple[datetime, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,22 +62,37 @@ class Seen:
     attempt: int
 
 
-#: The runs a process's lines read, shared by its waiting runs (each read once).
+#: The runs a process's lines read, shared by its waiting runs (each read once; bounded).
 Cache = LRU[str, Seen]
 
 
-async def placed(runs: RunStore, record: RunRecord) -> datetime:
-    """When the run ``record`` took its place, as the run store says: its ``created_at``,
-    or the ``recorded_at`` of its latest answer (it took its place again then)."""
-    place = record.created_at
+def _leaving() -> asyncio.Future[None]:
+    return asyncio.get_running_loop().create_future()
+
+
+@dataclass(eq=False, slots=True)
+class Here:
+    """A run in its conversation's line in this process, waiting its turn or holding it."""
+
+    #: done as it leaves the line here (the run behind it looks at the line again)
+    left: asyncio.Future[None] = field(default_factory=_leaving)
+    #: set to have it look at the line again now
+    again: asyncio.Event = field(default_factory=asyncio.Event)
+    #: why it was cancelled while it waited its turn (it takes none)
+    cancelled: str | None = None
+
+
+async def placed(runs: RunStore, record: RunRecord) -> Place:
+    """The place of the run ``record`` is (``runs.place``), its answers read from the store."""
     if record.last_resolution is None:
-        return place
+        return place(record, ())
+    answers = []
     cursor: str | None = None
     while True:
         page = await runs.resolutions(record.run_id, cursor=cursor, tenant=record.tenant_id)
-        place = max([place, *(entry.recorded_at for entry in page.items)])
+        answers += page.items
         if (cursor := page.next_cursor) is None:
-            return place
+            return place(record, answers)
 
 
 @dataclass(slots=True)
@@ -94,7 +103,7 @@ class Line:
 
     runs: RunStore
     record: RunRecord
-    seen: Cache = field(default_factory=LRU)
+    seen: Cache
     #: how far each run ahead's event log was read (its position)
     _read: dict[str, int] = field(default_factory=dict)
     #: the failures in a row to follow an event log
@@ -114,72 +123,71 @@ class Line:
                 tenant=record.tenant_id,
             )
         ]
-        if not any(s.run_id == record.run_id and s.status is RunStatus.RUNNING for s in listed):
-            return None
-        if len(listed) == 1:
-            return []
         places: dict[str, Place | None] = {}
         for summary in listed:
             seen = self.seen.get(summary.run_id)
             if seen is None or seen.updated_at != summary.updated_at:
                 seen = await self._seen(summary.run_id, summary.updated_at)
             places[summary.run_id] = seen.place
-        mine = places.pop(record.run_id)
+        mine = places.pop(record.run_id, None)
         if mine is None:
-            return []
+            return None
         return [run for _, run in sorted(p for p in places.values() if p is not None and p < mine)]
 
-    async def turn(self, leaving: Mapping[str, asyncio.Event], poked: asyncio.Event) -> bool:
-        """Wait until no run is placed before this one: ``True``, its turn; ``False``, it left
-        the line first (it no longer runs). It waits for the run just ahead of it to leave the
-        line: one of this process (``leaving``: each run here, and the event set as it leaves)
-        until that event; one elsewhere, by following its event log. ``poked``: look at the line
-        again now (it may have been cancelled)."""
-        while True:
-            poked.clear()
+    async def turn(self, here: Mapping[str, Here], mine: Here) -> bool:
+        """Wait until no run is placed before this one: ``True``, its turn; ``False``, it takes
+        none (cancelled while it waited, or it no longer runs). ``here`` are the conversation's
+        runs in line in this process, ``mine`` this one among them: it waits for the run just
+        ahead of it to leave the line — one of ``here`` until it leaves, one elsewhere by its
+        event log (:meth:`_left`) — or to be told to look again."""
+        while mine.cancelled is None:
+            mine.again.clear()
             ahead = await self.ahead()
-            if ahead is None:
-                return False
             if not ahead:
-                return True
-            here = leaving.get(ahead[-1])
-            waits = [
-                asyncio.ensure_future(poked.wait()),
-                asyncio.ensure_future(here.wait() if here is not None else self._left(ahead[-1])),
-            ]
+                return ahead is not None
+            before = here.get(ahead[-1])
+            elsewhere = None if before is not None else asyncio.ensure_future(self._left(ahead[-1]))
+            again = asyncio.ensure_future(mine.again.wait())
             try:
-                await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                leaving = elsewhere if before is None else before.left
+                await asyncio.wait({leaving, again}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                for waiting in waits:
-                    waiting.cancel()
-                await asyncio.gather(*waits, return_exceptions=True)
+                again.cancel()
+                if elsewhere is not None:  # (a run's ``left`` is its own: all behind it wait on it)
+                    elsewhere.cancel()
+        return False
 
     async def _left(self, run_id: str) -> None:
-        """Until the run ``run_id``, ahead in the line elsewhere, may have left it: its event log
-        says its attempt ended (or paused), or the run ended; at the latest
-        :data:`STILL_SECONDS`. Where the store keeps no event log, :data:`POLL_SECONDS`."""
+        """Until the run ``run_id``, ahead in the line elsewhere, may have left it: its event
+        log followed to its attempt's end (:meth:`_followed`); a log that cannot be followed,
+        after a pause that grows with each failure in a row."""
         log = event_log(self.runs)
-        if log is None:
-            await asyncio.sleep(POLL_SECONDS)
+        if log is not None and await self._followed(log, run_id):
+            self._dropped = 0
             return
+        pause = min(DROPPED_MAX_SECONDS, DROPPED_SECONDS * 2**self._dropped)
+        self._dropped += 1
+        await asyncio.sleep(pause * random.uniform(0.5, 1.0))  # jittered
+
+    async def _followed(self, log: EventLog, run_id: str) -> bool:
+        """Follow the event log of run ``run_id`` until it says the attempt the line saw ended
+        (or paused), the run ended, or :data:`STILL_SECONDS` passed; ``False`` when the log
+        cannot be followed now."""
         seen = self.seen.get(run_id)
-        attempt = 1 if seen is None else seen.attempt
-        tenant = self.record.tenant_id
         try:
             async with asyncio.timeout(STILL_SECONDS):
-                after = self._read.get(run_id, 0)
-                async for entry in log.stream_events(run_id, after=after, tenant=tenant):
+                async for entry in log.stream_events(
+                    run_id, after=self._read.get(run_id, 0), tenant=self.record.tenant_id
+                ):
                     self._read[run_id] = entry.position
-                    event = entry.event
-                    if event.type is RunEventType.RUN_FINISHED and event.attempt >= attempt:
+                    ended = entry.event.type is RunEventType.RUN_FINISHED
+                    if ended and (seen is None or entry.event.attempt >= seen.attempt):
                         break
-            self._dropped = 0
         except TimeoutError:
-            self._dropped = 0
-        except RunsError:  # the log cannot be followed now: read the line again after a pause
-            pause = min(DROPPED_MAX_SECONDS, DROPPED_SECONDS * 2**self._dropped)
-            self._dropped += 1
-            await asyncio.sleep(pause * random.uniform(0.5, 1.0))  # jittered
+            pass
+        except RunsError:
+            return False
+        return True
 
     async def _seen(self, run_id: str, updated_at: datetime) -> Seen:
         found = await self.runs.get(run_id, tenant=self.record.tenant_id)
@@ -190,7 +198,7 @@ class Line:
         ):
             seen = Seen(updated_at, None, 1)
         else:
-            seen = Seen(updated_at, (await placed(self.runs, found), run_id), found.attempt)
+            seen = Seen(updated_at, await placed(self.runs, found), found.attempt)
         self.seen[run_id] = seen
         return seen
 
@@ -199,11 +207,10 @@ __all__ = [
     "DROPPED_MAX_SECONDS",
     "DROPPED_SECONDS",
     "IN_LINE",
-    "POLL_SECONDS",
     "STILL_SECONDS",
     "Cache",
+    "Here",
     "Line",
-    "Place",
     "Seen",
     "placed",
 ]

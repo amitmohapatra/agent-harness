@@ -15,9 +15,9 @@ interchangeable. Both behave the same way:
   run has left; a stopping worker releases the runs it holds back to the queue;
 * a schedule's fire copies its ``timeout_seconds`` and ``agent_version`` into the run, and
   the thread its metadata names (``thread_id``) as the run's;
-* a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
-  the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
-  run is cancelled when its lease runs out;
+* a cancel ends a queued or paused run (or one in a caller's process that does not hold it) at
+  once, and asks the worker, or the process, holding a running one to stop: its heartbeats say
+  ``cancel_requested``, and the run is cancelled when its lease, or its hold, runs out;
 * a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
   it for the ``worker_id`` (the process running it) instead: once the hold lapses the run ends
   ``ERROR`` (``holder_lost``), never queued; a hold fences no write, and a pause lets go of it.
@@ -52,7 +52,7 @@ import tempfile
 import time
 import weakref
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
@@ -271,6 +271,19 @@ class RunStore(Protocol):
 # --------------------------------------------------------------------------- in process
 
 
+#: A run's place among the runs sharing its ``concurrency_key``: when it took it, then its id
+#: (two placed at once). An earlier place is ahead.
+Place = tuple[datetime, str]
+
+
+def place(record: RunRecord, answers: Iterable[ResolutionEntry]) -> Place:
+    """The place of the run ``record`` is among its key's runs, as every run store keeps it:
+    when it was started, or when the latest of its ``answers`` was recorded (it took its place
+    again then). A conversation's turns are answered in this order (``line``), and a queued
+    run is claimed only while no run placed before it runs."""
+    return max([record.created_at, *(entry.recorded_at for entry in answers)]), record.run_id
+
+
 class LocalRuns:
     """The same store in this process, for development and tests: nothing survives a restart,
     only workers in this process claim, and a due schedule fires when a worker claims. A
@@ -386,22 +399,20 @@ class LocalRuns:
     def _room(self, record: RunRecord) -> bool:
         """Whether a queued run may run now: no run of its tenant sharing its
         ``concurrency_key`` holds it (agent-runs' default limit, one) — one a worker runs, or
-        one running in its caller's process placed before it (``line.placed``): a run placed
+        one running in its caller's process placed before it (:func:`place`): a run placed
         after it waits for it there."""
         key = record.concurrency_key
-        mine = (self._place(record), record.run_id)
+        mine = self._place(record)
         return key is None or not any(
             r.status is RunStatus.RUNNING
             and r.concurrency_key == key
             and r.tenant_id == record.tenant_id
-            and (r.run_id in self._leases or (self._place(r), r.run_id) < mine)
+            and (r.run_id in self._leases or self._place(r) < mine)
             for r in self._runs.values()
         )
 
-    def _place(self, record: RunRecord) -> datetime:
-        """When the run took its place among its key's runs: its start, or its latest answer."""
-        answered = [entry.recorded_at for entry in self._resolutions.get(record.run_id, ())]
-        return max([record.created_at, *answered])
+    def _place(self, record: RunRecord) -> Place:
+        return place(record, self._resolutions.get(record.run_id, ()))
 
     async def heartbeat(
         self,
@@ -437,6 +448,8 @@ class LocalRuns:
                 raise LeaseLostError(
                     f"{worker_id} does not hold {run_id}", code="LEASE_LOST", status=409
                 )
+            if run_id in self._cancelling:  # asked to stop, and let go of: it ends
+                return self._move(found, RunStatus.CANCELLED)
             del self._holds[run_id]
             if checkpoint is not None:
                 found = self._move(found, found.status, checkpoint=checkpoint)
@@ -455,8 +468,8 @@ class LocalRuns:
             return record
         if record.final:
             raise _conflict(f"run {run_id} already ended {record.status.value}")
-        if record.status is RunStatus.RUNNING and run_id in self._leases:
-            self._cancelling[run_id] = reason  # its worker stops it
+        if record.status is RunStatus.RUNNING and (run_id in self._leases or self._held(run_id)):
+            self._cancelling[run_id] = reason  # its worker, or the process holding it, stops it
             return record
         if run_id in self._queue:
             self._queue.remove(run_id)
@@ -595,7 +608,8 @@ class LocalRuns:
         checkpoint: dict[str, Any] | None,
     ) -> Lease:
         """Hold a run kept in its caller's process for ``holder``, as agent-runs does: another
-        holder's hold in force is ``LeaseLostError``."""
+        holder's hold in force is ``LeaseLostError``; once the run's cancel was asked for, the
+        hold says so (``cancel_requested``) and is no longer extended."""
         moment = datetime.now(UTC)
         held = self._holds.get(record.run_id)
         if held is not None and held[0] not in (None, holder) and held[1] >= moment:
@@ -605,8 +619,15 @@ class LocalRuns:
         if checkpoint is not None:
             record = self._move(record, record.status, checkpoint=checkpoint)
         until = moment + timedelta(seconds=lease_seconds)
+        if held is not None and record.run_id in self._cancelling:
+            until = min(until, held[1])
         self._holds[record.run_id] = (holder, until)
         return self._leased(record, holder, until)
+
+    def _held(self, run_id: str) -> bool:
+        """Whether a process holds the run kept in its caller's process now."""
+        held = self._holds.get(run_id)
+        return held is not None and held[0] is not None and held[1] >= datetime.now(UTC)
 
     def _fenced(self, run_id: str, worker_id: str | None, tenant: str | None) -> RunRecord:
         record = self._require(run_id, tenant)
@@ -704,7 +725,9 @@ class LocalRuns:
                 del self._leases[run_id]
                 self._requeued(self._runs[run_id])
         for run_id, (holder, until) in list(self._holds.items()):
-            if until < now:  # its holder stopped: nothing else can run it
+            if until < now and run_id in self._cancelling:  # asked to stop, never ended
+                self._move(self._runs[run_id], RunStatus.CANCELLED)
+            elif until < now:  # its holder stopped: nothing else can run it
                 stopped = (
                     f"its holder stopped: {holder} kept the run in its own process and "
                     f"stopped heartbeating (held until {until}), so nothing runs it"
