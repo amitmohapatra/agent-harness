@@ -594,7 +594,10 @@ async def test_a_large_file_is_read_in_parts_and_a_sandbox_of_another_provider_i
     harness: Harness,
 ) -> None:
     provider = FakeSandboxes()
-    files = {"big.txt": "x" * (256 * 1024 + 1), "fits.txt": "y" * (256 * 1024)}
+    files: dict[str, str | bytes] = {
+        "big.txt": "x" * (256 * 1024 + 1),
+        "fits.txt": "y" * (256 * 1024),
+    }
     source = sandbox(provider, spec=SandboxSpec(files=files))
 
     async def reads(input: str, agent: Runtime) -> Any:
