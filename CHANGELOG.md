@@ -49,8 +49,8 @@ A library's feature works as the library does it; the harness governs, records a
 - Fitting the window keeps a tool's provider fields (`extras`: `defer_loading`,
   `cache_control`) and leaves a provider's own tool (web search, code execution) as it is.
 - A graph that summarizes its own history (LangChain's `SummarizationMiddleware`, Deep
-  Agents' summarization) beside `middleware()`: the older turns are the library's to shrink;
-  fitting the window after it no longer leaves turns out too (the summary itself was dropped).
+  Agents' summarization) beside `middleware()`: fitting the window after it keeps the
+  summary when it leaves older turns out (the summary itself was dropped with them).
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks

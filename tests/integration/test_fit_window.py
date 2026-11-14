@@ -682,10 +682,11 @@ def long_talk() -> list[Any]:
 async def test_a_graphs_own_summarization_has_the_older_turns_and_fitting_only_guards_the_window(
     harness: Harness, summarized: bool
 ) -> None:
-    """LangChain's ``SummarizationMiddleware`` beside ``middleware()``: the older turns are
-    the summarization's — it runs once, as on its own — and fitting the window after it cuts
-    what is too long but leaves no turn out (the turns it kept are sent). Without it, fitting
-    leaves the older turns out itself, as ever."""
+    """LangChain's ``SummarizationMiddleware`` beside ``middleware()``: the summarization
+    runs once, as on its own, and fitting guards the window after it. Where what it kept is
+    still more than the window, fitting leaves the turns it kept out — never the summary,
+    which is what is left of the turns before them (it was left out too: the model was sent
+    the question alone). Without it, fitting leaves the older turns out itself, as ever."""
     model, summarizer = ScriptedChatModel(turns=["answered"]), ScriptedChatModel(turns=["SUMMARY"])
     # what it keeps (the last two turns) is itself more than the window: the library's choice
     own = SummarizationMiddleware(model=summarizer, trigger=("messages", 6), keep=("messages", 5))
@@ -696,10 +697,9 @@ async def test_a_graphs_own_summarization_has_the_older_turns_and_fitting_only_g
     sent = " ".join(m.text for m in model.seen[-1])
     if summarized:
         assert summarizer.turns == [] and "SUMMARY" in sent  # it ran, once
-        # the summary, then every turn the summarization kept, each once and in order
-        kept = [m.text.split(" x")[0] for m in model.seen[-1]][1:]
-        assert kept[0].endswith("SUMMARY")
-        assert kept[1:] == ["second", "did second", "third", "did third", "and now?"]
+        # the summary stays, once, ahead of the question: only the turns after it are left out
+        kept = [m.text for m in model.seen[-1]][1:]
+        assert kept[0].endswith("SUMMARY") and kept[1:] == ["and now?"]
     else:
         fitted = [str(e.data) for e in events if e.data.get("code") == "context_fit"]
         assert "did second" not in sent and any("turns" in said for said in fitted)

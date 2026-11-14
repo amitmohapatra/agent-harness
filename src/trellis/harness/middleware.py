@@ -144,7 +144,6 @@ from trellis.harness.adapters.langgraph import (
     TASK_TOOL,
     carried_plain,
     notified,
-    summarizes,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
@@ -2821,19 +2820,9 @@ class FitWindow(AgentMiddleware):
         if window is not None and window <= 0:
             raise ConfigurationError("a window is a number of tokens over 0")
         self.window = window
-        self._turns_asked = turns
+        self.turns = turns
         #: each run's tools its last narrowed call kept (:func:`_narrowed`'s ``before``)
         self._kept: weakref.WeakKeyDictionary[Runtime, frozenset[str]] = weakref.WeakKeyDictionary()
-
-    @property
-    def turns(self) -> bool:
-        """Whether fitting leaves older turns out: as it was built — and never in a graph
-        that summarizes its own history (``adapters.langgraph.summarizes``: LangChain's
-        ``SummarizationMiddleware``, Deep Agents'): the older turns are the library's to
-        shrink, as on its own, and fitting only guards the window after it — both shrinking
-        one history, the summary itself was left out with the turns."""
-        runtime = current()
-        return self._turns_asked and not (runtime is not None and summarizes(runtime.agent.target))
 
     async def awrap_model_call(
         self,
@@ -3209,7 +3198,7 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     a note appended to this call alone, as the step limit's and the budget's are, is not one:
     the turn starts at the question before it — or ``None`` when no turn is before it."""
     messages = request.messages
-    lead = sum(1 for _ in itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages))
+    lead = _lead(messages)
     state = request.state.get("messages") or []
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
@@ -3220,14 +3209,23 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     return None if asked is None or asked <= lead else asked
 
 
+def _lead(messages: Sequence[AnyMessage]) -> int:
+    """How many messages open a request before its turns: its leading system messages, and
+    the summary a summarization of the graph's own (LangChain's, Deep Agents') put in its
+    older turns' place. The summary is what is left of those turns: left out with the turns
+    that follow it, they would be lost twice."""
+    opens = itertools.takewhile(lambda m: isinstance(m, SystemMessage) or _summary(m), messages)
+    return sum(1 for _ in opens)
+
+
 def _latest(request: ModelRequest[Any]) -> ModelRequest[Any]:
-    """The request with its leading system messages and its latest turn only (:func:`_asked`)."""
+    """The request with what opens it (:func:`_lead`) and its latest turn only
+    (:func:`_asked`)."""
     asked = _asked(request)
     if asked is None:
         return request
     messages = list(request.messages)
-    lead = itertools.takewhile(lambda m: isinstance(m, SystemMessage), messages)
-    return request.override(messages=[*lead, *messages[asked:]])
+    return request.override(messages=[*messages[: _lead(messages)], *messages[asked:]])
 
 
 def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:

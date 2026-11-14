@@ -1115,42 +1115,21 @@ def langchain_message(said: Said) -> Any:
     return SystemMessage(content=said.content)
 
 
-def hooked(target: Any, kind: type) -> list[Any]:
-    """The middleware of class ``kind`` a ``create_agent`` graph runs as nodes (its
-    ``before_model``, ``after_model``... hooks), in the graph's order: read from the nodes
-    ``create_agent`` made of them. ``[]`` for any other graph, and for a middleware that only
-    wraps calls (it has no node)."""
+def input_screens(target: Any) -> list[Any]:
+    """The ``PIIMiddleware`` instances of a ``create_agent`` graph that check the user's
+    message before each model call (``apply_to_input``), in the graph's order: read from the
+    ``before_model`` nodes ``create_agent`` made of them. ``[]`` for any other graph."""
+    from langchain.agents.middleware import PIIMiddleware
+
     found: list[Any] = []
     for node in (getattr(target, "nodes", None) or {}).values():
         bound = getattr(node, "bound", None)
         for hook in (getattr(bound, "func", None), getattr(bound, "afunc", None)):
             owner = getattr(hook, "__self__", None)
-            if isinstance(owner, kind) and not any(owner is m for m in found):
+            screens = isinstance(owner, PIIMiddleware) and owner.apply_to_input
+            if screens and not any(owner is m for m in found):
                 found.append(owner)
     return found
-
-
-def input_screens(target: Any) -> list[Any]:
-    """The ``PIIMiddleware`` instances of a ``create_agent`` graph that check the user's
-    message before each model call (``apply_to_input``), in the graph's order."""
-    from langchain.agents.middleware import PIIMiddleware
-
-    return [m for m in hooked(target, PIIMiddleware) if m.apply_to_input]
-
-
-#: The state channel of Deep Agents' own summarization (its ``SummarizationState``): a graph
-#: has it when Deep Agents summarizes its history (it wraps the model call: it has no node).
-SUMMARIZED: Final = "_summarization_event"
-
-
-def summarizes(target: Any) -> bool:
-    """Whether the graph summarizes its own history: LangChain's ``SummarizationMiddleware``
-    (a ``before_model`` node of the graph) or Deep Agents' (:data:`SUMMARIZED`). The older
-    turns are then the library's to shrink, as on its own."""
-    from langchain.agents.middleware import SummarizationMiddleware
-
-    channels = getattr(target, "channels", None) or {}
-    return SUMMARIZED in channels or bool(hooked(target, SummarizationMiddleware))
 
 
 def screened(target: Any, text: str) -> str:
