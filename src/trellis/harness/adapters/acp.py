@@ -257,18 +257,38 @@ CRON_OFF: Final = (
 #: Why Kimi's tower mode (``KIMI_CODE_EXPERIMENTAL_TOWER``: ``TowerInit``, ``TowerSpawn``,
 #: ``TowerMerge``...) is off: ``TowerSpawn`` starts each worker in Kimi's ``auto`` permission
 #: mode, which asks about none of its calls (:data:`GOVERNED_MODES`), so the harness would
-#: govern none of them — a run's sub-agents work through ``Agent`` and ``AgentSwarm``, whose
-#: calls Kimi asks about.
+#: govern none of them — a run's sub-agents work through ``Agent``, whose calls Kimi asks
+#: about.
 TOWER_OFF: Final = (
     "Kimi's tower mode is off: its workers run in Kimi's auto permission mode, which asks about "
-    "none of their calls, so the harness could govern none of them (use Agent and AgentSwarm)"
+    "none of their calls, so the harness could govern none of them (use Agent)"
 )
 #: What the harness sets in Kimi's environment, whatever the agent's own says, and why (said
 #: on the run when the agent's own ``env`` asks otherwise): scheduling off (before, Kimi
 #: scheduled a prompt nothing would fire, and answered as if it would: the break-and-fix gate),
 #: and tower mode off (Kimi reads its environment's word over its config's).
-KIMI_ENV: Final = {"KIMI_DISABLE_CRON": "1", "KIMI_CODE_EXPERIMENTAL_TOWER": "0"}
-KIMI_ENV_WHY: Final = {"KIMI_DISABLE_CRON": CRON_OFF, "KIMI_CODE_EXPERIMENTAL_TOWER": TOWER_OFF}
+#: Its own update and its usage reports are off too: a server's Kimi stays the version that
+#: was tested, and sends its maker nothing of the tenants' use.
+UPDATES_OFF: Final = (
+    "Kimi does not update itself under the harness: an update would move it past the version "
+    "the harness was tested with while it serves runs (install the version you want)"
+)
+TELEMETRY_OFF: Final = (
+    "Kimi's usage reports to its maker are off under the harness: a server's runs are its "
+    "tenants', and what is recorded of them is the harness's to keep"
+)
+KIMI_ENV: Final = {
+    "KIMI_DISABLE_CRON": "1",
+    "KIMI_CODE_EXPERIMENTAL_TOWER": "0",
+    "KIMI_CODE_NO_AUTO_UPDATE": "1",
+    "KIMI_DISABLE_TELEMETRY": "1",
+}
+KIMI_ENV_WHY: Final = {
+    "KIMI_DISABLE_CRON": CRON_OFF,
+    "KIMI_CODE_EXPERIMENTAL_TOWER": TOWER_OFF,
+    "KIMI_CODE_NO_AUTO_UPDATE": UPDATES_OFF,
+    "KIMI_DISABLE_TELEMETRY": TELEMETRY_OFF,
+}
 #: Where Kimi Code keeps its sessions, its config and its usage log, unless ``KIMI_CODE_HOME``
 #: says.
 KIMI_HOME: Final = "~/.kimi-code"

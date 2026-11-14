@@ -717,6 +717,21 @@ async def test_kimis_scheduling_is_turned_off_whatever_its_own_environment_says(
     assert KIMI.env == KIMI_ENV
 
 
+async def test_kimi_neither_updates_itself_nor_reports_usage_whatever_its_own_environment_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """DECISIONS A3. On a server Kimi must stay the version that was tested (its own update
+    would move it mid-deployment) and send its maker no usage of the tenants': both switches
+    of Kimi's own are set, and an agent's ``env`` that asks otherwise is told why."""
+    asks = {"KIMI_CODE_NO_AUTO_UPDATE": "0", "KIMI_DISABLE_TELEMETRY": "0"}
+    agent = harness.wrap(fake(tmp_path, [{"text": "ok"}], env=asks), id="quiet")
+    events = [e async for e in agent.stream("hi", user="u1")]
+    env = recorded(tmp_path)["started"][0]["env"]
+    assert (env["KIMI_CODE_NO_AUTO_UPDATE"], env["KIMI_DISABLE_TELEMETRY"]) == ("1", "1")
+    said = [e.data["message"] for e in events if e.data.get("code") == "acp_env"]
+    assert len(said) == 2 and all("is not used" in message for message in said)
+
+
 async def test_kimis_tower_mode_is_turned_off_and_an_agent_that_asks_for_it_is_told_why(
     harness: Harness, tmp_path: Path
 ) -> None:

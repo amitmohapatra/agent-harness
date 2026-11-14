@@ -16,6 +16,13 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Changed: Kimi Code neither updates itself nor reports usage under the harness
+
+`KIMI_CODE_NO_AUTO_UPDATE=1` and `KIMI_DISABLE_TELEMETRY=1` are set for every run of
+`kimi()`, whatever the agent's `env` says (it is told why, as for scheduling and tower
+mode): an update would move Kimi past the tested version while it serves runs, and its
+telemetry sent the tenants' usage to Moonshot.
+
 ### Changed: Kimi Code 2.6.2 (was 2.1.1)
 
 The tested range of `kimi` is now `>=2.6.2,<2.7` (`compat.BINARIES`); 2.1.x is refused.
