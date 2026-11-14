@@ -61,7 +61,8 @@
   virtual key (:func:`routed_env`; the options' own ``ANTHROPIC_BASE_URL`` wins), carrying
   the deny-all MCP scope, the run's dimensions and its ``traceparent`` as
   ``ANTHROPIC_CUSTOM_HEADERS`` beside the options' own — the CLI reads them as it starts, once
-  per attempt;
+  per attempt; a conversation's live session, which serves many runs, carries the dimensions
+  that hold for all of them (``telemetry.lasting_headers``: no run, no ``traceparent``);
 * framework options: ``ClaudeAgentOptions`` fields, set on the run's copy of the options
   before the harness's own changes. Merged with them: ``hooks`` (the governance and context
   hooks go after theirs), ``can_use_tool`` (asked when Claude Code would ask, after the hooks
@@ -129,8 +130,9 @@ from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
 from trellis.harness.journal import Pending, approvals_read, content_key
-from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
+from trellis.harness.prompts import CUSTOM_HEADERS, NO_GATEWAY_TOOLS
 from trellis.harness.runtime import Paused, Runtime, current
+from trellis.harness.telemetry import gateway_headers, lasting_headers
 from trellis.harness.tools import bridge
 from trellis.harness.tools.ask import ask_question
 from trellis.harness.tools.base import UNDECLARED, SideEffects
@@ -862,7 +864,7 @@ def _shape(options: Any) -> tuple[Any, ...]:
     """What a process started with ``options`` has for good, and a later turn must bring the
     same to be served by it: the options less what each turn brings of its own (its hooks'
     and its permission check's code, its harness tools' code, its journal, the session it
-    resumes, its run's gateway headers), the hooks' places, and the tools its ``trellis``
+    resumes), the hooks' places, and the tools its ``trellis``
     server lists with their schemas (not their wording of the moment: ``convert.listing``)."""
     from trellis.harness.tools.convert import claude as convert
 
@@ -878,7 +880,6 @@ def _shape(options: Any) -> tuple[Any, ...]:
         mcp_servers={n: c for n, c in servers.items() if n != convert.SERVER}
         if isinstance(servers, dict)
         else servers,
-        env={k: v for k, v in options.env.items() if k != CUSTOM_HEADERS},
     )
     hooks = tuple(
         (event, tuple((m.matcher, len(m.hooks), m.timeout) for m in matchers))
@@ -1232,8 +1233,21 @@ class Steps:
             bare = name.removeprefix(f"mcp__{SERVER}__")
             self.runtime.replay.announced(content_key("call", bare, args), call_id)
 
+    def approved(self, tool_use_id: Any) -> None:
+        """A person approved the call the CLI names ``tool_use_id`` before it ran: carried to
+        Claude Code's own question about that call (:meth:`carries`), until the call ends. A
+        call the CLI names no id for carries nothing: its tool's name would name every later
+        call of the tool."""
+        if tool_use_id:
+            self.answered.add(str(tool_use_id))
+
+    def carries(self, tool_use_id: Any) -> bool:
+        """Whether a person approved the call ``tool_use_id`` already (:meth:`approved`)."""
+        return bool(tool_use_id) and str(tool_use_id) in self.answered
+
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
+        self.answered.discard(call_id)
         found = self.calls.pop(call_id, None)
         self.waiting()
         return found
@@ -1260,7 +1274,10 @@ def _options(
             "permission_prompt_tool_name"
         )
     runtime = run.runtime
-    env = dict(routed_env(options.env, runtime) or options.env)
+    # whose the CLI's model calls are, told the gateway for as long as the process lives: a
+    # query's own, its run and trace; one a live session may keep, what holds for every turn
+    headers = lasting_headers(runtime) if kept else gateway_headers()
+    env = dict(routed_env(options.env, runtime, headers) or options.env)
     if MCP_OUTPUT_ENV not in env and MCP_OUTPUT_ENV not in os.environ:
         env[MCP_OUTPUT_ENV] = str(MCP_OUTPUT_TOKENS)
     # the run's tenant and user's own Claude Code folder, with no auto memory (the team's own
@@ -1351,14 +1368,16 @@ def _told(given: Any, context: str | None) -> tuple[Any, str | None]:
     return given, after(context)
 
 
-def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | None:
+def routed_env(
+    env: Mapping[str, str], runtime: Runtime, headers: Mapping[str, str]
+) -> dict[str, str] | None:
     """The CLI's environment with its model calls routed through the gateway when the route
     serving the harness has an Anthropic route (``Capability.ANTHROPIC_ROUTE``: Bifrost;
     ``None``: as it is): the gateway's Anthropic route (``ANTHROPIC_BASE_URL``, the
     virtual key as ``ANTHROPIC_API_KEY``) — unless the options' own ``env`` names a base URL
-    (code over the environment) — and, on Bifrost's route, its headers as
-    ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own: the deny-all MCP scope, the
-    run's dimensions and its ``traceparent`` (read as the CLI starts)."""
+    (code over the environment) — and, on Bifrost's route, the deny-all MCP scope and
+    ``headers`` as ``ANTHROPIC_CUSTOM_HEADERS`` lines beside the options' own (the CLI reads
+    them once, as it starts)."""
     gateway = runtime.agent.harness.model_gateway
     if not gateway.has(Capability.ANTHROPIC_ROUTE):
         return None
@@ -1370,7 +1389,7 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
         given["ANTHROPIC_API_KEY"] = gateway.key or NO_KEY
     if not given["ANTHROPIC_BASE_URL"].startswith(gateway.origin):
         return given if given != env else None  # their own endpoint: no Bifrost headers
-    ours = GatewayHeaders().now()
+    ours = {**NO_GATEWAY_TOOLS, **headers}
     lines = (given.get(CUSTOM_HEADERS) or "").splitlines()
     kept = [line for line in lines if line.partition(":")[0].strip().lower() not in ours]
     given[CUSTOM_HEADERS] = "\n".join([*kept, *(f"{k}: {v}" for k, v in ours.items())])
@@ -1468,7 +1487,7 @@ async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHook
     if any(c.tool == name for c in approved):
         # a person answered the approval of this call, whatever made governance ask (a
         # hook's own question, answered meanwhile, approves nothing)
-        steps.answered.add(call_id)
+        steps.approved(tool_use_id or given.get("tool_use_id"))
     if name in SUBAGENT_TOOLS:
         ran = await _briefed(runtime, call_id, name, decided.args)
         steps.started(call_id, name, ran)
@@ -1530,7 +1549,7 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 verdict = PermissionResultDeny(message=WAITING, interrupt=True)
         elif (
-            this in steps.answered
+            steps.carries(getattr(context, "tool_use_id", None))
             or (spec.side_effects == "read" and name not in CLAUDE_ASKS)
             or shell.read_only(name, args, moving=moving())
             or (name in CLAUDE_ASKS and await _catalog_allows(runtime, name, args))

@@ -221,6 +221,12 @@ def replaced(path: str, data: Any) -> None:
     os.replace(part, path)
 
 
+def named(tool_id: str) -> str | None:
+    """The call's id as a hook or a permission request carries it — none from a CLI (or a
+    relay) that leaves it out (``FAKE_CLAUDE_NO_CALL_IDS``)."""
+    return None if os.environ.get("FAKE_CLAUDE_NO_CALL_IDS") else tool_id
+
+
 def appended(path: str, data: Any) -> None:
     """``data`` (JSON) a line of ``path``, under a lock on it: the stand-in's processes that
     run at once (a matrix cell's runs) each write whole lines."""
@@ -606,10 +612,10 @@ class Cli:
                     "hook_event_name": "PreToolUse",
                     "tool_name": name,
                     "tool_input": args,
-                    "tool_use_id": tool_id,
+                    "tool_use_id": named(tool_id),
                     **self.working,
                 },
-                "tool_use_id": tool_id,
+                "tool_use_id": named(tool_id),
             }
         )
 
@@ -633,7 +639,7 @@ class Cli:
             "hook_event_name": event,
             "tool_name": name,
             "tool_input": args,
-            "tool_use_id": tool_id,
+            "tool_use_id": named(tool_id),
             **self.working,
         }
         if error is None:
@@ -650,7 +656,7 @@ class Cli:
                         "subtype": "hook_callback",
                         "callback_id": callback,
                         "input": given,
-                        "tool_use_id": tool_id,
+                        "tool_use_id": named(tool_id),
                     }
                 )
                 added = (answer.get("hookSpecificOutput") or {}).get("additionalContext")
@@ -757,7 +763,7 @@ class Cli:
                 "tool_name": name,
                 "input": args,
                 "permission_suggestions": suggested,
-                "tool_use_id": tool_id,
+                "tool_use_id": named(tool_id),
                 **{k: v for k, v in self.working.items() if k == "agent_id"},
             }
         )

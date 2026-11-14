@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -363,7 +364,7 @@ def _claude_runtime(gateway: Any) -> Any:
 def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     bifrost = Bifrost("http://bf/v1", "vk")
     given = {CUSTOM_HEADERS: "x-bf-prompt-id: p1\nx-bf-mcp-include-tools: all"}
-    env = routed_env(given, _claude_runtime(bifrost))
+    env = routed_env(given, _claude_runtime(bifrost), {})
     assert env is not None
     assert env["ANTHROPIC_BASE_URL"] == "http://bf/anthropic"
     assert env["ANTHROPIC_API_KEY"] == "vk"
@@ -372,10 +373,10 @@ def test_claude_is_routed_through_bifrosts_anthropic_route() -> None:
     assert "x-bf-mcp-include-tools: " in lines and "x-bf-mcp-include-tools: all" not in lines
     # the options' own endpoint (code over the environment): kept, with no Bifrost header
     theirs = {"ANTHROPIC_BASE_URL": "https://api.anthropic.com"}
-    assert routed_env(theirs, _claude_runtime(bifrost)) is None
-    own = routed_env({"ANTHROPIC_BASE_URL": "http://bf/anthropic"}, _claude_runtime(bifrost))
+    assert routed_env(theirs, _claude_runtime(bifrost), {}) is None
+    own = routed_env({"ANTHROPIC_BASE_URL": "http://bf/anthropic"}, _claude_runtime(bifrost), {})
     assert own is not None and "ANTHROPIC_API_KEY" not in own  # their key, from their env
-    assert routed_env({}, _claude_runtime(ProviderSDK())) is None  # the CLI's own key
+    assert routed_env({}, _claude_runtime(ProviderSDK()), {}) is None  # the CLI's own key
 
 
 async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> None:
@@ -392,6 +393,32 @@ async def test_a_claude_run_starts_its_cli_on_bifrosts_route(tmp_path: Any) -> N
     sent = json.loads(record.read_text())["custom_headers"].splitlines()
     # Bifrost's own headers, routed automatically: the deny-all MCP scope, whose run it is
     assert "x-bf-mcp-include-tools: " in sent and "x-bf-dim-agent: claude" in sent
+
+
+async def test_a_kept_claude_process_names_no_one_turns_run_to_the_gateway(tmp_path: Any) -> None:
+    """SEC: Claude Code reads its gateway headers once, as it starts. A conversation's process
+    serves many turns, so the headers it starts with name what holds for all of them — the
+    tenant, the agent, the user's hash — and no run or trace of the turn that started it: the
+    gateway would book every later turn's model calls to that first run. A run in a process
+    of its own names its run."""
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    from tests.support.adapters import CLI
+
+    record = tmp_path / "cli.json"
+    env = {"FAKE_CLAUDE_SCRIPT": json.dumps([{"text": "ok"}]), "FAKE_CLAUDE_RECORD": str(record)}
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    async with Harness(config=settings, gateway=FakeGateway().gateway()) as h:
+        agent = h.wrap(ClaudeAgentOptions(cli_path=CLI, env=env), id="claude")
+        for _ in range(2):
+            assert (await agent.run("x", user="ada", thread="t1")).answer == "ok"
+        alone = await agent.run("x", user="ada")
+    one, two, own = (json.loads(line) for line in Path(f"{record}.turns").read_text().splitlines())
+    assert one["pid"] == two["pid"] != own["pid"]
+    kept = dict(line.split(": ", 1) for line in two["custom_headers"].splitlines())
+    assert kept["x-bf-dim-agent"] == "claude" and "x-bf-dim-user" in kept
+    assert not {"x-bf-dim-run", "traceparent"} & set(kept)
+    assert f"x-bf-dim-run: {alone.run_id}" in own["custom_headers"].splitlines()
 
 
 @respx.mock

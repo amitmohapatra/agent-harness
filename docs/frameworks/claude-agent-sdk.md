@@ -8,7 +8,10 @@ gateway's MCP tools, memory's); your options object is never changed.
 drives. Through Bifrost: `env={"ANTHROPIC_BASE_URL": "<gateway>/anthropic",
 "ANTHROPIC_API_KEY": "<virtual key>"}` is set on the run's copy of the options by the harness
 when Bifrost is the route (`LLM_GATEWAY=bifrost`, its `Capability.ANTHROPIC_ROUTE`; unless your `env` names a base URL), with Bifrost's headers — the
-deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines.
+deny-all MCP scope, whose run it is — as `ANTHROPIC_CUSTOM_HEADERS` lines. Claude Code reads
+them once, as it starts: a conversation's kept process (below) serves many runs, so it names
+the tenant, the agent and the user's hash, and no run or trace; the run's own records say
+what each turn spent.
 
 This page is Way 1: the harness runs `query()`. To keep calling `query()` yourself and plug in
 the blocks (memory, `can_use_tool` from governance, the session as the run's checkpoint in

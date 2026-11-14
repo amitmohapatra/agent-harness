@@ -616,6 +616,36 @@ async def test_a_built_in_governance_asked_about_is_one_question_whatever_made_i
     assert ran == [("Bash", {"command": "make deploy -n"} if why == "rewritten" else command)]
 
 
+async def test_an_approval_is_carried_for_the_call_it_answered_and_no_other(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """SEC-R-7: a person's answer spares the call it answered Claude Code's own question, by
+    the call's id. From a CLI (or a relay) that names no id, nothing is carried: an approved
+    ``make deploy`` is no approval of the ``rm -rf build`` that follows, which a person is
+    asked about before it runs (the call it could not name is asked about again)."""
+    deploy, wipe = {"command": "make deploy"}, {"command": "rm -rf build"}
+    script = [{"builtin": "Bash", "args": deploy}, {"builtin": "Bash", "args": wipe}]
+
+    class Asking(Hooks):
+        async def before_tool(self, call: ToolCall) -> Ask | None:
+            return Ask("Deploy now?") if call.args == deploy else None
+
+    target = options(tmp_path, [*script, {"text": "{last}"}])
+    target.env["FAKE_CLAUDE_NO_CALL_IDS"] = "1"
+    agent = harness.wrap(target, id="carries", hooks=[Asking()])
+    asked = await agent.run("deploy, then clean", user="u1")
+    for _ in range(2):  # the hook's question, then Claude Code's own about the same call
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.error
+        assert asked.interrupt.tool_call is not None
+        if asked.interrupt.tool_call.args != deploy:
+            break
+        asked = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.answer
+    assert asked.interrupt.tool_call is not None and asked.interrupt.tool_call.args == wipe
+    ran = [(c["tool"], c["args"]) for c in lines(tmp_path / "builtins.jsonl")]
+    assert ran == [("Bash", deploy)]
+
+
 @pytest.mark.parametrize("path", PATHS)
 async def test_a_question_a_hook_asks_while_a_call_is_decided_is_no_approval_of_that_call(
     harness: Harness, tmp_path: Path, path: str

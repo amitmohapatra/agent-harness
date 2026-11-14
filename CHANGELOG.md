@@ -303,6 +303,12 @@ cancelled after its start (the task is cancelled with it). See
   run.
 - **At its turn limit a run ends `PARTIAL`** with what Claude said, as Claude Code ends the
   query (`error_max_turns`); the one more paid query for a last answer is gone.
+- **An approval is carried for the call it answered only** (SEC-R-7): with no call id from
+  the CLI the carry fell back to the tool's name, so one approved `Bash` let every later one
+  through unasked. Only a real id is carried, and it is dropped when the call ends.
+- **A conversation's kept process names no single run to the gateway**: it sent its first
+  turn's run id and `traceparent` with every later turn's model calls (booked to the wrong
+  run). It carries the dimensions that hold for all its turns.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.
