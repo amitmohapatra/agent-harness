@@ -28,7 +28,9 @@ came, ``ERROR`` when the run failed — except on a pause or a crash: the next a
 the helper again, ends it. One the framework runs in the background of the run (its call
 returned at once: :meth:`Helpers.attribute`) ends when the framework says its work ended
 (:meth:`Helpers.settled`), not with its call; still at work when the attempt ends, it was cut
-off: ``ERROR``, whatever the run answered.
+off: ``ERROR``, whatever the run answered. One handed on past the attempt
+(:meth:`Helpers.detached`: a Claude subagent in its session's background, a Deep Agents async
+task) is its keeper's to end (``bridges.claude_live``, ``bridges.async_tasks``).
 
 While a helper is open its run is held in the run store (``holding``), so a process killed
 with it leaves a run the store ends; a pause lets go of it there, as of its run (the helper
@@ -46,7 +48,7 @@ import contextlib
 import logging
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -89,6 +91,7 @@ class Kind(StrEnum):
     TASK = "task"  # Deep Agents' ``task`` tool
     AGENT_TOOL = "agent_tool"  # an OpenAI agent called as a tool (``Agent.as_tool``)
     SUBAGENT = "subagent"  # Claude's ``agents=`` (its ``Agent``/``Task`` tool)
+    ASYNC_TASK = "async_task"  # Deep Agents' ``start_async_task``: a task on a server of yours
 
 
 @dataclass
@@ -188,24 +191,49 @@ class Helpers:
         self.held: Helper | None = None
         runtime.helpers = self  # the adapter's hooks find the attempt's helpers here
 
-    async def start(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
+    async def start(
+        self,
+        key: str,
+        *,
+        kind: Kind,
+        name: str,
+        task: str,
+        run_id: str | None = None,
+        about: Mapping[str, str] | None = None,
+    ) -> Helper:
         """The helper ``key`` started on ``task``: its run record started (found again on a
         later attempt), its memory bound, and the memory context for its task fetched
-        (:meth:`briefed` hands it over). A key already open is that helper, and so is one
-        handed on (:meth:`detached`) and one being started (a framework that says a helper
-        started two ways — Claude's hook and its message — may say both before the run store
-        answered the first)."""
+        (:meth:`briefed` hands it over; not for an :attr:`Kind.ASYNC_TASK`, whose task goes
+        to its server as the framework sends it). A key already open is that helper, and so
+        is one handed on (:meth:`detached`) and one being started (a framework that says a
+        helper started two ways — Claude's hook and its message — may say both before the run
+        store answered the first). ``run_id``: its run's id, where whoever ends it derives it
+        (else derived from the run, the helper and its task); ``about``: more of what it is,
+        in its record's :data:`HELPER` metadata."""
         async with self._starting.setdefault(key, asyncio.Lock()):
-            return await self._started_as(key, kind=kind, name=name, task=task)
+            return await self._started_as(
+                key, kind=kind, name=name, task=task, run_id=run_id, about=about or {}
+            )
 
-    async def _started_as(self, key: str, *, kind: Kind, name: str, task: str) -> Helper:
+    async def _started_as(
+        self,
+        key: str,
+        *,
+        kind: Kind,
+        name: str,
+        task: str,
+        run_id: str | None,
+        about: Mapping[str, str],
+    ) -> Helper:
         found = self._open.get(key) or self._detached.get(key)
         if found is not None:
             return found
         parent = self.runtime
         occurrence = self._started[(name, task)]
         self._started[(name, task)] += 1
-        run_id = stable_id(parent.run_id, HELPER, kind, name, task, occurrence, prefix="run_")
+        run_id = run_id or stable_id(
+            parent.run_id, HELPER, kind, name, task, occurrence, prefix="run_"
+        )
         await parent.agent.harness.runs.start(
             RunStart(
                 run_id=run_id,
@@ -221,7 +249,7 @@ class Helpers:
                 # process that died, its work gone with it)
                 deadline=parent.deadline,
                 metadata={
-                    HELPER: {"framework": self.framework, "kind": kind, "name": name},
+                    HELPER: {"framework": self.framework, "kind": kind, "name": name, **about},
                     AGENT_GROUP: parent.identity.own_group,
                 },
             )
@@ -231,7 +259,8 @@ class Helpers:
         if kind is Kind.SUBAGENT:  # its framework starts it again after a pause in its work
             helper.read = parent.replay.cursor()
         helper.memory = self._memory(run_id)
-        helper.context = await self._pushed(helper, task)
+        if kind is not Kind.ASYNC_TASK:
+            helper.context = await self._pushed(helper, task)
         self._open[key] = helper
         parent.events.helper(
             "started", run_id=run_id, agent_id=name, framework=self.framework, kind=kind.value
@@ -346,25 +375,42 @@ class Helpers:
             await self.end(key, output=said or None)
 
     async def end(self, key: str, *, output: str | None = None, error: str | None = None) -> None:
-        """The helper ``key`` ended with ``output``, or failed (``error``): its run record
-        ended, its turns recorded. A key not open (ended already) is no change, and so is
-        any while the run is pausing (a framework that hid the pause in a tool's result still
-        hands back): the next attempt takes the helper up again."""
+        """The helper ``key`` ended with ``output``, or failed (``error``): :meth:`finished`.
+        A key not open (ended already) is no change, and so is any while the run is pausing (a
+        framework that hid the pause in a tool's result still hands back): the next attempt
+        takes the helper up again."""
         if self.runtime.pending is not None:
             return
         helper = self._open.pop(key, None)
-        if helper is None:
-            return
+        if helper is not None:
+            await self.finished(helper, output=output, error=error)
+
+    async def finished(
+        self,
+        helper: Helper,
+        *,
+        output: str | None = None,
+        error: str | None = None,
+        cancelled: bool = False,
+    ) -> None:
+        """``helper`` ended with ``output``, or failed (``error``; ``cancelled``: was stopped,
+        ``error`` saying how): its run record ended, no longer held, its end on this attempt's
+        stream, its turns recorded — one of this attempt's, or one handed on past an earlier
+        attempt that this attempt learned the end of (``bridges.async_tasks``)."""
         self.runtime.agent.harness.holds.let_go(helper.run_id)
         if output:
             helper.said.append(Said(Speaker.ASSISTANT, output))
         runs = self.runtime.agent.harness.runs
         record = await runs.get(helper.run_id, tenant=self.runtime.tenant)
+        status = RunStatus.SUCCESS if error is None else RunStatus.ERROR
+        status = RunStatus.CANCELLED if cancelled else status
         # a helper a re-run took up again after it ended (before a crash) is ended already
-        if record is not None and not record.status.final:
+        if record is not None and not record.status.final and cancelled:
+            await runs.cancel(helper.run_id, reason=error, tenant=self.runtime.tenant)
+        elif record is not None and not record.status.final:
             await runs.finish(
                 helper.run_id,
-                RunStatus.SUCCESS if error is None else RunStatus.ERROR,
+                status,
                 output=output,
                 error=None if error is None else AgentError(code=UNFINISHED, message=error),
                 tenant=self.runtime.tenant,
@@ -374,7 +420,7 @@ class Helpers:
             run_id=helper.run_id,
             agent_id=helper.name,
             framework=self.framework,
-            status=(RunStatus.SUCCESS if error is None else RunStatus.ERROR).value.lower(),
+            status=status.value.lower(),
             seconds=round(time.monotonic() - helper.began, 3),
         )
         await self._recorded(helper)

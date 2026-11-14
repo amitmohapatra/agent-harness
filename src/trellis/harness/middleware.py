@@ -463,6 +463,10 @@ async def governed_call(
             failure = ToolError(text_of(done.content), source="tools")
             reported[:] = [(done, failure)]
             raise failure
+        tasks = getattr(runtime.agent.adapter, "tasks", None)
+        if tasks is not None and call["name"] in ASYNC_TASKS and framework_made(own):
+            # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
+            await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))

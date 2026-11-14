@@ -68,7 +68,6 @@ from trellis.runs import ConflictError
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
     from trellis.harness.budget import Budget
-    from trellis.harness.runs import RunStore
 
 #: The key of a parent's interrupt payload naming the child that asked:
 #: ``{"agent_id", "run_id", "interrupt_id"}``.
@@ -300,15 +299,21 @@ def asked_by(interrupt: Interrupt) -> dict[str, Any] | None:
     return named if isinstance(named, dict) else None
 
 
-async def cancel_children(runs: RunStore, run_id: str, *, reason: str | None, tenant: str) -> None:
-    """Cancel the children of ``run_id`` that have not ended, and theirs: a child paused for a
-    person waits on nobody once its parent is cancelled."""
+async def cancel_children(agent: Agent, run_id: str, *, reason: str | None, tenant: str) -> None:
+    """Cancel the children of ``agent``'s run ``run_id`` that have not ended, and theirs: a
+    child paused for a person waits on nobody once its parent is cancelled, and the work its
+    framework keeps going for one outside any attempt stops (``Adapter.stopped``: a Deep Agents
+    async task, ``bridges.async_tasks``)."""
+    runs = agent.harness.runs
+    stop = getattr(agent.adapter, "stopped", None)
     async for child in runs.iterate(parent_run_id=run_id, tenant=tenant):
         if child.status.final:
             continue
         with contextlib.suppress(ConflictError):  # it ended meanwhile
             await runs.cancel(child.run_id, reason=reason, tenant=tenant)
-        await cancel_children(runs, child.run_id, reason=reason, tenant=tenant)
+        if stop is not None:
+            await stop(child.run_id, reason)
+        await cancel_children(agent, child.run_id, reason=reason, tenant=tenant)
 
 
 async def _side_effects(agent: Agent) -> SideEffects:

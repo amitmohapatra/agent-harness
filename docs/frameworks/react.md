@@ -530,11 +530,28 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
 * **Approvals** — a check or the list is a read; a start, an update and a cancel are writes of
   Deep Agents' own tools, announced on the stream and not asked about. To have a person
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Its own run** — each task is a child run of the turn that started it, as a `task`
+  sub-agent is ([above](#sub-agents-and-child-runs)), and outlives that turn as the task does: its input
+  the task's text, its metadata (`native_helper`) the task's id, the server's `url` and the
+  `graph_id` (never your `headers`), `helper_started` on the turn's stream. While the task
+  runs, the run is `RUNNING` and held in the run store from the server that started it: a
+  server that dies leaves a run the store ends (cut off), and nothing asks the task's server
+  how it goes meanwhile. It ends when Deep Agents' own tools learn how the task ended — a
+  later `check_async_task` or `list_async_tasks` that reads its final status, or the model's
+  `cancel_async_task`: `SUCCESS` with the task's result, `ERROR` saying why it failed,
+  `CANCELLED` — with `helper_finished` on the stream of the turn that learned it, on any
+  server that shares the run store.
+* **Cancelled with its turn** — a turn that is cancelled (while it works, or where it waits
+  for an approval, or taken over by a newer message: `mode="interrupt"`) cancels the tasks it
+  started, as a cancelled run's other children are: on their server, through Deep Agents'
+  own `cancel_async_task` (the Agent Protocol's cancel of the task's run of now), and their
+  runs end `CANCELLED`. A server that refuses the cancel is said in the log. The task stays in
+  the list, cancelled. A task a turn did not start (one of an earlier turn) goes on.
 * **Across turns** — Deep Agents keeps its list of tasks in the graph's state, and a `ReAct`
   graph's state is its run's, so the harness carries that list from a conversation's turn to
   its next one: per user, thread and agent, a cancelled turn's too, and that of a turn that
-  waits for an approval (the task it started is listed meanwhile, and still is when the turn
-  is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
+  waits for an approval (the task it started is listed meanwhile, and still is, cancelled,
+  when the turn is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
   running while another ends, two ending at once) each keep the tasks they started. A graph with a checkpointer
   of its own (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the
   list in its thread instead, and it lasts as that checkpointer does.
@@ -562,9 +579,11 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   nor a checkpointer keeps no state between turns; its list is carried too, read from the
   state each turn ends with — so a turn cancelled or failed after a start leaves that task
   out of the list (with `middleware()` each step is kept, and it is in).
-* **What still does not hold** — nothing tells the chat when a task ends; cancelling a turn
-  does not cancel its task (the next turn can); and when two overlapping turns both change
-  the same task, the record of the turn that ends last is the one kept.
+* **What still does not hold** — nothing tells the chat when a task ends (its run ends when a
+  later turn checks); a worker's turn cancelled from another server (agent-runs' cancel) ends
+  the task's run, not the task on its server; and
+  when two overlapping turns both change the same task, the record of the turn that ends last
+  is the one kept.
 
 ## Where sandbox, skills and hooks go
 
