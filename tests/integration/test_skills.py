@@ -215,6 +215,31 @@ async def test_a_deep_agent_of_your_own_takes_a_sandbox_and_skills_in_one_backen
     result = await harness.wrap(graph, id="deep").run("go", user="ada")
     assert result.answer == "both", result.error
     assert "Check every JOIN." in tool_said(model) and provider.commands == ["echo ran"]
+
+
+async def test_a_sandboxs_files_are_governed_beside_the_skills_route(harness: Harness) -> None:
+    """SEC: the documented recipe, a sandbox and the run's skills in one backend. The skills
+    route is read as the graph's own (no call of the run); a file written to the sandbox is a
+    write of the run, governed and recorded, as on the sandbox alone."""
+    provider = FakeSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("read_file", {"file_path": SKILL, "limit": 1000}),
+            ("write_file", {"file_path": "/work/out.md", "content": "made"}),
+            ("execute", {"command": "echo ran"}),
+            "both",
+        ]
+    )
+    src = skills.combine(store_with())
+    graph = create_deep_agent(model=model, **deep_agent(sandbox(provider), src))
+    events = [e async for e in harness.wrap(graph, id="deep").stream("go", user="ada")]
+    assert events[-1].data["result"] == "both"
+    ended = [
+        (e.data["tool"], e.data["status"])
+        for e in events
+        if e.type is RunEventType.TOOL_CALL_RESULT
+    ]
+    assert ended == [("write_file", "ok"), ("execute", "ok")]
     only = create_deep_agent(model=read_skill(), **src.deep_agent())
     assert (await harness.wrap(only, id="deep-skills").run("go", user="ada")).answer
 

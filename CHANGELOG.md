@@ -15,6 +15,30 @@ shape) given to the conversation's model at its next model call or turn, or by a
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
 
+### Fixed: LangChain, LangGraph and Deep Agents features through the harness
+
+A library's feature works as the library does it; the harness governs, records and counts it.
+
+- **Security.** Deep Agents' file tools on a `CompositeBackend` are governed call by call, by
+  where the path is routed: a write or read on a disk, store or sandbox route is a call of the
+  run (the catalog's rules, approvals, records) though another route keeps files in the graph's
+  state. Before, one state route — the run's skills beside a sandbox,
+  `create_deep_agent(**deep_agent(sandbox(), src))` — left every route ungoverned and unrecorded.
+- A graph's stream passes its stream transformers (`astream_events(version="v3")`):
+  `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
+- A graph's own tool call ends with the message its tool made: artifacts and content blocks
+  are kept (a replay after a pause included). Without `middleware()`, results are the
+  library's as returned (no large-result or table rewriting), and a call made twice in one
+  step runs twice; the harness's own tools are unchanged.
+- No false `NO_ANSWER`: a `return_direct` tool's result, a non-conversation state, a Pydantic
+  or dataclass state and an `@entrypoint`'s return value are the answer; a string input goes
+  as it is to a graph whose input schema takes a string.
+- `HumanInTheLoopMiddleware(interrupt_mode="per_call")` is an approval of its call; the gate's
+  decision is governance's too (one question a call); an edit of a batch of several calls is
+  refused unless it gives one decision for each. `interrupt(response_schema=...)` is the
+  question's `expects`.
+- A middleware with only sync hooks runs; a model called in a sync node is watched for stalls.
+
 ### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
 
 - Deep Agents reads its async tasks' statuses itself and adds each outcome as a notification:

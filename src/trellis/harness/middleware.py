@@ -253,9 +253,11 @@ OUTSIDE_STATE: Final = "trellis_outside_state"
 FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
 FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
 FILE_TOOLS: Final = FILE_READS | FILE_WRITES
-#: The graph state channel Deep Agents keeps its files in: a graph has it when its file tools'
-#: backend keeps files in the graph's state (``StateBackend``, alone or a route of a composite).
-FILES_CHANNEL: Final = "files"
+#: The metadata key holding the backend of a Deep Agents file tool that keeps some paths in
+#: the graph's state and others outside it (a ``CompositeBackend``: a state route beside a
+#: disk, a store or a sandbox — the run's skills beside a sandbox): each call is the graph's
+#: scratch or a governed call of the run by where its path lands (:func:`in_state`).
+ROUTED: Final = "trellis_routed_backend"
 
 
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
@@ -297,12 +299,103 @@ def outside_state(name: str) -> dict[str, Any]:
     return {OUTSIDE_STATE: True, "side_effects": "read" if name in FILE_READS else "write"}
 
 
+def files_backend(tool: Any) -> Any | None:
+    """The backend of a Deep Agents file tool, as the ``FilesystemMiddleware`` that made it
+    holds it (the tool's code closes over its middleware); ``None`` when it cannot be read: a
+    tool of another middleware, a release laid out otherwise, or a backend made per call (a
+    factory)."""
+    from deepagents.backends.protocol import BackendProtocol  # noqa: PLC0415 - an extra
+    from deepagents.middleware.filesystem import FilesystemMiddleware  # noqa: PLC0415
+
+    for code in (getattr(tool, "coroutine", None), getattr(tool, "func", None)):
+        for cell in getattr(code, "__closure__", None) or ():
+            try:
+                held = cell.cell_contents
+            except ValueError:  # an empty cell
+                continue
+            if isinstance(held, FilesystemMiddleware):
+                backend = held.backend
+                return backend if isinstance(backend, BackendProtocol) else None
+    return None
+
+
+def _all_state(backend: Any) -> bool:
+    """Whether every file of ``backend`` is kept in the graph's state: a ``StateBackend``, or
+    a composite of nothing else."""
+    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+
+    if isinstance(backend, CompositeBackend):
+        return all(_all_state(b) for b in (backend.default, *backend.routes.values()))
+    return isinstance(backend, StateBackend)
+
+
+def in_state(backend: Any, args: Mapping[str, Any]) -> bool:
+    """Whether a Deep Agents file call with ``args`` only touches the graph's state on
+    ``backend``: its path (``file_path``, else ``path``, else the root, as the tools default)
+    is routed to a state backend as Deep Agents routes it, and no route outside the state lies
+    under it — a listing or a search from a folder reads the routes below it too. A path
+    Deep Agents would refuse, or anything that cannot be decided, is not: the call is then
+    governed (it fails closed)."""
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
+    from deepagents.backends.composite import _route_for_path  # noqa: PLC0415
+    from deepagents.backends.utils import validate_path  # noqa: PLC0415
+
+    given = args.get("file_path") or args.get("path") or "/"
+    try:
+        path = validate_path(given)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(backend, CompositeBackend):
+        return _all_state(backend)
+    under = path if path.endswith("/") else f"{path}/"
+    below = [b for prefix, b in backend.sorted_routes if prefix.startswith(under)]
+    if not all(_all_state(b) for b in below):
+        return False
+    routed, routed_path, _ = _route_for_path(
+        default=backend.default, sorted_routes=backend.sorted_routes, path=path
+    )
+    return in_state(routed, {"path": routed_path})
+
+
+def _file_marks(tool: Any, name: str) -> dict[str, Any]:
+    """What a Deep Agents file tool ``name`` is marked with, by where its backend keeps files
+    (:func:`files_backend`): nothing when all of them are the graph's state (its calls only
+    change the state, which the checkpoint keeps); :func:`outside_state` when none is, or when
+    the backend cannot be read (governed: it fails closed); and with the backend to decide
+    each call by (:data:`ROUTED`) when some are."""
+    backend = files_backend(tool)
+    if backend is not None and _all_state(backend):
+        return {}
+    routed = backend is not None and _routes_some_to_state(backend)
+    return {**outside_state(name), **({ROUTED: backend} if routed else {})}
+
+
+def _routes_some_to_state(backend: Any) -> bool:
+    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+
+    if isinstance(backend, CompositeBackend):
+        return any(_routes_some_to_state(b) for b in (backend.default, *backend.routes.values()))
+    return isinstance(backend, StateBackend)
+
+
+def scratch(tool: Any, call: Mapping[str, Any]) -> bool:
+    """Whether ``call`` of a state tool (:data:`STATE_TOOLS`, the framework's) only changes
+    the graph's own state: its tool is not marked :data:`OUTSIDE_STATE`, or — a backend that
+    routes some paths to the state (:data:`ROUTED`) — this call's path is one of them."""
+    marks = tool.metadata or {}
+    if not marks.get(OUTSIDE_STATE):
+        return True
+    backend = marks.get(ROUTED)
+    return backend is not None and in_state(backend, call.get("args") or {})
+
+
 def declare_files(graph: Any) -> None:
     """Deep Agents' file tools of ``graph`` and of its ``task`` sub-agents' graphs, marked
-    :func:`outside_state` in each graph whose files are not its state (no
-    :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
-    ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
-    is: those calls only change the state, which its checkpoint keeps. Deep Agents'
+    :func:`outside_state` wherever their backend keeps files outside the graph's state (a
+    disk, a store, a sandbox — alone, or a route of a composite beside a state route:
+    :func:`_file_marks`), so those calls are governed as any tool's — as ``ReAct(backend=)``
+    marks its own. A tool whose files are all the graph's state is left as it is: its calls
+    only change the state, which the checkpoint keeps. Deep Agents'
     :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
     (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
     :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
@@ -320,7 +413,6 @@ def declare_files(graph: Any) -> None:
         if id(found) in seen:
             continue
         seen.add(id(found))
-        outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
         for tool in bound_tools(found):
             name = getattr(tool, "name", None)
             said = tool.metadata or {}
@@ -328,8 +420,8 @@ def declare_files(graph: Any) -> None:
                 pending.extend(subagent_graphs(tool))
             elif not framework_made(tool):
                 continue
-            elif outside and name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
-                tool.metadata = {**said, **outside_state(name)}
+            elif name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
+                tool.metadata = {**said, **_file_marks(tool, name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
             elif name in ASYNC_TASKS and "side_effects" not in said:
@@ -446,8 +538,7 @@ async def governed_call(
     own = request.tool
     if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
-    state_only = call["name"] in STATE_TOOLS and framework_made(own)
-    if state_only and not (own.metadata or {}).get(OUTSIDE_STATE):
+    if call["name"] in STATE_TOOLS and framework_made(own) and scratch(own, call):
         return _scratch_said(runtime, call["name"], await handler(request))
     if converted.made(own) or call["name"] in runtime.toolbox:
         # the harness's own: its call goes through the bridge, a repeat of its step's too
