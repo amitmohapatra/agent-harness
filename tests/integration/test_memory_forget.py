@@ -84,11 +84,12 @@ async def test_what_the_agent_wrote_is_forgotten_at_once(
     assert memory_service.named("forget") == []
 
 
-@pytest.mark.parametrize("reason", ["not_owner", None])
+@pytest.mark.parametrize("reason", ["not_owner", "users_own_statement", None])
 async def test_another_refusal_is_the_models_to_read(
     memory_harness: Harness, memory_service: FakeMemoryService, reason: str | None
 ) -> None:
-    """Only the user's own statement is asked about: any other refusal is an error as before."""
+    """Only the user's own statement is asked about: any other refusal is an error as before,
+    as is one that names no statement."""
     memory_service.forget_refusal = reason or "plain"
     model = ScriptedChat([("memory_forget", {"id": "mem_x"}), "Could not."])
     agent = memory_harness.wrap(ReAct(system_prompt="s", model=model), id="forget")
@@ -96,6 +97,8 @@ async def test_another_refusal_is_the_models_to_read(
     assert result.status is RunStatus.SUCCESS, result.error
     assert memory_service.named("forget") == []
     assert "Approve" not in str(model.requests[-1]["messages"])
+    told = str(model.requests[-1]["messages"][-1]["content"])
+    assert told == "memory_forget failed: scope_denied (the fake memory service)"  # its refusal
 
 
 async def test_the_tool_says_what_it_does_with_the_users_words(

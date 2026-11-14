@@ -71,6 +71,12 @@ async def test_a_structured_question_renders_and_reads_back(
         assert entry["metadata"]["component"] == "ask_user"
         assert entry["metadata"]["props"] == {"kind": kind, "options": []}
         assert entry["responseSchema"] == EXPECTS[kind]  # a structured value, or text
+        widgets = {
+            "date": {"ui:widget": "date"},
+            "date_range": {"start": {"ui:widget": "date"}, "end": {"ui:widget": "date"}},
+            "number": {"ui:widget": "updown"},
+        }
+        assert entry["metadata"]["ui_schema"] == widgets[kind]  # the form's widget hints
         resume = [{"interruptId": entry["id"], "payload": answer}]
         done = (await post(http, {"resume": resume}))[-1]
     assert done["outcome"] == {"type": "success"}
@@ -223,7 +229,10 @@ async def test_a_call_replayed_on_resume_is_counted_once(harness: Harness) -> No
     counted = [
         e["content"]["tools"] for e in [*first, *resumed] if e["type"] == "ACTIVITY_SNAPSHOT"
     ]
-    assert counted == [1, 1]  # the replayed lookup has the same id: the line says 1 again
+    # the replayed lookup is not announced again (SCN-3), so no line follows it: the one the
+    # first attempt sent (1 tool, under the run's one activity id) stands
+    assert counted == [1]
+    assert not [e for e in resumed if e["type"] == "TOOL_CALL_START"]
 
 
 # --------------------------------------------------------------------------- offered by itself
@@ -508,3 +517,24 @@ def test_a_forms_field_with_several_picks_is_an_array_of_its_options() -> None:
     }
     both = regions.model_copy(update={"default": ["north", "west"]})
     assert both.line("Regions") == "Regions (north or west): north, west"
+
+
+def test_the_sandbox_deep_agents_and_claude_shells_each_ran_a_command() -> None:
+    from trellis.contracts import AgentExecutionContext, RunEvent, RunEventType
+    from trellis.harness.agui.activity import Activity
+
+    context = AgentExecutionContext.create(tenant_id="t", agent_id="a", agent_run_id="run_1")
+    line = Activity()
+    said = []
+    for n, tool_name in enumerate(("sandbox_exec", "execute", "Bash", "lookup")):
+        ended = RunEvent.of(
+            context,
+            RunEventType.TOOL_CALL_RESULT,
+            0,
+            tool_call_id=f"c{n}",
+            data={"tool": tool_name},
+        )
+        event = line.seen(ended)
+        assert event is not None
+        said.append(event.content["summary"])  # type: ignore[index]
+    assert said[-1] == "used 1 tool · ran 3 commands"

@@ -127,10 +127,11 @@ def data_of_listed(listed: Any) -> dict[str, Any]:
 
 
 def _hint(annotations: Any, attribute: str, key: str, *, default: bool) -> bool:
-    """An annotation's hint: an SDK object's attribute, or a mapping's key (the wire's name);
-    the protocol's ``default`` where the tool does not give it."""
+    """An annotation's hint: an SDK object's attribute, or a mapping's key (the wire's name,
+    else the attribute's: a model dumped without its aliases); the protocol's ``default``
+    where the tool does not give it."""
     if isinstance(annotations, Mapping):
-        found = annotations.get(key)
+        found = annotations.get(key, annotations.get(attribute))
     else:
         found = getattr(annotations, attribute, None)
     return default if found is None else bool(found)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, cast
@@ -39,8 +40,6 @@ from trellis.harness.governance import Governance, governed
 from trellis.harness.governance.catalog import Rule
 from trellis.harness.runs import LocalRuns
 from trellis.harness.sandbox import (
-    READ_BYTES,
-    REAP_SECONDS,
     DockerSandbox,
     ExecResult,
     SandboxRef,
@@ -149,6 +148,34 @@ async def test_a_file_a_command_leaves_at_any_depth_is_known_to_be_the_users_or_
         assert "not given to the user" not in told
     else:
         assert beside in told, told
+
+
+async def test_twenty_new_files_beside_the_folder_are_named_and_the_rest_counted(
+    harness: Harness,
+) -> None:
+    """One command leaves new files beside the kept folder: up to 20 are named, with no
+    count; past 20, the first 20 and how many more."""
+    from langchain_core.messages import ToolMessage
+
+    from tests.support.chat_model import ScriptedChatModel
+    from trellis.harness.sandbox import OUTPUTS_BESIDE
+
+    twenty = [f"a{n:02}.csv" for n in range(20)]
+    more = [f"b{n:02}.csv" for n in range(21)]
+    steps = [
+        ("execute", {"command": "echo first"}),
+        ("execute", {"command": "touch " + " ".join(twenty)}),
+        ("execute", {"command": "touch " + " ".join(more)}),
+        "done",
+    ]
+    model = ScriptedChatModel(turns=steps)
+    agent = arm(harness.wrap(ReAct("s", model, backend=sandbox(FakeSandboxes())), id="many"), [])
+    assert (await agent.run("make the files", user="u")).answer == "done"
+    told = [m.text for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    folder = "/workspace/outputs"
+    assert OUTPUTS_BESIDE.format(folder=folder, files=", ".join(twenty)) in told[1], told[1]
+    named = ", ".join(more[:20]) + " and 1 more"
+    assert OUTPUTS_BESIDE.format(folder=folder, files=named) in told[2], told[2]
 
 
 async def test_a_function_targets_own_sandbox_is_its_runs_and_deleted_at_the_end(
@@ -456,12 +483,15 @@ async def test_a_run_that_fails_times_out_or_is_cancelled_deletes_its_sandbox(
     [run_id] = list(agent.running)
     await agent.cancel(run_id, reason="not needed")
     assert (await running).status is RunStatus.CANCELLED
-    stream = agent.stream("wait", user="u")
+    stream, streamed = agent.stream("wait", user="u"), ""
     async for event in stream:
         if event.type is RunEventType.TOOL_CALL_RESULT:
+            streamed = event.run_id
             break
     await stream.aclose()  # the caller went away: the run ends CANCELLED
-    await asyncio.sleep(0.05)
+    async with asyncio.timeout(10):  # its attempt ends after the stream did, however slowly
+        while streamed in agent.running:  # noqa: ASYNC110 - the attempt's task is the run's own
+            await asyncio.sleep(0.01)
     asked = arm(harness.wrap(_asking, id="asker"), [sandbox(provider).tools()])
     for decided in ("cancel", "resume"):
         waiting = await asked.run("x", user="u")  # paused: no attempt ends it when cancelled
@@ -519,6 +549,35 @@ class Retrying(LocalRuns):
         return await super().finish(run_id, status, error=error, worker_id=worker_id, **fields)
 
 
+async def test_a_sandbox_its_runs_end_and_the_reaper_delete_at_once_is_deleted_once(
+    harness: Harness,
+) -> None:
+    """The reaper (in the background, when a process makes a sandbox) lists a sandbox whose
+    run has just ended in this process while that run's end deletes it: one of them deletes
+    it, the other passes it over — never two deletes of one sandbox at once (a provider may
+    refuse the second, which would stop the reaper's round and log the run's end as not
+    deleted)."""
+
+    async def work(input: str, agent: Runtime) -> Any:
+        return "done"
+
+    provider = FakeSandboxes()
+    agent = arm(harness.wrap(work, id="ended"), [sandbox(provider).tools()])
+    ended_run = await agent.run("x", user="u")
+    ref = SandboxRef(
+        provider="fake",
+        id=f"trellis-{ended_run.run_id}",
+        labels={RUN: ended_run.run_id, TENANT: "default"},
+    )
+    await provider.create(ref, SandboxSpec())  # its run ends now, its sandbox not deleted yet
+    await asyncio.gather(
+        reap(provider, harness.runs, tenant="default"),
+        ended(agent, ref.model_dump(), ended_run.run_id),
+    )
+    assert [c for c in provider.calls if c == ("delete", ref.id)] == [("delete", ref.id)]
+    assert provider.boxes == {}
+
+
 async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
     harness: Harness,
 ) -> None:
@@ -540,7 +599,7 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
     deleted = await reap(provider, harness.runs, tenant="default")
     assert [r.id for r in deleted] == ["left"]  # a paused run's, an unknown run's: left alone
     assert sorted(provider.boxes) == sorted(["unknown", "other", f"trellis-{waiting.run_id}"])
-    # a process reaps in the background when it makes a sandbox: once, then every REAP_SECONDS
+    # a process reaps in the background when it makes a sandbox: once, then every 10 minutes
     again = FakeSandboxes()
     source = sandbox(again)
     late = arm(harness.wrap(work, id="late"), [source.tools()])
@@ -549,7 +608,13 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
         await late.run("x", user="u")
         await harness.writes.drain()
     assert sorted(again.boxes) == ["left"]  # reaped the first time, not the second
-    source._reaped["default"] -= REAP_SECONDS
+    # within 10 minutes of the last (a minute to spare for this test's own time): not again
+    source._reaped["default"] = time.monotonic() - 540
+    await again.create(left, SandboxSpec())
+    await late.run("x", user="u")
+    await harness.writes.drain()
+    assert sorted(again.boxes) == ["left"]
+    source._reaped["default"] = time.monotonic() - 600
     await late.run("x", user="u")
     await harness.writes.drain()
     assert again.boxes == {}
@@ -558,6 +623,21 @@ async def test_the_reaper_deletes_what_ended_runs_left_and_nothing_else(
 async def _asking(input: str, agent: Runtime) -> Any:
     await agent.tools.call("sandbox_exec", command="echo hi")
     return await agent.ask("Go on?")
+
+
+def test_a_sandbox_name_is_at_most_63_characters_else_the_run_ids_digest() -> None:
+    from types import SimpleNamespace
+
+    from trellis.harness.sandbox import ref_of
+
+    def named(run_id: str) -> str:
+        run: Any = SimpleNamespace(run_id=run_id, tenant="t", agent_id="a")
+        return ref_of(run, "fake").id
+
+    assert named("r" * 55) == "trellis-" + "r" * 55  # 63 characters: the run's own id
+    longer = named("r" * 56)
+    assert longer.startswith("trellis-") and "r" * 56 not in longer and len(longer) <= 63
+    assert named("r/1") != "trellis-r/1"  # not a name every provider takes: its digest too
 
 
 def test_without_a_provider_a_sandbox_is_dockers_of_the_image_given() -> None:
@@ -574,14 +654,21 @@ async def test_a_large_file_is_read_in_parts_and_a_sandbox_of_another_provider_i
     harness: Harness,
 ) -> None:
     provider = FakeSandboxes()
-    source = sandbox(provider, spec=SandboxSpec(files={"big.txt": "x" * (READ_BYTES + 1)}))
+    files: dict[str, str | bytes] = {
+        "big.txt": "x" * (256 * 1024 + 1),
+        "fits.txt": "y" * (256 * 1024),
+    }
+    source = sandbox(provider, spec=SandboxSpec(files=files))
 
     async def reads(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("sandbox_read", path="big.txt")
+        return await agent.tools.call("sandbox_read", path=input)
 
-    big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("x", user="u")
+    fits = await arm(harness.wrap(reads, id="fits"), [source.tools()]).run("fits.txt", user="u")
+    assert fits.answer == "y" * (256 * 1024)  # 256 KiB: read at once
+
+    big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("big.txt", user="u")
     assert big.answer == (
-        f"sandbox_read failed: big.txt is {READ_BYTES + 1} bytes, more than the {READ_BYTES} "
+        "sandbox_read failed: big.txt is 262145 bytes, more than the 262144 "
         "read at once: read a part of it with sandbox_exec (head -c, tail -c, sed -n)"
     )
     agent = arm(harness.wrap(_asking, id="moved"), [source.tools()])
@@ -715,6 +802,9 @@ async def test_the_card_says_what_it_can_and_a_probe_that_fails_leaves_the_tool_
     card = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
     assert card.startswith("Its environment: Python 3.13.1; installed: p000 1, p001 1")
     assert card.endswith("p079 1 and 5 more.")  # no network sentence: it has one
+    open_box.environment = "3.13.1\n" + " ".join(f"p{n:03}==1" for n in range(80))
+    eighty = await sandbox(open_box, spec=SandboxSpec(network="open")).card()
+    assert eighty.endswith("p079 1.")  # 80: each named, no count
     bare = FakeSandboxes()
     bare.environment = "3.12.7"
     assert await sandbox(bare).card() == (
@@ -741,8 +831,9 @@ async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On success each file directly in outputs/ goes to the file store (named in the journal,
-    announced); one it cannot keep is a warning; a run that fails keeps none."""
-    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 8)
+    announced), one of exactly the most kept too; one it cannot keep is a warning; a run that
+    fails keeps none."""
+    monkeypatch.setattr(trellis.harness.sandbox, "OUTPUT_MAX_BYTES", 4)  # report.csv's size
     harness = Harness(config=Settings(files_url=f"memory://outputs-{id(object())}"))
     provider = FakeSandboxes()
     box = sandbox(provider)
@@ -769,7 +860,7 @@ async def test_what_the_runs_code_writes_in_outputs_is_kept_for_its_user(
     ]
     warned = sorted(w["message"] for w in custom(events, "warning") if w["code"] == "sandbox")
     assert warned[0].startswith("the output a b.csv was not kept: 'a b.csv' is not a file")
-    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 8 kept"
+    assert warned[1] == "the output big.csv was not kept: 9 bytes, past the 4 kept"
     folder = runtime.files_folder()
     assert await harness.files.size(folder, "report.csv") == 4
     assert provider.calls[-1][0] == "delete"  # kept before the sandbox went

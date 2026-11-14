@@ -1,12 +1,15 @@
 """Framework detection: the target's type picks its adapter.
 
 Checked by the class's module before anything is imported, so wrapping a plain function
-never imports a framework, and wrapping a LangGraph graph never imports the OpenAI SDK.
+never imports a framework, and wrapping a LangGraph graph never imports the OpenAI SDK. An
+OpenAI Agents ``Agent`` is told by its type wherever its class is defined (a subclass in your
+own module): the SDK is imported already when one exists.
 """
 
 from __future__ import annotations
 
 import inspect
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -27,11 +30,17 @@ def detect(target: Any) -> Adapter:
 
         if isinstance(target, Pregel):
             return LangGraphAdapter(target)
-    if module.startswith("agents."):
-        from agents import Agent
-
-        if isinstance(target, Agent):
-            return OpenAIAgentsAdapter()
+    sdk = sys.modules.get("agents")  # imported wherever an Agent, or a subclass of it, exists
+    agent = getattr(sdk, "Agent", None)
+    if isinstance(agent, type) and isinstance(target, agent):
+        return OpenAIAgentsAdapter(target)
+    if module.startswith(("agents.realtime.", "agents.voice.")):
+        raise ConfigurationError(
+            f"cannot wrap {type(target).__name__}: the OpenAI Agents SDK runs it over a live "
+            "audio or realtime session of its own (RealtimeRunner, VoicePipeline), not "
+            "Runner.run, so the harness cannot run it. Keep running it yourself and plug the "
+            "blocks in (docs/blocks/openai-agents.md), or wrap the Agent its workflow runs"
+        )
     if module.startswith("claude_agent_sdk."):
         from claude_agent_sdk import ClaudeAgentOptions
 

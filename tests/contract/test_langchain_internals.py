@@ -10,7 +10,9 @@ deployment (the harness then warns and runs the graph un-narrowed, ``middleware.
   latest checkpoint), Deep Agents' ``messages`` and ``files`` kept so;
 * Deep Agents' summarization named ``SummarizationMiddleware`` (``ReAct`` stands one in for it,
   and places it after the harness's narrowing: ``react.SUMMARIZATION``);
-* ``ContextEditingMiddleware._resolve_token_counter`` (``adaptive.ClearOldResults``'s counter).
+* ``ContextEditingMiddleware._resolve_token_counter`` (``adaptive.ClearOldResults``'s counter);
+* the ``configurable`` keys LangGraph hands a task: the checkpoint map and the task's id
+  (``adapters.langgraph.CHECKPOINT_MAP``, ``TASK_ID``).
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.pregel._checkpoint import create_metadata_for_update_state_api
 
 from tests.support.chat_model import ScriptedChatModel
-from trellis.harness.adapters.langgraph import MODEL_NODE, _narrowed
+from trellis.harness.adapters.langgraph import CHECKPOINT_MAP, MODEL_NODE, TASK_ID, _narrowed
 from trellis.harness.middleware import HANDLER
 from trellis.harness.react import SUMMARIZATION
 
@@ -89,3 +91,9 @@ def test_context_editing_resolves_its_token_counter_per_request() -> None:
     )
     params = inspect.signature(count_tokens_approximately).parameters
     assert {"use_usage_metadata_scaling", "tools"} <= set(params)
+
+
+def test_the_keys_langgraph_hands_a_task_are_the_ones_the_adapter_reads() -> None:
+    from langgraph._internal._constants import CONFIG_KEY_CHECKPOINT_MAP, CONFIG_KEY_TASK_ID
+
+    assert (CHECKPOINT_MAP, TASK_ID) == (CONFIG_KEY_CHECKPOINT_MAP, CONFIG_KEY_TASK_ID)

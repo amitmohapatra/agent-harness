@@ -1,7 +1,9 @@
 """What the memory service learns from the harness's records shows up in the next run's
-context: a procedure from successful runs, tool statistics and approval patterns from the
-calls and their approvals, a pinned profile block an agent edited, feedback on a run — plus
-the agent's model key registered once at startup."""
+context: a procedure from runs a person confirmed (a run's own report of success teaches
+nothing; a person's verdict applies once the tenant's administrator accepts it), tool
+statistics and approval patterns from the calls and their approvals (a rule to approve
+automatically needs two reviewers), a pinned profile block an agent edited, feedback on a run
+— plus the agent's model key registered once at startup."""
 
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from tests.live.support import eventually, memory_scope
 from tests.support.arm import arm
 from trellis import Runtime, tool
 from trellis.contracts import RunStatus
+from trellis.memory import MemoryClient
 
 #: about what a write does once it runs, not whether it asks: ``writes_unasked``
 pytestmark = [pytest.mark.live, needs_memory, pytest.mark.usefixtures("writes_unasked")]
@@ -23,10 +26,15 @@ pytestmark = [pytest.mark.live, needs_memory, pytest.mark.usefixtures("writes_un
 TASK = "Restock SKU A-1 if it is low"
 #: Approvals on one (tool, argument shape) before the service suggests a rule.
 APPROVALS = 5
+#: The tenant administrator's memory key: accepts a person's verdict on a run.
+ADMIN_KEY = os.environ.get("TRELLIS_ADMIN_KEY", "").strip() or None
 
 
 # longer than the suite's 120 s: the learning job is waited for up to 120 s after the runs it learns from
 @pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    ADMIN_KEY is None, reason="TRELLIS_ADMIN_KEY (the tenant administrator's memory key) is not set"
+)
 async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None:
     suffix = uuid.uuid4().hex[:8]
     lookup_name, reorder_name = f"lookup_{suffix}", f"reorder_{suffix}"
@@ -61,7 +69,15 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
             )
             assert done.status is RunStatus.SUCCESS and done.answer == "reordered 20"
             run_ids.append(done.run_id)
+        # a person confirms three runs; the administrator accepts two: the procedure is
+        # learned from those (two runs that followed it), the third verdict still waits
         await h.feedback(run_ids[0], "confirm")
+        async with MemoryClient(os.environ["MEMORY_URL"], api_key=ADMIN_KEY) as client:
+            admin = client.bind(tenant_id=await h._tenant())
+            for run_id in run_ids[1:3]:
+                said = await h.feedback(run_id, "confirm")
+                assert said is not None
+                await admin.feedback.approve(said.feedback_id)
         await h.writes.drain()
         assert h.writes.failed == 0
 
@@ -104,13 +120,19 @@ async def test_procedures_tool_stats_approvals_and_profile_are_learned() -> None
 async def test_a_learned_approval_rule_is_applied_automatically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool an administrator set to always ask, approved by people every time: the memory
-    service learns from the agent's decisions to stop asking, and governance accepts that
-    suggestion for the agent on its next refresh — the next call runs with no pause."""
+    """A write the harness asks about (no rule says otherwise), approved by people every time —
+    two of them (one person's approvals, however many, are no team's rule): the memory service
+    learns from the agent's decisions to stop asking, and governance accepts that suggestion
+    for the agent on its next refresh — the next call runs with no pause. The same decisions
+    on a tool its administrator set to always ask learn no such rule: what an administrator
+    decided is never relaxed by learning (the memory service asks more, never less, of it)."""
     from trellis.harness.governance import catalog as catalog_module
+    from trellis.harness.governance import decision
 
+    # the product's default here, not the module's ``writes_unasked``: a write asks
+    monkeypatch.setitem(decision.ACTIONS, "write", decision.Action.ASK)
     suffix = uuid.uuid4().hex[:8]
-    order_name = f"order_{suffix}"
+    order_name, ruled_name = f"order_{suffix}", f"ruled_order_{suffix}"
     user = f"live-user-{suffix}"
 
     @tool(name=order_name, side_effects="write")
@@ -118,22 +140,34 @@ async def test_a_learned_approval_rule_is_applied_automatically(
         """Order units of a SKU."""
         return f"ordered {qty} x {sku}"
 
-    async def buyer(input: str, agent: Runtime) -> str:
-        return str(await agent.tools.call(order_name, sku="A-1", qty=2))
+    @tool(name=ruled_name, side_effects="write")
+    def ruled_order(sku: str, qty: int) -> str:
+        """Order units of a SKU, as the administrator's rule says: asked every time."""
+        return f"ordered {qty} x {sku} (ruled)"
+
+    def buyer(name: str) -> Any:
+        async def buy(input: str, agent: Runtime) -> str:
+            return str(await agent.tools.call(name, sku="A-1", qty=2))
+
+        return buy
 
     async with live_harness() as h:
-        agent = arm(h.wrap(buyer, id=f"live-buyer-{suffix}"), [order])
+        agent = arm(h.wrap(buyer(order_name), id=f"live-buyer-{suffix}"), [order])
+        ruled = arm(h.wrap(buyer(ruled_name), id=f"live-ruled-{suffix}"), [ruled_order])
         scope = await memory_scope(h, user=user, agent_id=agent.id)
-        await scope.advanced.tools.put_catalog(
-            [{"name": order_name, "side_effects": "write", "approve_when": "true"}]
+        ruled_scope = await memory_scope(h, user=user, agent_id=ruled.id)
+        await ruled_scope.advanced.tools.put_catalog(
+            [{"name": ruled_name, "side_effects": "write", "approve_when": "true"}]
         )
-        for n in range(APPROVALS):
-            paused = await agent.run("order two", user=user, thread=f"buy-{suffix}-{n}")
-            assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-            done = await agent.resume(
-                paused.interrupt.interrupt_id, "approve", reviewer=f"live-lead-{suffix}"
-            )
-            assert done.status is RunStatus.SUCCESS
+        for each in (agent, ruled):
+            for n in range(APPROVALS):
+                paused = await each.run("order two", user=user, thread=f"{each.id}-{n}")
+                assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+                reviewer = f"live-lead-{suffix}" if n % 2 == 0 else f"live-buyer-lead-{suffix}"
+                done = await each.resume(
+                    paused.interrupt.interrupt_id, "approve", reviewer=reviewer
+                )
+                assert done.status is RunStatus.SUCCESS
         await h.writes.drain()
         assert h.writes.failed == 0
 
@@ -142,7 +176,11 @@ async def test_a_learned_approval_rule_is_applied_automatically(
             return any(s.suggestion == "auto_approve" for s in found)
 
         assert await eventually(suggested, within=120, every=3)
-        # governance's next refresh (now, not in 30 s) accepts it for this agent
+        # the administrator's rule stays: the same decisions on its tool suggest nothing
+        # that would ask less
+        found = await ruled_scope.advanced.tools.approval_suggestions(tool=ruled_name)
+        assert not any(s.suggestion == "auto_approve" for s in found), found
+        # governance's next refresh (now, not in 30 s) accepts the suggestion for this agent
         later = catalog_module._now() + catalog_module.GOVERNANCE_TTL_SECONDS + 1
         monkeypatch.setattr(catalog_module, "_now", lambda: later)
         ran = await agent.run("order two", user=user, thread=f"buy-{suffix}-last")
@@ -151,6 +189,8 @@ async def test_a_learned_approval_rule_is_applied_automatically(
         assert entry.approve_when and entry.approve_when != "true"  # the learned rule
         found = await scope.advanced.tools.approval_suggestions(tool=order_name)
         assert any(s.accepted for s in found)
+        still = await ruled.run("order two", user=user, thread=f"ruled-{suffix}-last")
+        assert still.status is RunStatus.PAUSED, "the administrator's rule still asks"
 
 
 async def test_a_profile_block_an_agent_edits_is_in_the_next_context() -> None:

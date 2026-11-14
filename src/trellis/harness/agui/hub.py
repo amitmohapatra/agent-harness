@@ -18,6 +18,7 @@ from collections import OrderedDict, deque
 from collections.abc import AsyncIterator
 from typing import Final
 
+from trellis.harness.agui.activity import Activity
 from trellis.harness.agui.events import AGUIEvent
 
 MAX_EVENTS_PER_RUN: Final = 2048
@@ -27,10 +28,12 @@ MAX_RUNS: Final = 256
 class RunBuffer:
     """One run's events, and the readers waiting on the next one."""
 
-    __slots__ = ("_changed", "appended", "events", "finished", "published", "user")
+    __slots__ = ("_changed", "activity", "appended", "events", "finished", "published", "user")
 
     def __init__(self, user: str) -> None:
         self.user = user
+        #: the run's activity line, as its calls end in any of its attempts served here
+        self.activity = Activity()
         #: the last events, each with its number
         self.events: deque[tuple[int, AGUIEvent]] = deque(maxlen=MAX_EVENTS_PER_RUN)
         #: the next event's number (a derived event takes none of its own)

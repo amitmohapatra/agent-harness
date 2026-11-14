@@ -2,7 +2,8 @@
 record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
-   returns its recorded output and runs nothing; a tool of a feature the run is without
+   returns its recorded output and runs nothing, and is not announced again (the attempt that
+   ran it did: its events are in the run's log); a tool of a feature the run is without
    (``without=``: a graph's tools are bound when it is built) is an error the model reads, and
    so are arguments that do not fit the tool's schema (``tools.base.arguments_problem``: a
    required field missing, a basic type wrong, an unknown field where none are allowed) —
@@ -45,7 +46,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Iterable
+import types
+import weakref
+from collections.abc import Hashable, Iterable
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -53,6 +56,7 @@ from opentelemetry.trace import StatusCode
 
 from trellis.contracts import (
     InterruptDecision,
+    InterruptResolution,
     Option,
     RunEventType,
     ToolCall,
@@ -67,10 +71,10 @@ from trellis.harness.asking import RunCancelled, answer_of
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.clients.memory import Permissions, grants
 from trellis.harness.conversation import allowed, result_id
-from trellis.harness.events import DECISION, NOTICE
+from trellis.harness.events import DECISION, NOTICE, preview
 from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, Made, content_key
+from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
@@ -81,7 +85,9 @@ from trellis.harness.tools.base import (
     arguments_problem,
     execute,
     interrupted,
+    may_pass,
     not_run,
+    retries_of,
 )
 
 log = logging.getLogger("trellis.run")
@@ -102,6 +108,10 @@ CUT: Final = {
     CANCELLED: "{tool} was cut short: the run was cancelled",
     ToolStatus.TIMEOUT.value: "{tool} was cut short: the run ran out of time",
 }
+#: What a framework's own call made again reads, when the same call already ran for the run
+#: (:func:`permitted`): its framework begins work again that it did before (a subagent paused
+#: in its work, started again) — the call is not run a second time.
+RAN_BEFORE: Final = "{tool} was not run again: this same call already ran. Its result: {output}"
 #: What the model reads for a call that repeats an earlier one of its model step (:func:`same`).
 SAME_CALL: Final = "Same call as {first} above (the same tool, the same arguments): see its result."
 #: What a model that stalled — the same call with the same arguments over and over — is told,
@@ -127,14 +137,22 @@ MAX_REPEATS: Final = 3
 REPEATED: Final = "Repeated"
 #: The error class of a call not run because its start could not be saved (:func:`_unsaved`).
 UNSAVED: Final = "StartUnsaved"
+#: The outcomes the run's ``after_tool`` hooks changed (:func:`hooked`), by id, while they live.
+_HOOKED: weakref.WeakValueDictionary[int, ToolOutcome] = weakref.WeakValueDictionary()
 
 
 async def call(
-    tool: Tool, args: dict[str, Any], *, call_id: str | None = None, step: int | None = None
+    tool: Tool,
+    args: dict[str, Any],
+    *,
+    call_id: str | None = None,
+    step: int | None = None,
+    decision: Hashable | None = None,
 ) -> ToolOutcome:
     """Run ``tool`` for the current run (``step``: the call's number, when the caller numbered
-    the calls it makes at once). Pauses propagate; every other failure is an outcome the
-    framework shows its model (``ERROR``, or ``TIMEOUT``)."""
+    the calls it makes at once; ``decision``: the model decision the call is part of, when the
+    caller knows it — :func:`_deciding`). Pauses propagate; every other failure is an outcome
+    the framework shows its model (``ERROR``, or ``TIMEOUT``)."""
     runtime = current()
     if runtime is None:
         raise ToolError(
@@ -142,12 +160,26 @@ async def call(
             source="tools",
         )
     made = runtime.replay.made(tool.name, args)  # the paused call made again runs as it was
-    key = content_key("call", tool.name, made.args)
+    key = call_key(tool.name, made.args)
     step = runtime.next_step() if step is None else step
+    # the call's identity: its framework's id (given, or said before its MCP request came)
+    ident = call_id or runtime.replay.claimed(call_key(tool.name, args))
     async with runtime.replay.exclusive(key):
-        outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
+        with runtime.replay.calling(key, ident=ident):
+            outcome = await _called(
+                runtime, tool, made, key=key, step=step, call_id=call_id, decision=decision
+            )
     runtime.replay.ended(made)
     return outcome
+
+
+def hooked(outcome: ToolOutcome) -> bool:
+    """Whether the run's ``after_tool`` hooks changed this outcome of :func:`call` (what the
+    call says, or how it ended). The model then reads the hooks' outcome, whatever its framework
+    makes of the call otherwise: a failure a hook turned into a result is that result, and a
+    failure it worded otherwise says the hook's words — still delivered as its framework
+    delivers a failed call (``middleware.governed_call``, ``tools.convert``)."""
+    return _HOOKED.get(id(outcome)) is outcome
 
 
 def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
@@ -157,7 +189,7 @@ def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
     first: dict[str, str] = {}
     repeats: dict[str, str] = {}
     for call_id, tool, args in calls:
-        earlier = first.setdefault(content_key("call", tool, args), call_id)
+        earlier = first.setdefault(call_key(tool, args), call_id)
         if earlier != call_id:
             repeats[call_id] = earlier
     return repeats
@@ -178,24 +210,52 @@ def same(
     return outcome
 
 
-async def permitted(spec: ToolSpec, args: dict[str, Any]) -> ToolCall | ToolOutcome:
+async def permitted(
+    spec: ToolSpec,
+    args: dict[str, Any],
+    *,
+    framework: str | None = None,
+    call_id: str | None = None,
+) -> ToolCall | ToolOutcome:
     """A call its framework runs itself (Claude Code's built-in tools, through its permission
     callback), decided as a harness call is — the run's ``before_tool`` hooks, then governance,
     and a person when it asks — but not run, journaled or recorded here: the call to let
     through (its arguments rewritten or edited, perhaps), or the outcome of one that is not
-    (denied, rejected). A pause propagates."""
+    (denied, rejected). A pause propagates. ``framework``: the framework asks its own user
+    about this call too (:func:`asked`, its name in the question) — asked here once the call
+    is let through as it was made, unless a person was just asked about it (governance's
+    question, a hook's): one call, one question. The same call made again after it ran for
+    the run (:func:`observed`: its framework began that work again — a subagent paused in its
+    work, started again) is not let through: its result is what it reads. ``call_id``: the
+    framework's id of the call, whose answers are its own (``Replay.calling``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
-    call, verdict = await _hooked(runtime, call, key)
-    if isinstance(verdict, Deny):
-        return denied(call, verdict)
-    _, call, rejected = await _decided(runtime, spec, call, verdict)
-    return call if rejected is None else rejected
+    with runtime.replay.calling(key, ident=call_id):
+        replayed, output = runtime.replay.call(key)  # it ran for the run (:func:`observed`)
+        if replayed:
+            said = journal_outcome(spec.name, output).output
+            return ToolOutcome(
+                tool=spec.name,
+                status=ToolStatus.REJECTED,
+                output=RAN_BEFORE.format(tool=spec.name, output=said),
+                cached=True,
+            )
+        call, verdict = await _hooked(runtime, call, key)
+        if isinstance(verdict, Deny):
+            return denied(call, verdict)
+        decision, call, rejected = await _decided(runtime, spec, call, verdict)
+    if rejected is not None:
+        return rejected
+    if framework is None or decision.asks or call.args != args:
+        return call
+    return await asked(spec, args, framework, call_id=call_id)
 
 
-async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCall | ToolOutcome:
+async def asked(
+    spec: ToolSpec, args: dict[str, Any], framework: str, *, call_id: str | None = None
+) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
     :func:`permitted` let it through: a person is asked, as governance asks — answered from the
@@ -204,11 +264,35 @@ async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCal
     propagates."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     why = FRAMEWORK_ASKS.format(framework=framework)
-    _, call, rejected = await _decided(runtime, spec, call, Ask(why))
+    with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
+        _, call, rejected = await _decided(runtime, spec, call, Ask(why))
     return call if rejected is None else rejected
+
+
+async def _checked(runtime: Runtime, spec: ToolSpec, args: dict[str, Any]) -> Decision:
+    """Governance's decision on a call a framework holds at a gate of its own; a rule that
+    could not be evaluated is recorded on the run."""
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.error is not None:
+        runtime.events.warning(decision.error.code, decision.error.message)
+    return decision
+
+
+async def unasked(spec: ToolSpec, args: dict[str, Any]) -> bool:
+    """For a framework that asks its own user about a call at a gate of its own (OpenAI
+    Agents' ``needs_approval``): whether the call runs without that question, because its tool
+    was allowed beyond one call (:func:`_allowed`: for the rest of the run, the conversation,
+    its schedule, or always) — never an ``irreversible`` tool, which asks every call."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    decision = await _checked(runtime, spec, args)
+    return await _allowed(runtime, decision, ours=True) is not None
 
 
 async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
@@ -221,12 +305,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     as ever. Only a tool the harness runs is held (never a confined one: ``_gated``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    governance = runtime.agent.harness._governance(runtime.tenant)
-    decision = await governance.check(
-        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
-    )
-    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
-        runtime.events.warning(decision.error.code, decision.error.message)
+    decision = await _checked(runtime, spec, args)
     journal = runtime.replay.journal
     if (
         not decision.asks
@@ -235,7 +314,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
         or runtime.replay.answered(content_key("approve", spec.name, args))
     ):
         return False
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     try:
         await runtime.approve(call, decision, await _offered(runtime, decision))
@@ -257,7 +336,11 @@ async def observed(
     OpenAI agent's file search, web search, code interpreter: run inside the model's step),
     Claude Code's built-ins (after its ``PreToolUse`` decision, ``permitted``): on the run's
     stream, counted, traced with its duration (``started``: ``time.time()`` when it began) and
-    recorded in the memory service, as a harness call is. Nothing is run or journaled here."""
+    recorded in the memory service, as a harness call is. Nothing is run here. A call that
+    ended well is journaled, so that made again it is not run twice (:func:`permitted`): whole
+    while a subagent works in the foreground (``Helpers.begun_again``: started again after a
+    pause, it makes its calls again and reads their results), else as the stream previews it
+    (``events.preview``: bounded) — the transcript has the rest."""
     call = ToolCall(
         tool=spec.name, args=args, task=runtime.task, step=runtime.next_step(), idempotency_key=ref
     )
@@ -270,6 +353,13 @@ async def observed(
         if not outcome.ok:
             span.set_status(StatusCode.ERROR, str(outcome.status.value))
     runtime.used.add(spec.name)
+    if outcome.ok:  # made again (its framework begins that work again), it is not run twice
+        key, helpers = call_key(spec.name, args), runtime.helpers
+        replays = helpers is not None and helpers.begun_again() is not None
+        kept = (
+            outcome if replays else outcome.model_copy(update={"output": preview(outcome.output)})
+        )
+        runtime.replay.record_call(key, journal_record(kept), scope=key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
@@ -283,21 +373,26 @@ async def _called(
     key: str,
     step: int,
     call_id: str | None,
+    decision: Hashable | None = None,
 ) -> ToolOutcome:
     args = made.args
+    deciding = _deciding(runtime, call_id, decision)
     # what the tool hands its service: this run's n-th such call, in every attempt (the
     # call's own key, the same for the same call anywhere, is what feedback is filed under)
     idempotency_key = f"{runtime.run_id}:{key}:{runtime.replay.occurrence(key)}"
     tool_call = ToolCall(
         tool=tool.name, args=args, task=runtime.task, step=step, idempotency_key=call_id or key
     )
-    ref = call_id or f"{runtime.run_id}:{step}"
+    # its id on the stream and in the transcript: its framework's, else what the call is (not
+    # when in its attempt it ran: an attempt that goes on from a checkpoint counts from 0 again)
+    ref = call_id or idempotency_key
     replayed, output = runtime.replay.call(key)
-    if replayed:
-        outcome = _replayed(tool.name, output)
-        _events(runtime, ref, tool_call, outcome)
-        return outcome
-    refused = _refused(runtime, tool, args, key)
+    if replayed:  # on the stream already: the attempt that ran it said it, in the run's log
+        return journal_outcome(tool.name, output)
+    # a try again of a framework's own tool (``Tool.deferring``): an attempt of the call that
+    # began with its first — refused, counted, started and announced then, not again
+    again = tool.deferring is not None and tool.deferring.tried > 0
+    refused = None if again else _refused(runtime, tool, args, key, deciding)
     if refused is not None:
         _events(runtime, ref, tool_call, refused)
         return refused
@@ -312,17 +407,18 @@ async def _called(
         _events(runtime, ref, tool_call, refused)
         return refused
     decision, tool_call, rejected = await _decided(
-        runtime, tool.spec, tool_call, verdict, tool=tool
+        runtime, tool.spec, tool_call, verdict, tool=tool, deciding=deciding, again=again
     )
     # the budget again, then counted at once: the calls of one step are decided together
-    rejected = rejected or _over_budget(runtime, tool)
+    rejected = rejected or (None if again else _over_budget(runtime, tool))
     if rejected is not None:
         _events(runtime, ref, tool_call, rejected)
         return rejected
-    budget.count_tool_call(runtime)
-    _started(runtime, ref, tool.name, tool_call.args)
+    if not again:
+        budget.count_tool_call(runtime)
+        _started(runtime, ref, tool.name, tool_call.args)
     try:
-        outcome = await _ran(
+        outcome, owed = await _ran(
             runtime, tool, tool_call, decision, key=key, ref=ref, idem=idempotency_key, made=made
         )
     except asyncio.CancelledError:
@@ -335,10 +431,12 @@ async def _called(
         cancelled = isinstance(cut, RunCancelled)
         if cancelled or is_pause_signal(cut):
             _cut(runtime, ref, tool.name, CANCELLED if cancelled else PAUSED)
+        if is_pause_signal(cut) and not again:  # not over: made again on the resume
+            budget.count_tool_call(runtime, times=-1)
         raise
-    runtime.fetched[ref] = snapshots.now()  # what a later turn's replay says it is from
-    _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
-    await _record(runtime, tool_call, outcome, decision, key=key)
+    await _ended_or_owed(
+        runtime, tool, tool_call, outcome, decision=decision, owed=owed, key=key, ref=ref
+    )
     return outcome
 
 
@@ -352,11 +450,13 @@ async def _ran(
     ref: str,
     idem: str,
     made: Made,
-) -> ToolOutcome:
+) -> tuple[ToolOutcome, Exception | None]:
     """The call, started on the stream, under way: saved as started (one that does more than
     read), executed (``idem``: the key the tool hands its service; ``made``: the call as the
     model made it, which a pause from within it keeps), and its outcome as the ``after_tool``
-    hooks leave it. A pause (it asked a person) or a cancellation propagates."""
+    hooks leave it — and, of a framework's own tool (``Tool.deferring``), the error it is to
+    be tried again after, around its framework's handling. A pause (it asked a person) or a
+    cancellation propagates."""
     args = tool_call.args
     if tool.feature == "code_mode":
         runtime.code_mode_scripts.append((datetime.now(UTC), tool_call.step))
@@ -367,7 +467,7 @@ async def _ran(
         runtime.replay.start(key)
         if not await runtime.saved_start():
             runtime.replay.unstart(key)
-            return _unsaved(tool)
+            return _unsaved(tool), None
     started = time.perf_counter()
     action = decision.action.value
     with tool_span(tool.name, ref, args, source=tool.spec.source, action=action) as span:
@@ -379,11 +479,52 @@ async def _ran(
             raise error
         span_output(span, outcome.output, key="gen_ai.tool.call.result")
     hooks = runtime.agent.hooks
-    if error is not None:
+    # a framework's own tool's error it may be tried again after: its failure is the call's
+    # only if no try follows (the ``on_error`` hooks are told then: ``_ended_or_owed``)
+    owed = None
+    if tool.deferring is not None and error is not None and retries_of(tool.spec, reads=reads):
+        owed = error if may_pass(error) else None
+    if error is not None and owed is None:
         await hooks.failed("tool", error)
+    before = outcome.model_dump() if hooks else None
     outcome = await hooks.done(tool_call, outcome)
+    if before is not None and outcome.model_dump() != before:
+        _HOOKED[id(outcome)] = outcome  # the hooks' word on the call (:func:`hooked`)
     outcome.latency_ms = round((time.perf_counter() - started) * 1000, 3)
-    return outcome
+    return outcome, owed
+
+
+async def _ended_or_owed(
+    runtime: Runtime,
+    tool: Tool,
+    tool_call: ToolCall,
+    outcome: ToolOutcome,
+    *,
+    decision: Decision,
+    owed: Exception | None,
+    key: str,
+    ref: str,
+) -> None:
+    """A call that ran: ended on the stream and recorded — or, a try of a framework's own tool
+    to be tried again (``owed``; not when the ``after_tool`` hooks made it a result), handed
+    with what ends it to where its tries are made (``Tool.deferring``), which ends it when no
+    try follows — its error the ``on_error`` hooks' then. The attempts of a try again count the
+    tries before it."""
+    deferring = tool.deferring
+    if deferring is not None:
+        outcome.attempts += deferring.tried
+
+    async def finish() -> None:
+        if owed is not None:  # the failure of the call's last try: the call's
+            await runtime.agent.hooks.failed("tool", owed)
+        runtime.fetched[ref] = snapshots.now()  # what a later turn's replay says it is from
+        _ended(runtime, ref, tool.name, status=outcome.status.value, output=outcome.output)
+        await _record(runtime, tool_call, outcome, decision, key=key)
+
+    if owed is None or deferring is None or outcome.status is not ToolStatus.ERROR:
+        await finish()
+        return
+    await deferring.owe(owed, retries_of(tool.spec, reads=decision.risk == "read"), finish)
 
 
 def _unsaved(tool: Tool) -> ToolOutcome:
@@ -417,19 +558,43 @@ def _over_budget(runtime: Runtime, tool: Tool) -> ToolOutcome | None:
     )
 
 
-def _repeated(runtime: Runtime, tool: Tool, key: str) -> ToolOutcome | None:
+def _deciding(runtime: Runtime, call_id: str | None, given: Hashable | None) -> Hashable | None:
+    """The model decision a call is part of — the same each time its framework makes that call
+    again, and for each call that one decision makes —: ``given`` by the caller (an OpenAI
+    computer call's id, for each of its actions), else the framework's own (``Runtime.deciding``:
+    a LangGraph task, the same for each run its ``RetryPolicy`` makes) with the call's id;
+    ``None`` when neither says."""
+    if given is not None:
+        return given
+    deciding = runtime.deciding() if runtime.deciding is not None else None
+    return None if deciding is None else (deciding, call_id)
+
+
+def _repeated(
+    runtime: Runtime, tool: Tool, key: str, decision: Hashable | None
+) -> ToolOutcome | None:
     """The call, refused when it is the same call (the same tool, the same arguments) the run
     made the :data:`MAX_REPEATS` - 1 calls before it: a model looping on one call is told to
     answer with what it has (:data:`STALLED`), whatever its framework — the harness's tools
     are where every adapter's calls meet, so a graph without the harness's middleware, a Deep
     Agent, OpenAI Agents and the Claude CLI are stopped as ``ReAct``'s ``StallGuard`` stops its
-    own loop (which acts before its step's calls reach here). Said once on the run's stream."""
-    last, times = runtime.repeating
-    times = times + 1 if key == last else 1
-    runtime.repeating = (key, times)
+    own loop (which acts before its step's calls reach here). Said once on the run's stream.
+
+    A repeat is a decision made again: a call of the decision that made the call before it
+    (:func:`_deciding`) — its framework running that decision again (a LangGraph task its
+    ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id in
+    the same task), or another action of the same OpenAI computer call (a batch of three
+    ``Down`` presses, and the screenshot after them) — is part of it: neither counted nor
+    starting a count of its own, and refused when that decision was."""
+    last, times, made_by = runtime.repeating
+    again = decision is not None and decision == made_by
+    if again:
+        key = last  # the decision is counted by the call it began with
+    times = times if again else times + 1 if key == last else 1
+    runtime.repeating = (key, times, decision)
     if times < MAX_REPEATS:
         return None
-    if times == MAX_REPEATS:
+    if times == MAX_REPEATS and not again:
         said = f"stopped {tool.name}: the same call {times} times in a row (a stall)"
         log.warning("run %s %s", runtime.run_id, said)
         runtime.events.warning("stalled", said)
@@ -449,12 +614,14 @@ def stalled(runtime: Runtime) -> bool:
     return runtime.repeating[1] >= MAX_REPEATS
 
 
-def _refused(runtime: Runtime, tool: Tool, args: dict[str, Any], key: str) -> ToolOutcome | None:
+def _refused(
+    runtime: Runtime, tool: Tool, args: dict[str, Any], key: str, decision: Hashable | None
+) -> ToolOutcome | None:
     """Why a call is not run at all, as the model reads it: the run's budget is spent, the
     same call made :data:`MAX_REPEATS` times in a row, a tool the framework was built with of a
     feature this run is without, or arguments that do not fit its schema (nothing runs,
     nothing is journaled: the model corrects them)."""
-    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key)
+    over = _over_budget(runtime, tool) or _repeated(runtime, tool, key, decision)
     if over is not None:
         return over
     if tool.feature is not None and not runtime.uses(tool.feature):
@@ -486,7 +653,7 @@ async def _record(
     """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
     attempt), saved, counted and recorded."""
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
-        runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
+        runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     runtime.replay.record_step(call, outcome)
@@ -519,6 +686,8 @@ async def _decided(
     asked: Ask | None,
     *,
     tool: Tool | None = None,
+    deciding: Hashable | None = None,
+    again: bool = False,
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
     before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and not
@@ -528,21 +697,28 @@ async def _decided(
     tool is ``confined``), and the person picks one of ``governance.decision.choices`` (Always
     allow kept in the memory service: :func:`_kept_always`); none: a call its framework runs
     under its own permission flow — a write is announced, and an approval reaches the rest of
-    the run only (``remember="run"``)."""
+    the run only (``remember="run"``). ``deciding``: the model decision the call is part of
+    (:func:`_deciding`) — the person's answer about the call covers its framework's own tries
+    of it again (a ``ToolRetryMiddleware`` retrying a failed irreversible call: the same
+    decision, the same arguments), so one call is one question; an edited call, or the same
+    call of a new model step, is asked about anew. ``again``: a try again of a call decided
+    already, whose decision is not said on the run's stream a second time."""
     governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
     )
     if tool is None or tool.confined:
         decision = decision.unasked()
+    events = _SILENT if again else runtime.events  # a try again: said with its first
     if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
-        runtime.events.warning(decision.error.code, decision.error.message)
+        events.warning(decision.error.code, decision.error.message)
     if asked is not None:
         decision = decision.asking(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     ours = tool is not None
-    # a call answered already in this run keeps its answer: a denial stays one
+    # a call answered already in this run keeps its answer: a denial stays the call's (a new
+    # call its framework names by another id is asked: ``Replay.answer``)
     answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
     if (
         decision.asks
@@ -551,17 +727,18 @@ async def _decided(
         is not None
     ):
         decision = decision.approved(why)
-        runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
+        events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
     gated = content_key("approved", spec.name, call.args)
     approved = runtime.replay.journal.approved
     if decision.asks and decision.assignee is None and gated in approved:
         approved.remove(gated)  # one approval, one call
         decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
-        runtime.events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
+        events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
         hooked = asked is not None
-        offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
-        resolution = await runtime.approve(call, decision, offered)
+        resolution = await _answered(
+            runtime, call, decision, ours=ours, hooked=hooked, deciding=deciding
+        )
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
         remembered = runtime.replay.journal.remembered
         covered = reach(spec.name, decision.assignee)
@@ -589,8 +766,40 @@ async def _decided(
         if resolution.decision is InterruptDecision.EDIT and isinstance(answer, dict):
             call = call.model_copy(update={"args": answer})
     elif decision.announces:
-        runtime.events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
+        events.custom(NOTICE, tool=spec.name, args=call.args, side_effects=decision.risk)
     return decision, call, None
+
+
+def _said_before(*_args: Any, **_kwargs: Any) -> None:
+    """What a try again of a decided call says on the run's stream of its decision: nothing
+    (its first try said it)."""
+
+
+#: The run's stream as a try again of a decided call speaks to it (:func:`_said_before`).
+_SILENT: Final = types.SimpleNamespace(warning=_said_before, custom=_said_before)
+
+
+async def _answered(
+    runtime: Runtime,
+    call: ToolCall,
+    decision: Decision,
+    *,
+    ours: bool,
+    hooked: bool,
+    deciding: Hashable | None,
+) -> InterruptResolution:
+    """A person's answer about a call that asks: asked now (the run's pause; its choices those
+    of a call the harness runs, ``ours``, a hook's question or not, ``hooked``) — or, for a call
+    of a model decision already answered (``deciding``: its framework trying the same call
+    again), that answer."""
+    held = None if deciding is None else (deciding, content_key("approve", call.tool, call.args))
+    if held is not None and held in runtime.decided:
+        return runtime.decided[held]
+    offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
+    resolution = await runtime.approve(call, decision, offered)
+    if held is not None:
+        runtime.decided[held] = resolution
+    return resolution
 
 
 async def _allowed(
@@ -709,7 +918,7 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
         error_class=OUTCOME_UNKNOWN,
         metadata={UNKNOWN: True},
     )
-    runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
+    runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     runtime.replay.record_step(call, outcome)
     await runtime.progress(now=True)
     _events(runtime, ref, call, outcome)
@@ -717,31 +926,56 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
     return outcome
 
 
-def _journaled(outcome: ToolOutcome) -> Any:
-    """What the journal keeps of a call: its output, or — a timeout, an unknown effect — the
-    outcome itself, so a re-run tells the model the same."""
-    if outcome.ok:
-        return outcome.output
-    return {OUTCOME: outcome.model_dump(mode="json", include={"status", "output", "metadata"})}
+#: What the journal keeps of a call, and all a replay reads of it.
+_KEPT: Final = frozenset({"status", "output", "metadata"})
+_STATUSES: Final = frozenset(status.value for status in ToolStatus)
 
 
-def _replayed(tool: str, recorded: Any) -> ToolOutcome:
-    if isinstance(recorded, dict) and set(recorded) == {OUTCOME}:
-        return ToolOutcome(tool=tool, cached=True, **recorded[OUTCOME])
-    return ToolOutcome(tool=tool, output=recorded, cached=True)
+def journal_record(outcome: ToolOutcome) -> dict[str, Any]:
+    """What the journal keeps of a call: its status, its output and — when it has any — its
+    metadata, always in the envelope :data:`RECORD`, so a re-run tells the model the same and
+    an output is never read as a record, whatever a tool shapes it like
+    (:func:`journal_outcome`)."""
+    kept = outcome.model_dump(mode="json", include={"metadata"}, exclude_defaults=True)
+    return {RECORD: {"status": outcome.status.value, "output": outcome.output, **kept}}
+
+
+def journal_outcome(tool: str, recorded: Any) -> ToolOutcome:
+    """The outcome of ``tool``'s call the journal kept (:func:`journal_record`), from its three
+    fields and no other. A journal the release before wrote kept an output bare and an
+    outcome that was none under :data:`OUTCOME`: both are read. What is filed under either
+    key and is no record — a status that is none of a call's, another field — was an output
+    (a tool's, shaped like one) and is replayed as that."""
+    kept = _filed(recorded, RECORD) or _filed(recorded, OUTCOME)
+    if kept is None:
+        return ToolOutcome(tool=tool, output=recorded, cached=True)
+    return ToolOutcome(
+        tool=tool,
+        status=ToolStatus(kept["status"]),
+        output=kept.get("output"),
+        metadata=kept.get("metadata", {}),
+        cached=True,
+    )
+
+
+def _filed(recorded: Any, key: str) -> dict[str, Any] | None:
+    """The record filed under ``key`` in ``recorded``; ``None`` when it holds none."""
+    kept = recorded.get(key) if isinstance(recorded, dict) and set(recorded) == {key} else None
+    if (
+        isinstance(kept, dict)
+        and set(kept) <= _KEPT
+        and kept.get("status") in _STATUSES
+        and isinstance(kept.get("metadata", {}), dict)
+    ):
+        return kept
+    return None
 
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
-    """A call that did not execute still appears on the stream, so a UI sees every step."""
+    """A call that did not run here (refused, rejected, its effect unknown, run by its
+    framework) still appears on the stream, so a UI sees every step."""
     _started(runtime, ref, call.tool, call.args)
-    _ended(
-        runtime,
-        ref,
-        call.tool,
-        status=outcome.status.value,
-        cached=outcome.cached,
-        output=outcome.output,
-    )
+    _ended(runtime, ref, call.tool, status=outcome.status.value, output=outcome.output)
 
 
 def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:

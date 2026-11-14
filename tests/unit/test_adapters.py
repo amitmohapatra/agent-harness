@@ -35,6 +35,7 @@ from trellis.harness.adapters.claude import (
     MCP_OUTPUT_ENV,
     MCP_OUTPUT_TOKENS,
     OUTLIVES_THE_QUERY,
+    UNHELD_AGENTS,
     ClaudeAdapter,
     ClaudeRunError,
     configured_servers,
@@ -191,6 +192,9 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
         framework_options={},
         agent_id="a",
         attempt=1,
+        parent=None,  # a run with no conversation of its own: a process of its own
+        run_id="run_1",
+        conversation="run_1",
         model_started=lambda key: watched.append(("started", key)),
         model_ended=lambda key: watched.append(("ended", key)),
         offered=None,
@@ -218,7 +222,7 @@ async def test_the_stream_yields_only_the_assistant_text(monkeypatch: pytest.Mon
     assert "UserPromptSubmit" not in sent.hooks  # no context: no context hook
     assert sent.max_buffer_size == CLI_MESSAGE_BYTES
     assert isinstance(sent.session_store, JournalSessions)
-    assert sent.disallowed_tools == list(OUTLIVES_THE_QUERY)  # nothing narrowed: only these
+    assert sent.disallowed_tools == [*OUTLIVES_THE_QUERY, *UNHELD_AGENTS]  # nothing narrowed
     assert sent.env == {MCP_OUTPUT_ENV: str(MCP_OUTPUT_TOKENS)}  # the harness keeps large results
     unchanged = {
         "hooks": None,
@@ -257,16 +261,24 @@ def test_the_answer_is_the_structured_response_or_the_last_ai_text() -> None:
     assert adapter.extract(None, GraphOutput(value=None)).answer is None
 
 
-async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
-    class Graph:
-        checkpointer = None
+async def test_the_stream_yields_the_text_and_forwards_what_the_graph_writes() -> None:
+    from langgraph.config import get_stream_writer
+    from langgraph.graph import END, START, MessagesState, StateGraph
 
-        async def astream(self, *args: Any, **kwargs: Any) -> Any:
-            yield {"type": "messages", "data": (AIMessage(content="hel"), {})}
-            yield {"type": "messages", "data": (HumanMessage(content="not ours"), {})}
-            yield {"type": "custom", "data": "progress"}
-            yield {"type": "values", "data": {"messages": []}, "interrupts": ()}
+    from tests.support.chat_model import StreamingChatModel
 
+    model = StreamingChatModel(turns=["hello"], blocks=False, piece=3)
+
+    async def say(state: MessagesState) -> dict[str, Any]:
+        get_stream_writer()("progress")
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("say", say)
+    builder.add_edge(START, "say")
+    builder.add_edge("say", END)
+    graph = builder.compile()
+    written: list[tuple[str, dict[str, Any]]] = []
     runtime = SimpleNamespace(
         conversation="run_1",
         run_id="run_1",
@@ -274,12 +286,35 @@ async def test_the_stream_ignores_parts_it_does_not_carry() -> None:
         run_memory=None,
         attempt=1,
         pending=None,
+        cancelled=None,
         worker_id=None,
+        events=SimpleNamespace(custom=lambda name, **data: written.append((name, data))),
     )
     run = Invocation(runtime=runtime, tools=[])  # type: ignore[arg-type]
-    items = [i async for i in LangGraphAdapter().stream(Graph(), {}, run)]
-    assert items[0] == "hel" and len(items) == 2
-    assert items[1].value == GraphOutput(value={"messages": []}, interrupts=())
+    asked = {"messages": [HumanMessage(content="hi", id="q")]}
+    items = [i async for i in LangGraphAdapter().stream(graph, asked, run)]
+    assert items[:-1] == ["hel", "lo"]  # the model's text as it streamed, not the question's
+    assert written == [("custom", {"value": "progress"})]
+    assert [m.text for m in items[-1].value.value["messages"]] == ["hi", "hello"]
+
+
+async def test_a_call_comes_from_the_graph_task_it_is_made_in_and_none_outside_one() -> None:
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from trellis.harness.adapters.langgraph import _task
+
+    seen: list[str | None] = []
+
+    def node(state: MessagesState) -> dict[str, Any]:
+        seen.append(_task())
+        return {}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("node", node)
+    graph.add_edge(START, "node")
+    graph.add_edge("node", END)
+    await graph.compile().ainvoke({"messages": []})
+    assert _task() is None and len(seen) == 1 and isinstance(seen[0], str)
 
 
 def test_a_graph_without_tool_nodes_binds_no_tools() -> None:
@@ -438,18 +473,19 @@ def test_a_middleware_request_is_recognised_by_its_shape() -> None:
 def test_each_harness_decision_is_one_middleware_decision_per_call() -> None:
     approve = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.APPROVE))
     assert approve == {"decisions": [{"type": "approve"}] * 2}
-    edit = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
-    assert edit["decisions"] == [
-        {"type": "edit", "edited_action": {"name": "a", "args": {"x": 2}}},
-        {"type": "approve"},
-    ]
+    one = {key: HITL_REQUEST[key][:1] for key in ("action_requests", "review_configs")}
+    edit = hitl_response(one, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
+    assert edit["decisions"] == [{"type": "edit", "edited_action": {"name": "a", "args": {"x": 2}}}]
+    # an edit's arguments are one call's: a batch of several takes a decision for each
+    with pytest.raises(ConfigurationError, match="one decision for each call"):
+        hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
     reject = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.REJECT, answer="why"))
     assert reject["decisions"] == [{"type": "reject", "message": "why"}] * 2
     respond = hitl_response(HITL_REQUEST, _resolved(InterruptDecision.ANSWER, answer={"k": 1}))
     assert respond["decisions"] == [{"type": "respond", "message": '{"k": 1}'}] * 2
     raw = {"decisions": [{"type": "approve"}, {"type": "reject"}]}
     assert hitl_response(HITL_REQUEST, _resolved(InterruptDecision.EDIT, payload=raw)) == raw
-    only_b = {**HITL_REQUEST, "review_configs": [HITL_REQUEST["review_configs"][1]] * 2}
+    only_b = {**one, "review_configs": HITL_REQUEST["review_configs"][1:]}
     with pytest.raises(ConfigurationError, match="does not allow the decision 'edit'"):
         hitl_response(only_b, _resolved(InterruptDecision.EDIT, payload={"x": 2}))
 
@@ -565,9 +601,14 @@ def test_only_a_middleware_graph_compiled_without_a_checkpointer_is_given_one() 
     own = create_agent(model, middleware=middleware(), checkpointer=InMemorySaver())
     off = create_agent(model, middleware=middleware(), checkpointer=False)
     plain = create_agent(model)  # not a middleware() graph: run as it was built
-    ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
-    for kept in (own, off, plain, ours, object()):
+    for kept in (own, off, plain, object()):
         assert checkpointing(kept) is kept
+    # a RunCheckpointer of its builder's stays the graph's, told the graph's own state types
+    ours = create_agent(model, middleware=middleware(), checkpointer=RunCheckpointer())
+    typed = checkpointing(ours)
+    assert isinstance(typed.checkpointer, RunCheckpointer) and run_scoped(typed)
+    assert isinstance(ours.checkpointer, RunCheckpointer)  # the builder's own, left as it was
+    assert typed.checkpointer.serde is not ours.checkpointer.serde
 
 
 def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> None:
@@ -583,3 +624,53 @@ def test_claude_is_told_of_its_outputs_folder_after_its_own_system_prompt() -> N
     assert _told({**preset, "append": "Be brief."})["append"] == f"Be brief.\n\n{DELIVERS_HERE}"
     assert _told({"type": "custom", "prompt": "Mine."})["prompt"] == f"Mine.\n\n{DELIVERS_HERE}"
     assert _told({"type": "file", "path": "p.md"}) == {"type": "file", "path": "p.md"}
+
+
+def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> None:
+    """A result that gives no cost is charged its usage and no cost; one that names no
+    session is kept for no session."""
+    from types import SimpleNamespace
+
+    from trellis.harness import budget
+    from trellis.harness.adapters.claude import Spending
+    from trellis.harness.bounded import LRU
+    from trellis.harness.journal import Journal
+
+    charged: list[dict[str, Any]] = []
+    journal = Journal()
+    runtime = SimpleNamespace(replay=SimpleNamespace(journal=journal))
+    costs: LRU[str, float] = LRU()
+    spending = Spending(runtime, SimpleNamespace(model="m"), costs, "s1")  # type: ignore[arg-type]
+    account = budget.account
+    try:
+        budget.account = lambda run, **kw: charged.append(kw)  # type: ignore[assignment]
+        usage = {"input_tokens": 3, "output_tokens": 2}
+        ended = SimpleNamespace(total_cost_usd=None, session_id="", usage=usage, num_turns=1)
+        spending.ended(ended, None)
+    finally:
+        budget.account = account
+    assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
+    assert journal.session_cost == 0.0 and "" not in costs
+
+
+def test_the_question_is_the_last_user_message_the_harness_put_after_the_context() -> None:
+    """``_question``: what this run asked, from the input the harness made, the input a run
+    resumed from its input runs again, or a resumed run's saved state; ``None`` when there is
+    none to read."""
+    from trellis.harness.adapters.openai_agents import _Again, _Continue, _question
+
+    made = [
+        {"role": "user", "content": "earlier"},
+        {"role": "system", "content": "ctx"},
+        {"role": "user", "content": "first part"},
+        {"role": "assistant", "content": "said"},
+        {"role": "user", "content": "the question"},
+    ]
+    assert _question(made, "ctx") == "the question"
+    assert _question(_Again(made, told="again"), "ctx") == "the question"
+    state = {"original_input": made}
+    assert _question(_Continue(state, "call_1", approve=True), "ctx") == "the question"
+    assert _question(_Continue({}, "call_1", approve=True), "ctx") is None
+    assert _question("a question as text", "ctx") is None
+    assert _question([{"role": "system", "content": "ctx"}], "ctx") is None
+    assert _question([{"role": "user", "content": "q"}], None) == "q"  # no context: from the top

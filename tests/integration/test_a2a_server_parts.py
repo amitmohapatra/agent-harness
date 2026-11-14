@@ -59,12 +59,7 @@ from trellis.harness.a2a import push
 from trellis.harness.a2a import tasks as tasks_module
 from trellis.harness.a2a.executor import RunExecutor
 from trellis.harness.a2a.identity import HeaderIdentity, header
-from trellis.harness.a2a.push import (
-    PushNotifier,
-    TargetRefused,
-    check_addresses,
-    validate_url,
-)
+from trellis.harness.a2a.push import PushNotifier
 from trellis.harness.a2a.server import agent_card
 from trellis.harness.a2a.tasks import RunTaskStore, task_from_run
 from trellis.harness.a2a.translate import (
@@ -76,6 +71,7 @@ from trellis.harness.a2a.translate import (
 )
 from trellis.harness.agent import Agent
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, identity_headers
+from trellis.harness.outbound import TargetRefused, checked, validate_url
 from trellis.harness.runs import LocalRuns
 from trellis.runs.webhooks import verify_signature
 
@@ -110,10 +106,18 @@ async def test_the_identity_header_names_the_user_of_the_keys_tenant() -> None:
     await harness.aclose()
 
 
+def test_an_identity_header_of_4096_characters_is_read() -> None:
+    from trellis.harness.identity import trusted_user
+
+    raw = '{"user_id": "' + "u" * (4096 - len('{"user_id": ""}')) + '"}'
+    assert len(raw) == 4096
+    assert trusted_user(raw, "acme") == "u" * (4096 - 15)
+
+
 @pytest.mark.parametrize(
     ("raw", "reason"),
     [
-        ("x" * 5000, "too long"),
+        ("x" * 4097, "too long"),
         ("{not json", "not JSON"),
         ('["a list"]', "must be a JSON object"),
         ('{"tenant_id": "other", "user_id": "u"}', "tenant 'other' is not served here"),
@@ -172,13 +176,25 @@ async def test_the_card_describes_what_the_target_says_about_itself() -> None:
 
 def test_a_push_url_is_normalised_and_checked_without_resolving_it() -> None:
     assert validate_url(" https://hooks.example.com ") == "https://hooks.example.com/"
+    assert validate_url("https://Hooks.Example.com.:8443/h?x=1") == (
+        "https://hooks.example.com:8443/h?x=1"  # the host, as it is named without the dot
+    )
     assert validate_url("https://[::ffff:93.184.216.34]/h") == "https://[::ffff:93.184.216.34]/h"
+    longest = "https://example.com/" + "a" * (2048 - len("https://example.com/"))
+    assert validate_url(longest) == longest  # 2,048 characters: the most a url may have
     for refused, reason in (
-        ("https://example.com/" + "a" * 2048, "too long"),
+        ("https://example.com/" + "a" * (2049 - len("https://example.com/")), "too long"),
         ("https://[::1]/hook", "private address"),
         ("https://[::ffff:10.0.0.1]/hook", "private address"),
         ("https://printer.local/", "local host"),
         ("https://example.com/#frag", "no credentials or fragment"),
+        # SEC-R-9: a trailing dot names the same host, and a number is an address
+        ("https://localhost./", "local host"),
+        ("https://x.internal./", "local host"),
+        ("https://2130706433/", "a number"),
+        ("https://127.1/", "a number"),
+        ("https://0x7f000001/", "a number"),
+        ("https://example.com:port/", "port"),
     ):
         with pytest.raises(TargetRefused, match=reason):
             validate_url(refused)
@@ -204,13 +220,18 @@ async def test_every_address_a_push_host_resolves_to_must_be_public(
     resolving["public.example"] = ["93.184.216.34"]
     resolving["mixed.example"] = ["93.184.216.34", "10.0.0.7"]
     resolving["empty.example"] = []
-    await check_addresses("https://public.example/hook")
+    resolving["rebound.example"] = ["127.0.0.1"]
+    assert await checked("https://public.example./hook") == "https://public.example/hook"
     with pytest.raises(TargetRefused, match="private address"):
-        await check_addresses("https://mixed.example/hook")
+        await checked("https://mixed.example/hook")
     with pytest.raises(TargetRefused, match="private address"):
-        await check_addresses("https://empty.example/hook")
+        await checked("https://empty.example/hook")
+    with pytest.raises(TargetRefused, match="private address"):
+        await checked("https://rebound.example/hook")  # a public name for a local address
     with pytest.raises(TargetRefused, match="does not resolve"):
-        await check_addresses("https://nowhere.example/hook")
+        await checked("https://nowhere.example/hook")
+    with pytest.raises(TargetRefused, match="https"):
+        await checked("http://public.example/hook")  # the lexical half, first
     notifier = PushNotifier(configs=None)  # type: ignore[arg-type]
     assert await notifier.validate_url("https://public.example/hook")
     assert not await notifier.validate_url("https://mixed.example/hook")
@@ -254,7 +275,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
 
     def refuse(request: httpx.Request) -> httpx.Response:
         attempts.append(request)
-        return httpx.Response(410)
+        return httpx.Response(300 if len(attempts) == 1 else 410)  # a redirect is not taken
 
     notifier = PushNotifier(
         configs=None,  # type: ignore[arg-type]
@@ -263,7 +284,7 @@ async def test_a_push_that_is_never_accepted_or_may_not_go_is_dropped(
     with caplog.at_level(logging.WARNING, logger="trellis.a2a.push"):
         assert not await notifier.deliver("https://93.184.216.34/hook", "tok", "run-1", b"{}")
         assert not await notifier.deliver("https://10.1.1.1/hook", "tok", "run-2", b"{}")
-    assert len(attempts) == push.ATTEMPTS
+    assert len(attempts) == 3
     assert "A2A push attempt 3 for run-1 failed: HTTP 410" in caplog.text
     assert "A2A push target refused for run-2" in caplog.text
 
@@ -286,6 +307,25 @@ def test_a_failed_run_is_a_failed_task_with_its_error() -> None:
     assert task.status.message.parts[0].text == "it broke"
     assert task.history[0].parts[0].text == "go"
     assert task.context_id == "th"
+
+
+def test_a_tasks_state_follows_its_runs_as_documented() -> None:
+    """docs/surfaces.md: QUEUED submitted, RUNNING working, PAUSED input-required, SUCCESS (and
+    PARTIAL) completed, ERROR/TIMEOUT failed, CANCELLED canceled; a refused run rejected."""
+    states = {
+        RunStatus.QUEUED: TaskState.TASK_STATE_SUBMITTED,
+        RunStatus.RUNNING: TaskState.TASK_STATE_WORKING,
+        RunStatus.PAUSED: TaskState.TASK_STATE_INPUT_REQUIRED,
+        RunStatus.SUCCESS: TaskState.TASK_STATE_COMPLETED,
+        RunStatus.PARTIAL: TaskState.TASK_STATE_COMPLETED,
+        RunStatus.ERROR: TaskState.TASK_STATE_FAILED,
+        RunStatus.TIMEOUT: TaskState.TASK_STATE_FAILED,
+        RunStatus.CANCELLED: TaskState.TASK_STATE_CANCELED,
+        RunStatus.REJECTED: TaskState.TASK_STATE_REJECTED,
+    }
+    assert set(states) == set(RunStatus)
+    for status, state in states.items():
+        assert task_from_run(record(status)).status.state == state, status
 
 
 def test_a_finished_run_carries_its_result_as_the_tasks_artifact() -> None:
@@ -353,6 +393,75 @@ def test_an_ending_without_an_error_says_how_it_ended() -> None:
     timeout = update_for(event(RunEventType.RUN_FINISHED, outcome=RunOutcome.TIMEOUT))
     assert timeout is not None and timeout.state == TaskState.TASK_STATE_FAILED
     assert timeout.parts[0].text == "the run ended timeout"
+
+
+def test_every_ending_is_the_task_state_a2a_names() -> None:
+    states = {
+        RunOutcome.SUCCESS: TaskState.TASK_STATE_COMPLETED,
+        RunOutcome.PARTIAL: TaskState.TASK_STATE_COMPLETED,  # an answer, cut short
+        RunOutcome.INTERRUPT: TaskState.TASK_STATE_INPUT_REQUIRED,
+        RunOutcome.ERROR: TaskState.TASK_STATE_FAILED,
+        RunOutcome.TIMEOUT: TaskState.TASK_STATE_FAILED,
+        RunOutcome.REJECTED: TaskState.TASK_STATE_REJECTED,
+        RunOutcome.CANCELLED: TaskState.TASK_STATE_CANCELED,
+    }
+    assert set(states) == set(RunOutcome)
+    asked = {"interrupt": {"question": "Which plan?"}}
+    for outcome, state in states.items():
+        data = asked if outcome is RunOutcome.INTERRUPT else {}
+        update = update_for(event(RunEventType.RUN_FINISHED, outcome=outcome, data=data))
+        assert update is not None and update.state == state, outcome
+        # a task cannot leave a final state: all but a question are final
+        assert update.terminal is (outcome is not RunOutcome.INTERRUPT), outcome
+    partial = update_for(
+        event(RunEventType.RUN_FINISHED, outcome=RunOutcome.PARTIAL, data={"result": "half"})
+    )
+    assert partial is not None and partial.result == "half"
+
+
+def test_a_pause_says_what_a_caller_renders_and_nothing_else() -> None:
+    told = {
+        "interrupt_id": "i1",
+        "reason": "approval",
+        "ui": "choice",
+        "options": ["a"],
+        "multiple": True,
+        "expects": {"type": "string"},
+        "ui_schema": {"x": 1},
+        "component": "Picker",
+        "props": {"p": 1},
+        "payload": {"amount": 5},
+        "tool_call": {"tool": "pay"},
+    }
+    kept_back = {"question": "Pay?", "run_id": "run_1", "tenant_id": "t", "evidence": ["x"]}
+    update = update_for(
+        event(
+            RunEventType.RUN_FINISHED,
+            outcome=RunOutcome.INTERRUPT,
+            data={"interrupt": {**told, **kept_back}},
+        )
+    )
+    assert update is not None and update.parts[0].text == "Pay?"
+    assert values(update.parts[1:]) == [told]  # the documented fields, all and only them
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        RunEventType.STEP_STARTED,
+        RunEventType.STEP_FINISHED,
+        RunEventType.TOOL_CALL_START,
+        RunEventType.TOOL_CALL_ARGS,
+        RunEventType.TOOL_CALL_END,
+        RunEventType.TOOL_CALL_RESULT,
+        RunEventType.CONTEXT_LOADED,
+        RunEventType.CUSTOM,
+    ],
+)
+def test_each_progress_event_keeps_the_task_working_and_says_itself(kind: RunEventType) -> None:
+    update = update_for(event(kind, tool_call_id="c1", data={"n": 1}))
+    assert update is not None and update.state == TaskState.TASK_STATE_WORKING
+    assert values(update.parts) == [{"event": kind.value, "tool_call_id": "c1", "n": 1}]
 
 
 def test_values_and_parts_convert_both_ways() -> None:

@@ -18,6 +18,8 @@ import uvicorn
 from langchain.agents.middleware import AgentMiddleware
 
 from trellis import Harness
+from trellis.contracts import RunRecord
+from trellis.harness.identity import Identity
 from trellis.memory import MemoryContext
 
 #: How long a background effect of the services (a projection, a learning job) may take.
@@ -51,13 +53,22 @@ async def seed(scope: MemoryContext, content: str, **options: Any) -> None:
 
 
 async def memory_scope(
-    h: Harness, *, user: str, agent_id: str, thread: str | None = None
+    h: Harness,
+    *,
+    user: str,
+    agent_id: str,
+    thread: str | None = None,
+    run: RunRecord | None = None,
 ) -> MemoryContext:
     """The memory service in a user's (and thread's) scope, read as the agent reads it: the
-    thread is the user's conversation (``h.conversation``)."""
+    thread is the user's conversation (``h.conversation``); or, given the ``run``, the one
+    its transcript is kept in (``Identity.conversation``: a run started with no thread keeps
+    its own, its run id)."""
     assert h.memory is not None
     scope = {"tenant_id": await h._tenant(), "user_id": user, "agent_id": agent_id}
-    if thread is not None:
+    if run is not None:
+        scope["thread_id"] = Identity.of(run).conversation
+    elif thread is not None:
         scope["thread_id"] = await h.conversation(user=user, thread=thread)
     return h.memory.client.bind(**scope)
 

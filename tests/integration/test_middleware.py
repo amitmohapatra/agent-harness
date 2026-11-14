@@ -508,6 +508,21 @@ def test_the_step_limit_counts_the_run_or_the_invocation() -> None:
             step_limit(wrong)
 
 
+async def test_the_step_limit_given_no_number_is_twelve_steps(harness: Harness) -> None:
+    """``step_limit()`` with no argument is the documented default: 12 model calls that may
+    call tools, then the one that answers (as ``middleware()`` and ``ReAct`` have it)."""
+    default, twelve = step_limit(), step_limit(12)
+    assert isinstance(default, ModelCallLimitMiddleware)
+    assert isinstance(twelve, ModelCallLimitMiddleware)
+    assert default.run_limit == twelve.run_limit == 13
+    calls = [("look", {"item": str(n)}) for n in range(12)]
+    model = ScriptedChatModel(turns=[*calls, "partial"])
+    target = graph(model, HarnessTools(), step_limit(), checkpointer=RunCheckpointer())
+    result = await arm(harness.wrap(target, id="default-limit"), [look]).run("x", user="u")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert len(model.requests) == 13 and model.requests[-1]["tool_choice"] == "none"
+
+
 # --------------------------------------------------------------------------- StallGuard
 async def test_the_same_call_repeated_ends_with_one_answer_and_no_tool(harness: Harness) -> None:
     """A stall is not run again: the model is told so and answers with what it has, offered

@@ -1,0 +1,355 @@
+{
+ "$schemaVersion": "1.17",
+ "auto_previous_response_id": false,
+ "context": {
+  "approvals": {},
+  "context": null,
+  "context_meta": {
+   "omitted": false,
+   "original_type": "none",
+   "requires_deserializer": false,
+   "serialized_via": "none"
+  },
+  "tool_invocations": {
+   "call_1": {
+    "approval_scope": "27bea6c4b14548f28e12c123e411feef97fa0971592f74386bea43e8469c558d",
+    "completed": false,
+    "executed": false,
+    "fingerprint": "a4cb172bc8e5ad463b84e2a70c8ba1ab47f2af1c63eea2ca128a9c18b3d30827",
+    "type": "function_call"
+   }
+  },
+  "usage": {
+   "input_tokens": 0,
+   "input_tokens_details": [
+    {
+     "cache_write_tokens": 0,
+     "cached_tokens": 0
+    }
+   ],
+   "output_tokens": 0,
+   "output_tokens_details": [
+    {
+     "reasoning_tokens": 0
+    }
+   ],
+   "request_usage_entries": [],
+   "requests": 0,
+   "total_tokens": 0
+  }
+ },
+ "conversation_id": null,
+ "current_agent": {
+  "name": "shipper"
+ },
+ "current_response_generated_item_ownership": {
+  "end": 2,
+  "interruptions": [
+   1
+  ],
+  "start": 0
+ },
+ "current_step": {
+  "data": {
+   "interruptions": [
+    {
+     "agent": {
+      "name": "shipper"
+     },
+     "raw_item": {
+      "arguments": "{\"order\": \"o1\"}",
+      "call_id": "call_1",
+      "id": "fc_1",
+      "name": "ship",
+      "status": "completed",
+      "type": "function_call"
+     },
+     "tool_lookup_key": {
+      "kind": "bare",
+      "name": "ship"
+     },
+     "tool_name": "ship",
+     "tool_origin": {
+      "type": "function"
+     },
+     "type": "tool_approval_item"
+    }
+   ],
+   "llm_end_hooks_started": true,
+   "response_accepted": false
+  },
+  "type": "next_step_interruption"
+ },
+ "current_turn": 1,
+ "current_turn_persisted_item_count": 0,
+ "generated_items": [
+  {
+   "agent": {
+    "name": "shipper"
+   },
+   "description": "Ship an order.",
+   "raw_item": {
+    "arguments": "{\"order\": \"o1\"}",
+    "call_id": "call_1",
+    "id": "fc_1",
+    "name": "ship",
+    "status": "completed",
+    "type": "function_call"
+   },
+   "tool_name": "ship",
+   "tool_origin": {
+    "type": "function"
+   },
+   "type": "tool_call_item"
+  },
+  {
+   "agent": {
+    "name": "shipper"
+   },
+   "raw_item": {
+    "arguments": "{\"order\": \"o1\"}",
+    "call_id": "call_1",
+    "id": "fc_1",
+    "name": "ship",
+    "status": "completed",
+    "type": "function_call"
+   },
+   "tool_lookup_key": {
+    "kind": "bare",
+    "name": "ship"
+   },
+   "tool_name": "ship",
+   "tool_origin": {
+    "type": "function"
+   },
+   "type": "tool_approval_item"
+  }
+ ],
+ "generated_prompt_cache_key": null,
+ "generated_session_item_indexes": [
+  0,
+  1
+ ],
+ "input_guardrail_results": [],
+ "last_model_response": {
+  "output": [
+   {
+    "arguments": "{\"order\": \"o1\"}",
+    "call_id": "call_1",
+    "id": "fc_1",
+    "name": "ship",
+    "status": "completed",
+    "type": "function_call"
+   }
+  ],
+  "request_id": null,
+  "response_id": null,
+  "usage": {
+   "input_tokens": 0,
+   "input_tokens_details": [
+    {
+     "cache_write_tokens": 0,
+     "cached_tokens": 0
+    }
+   ],
+   "output_tokens": 0,
+   "output_tokens_details": [
+    {
+     "reasoning_tokens": 0
+    }
+   ],
+   "request_usage_entries": [],
+   "requests": 0,
+   "total_tokens": 0
+  }
+ },
+ "last_processed_response": {
+  "apply_patch_actions": [],
+  "computer_actions": [],
+  "custom_tool_actions": [],
+  "functions": [
+   {
+    "tool": {
+     "description": "Ship an order.",
+     "lookupKey": {
+      "kind": "bare",
+      "name": "ship"
+     },
+     "name": "ship",
+     "paramsJsonSchema": {
+      "additionalProperties": false,
+      "properties": {
+       "order": {
+        "title": "Order",
+        "type": "string"
+       }
+      },
+      "required": [
+       "order"
+      ],
+      "title": "ship_args",
+      "type": "object"
+     }
+    },
+    "tool_call": {
+     "arguments": "{\"order\": \"o1\"}",
+     "call_id": "call_1",
+     "id": "fc_1",
+     "name": "ship",
+     "status": "completed",
+     "type": "function_call"
+    }
+   }
+  ],
+  "handoffs": [],
+  "interruptions": [
+   {
+    "agent": {
+     "name": "shipper"
+    },
+    "raw_item": {
+     "arguments": "{\"order\": \"o1\"}",
+     "call_id": "call_1",
+     "id": "fc_1",
+     "name": "ship",
+     "status": "completed",
+     "type": "function_call"
+    },
+    "tool_lookup_key": {
+     "kind": "bare",
+     "name": "ship"
+    },
+    "tool_name": "ship",
+    "tool_origin": {
+     "type": "function"
+    },
+    "type": "tool_approval_item"
+   }
+  ],
+  "local_shell_actions": [],
+  "mcp_approval_requests": [],
+  "new_items": [
+   {
+    "agent": {
+     "name": "shipper"
+    },
+    "description": "Ship an order.",
+    "raw_item": {
+     "arguments": "{\"order\": \"o1\"}",
+     "call_id": "call_1",
+     "id": "fc_1",
+     "name": "ship",
+     "status": "completed",
+     "type": "function_call"
+    },
+    "tool_name": "ship",
+    "tool_origin": {
+     "type": "function"
+    },
+    "type": "tool_call_item"
+   }
+  ],
+  "shell_actions": [],
+  "tools_used": [
+   "ship"
+  ]
+ },
+ "max_turns": 10,
+ "model_responses": [
+  {
+   "output": [
+    {
+     "arguments": "{\"order\": \"o1\"}",
+     "call_id": "call_1",
+     "id": "fc_1",
+     "name": "ship",
+     "status": "completed",
+     "type": "function_call"
+    }
+   ],
+   "request_id": null,
+   "response_id": null,
+   "usage": {
+    "input_tokens": 0,
+    "input_tokens_details": [
+     {
+      "cache_write_tokens": 0,
+      "cached_tokens": 0
+     }
+    ],
+    "output_tokens": 0,
+    "output_tokens_details": [
+     {
+      "reasoning_tokens": 0
+     }
+    ],
+    "request_usage_entries": [],
+    "requests": 0,
+    "total_tokens": 0
+   }
+  }
+ ],
+ "nested_history_owned_session_item_refs": [],
+ "no_active_agent_run": true,
+ "original_input": [
+  {
+   "content": "ship o1",
+   "role": "user"
+  }
+ ],
+ "output_guardrail_results": [],
+ "pending_input": [],
+ "previous_response_id": null,
+ "reasoning_item_id_policy": null,
+ "session_items": [
+  {
+   "agent": {
+    "name": "shipper"
+   },
+   "description": "Ship an order.",
+   "raw_item": {
+    "arguments": "{\"order\": \"o1\"}",
+    "call_id": "call_1",
+    "id": "fc_1",
+    "name": "ship",
+    "status": "completed",
+    "type": "function_call"
+   },
+   "tool_name": "ship",
+   "tool_origin": {
+    "type": "function"
+   },
+   "type": "tool_call_item"
+  },
+  {
+   "agent": {
+    "name": "shipper"
+   },
+   "raw_item": {
+    "arguments": "{\"order\": \"o1\"}",
+    "call_id": "call_1",
+    "id": "fc_1",
+    "name": "ship",
+    "status": "completed",
+    "type": "function_call"
+   },
+   "tool_lookup_key": {
+    "kind": "bare",
+    "name": "ship"
+   },
+   "tool_name": "ship",
+   "tool_origin": {
+    "type": "function"
+   },
+   "type": "tool_approval_item"
+  }
+ ],
+ "tool_input_guardrail_results": [],
+ "tool_output_guardrail_results": [],
+ "tool_use_tracker": {
+  "shipper": [
+   "ship"
+  ]
+ },
+ "trace": null
+}

@@ -56,7 +56,7 @@ async def test_a_long_list_is_cut_and_says_there_is_more() -> None:
     client = Resourceful(count=30, per_page=50)
     [reader] = await connected(mcp("https://h/mcp", name="h"), client).resolve()
     lines = reader.spec.description.splitlines()
-    assert len(lines) == 1 + resources.MAX_LISTED + 1 and lines[-1] == resources.MORE
+    assert len(lines) == 1 + 20 + 1 and lines[-1] == resources.MORE  # at most 20 listed
     paged = Resourceful(count=3, per_page=2)
     [reader] = await connected(mcp("https://h/mcp", name="h"), paged).resolve()
     lines = reader.spec.description.splitlines()

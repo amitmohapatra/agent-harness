@@ -2,10 +2,12 @@
 
 * **past conversations** - a run in a new thread finds what the user said in an earlier one
   through the ``memory_search`` tool (``kinds=["message"]``), and never what another user said;
-* **learned skills** - two successful runs of an agent make its learned skill, offered in the
-  context of its next run with nobody publishing anything: to the user whose runs taught it,
-  to the agent's other users once a second user's run agreed, never to another agent, and no
-  longer once the tenant's administrator dismisses it.
+* **learned skills** - two runs of an agent a person confirmed (a run's own report of success
+  is its outcome only, which teaches nothing; a person's verdict applies once the tenant's
+  administrator accepts it) make its learned skill, offered in the context of its next run
+  with nobody publishing anything: to the user whose runs taught it, to the agent's other
+  users once a second user's confirmed run agreed, never to another agent, and no longer once
+  the tenant's administrator dismisses it.
 
 Every step is the harness's own path (tools through the bridge, the context pushed at run start);
 nothing depends on what a model chooses."""
@@ -99,13 +101,14 @@ async def test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offer
 
     agents: dict[str, Any] = {}
 
-    async def run(h: Any, user: str, n: int, agent: str = agent_id) -> None:
+    async def run(h: Any, user: str, n: int, agent: str = agent_id) -> str:
         if agent not in agents:
             agents[agent] = arm(h.wrap(refunds, id=agent), [find_order, refund])
         done = await agents[agent].run("Refund order O-1", user=user, thread=f"live-r-{suffix}-{n}")
         assert done.status is RunStatus.SUCCESS and done.answer == "refunded pay-O-1", done
         await h.writes.drain()
         assert h.writes.failed == 0
+        return done.run_id
 
     async with live_harness() as h:
         tenant = await h._tenant()
@@ -118,15 +121,25 @@ async def test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offer
             async def users(n: int) -> bool:
                 return any(s.status == "active" and s.users >= n for s in await skills())
 
-            await run(h, ann, 0)
-            await run(h, ann, 1)
+            async def confirmed(run_id: str) -> None:
+                """A person confirms the run (pending review), and the administrator accepts
+                it: the run's success is then evidence its calls are learned from."""
+                said = await h.feedback(run_id, "confirm")
+                assert said is not None and said.review is not None, said
+                assert said.review.state == "pending"
+                accepted = await admin.feedback.approve(said.feedback_id)
+                assert accepted.review is not None and accepted.review.state == "approved"
+
+            await confirmed(await run(h, ann, 0))
+            assert not await users(1), "one confirmed run teaches no skill yet"
+            await confirmed(await run(h, ann, 1))
             assert await eventually(lambda: users(1), within=120, every=3)
             [skill] = await skills()
             assert skill.steps == [find_name, refund_name] and skill.runs == 2
 
             await run(h, ann, 2)  # Ann's next run: offered what her runs taught
             assert "## Learned skills for this task" in seen[ann] and learned in seen[ann]
-            await run(h, bob, 3)  # Bob is not offered Ann's wording ...
+            await confirmed(await run(h, bob, 3))  # Bob is not offered Ann's wording ...
             assert learned not in seen[bob]
             assert await eventually(lambda: users(2), within=120, every=3)
             await run(h, cy, 4)  # ... and once Bob's run agreed, every user of the agent is

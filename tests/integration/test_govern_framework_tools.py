@@ -146,22 +146,49 @@ def told(model: ScriptedChatModel) -> list[tuple[str, Any]]:
     return [(m.tool_call_id, m.content) for m in model.seen[-1] if isinstance(m, ToolMessage)]
 
 
-async def test_an_own_tool_call_repeated_in_one_step_is_asked_about_and_run_once(
+async def test_an_own_write_repeated_in_one_step_never_runs_more_than_was_approved(
     harness: Harness,
 ) -> None:
+    """APR: a write of the graph's own made twice in one step is no longer answered by
+    the harness in the first one's name (the library runs each call; a read made twice runs
+    twice: ``test_create_agent_library``). What holds for a write that asks: no call runs
+    before a person approved one, none runs more often than was approved, and every call is
+    answered with the tool's own result."""
+    model = ScriptedChatModel(turns=[[("refund", {"order": "o1"})] * 2, "refunded"])
+    agent = harness.wrap(graph(model, refund), id="g")
+    result = await agent.run("refund o1", user="u", thread="t")
+    assert result.status is RunStatus.PAUSED and ran == []
+    approved = 0
+    while result.status is RunStatus.PAUSED:
+        assert result.interrupt is not None and approved < 2
+        approved += 1
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
+        assert len(ran) <= approved
+    assert result.status is RunStatus.SUCCESS and result.answer == "refunded", result.error
+    assert 1 <= len(ran) <= approved
+    assert told(model) == [(f"call_1_{n}", "refunded o1") for n in range(2)]
+
+
+@pytest.mark.xfail(strict=True, reason="call identity lands at the fold")
+async def test_each_identical_write_of_one_step_is_asked_about_once_and_runs_once(
+    harness: Harness,
+) -> None:
+    """APR, the intended behaviour: N identical writes of the graph's own in one model step
+    are N calls — each asked about once, each run once when approved — and the stall rule
+    (the same call made step after step) refuses none of them: they are one step's. Today
+    the journal takes identical calls of a step for one across a pause (a call's identity is
+    its tool and arguments: ``tools.bridge``), so fewer run than were approved."""
     model = ScriptedChatModel(turns=[[("refund", {"order": "o1"})] * 3, "refunded"])
     agent = harness.wrap(graph(model, refund), id="g")
-    paused = await agent.run("refund o1", user="u", thread="t")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
-    assert done.status is RunStatus.SUCCESS and done.answer == "refunded", done.error
-    assert ran == ["refund o1"]
-    repeat = SAME_CALL.format(first="call_1_0")
-    assert told(model) == [
-        ("call_1_0", "refunded o1"),
-        ("call_1_1", repeat),
-        ("call_1_2", repeat),
-    ]
+    result = await agent.run("refund o1", user="u", thread="t")
+    questions = 0
+    while result.status is RunStatus.PAUSED and questions < 4:
+        assert result.interrupt is not None
+        questions += 1
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="r")
+    assert result.status is RunStatus.SUCCESS, result.error
+    assert (questions, ran) == (3, ["refund o1"] * 3)
+    assert told(model) == [(f"call_1_{n}", "refunded o1") for n in range(3)]
 
 
 async def test_the_harness_tools_repeated_in_one_step_of_a_plain_graph_run_once(
@@ -206,6 +233,32 @@ def test_a_tools_risk_is_declared_else_annotated_else_none() -> None:
     assert side_effects_of({"annotations": {"destructiveHint": True}}) == "irreversible"
     assert side_effects_of({"annotations": {}}) == "irreversible"  # as an MCP tool's
     assert side_effects_of(None) == "unknown"  # nothing said: governance asks
+
+
+@pytest.mark.parametrize(
+    ("hints", "asks"),
+    [({"read_only_hint": True}, False), ({"destructive_hint": True}, True), ({}, True)],
+)
+async def test_a_langchain_mcp_tools_annotations_are_its_risk(
+    harness: Harness, hints: dict[str, bool], asks: bool
+) -> None:
+    """A tool ``langchain.mcp`` made of an MCP server's carries the server's annotations in
+    its metadata — ``metadata["mcp"]["tool"]["annotations"]``, their names in snake case, as
+    that library (and ``langchain-mcp-adapters``) writes them: they are its risk, as an MCP
+    tool's are. One that only reads runs unasked; one that is destructive, or gives no hint,
+    waits for a person."""
+
+    @lc_tool
+    def lookup(order: str) -> str:
+        """Look an order up on the server."""
+        ran.append(order)
+        return f"{order}: shipped"
+
+    lookup.metadata = {"mcp": {"tool": {"annotations": hints}, "server": {"name": "orders"}}}
+    model = ScriptedChatModel(turns=[("lookup", {"order": "o1"}), "shipped"])
+    result = await harness.wrap(create_agent(model, tools=[lookup]), id="mcp").run("o1?", user="u")
+    assert (result.interrupt is not None) is asks
+    assert ran == ([] if asks else ["o1"])
 
 
 # --------------------------------------------------------------------------- OpenAI Agents

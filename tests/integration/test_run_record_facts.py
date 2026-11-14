@@ -13,7 +13,7 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.models import ScriptedChat
 from trellis import Citation, Harness, ReAct, tool
-from trellis.harness.history import RUN_RECORD, Said, Speaker, recorded, said_of
+from trellis.harness.history import MESSAGE_ID, RUN_RECORD, Said, Speaker, recorded, said_of
 
 NASDAQ = Citation(name="Nasdaq Last Sale feed", date="2026-10-27")
 #: How deep the memory service lets custom metadata nest (its ``METADATA_MAX_DEPTH``).
@@ -53,7 +53,11 @@ async def test_the_turn_is_written_with_its_run_record(
     run = facts[-1]
     assert written[-1]["role"] == "ASSISTANT" and written[-1]["content"] == "123.45"
     assert run["status"] == "SUCCESS" and run["seconds"] > 0 and run["approvals"] == "none"
-    assert facts[0] is None  # the question carries nothing
+    # the question carries no fact, only its id: the one part of a message memory's window
+    # gives back, so the next turn knows which turns memory holds (``Agent.caught_up``)
+    assert facts[0] == {MESSAGE_ID: written[0]["custom_metadata"][MESSAGE_ID]}
+    assert run[MESSAGE_ID] == written[-1]["custom_metadata"][MESSAGE_ID]
+    assert MESSAGE_ID not in result  # a tool result's facts are its call's alone
     assert all(_depth(m.get("custom_metadata", {})) <= METADATA_DEPTH for m in written)
 
 
@@ -62,6 +66,10 @@ def test_the_facts_survive_the_write_spool() -> None:
     assert recorded(said)["custom_metadata"] == {RUN_RECORD: {"status": "OK"}}
     assert said_of(recorded(said)) == said
     assert "custom_metadata" not in recorded(Said(Speaker.USER, "hi"))
+    named = Said(Speaker.ASSISTANT, "123.45", facts={"status": "SUCCESS"}, id="msg_1")
+    stored = recorded(named)["custom_metadata"]
+    assert stored == {RUN_RECORD: {"status": "SUCCESS", MESSAGE_ID: "msg_1"}, MESSAGE_ID: "msg_1"}
+    assert said_of(recorded(named)) == named  # its facts its own, its id apart
 
 
 def test_a_run_not_yet_timed_records_no_seconds() -> None:
@@ -80,3 +88,31 @@ def test_a_run_not_yet_timed_records_no_seconds() -> None:
     said = [Said(Speaker.USER, "q"), Said(Speaker.ASSISTANT, "a")]
     out = pipeline._with_facts(said, runtime, RunStatus.SUCCESS)  # type: ignore[arg-type]
     assert out[-1].facts == {"status": "SUCCESS", "approvals": "none"}
+
+
+def test_each_decision_a_person_made_is_said_in_the_run_record() -> None:
+    from types import SimpleNamespace
+
+    from trellis.contracts import InterruptDecision as D
+    from trellis.contracts import RunStatus
+    from trellis.harness import pipeline
+    from trellis.harness.journal import Journal
+
+    journal = Journal()
+    journal.answers = {
+        "k1": [{"decision": D.APPROVE.value}, {"decision": D.EDIT.value}],
+        "k2": [{"decision": D.REJECT.value}, {"decision": D.ANSWER.value}],  # no decision
+        "k3": [{"decision": D.CANCEL.value}],
+    }
+    journal.approved = ["a"]
+    runtime = SimpleNamespace(
+        replay=SimpleNamespace(journal=journal), started_at=None, fetched={}, toolbox={}, native={}
+    )
+    said = [Said(Speaker.USER, "q"), Said(Speaker.ASSISTANT, "a")]
+    out = pipeline._with_facts(said, runtime, RunStatus.CANCELLED)  # type: ignore[arg-type]
+    assert out[-1].facts == {
+        "status": "CANCELLED",
+        "approvals": "a tool call approved; a tool call approved with edits; "
+        "a tool call rejected; the run abandoned at a question; "
+        "a tool call approved in the framework's own gate",
+    }

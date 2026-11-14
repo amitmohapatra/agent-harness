@@ -5,6 +5,843 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: sub-agents in the background, with no server to host
+
+`ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts
+— take tasks in the background in a chat a person reads: Deep Agents' five async sub-agent tools
+(`start_async_task`...), the task a child run of the turn at work in the process and held in the
+run store, its result a notification (langchain-core's notification metadata, Deep Agents'
+shape) given to the conversation's model at its next model call or turn, or by a turn of the
+chat's own on its thread stream when it is idle; its questions asked through the chat
+(`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
+
+### Fixed: LangChain, LangGraph and Deep Agents features through the harness
+
+A library's feature works as the library does it; the harness governs, records and counts it.
+
+- **Security.** Deep Agents' file tools on a `CompositeBackend` are governed call by call, by
+  where the path is routed: a write or read on a disk, store or sandbox route is a call of the
+  run (the catalog's rules, approvals, records) though another route keeps files in the graph's
+  state. Before, one state route — the run's skills beside a sandbox,
+  `create_deep_agent(**deep_agent(sandbox(), src))` — left every route ungoverned and unrecorded.
+- **Security.** With a `PIIMiddleware` that checks input, the memory context the harness
+  sends with the question passes the same rule (redacted, masked or hashed; `block` ends the
+  run before a model call), and the turn recorded in memory holds the question as the graph
+  kept it, not the raw input.
+- **Security.** What a run keeps of its graph — the checkpoint a `RunCheckpointer` keeps in
+  the run's journal, and a tool's `Command` kept for a replay — is read back in LangGraph's
+  strict mode: only LangGraph's and LangChain's own types and the types the graph's state
+  declares are made of stored data; anything else stays data and is never imported or called.
+- A Deep Agents graph with no thread of its own (`ReAct`, a graph compiled without a
+  checkpointer or with `RunCheckpointer`) keeps its state files and todos across the turns
+  of a conversation, as it keeps its background tasks: a file one turn wrote is read by the
+  next, one it deleted stays deleted. Bounded as before (256 KiB kept in the file store).
+- A `ReAct` sub-agent's `interrupt_on` is Deep Agents' own approval gate again, with its
+  `when`, `allowed_decisions` and `description` (it was flattened into an `irreversible`
+  catalog risk for the tools it named); still one question a call.
+- What a decision model used (`langchain_core.decisions`: the classifier of
+  `AutoModeMiddleware` and `ModelRouterMiddleware`) is counted in the run's budget, and a
+  call `AutoModeMiddleware` blocks is on the run's events and records as a failed call.
+- A graph's stream passes its stream transformers (`astream_events(version="v3")`):
+  `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
+- A graph's own tool call ends with the message its tool made: artifacts and content blocks
+  are kept (a replay after a pause included). Without `middleware()`, results are the
+  library's as returned (no large-result or table rewriting), and a call made twice in one
+  step runs twice; the harness's own tools are unchanged.
+- No false `NO_ANSWER`: a `return_direct` tool's result, a non-conversation state, a Pydantic
+  or dataclass state and an `@entrypoint`'s return value are the answer; a string input goes
+  as it is to a graph whose input schema takes a string.
+- `HumanInTheLoopMiddleware(interrupt_mode="per_call")` is an approval of its call; the gate's
+  decision is governance's too (one question a call); an edit of a batch of several calls is
+  refused unless it gives one decision for each. `interrupt(response_schema=...)` is the
+  question's `expects`.
+- A tool `langchain.mcp` (or `langchain-mcp-adapters`) made of an MCP server's is governed by
+  the server's annotations (`metadata["mcp"]["tool"]["annotations"]`): a read-only one runs
+  unasked.
+- A model called in a graph's sync node is accounted and watched for stalls.
+
+### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
+
+- Deep Agents reads its async tasks' statuses itself and adds each outcome as a notification:
+  the harness treats a notification as a message the user did not type (the turn's question,
+  the transcript and memory record, the earlier-results and turn logic, the conversation's
+  earlier turns); the records it updates are carried with the task list; the extra model turn
+  after a final answer counts against `max_steps`, and past it the run keeps its answer
+  instead of LangChain's "Model call limits exceeded".
+- A task held by a server is read after 10 s at most, then less and less often (up to every
+  two minutes, with jitter): an idle chat is told how it ended, a task whose
+  run was cancelled from another server is cancelled on its server, and a follow-up to a task
+  that ended is a run of its own.
+- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
+- An empty task list is not carried.
+
+### Changed: the five task tools are governed one way, on a server or in the harness
+
+- `start_async_task`, `update_async_task` and `cancel_async_task` are writes wherever the task
+  runs, announced on the run's stream and not asked about; `check_async_task` and
+  `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
+  cancel of a harness task no longer pauses a chat for an approval.
+
+### Performance: background tasks cost one run-store read per model call (PERF-4)
+
+- A turn's pull of its tasks' statuses asks the run store at most once per model call, however
+  many tasks are unfinished: a task at work in the process is known running, one that ended
+  there is known ended, and the others are read one per model call, the one read longest ago
+  first. `list_async_tasks` reads only the unfinished tasks.
+
+### Performance: the carried task list keeps the unfinished tasks and the last 50 that ended (PERF-5)
+
+- A conversation's task list no longer holds every task it ever started (it stopped being
+  kept at about 700 tasks, past the 256 KiB bound): the ended tasks past the 50 updated last
+  are dropped when the list is kept for the next turn. `check_async_task` of a task dropped
+  answers that it is not tracked.
+
+### Security: an outbound URL is checked by what it says and by where it leads (SEC-R-9)
+
+- `outbound.validate_url` reads a trailing dot as the same host (`https://localhost./` is
+  refused), refuses a host that is a number (`https://2130706433/`, `https://127.1/`), and
+  returns the host lower-cased without the dot. `outbound.checked` adds the resolution: every
+  address the host resolves to must be public. A2A push uses it (its own copy is gone), and an
+  `AsyncSubAgent`'s `webhook` is checked with it each time a task is started, beside the
+  check of the spec when the agent is built.
+
+### Security: background tasks are bounded (SEC-R-2)
+
+- A chat has at most as many unfinished background tasks as a run may have children working
+  at once (the admission limit: 4 at first, 1 to 16, falling under pressure); a start past it
+  is answered "Not started: this chat has N background tasks unfinished…".
+- A task's outcome told by a turn of the chat's own may start or update a task three times in
+  a row with no message from the user between; the fourth is refused (the depth is in the
+  runs' `trellis_background` / `trellis_notified` metadata).
+- A process keeps at most 1,024 background attempts at work; past it a start is refused, an
+  idle chat's outcome waits for the conversation's next turn.
+
+### Security: a background task belongs to the conversation that started it (SEC-R-1)
+
+- The task tools, the questions asked through a chat, each pull and each recorded
+  notification act on a task's run only when it is the conversation's: its tenant's and
+  user's, started by its agent in its chat thread, under the task's id
+  (`background.owned`; Deep Agents' tasks on a server: `bridges.async_tasks`). Any other is
+  answered as a task the conversation does not track.
+- A run's input names no task list: `async_tasks` in a mapping input is left out (the
+  conversation's list is the one the harness carries). A message a client of a chat surface
+  gives — AG-UI `state`, an A2A data part — keeps its role, content, name, id and tool calls;
+  `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
+  notification (`history.from_client`).
+
+### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
+
+Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
+2.8.0, which it requires). What it changes through the harness:
+
+- **A tool's failure no longer tells the model the error.** The SDK's default failure text
+  is a fixed sentence from 0.23 (`An error occurred while running the tool. Please try
+  again.`): a function tool, an MCP server's tool and an agent called as a tool alike, and an
+  SDK tool given arguments that are not JSON (it no longer says they were not). The
+  harness records the call as failed with the error, on the stream and in the tool records,
+  and the child run of an agent tool keeps it in its error, as before; a tool's own
+  `failure_error_function` and the run's `after_tool` hooks still word what the model reads.
+- **The run's own `RunConfig.tool_error_formatter`** (0.24: the `tool_exception` kind, given
+  the error) words a governed tool's failure under the SDK's default policy, as without the
+  harness.
+- **Still no background agents** ([openai-agents.md](docs/frameworks/openai-agents.md#limits)):
+  0.24 has no background run, agent tool or handoff, and never polls a Responses `background`
+  request; `tests/integration/test_background_by_adapter.py` pins what it does.
+
+### Changed: an OpenAI agent's features work as the SDK does them
+
+The harness governs, records and counts an OpenAI agent; it no longer changes what the SDK
+does with your own tools and settings ([openai-agents.md](docs/frameworks/openai-agents.md)).
+
+- **A session on `h.wrap` is each conversation's own.** It was one session for every user and
+  thread: bob's model read alice's turns. Each run now uses a copy of it — the same class, the
+  same storage — whose `session_id` is yours followed by the conversation's key (tenant, user,
+  thread). A session that cannot be kept so (its id is a property, or its storage key was made
+  from the id) is refused at `h.wrap`. A live `SandboxRunConfig(session=...)` or a
+  `session_state` on `h.wrap`, one sandbox for every user, is refused too: give it per run.
+- **`run_config` as a dict works** (it raised `TypeError` on every run), as `Runner.run` takes
+  it and as a queued run keeps it.
+- **Your tool's result is the SDK's.** An image or a file a function tool returns reaches the
+  model as one (it was a Python repr string), and a typed result reaches `tool_use_behavior`,
+  output guardrails and hooks as the object. Results of your own tools are no longer rewritten
+  (tables, the 80,000-character stub): that is the harness tools' only.
+- **Your tools keep their order** (they were sorted by name); the harness's follow them.
+- **A call your reply repeats runs each time for your own tools**, as the SDK runs it; a harness
+  tool still runs a repeated call once.
+- **Your `tool_not_found_behavior` is respected.** The friendly default (`return_error_to_model`)
+  applies only when your `run_config` does not say; say `"raise_error"` in a dict.
+- **At `max_turns` the run ends `PARTIAL` with the SDK's outcome**, no extra model call (it was
+  one more paid call for a last answer): the answer is the last message the model wrote, the
+  error `BUDGET_EXCEEDED` names the limit. Your own `error_handlers` still answer it.
+- **The Responses API through Bifrost, where the gateway serves it.** A model name goes to
+  Bifrost on the SDK's default API (`/v1/responses`; it was forced to chat completions). A
+  gateway that does not serve the route for a model answers so on the model's first call: the
+  call falls back to `/v1/chat/completions`, once, and the model stays there (said once), so a
+  deployment that worked before still does. On a model that fell back, an agent that uses a
+  hosted tool, a stored prompt, a Responses setting, a sandbox capability needing them or a
+  server-side thread is refused with each feature named (it failed mid-run or was silently
+  ignored).
+- **Your model routing is kept**: a `MultiProvider(provider_map=...)` entry and the `litellm/`
+  and `any-llm/` prefixes keep their providers (Bifrost replaced them); a `RunConfig.model`
+  object is said once as not routed.
+- **A server-side thread the model ignores no longer drops the history**: with the SDK's chat
+  completions model, memory keeps the conversation as with no thread.
+- **A `SandboxAgent`'s capability tools are governed and recorded** (`exec_command`,
+  `write_stdin`, `view_image`, `apply_patch`, `load_skill`): the catalog's risk, approvals, the
+  journal, the record, the stream. They ran with no person asked. Say their risk in the
+  catalog: undeclared, each call asks.
+- **A sandbox `Memory`'s own model calls go through the run's model route and budget** (they
+  went straight to OpenAI). Its consolidation agent's file writes in the sandbox are the SDK's
+  own, not governed, which is said once at `h.wrap`.
+- **An agent tool's own `run_config` no longer escapes the harness**: its child run gets the
+  model route, the day, a made-up tool's error and the stall watch. Messages steered into the
+  conversation are no longer given to a child's model calls.
+- **An `Agent` subclass of your own is wrapped** (it was refused). A `RealtimeAgent` or a
+  `VoicePipeline` is refused with what to do instead.
+- **The SDK's own tracing is warned of, once, at `WARNING`** (it was `INFO`): it exports tool
+  inputs and outputs to OpenAI unless turned off; the message names the switches.
+- **"Allow for this conversation" sticks for the SDK's own `needs_approval` tools**: the tool's
+  later calls run unasked in the run (the SDK's `always_approve`) and in the conversation's
+  later runs.
+- **An MCP server that retries itself owns its tries** (`max_retry_attempts`): the harness's
+  read retries no longer multiply them.
+- **An edited computer action runs only an action of the SDK's computer interface**, with
+  that action's arguments. An approver's edit (or a hook's rewrite) that names another method
+  of your computer object, or arguments that are not the action's, is refused: nothing of the
+  computer is called, and the model is told the call was not run.
+
+### Fixed: a conversation's messages one at a time, in the order sent, on every replica
+
+Two messages of one chat that reached two server processes both ran, writing the same thread:
+only queued runs (`start`) waited across processes. And a burst of messages in one process
+kept its order only by luck. Now a turn of a conversation started with `run`, `stream`,
+`serve_chat` or `serve_a2a`, or continued after its answer, takes the conversation's
+`concurrency_key` and waits in the conversation's line (`trellis.harness.line`, the one
+ordering of a conversation's turns): one turn at a time, in the order the messages were sent,
+whichever replica each reaches.
+
+- A queued turn (`start`) holds its place: direct messages sent after it wait for it, and a
+  worker claims it only when no turn placed before it runs.
+- `interrupt` stops the working run wherever it works, and never works beside it: sent to
+  another replica, the message waits until the replica holding the turn has stopped it (at its
+  next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
+  once.
+- A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting behind a turn in another process follows that turn's events (one shared
+  stream a run ahead, at most 32 a process, on its own client) instead of polling.
+- A turn's earlier turns are read with one listing per ending, never paging past the messages
+  still waiting (a burst's waiting turns used to crowd the history out).
+- A process killed while it holds a turn frees it once its hold lapses; one killed after
+  recording a turn and before holding it, 60 s later.
+- The in-process run store (`LocalRuns`) holds a run as agent-runs does: one heartbeat holds
+  it for 300 s at most, and the refusal another holder gets does not name the holder. One
+  suite of checks (`tests/support/store_contract.py`) runs against `LocalRuns`, the test
+  suite's `FileRuns` and agent-runs.
+- A turn's place is the run store's: the line orders by `RunRecord.placed_at`, which agent-runs
+  decides under the key's lock, and no longer reads every answer of every run in the line to
+  recompute it. A store that sends no `placed_at` is a `ConfigurationError` naming the run,
+  never a guessed order. `LocalRuns` sets `placed_at` with the same meaning.
+- The line is listed by its own key (`concurrency_key=thread:<conversation>`), so another
+  user's turns on a thread with the same name are never read (they were, one `get` each, and
+  again whenever they moved). It lists the queued runs, then the running ones, so a queued
+  turn a worker claims in between is never missed. `RunStore.iterate` takes
+  `concurrency_key`, as `RunsClient.iterate` does.
+
+Needs the agent-runs of this release (runs of a key created in their place, `placed_at` on the
+run record and summary, the `concurrency_key` listing filter) and `trellis-contracts` with
+`RunRecord.placed_at`. The two wire additions are optional and additive. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
+
+### Fixed: what the feature suite against the real services found
+
+`make test-features` (`tests/features`) proves each documented feature's purpose against the
+real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVERAGE.md](docs/research/FEATURE_COVERAGE.md)).
+
+- **`trellis doctor` reported every working agent-runs as failing.** Its runs check sent the
+  key as a bearer token; agent-runs reads it from `X-API-Key` only, and answered `401`.
+- **An A2A card ignored `h.wrap(description=)`.** The card read only the target's own
+  description and docstring; it now says what `h.wrap` was told first.
+- **A query over a kept CSV of one text column counted its header as a row.** The file that
+  `query_result(save_as="csv")` writes for one text column (`line` over its values) was read
+  back as lines, its header among them: one row too many. A kept `.csv` is now read under its
+  first line whatever its columns hold; `read_file` still shows the file as kept.
+- **A memory `504` (its request deadline) is proven handled, against the document that now
+  lists it.** The fake memory service answers the middleware's `504 TIMEOUT` before a route
+  runs or after a write is stored: a context is asked again and reaches the run (or is a
+  warning when it stays `504`), and a turn stored then answered `504` is sent again under the
+  same `Idempotency-Key` and kept once (`test_memory_outage.py`, `test_memory_window.py`).
+
+### Fixed: one question a call, run once, decided once — every adapter, whatever asks
+
+`tests/integration/test_one_question.py` checks, for every adapter and every way a call can
+need a person's approval (a tool that declares nothing, a catalog rule, a write, a hook's
+`Ask`, an allowance for the conversation or always, the library's own gate: LangChain's and
+Deep Agents' `interrupt_on`, OpenAI's `needs_approval` and an MCP server's
+`require_approval`, Claude Code's `can_use_tool`, an ACP agent's permission request), on a
+run, a stream, a resume on another harness, inside a sub-agent: one question a call, its
+body run once when approved and never when rejected, one record of it (journal, memory) and
+one count (budget), and its decision fed back once on the run that recorded it. What did
+not hold:
+
+- **The same call twice in a turn: the second took the first's answer.** A replayed call
+  did not read past the answer it had read, so the next identical call took that answer
+  for its own: a function target or a graph without a checkpointer, approving the first
+  and rejecting the second, ran both. A framework that goes on from its session (Claude,
+  Kimi over ACP) or its saved run (OpenAI's `needs_approval`) does not make the calls before
+  the paused one again, but the attempt read the journal from its start: the call made
+  again got the earlier call's record (approved, it did not run) or answer (Claude Code's
+  question rejected for the second call ran it). The journal keeps what each call read
+  (`reads`) and how far the calls before the pause read (`cursors`); a subagent paused in its
+  work, which its framework starts again, reads its own again.
+- **A rejection is the call's it answered.** In a session that goes on (Claude, Kimi over
+  ACP), a person's rejection of a call was taken by the next identical call: rejected, the
+  same call made again later in the turn was refused without asking. A rejection now
+  belongs to the call its framework named (its call id): that call — made again under its
+  id, or still waiting — keeps it, and a new call, identical or not, is asked, as on every
+  other adapter and as Claude Code itself does. The stall guard still stops a model that
+  makes one call over and over.
+- **A subagent started again ran a built-in it had run.** Claude starts a subagent paused in
+  its work again: it made its earlier built-in calls again, and they ran again on their
+  recorded approval. A built-in that ran is recorded in the journal; made again, it is not
+  run, and the subagent reads its result.
+- **An OpenAI agent tool's own approval was fed back on the calling run.** The SDK's
+  `needs_approval` inside `Agent.as_tool` names the agent tool's child run, which records the
+  call, as governance's approvals of a helper's call do.
+
+### Fixed: Claude Agent SDK approvals, spending and live sessions
+
+- **A question a run hook asks is no approval.** A call Claude Code asks about was let
+  through without its question when any recorded answer was read while the call was
+  decided: a `before_tool` hook that asked a person something else
+  (`trellis.current().ask(...)`: a ticket number) let a shell write run unapproved. Only the
+  answer to the approval of that call (governance's question, whatever made it ask) spares
+  it Claude Code's own question now (`journal.approvals_read`).
+- **Closing the harness ends every CLI and every part.** A live session ended its
+  background runs (one that waits for a person is cancelled in the run store) before its
+  CLI: a run store that failed then left the CLI process running, and `Harness.aclose`
+  stopped there — the queued writes, the spans, the MCP sources and the clients were never
+  closed. Each session's process now ends whatever its runs' ends meet, and `Harness.aclose`
+  closes every part before it raises the first error (any other is logged).
+- **A team's own hooks keep their timeout in a live session.** A live session told the CLI
+  to wait 24 hours for every hook with no timeout, the team's own too (a hook that hung held
+  a turn for a day): only the harness's own hooks, which may wait for a person's answer
+  about a background subagent's call, are; a team's keep what they set (none: Claude Code's
+  default), as in a process of their own.
+- **A paused or cancelled turn is charged its own spending.** A turn that paused before its
+  first result and was resumed on another worker was charged the conversation's earlier
+  turns again: the session's cost was kept in the first worker's memory only (it is in the
+  run's journal from the turn's start now). In a live session, the attempt a pause left lost
+  its tokens and model call (its result came after the attempt stopped reading), and what
+  a cancelled turn spent was charged to the conversation's next turn: a left turn's result,
+  which comes at once when it is interrupted, is its own run's now.
+- **The turn limit no longer ends a conversation's background work.** The one last answer
+  at `max_turns` ran in a process of its own and closed the conversation's live session
+  first, stopping the background subagent the same turn had started (its run `ERROR`). It
+  is the session's next turn now, told the limit is reached and its tool calls refused
+  (Claude Code's process answers the next prompt after its `error_max_turns` result, seen
+  driving the bundled CLI); a turn in a process of its own answers as before.
+- **A resume on another worker leaves a background subagent at work.** A turn that started
+  a background subagent (kept going by worker 1's live session) and paused was resumed on
+  worker 2, which ended the subagent's run `ERROR` ("not taken up again") while it was still
+  at work, and started a second CLI process resuming the session worker 1's still held. What
+  was handed on is in the run's journal now (`Journal.handed_on`, replacing a set in one
+  process's memory): no later attempt ends it on any worker, and a session another worker's
+  live session holds is forked (`fork_session`) — the turn goes on on worker 2, the subagent
+  on worker 1.
+- **A background subagent's harness tool calls are its own in two more cases.** A team's own
+  `PreToolUse` hook that rewrote such a call (`updatedInput`) left the call unknown when it
+  came with the rewritten arguments: refused for want of a run, or run in the turn being
+  answered then. And a tool the process lists that the subagent's run was not offered (the
+  hints narrow each run by its own task) failed in the relay ("not enough values to
+  unpack"): the subagent is offered what the process lists, so it runs, in its run.
+- **A conversation's turn is never served by a stale process.** A worker that served a
+  turn kept its session (and its live process) for the conversation's next turn, even when
+  another worker had served a later turn meanwhile: that turn was then answered by a process
+  that never saw it. A kept session is dropped now when the run store has a turn of the
+  conversation started after the last one this process served (`pipeline._served_elsewhere`):
+  the stale process is ended and the turn runs as on a worker that kept none — a new session,
+  the conversation's turns given as context.
+- **The hour turning no longer ends a conversation's live session.** `schedule_task`'s
+  description says the hour it is, and a live session served only a turn whose tools were
+  listed in the same words: the first turn after the hour turned closed the process and
+  stopped its background work (a background subagent's run `ERROR`). A later turn must bring
+  the same tools with the same schemas now (`convert.listing`), not the same wording; the
+  process keeps the wording it listed as it started. So that a session living for hours or
+  days does not tell the model a stale hour (a wrong today-or-tomorrow for "at 9"), each turn
+  it serves is told the day and the hour it is with its prompt (`schedules.now_said`, in the
+  context the `UserPromptSubmit` hook adds): Claude Code itself says the date once a session
+  and again only when the day changes (its `date_change` reminder), never the hour.
+
+### Fixed: what an independent review of the adapters found
+
+- **The run's `after_tool` hooks decide what the model reads of a failed call again.** A tool
+  that raised had its error handed back to its framework as it was, whatever a hook made of
+  the call: a LangGraph graph's wrapper or `ToolRetryMiddleware` worded it, the OpenAI SDK's
+  failure function worded it, and a tool the SDK runs here returned its own result over a
+  hook's. Now a failure a hook makes a result is that result, and a failure a hook rewords is
+  still delivered as the framework delivers a failed call — raised into the graph (its retry,
+  its wrappers and its tool node act on it), told by the SDK's failure policy (which may end
+  the run), raised to the SDK as the same error saying the hook's words — the model reading
+  the hook's words.
+- **A call that asks waits for the calls of its model step however LangGraph runs them.**
+  `create_agent` (and Deep Agents) runs each call as a task of its own: the wait for a
+  `ToolNode`'s other calls never applied, LangGraph cancelled the write beside the call that
+  asked, and the resumed run told the model its effect was unknown.
+- **A computer call's actions are one decision.** A batch pressing the same key three times
+  was read as a model looping: the third press was skipped, unsaid, and the run marked
+  stalled. The same computer call step after step is still stopped, and an action that does
+  not run is told to the model in its next call.
+- **Two turns of a conversation ending together keep both their tasks** (the carried task
+  list), on one server or two, in any order. The file store has no conditional write, so no
+  turn writes over another's any more: each keeps a file of its own under the conversation's
+  folder (what it read merged with its own state), readers merge every file there, and a turn
+  removes the files it read only once its own holds them.
+- **A LangGraph graph's retry policy is the only one for its own tools.** The harness tried a
+  read whose error may pass again inside each of the graph's tries:
+  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times, a node's
+  `RetryPolicy(max_attempts=3)` 9 times. A graph's own tool is now tried once by the bridge,
+  and tried again around the graph's handling of its error only where the graph did not try
+  it again itself — seen as it happens: a wrapper running the call a second time, or a retry
+  policy of its node that retries the error. `ToolRetryMiddleware(max_retries=2)` and
+  `RetryPolicy(max_attempts=3)` call the tool 3 times; under a wrapper that only handles the
+  error (`ToolErrorMiddleware`, Deep Agents' file middleware, `ReAct`'s `GovernTools`), or none,
+  the harness's 3 tries stand — one call of the run, as before, its tries its attempts: one
+  start and one result on the stream, one record, one count against `max_tool_calls`, one
+  question for a call that asks, and the `on_error` hooks told once if its last try fails
+  (the `after_tool` hooks see each try, whose words the graph's handling of it carries).
+- **An OpenAI function tool's own `timeout` is always that tool's timed-out call.** Counted
+  from when its task began, a call whose task began late (another call holding the loop) was
+  recorded as cut by a cancelled run, its start left open; it is counted from when the SDK
+  made the call, as the SDK counts it.
+- **One call, one question.** A person's answer about a call covers its framework's own tries
+  of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
+  second time); an edited call, or the same call of a new model step, is asked about anew.
+
+### Fixed: a call across a run's attempts, and a turn while memory is slow or down
+
+Four findings of the user-scenario suite (SCN-2, SCN-3, SCN-4, SCN-6), each tested in process
+in `tests/integration/test_scenario_fixes.py`:
+
+- **Writes to memory were lost when the memory service was down for more than a few seconds.**
+  A background write had three tries half a second apart; once the memory client's circuit
+  opened each try was refused at once, and with no spool (none in a container) transcripts,
+  tool records and outcomes were "failed and is lost". While the circuit is open a write now
+  spends no attempt: it waits the circuit's cool-down, queued, and is sent when the service is
+  back — however long that takes, bounded by the queue (10,000 writes; past it a write is
+  spooled or lost and reported, as a full queue's always was). **A write now has six attempts,
+  not three**: one more than the five failed calls that open the circuit, so the first write
+  of an outage is still trying when it opens. Still lost: what waits in the queue when the
+  process is killed, with no spool what a clean stop cannot deliver in 10 s, and a write that
+  fails six times while the service answers other calls ([memory.md](docs/memory.md)).
+- **The next turn was answered without the turn before when memory took more than 5 s to keep
+  it.** Where memory's window comes as messages (LangGraph's graphs, `ReAct`), the
+  conversation's latest turns memory does not hold yet are added after it from the run store
+  (each one's question and answer), on whichever server the next turn runs; matched by message
+  id, so a turn memory holds is never given twice; with nothing in memory's window, the run
+  store's newest turns (at most 10, within the conversation's budget). A chat message's
+  `run_record` in memory now carries its `message_id`. One listing of the run store per turn
+  of a conversation.
+- **A call with no framework id had a different id in a later attempt, or another call's.**
+  A call a graph's node or a function makes itself was `<run>:<step>`, the step counted per
+  attempt: after a resume a checkpointed graph's payment took the id of a lookup made before
+  the pause. It is `<run>:<digest of the tool and arguments>:<which time>` — the call's
+  idempotency key — in every attempt. **The format of these ids changed**; a framework's own
+  call ids are as they were.
+- **A call replayed after a resume was announced again** (`TOOL_CALL_START`…`TOOL_CALL_RESULT`
+  with `cached`), so a run's event log, a reconnecting AG-UI client and a thread's replay
+  showed it twice. A replayed call emits nothing: the attempt that ran it announced it. The
+  AG-UI activity line counts a run's calls across its attempts on the replica that served them.
+
+### Fixed: a tool result shaped like the journal's record of a call is its result
+
+A run's journal kept a call's output bare and an outcome that was none (a timeout, an unknown
+effect) under the key `trellis_outcome`; a tool that returned a dict of that shape — third-party
+JSON passed on — was replayed as the harness's record after a pause: every resume of the run
+failed, or the tool's author chose the replayed status and metadata (security review, SEC-R-5).
+Every call's record is now kept in an envelope (`trellis_record`: status, output, metadata) and
+read back from those three fields only, so an output is never read as a record. A journal
+written before this release is still read (a run paused before the upgrade); a server of the
+release before does not read the new shape: resume a run where it paused, or upgrade every
+server before resuming.
+
+### Fixed: a run that fails leaves no child `RUNNING`
+
+A run whose model call stalled ends `ERROR`; a helper its framework had open in the foreground
+(a Claude subagent) was let go of as for a pause and never ended: `RUNNING` for ever, held by
+nothing (architecture review, ARCH-1). A run's open children — helpers, sub-agents' runs — now
+end with it whatever its final status, once, where the run is concluded: with its status and
+error when it failed or ran out of time, cancelled with its reason when it was cancelled, and
+cancelled ("the run that started it ended first") when it answered without them. A child handed
+on to its conversation's session (a Claude subagent working in the background) still goes on.
+One listing of the run's children at the end of every run.
+
+### Changed: what a turn costs the run store and the journal does not grow with the conversation
+
+- A call its framework ran itself (Claude Code's built-in tools, a provider's hosted tools, an
+  ACP agent's) is journaled as the stream previews its result (2,000 characters), not whole:
+  200 calls of 10 KB kept 2 MB in the journal and every pause checkpoint. Whole still while a
+  subagent works in the foreground — started again after a pause, it reads its calls' results
+  again (performance review, PERF-8).
+- Whether another server served a turn of the conversation since this one's last is read from
+  the newest runs only: two requests whatever the conversation's length, not one for each of
+  up to 50 turns (PERF-6).
+- The turns memory does not hold yet are read from the run store one run each; the turns it
+  holds are not read.
+
+### Fixed: two failures a busy machine showed
+
+- **A wide table can be queried.** Typing a saved result asks every column whether a cell
+  says it holds no value (`NA`, `N/A`, `-`...); asked as `IN` a list of words, DuckDB made
+  each column's question a join of its own, and the statement that casts every column ran
+  out of the database's 512 MiB: a CSV of 200 columns (of one row) could not be queried, and
+  one of 67 failed now and then. The question is one regular expression a column now
+  (`query._missing`): a table of a thousand columns loads.
+- **A sandbox is deleted once.** The reaper (in the background, when a process makes a
+  sandbox) could list a sandbox whose run had just ended in the same process while that
+  run's end deleted it, and delete it again: two deletes of one sandbox at once, which a
+  provider may refuse (stopping the reaper's round, and logging the run's end as not
+  deleted). Whichever begins first deletes it; the other passes it over.
+- **A Claude live session waits for its own turn for a finished task.** When a background
+  task ended while no turn was served, Claude Code runs a turn of its own for it as soon as it
+  gets to it; the session counted as idle from the task's end, and closed (its process with
+  it) if that turn had not begun in time, or ran long: what the turn said was lost to the
+  conversation. Such a turn under way is work now (`LiveSession.injected`), and one due —
+  from the task's end until the turn begins — is waited for 30 seconds at least
+  (`LiveSession.due`, `SETTLE_SECONDS`) before the session counts as idle.
+
+### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
+
+The LangGraph adapter was checked feature by feature against the installed libraries
+(LangGraph 1.2, LangChain 1.4's `create_agent` and its middleware, Deep Agents 0.7): each
+feature run through the harness with a scripted model, 76 tests in
+`tests/integration/test_langgraph_library.py`, `test_create_agent_library.py`,
+`test_deepagents_library.py`, `test_tool_updates.py` and `test_tool_errors_library.py`. Most
+worked as the library gives them. Five did not:
+
+- **A tool's error reaches the graph's own handling.** The harness records a failed call and
+  handed the graph a failed result in the error's place, so nothing of the graph's that acts
+  on a tool's error ever saw one: LangChain's `ToolRetryMiddleware` never tried again,
+  `ToolErrorMiddleware` never worded the error, the `except` of a `wrap_tool_call` wrapper
+  never ran. The call is recorded as before and the error is raised again as the tool raised
+  it. An error nothing handles is, as before, the failed call's result the model reads (the
+  run goes on). The tries a wrapper makes of one call are not counted as a model repeating a
+  call (the stall guard stopped the third).
+- **A tool's `Command` is the graph's again when its call is replayed.** A call answered
+  from the journal gave the graph the message the model had read and dropped the state
+  update the tool had returned with it: after a resume without a checkpointer, what a Deep
+  Agent's sub-agent had written was gone (`task` returns its files as a `Command`), and so
+  was any state a tool of the graph's own had set. The journal keeps what the tool returned
+  with the call's record.
+- **A list of `Command`s and messages returned by one tool is applied.** The harness gave the
+  graph one message in its place, and no update was made.
+- **A call that asks waits for the calls a `ToolNode` runs beside it.** The node stops at the
+  first call that raises and leaves the others running: a write beside a call waiting for an
+  approval ended after the run's pause was recorded, and the resumed run told the model its
+  effect was unknown ("interrupted by a crash"). (This missed `create_agent`, which runs each
+  call as a task of its own: fixed above.)
+- **A Deep Agent with a `mode="fork"` sub-agent is wrapped.** `h.wrap` never returned: a fork
+  runs the graphs it is one of, and reading the sub-agents' file tools went round.
+
+Four more where the harness restricted what the library does:
+
+- **An error nothing of the graph handles fails the run**, as it fails the graph without the
+  harness (`ToolNode(handle_tool_errors=False)`, `create_agent`'s default,
+  `ToolRetryMiddleware(on_failure="error")`, a wrapper that raises it again): the run ends
+  `ERROR` with the tool's error, as any graph's error ends a run, and the call is recorded as
+  failed. It was turned into a failed result the model read. A graph with the harness's
+  middleware (`ReAct`, `middleware()`: `GovernTools`) keeps the harness's documented rule:
+  the model reads the failure and the run goes on.
+- **The graph's own text for a failed call is what the model reads**: a `ToolNode`'s
+  `handle_tool_errors` text reached the model as `"<tool> failed: <text>"`. The run's
+  `after_tool` hooks still have the last word (for an error the tool raised, only since the
+  fix above).
+- **What a node writes to LangGraph's `custom` stream mode is on the run's events**:
+  `get_stream_writer()` (and a middleware's `runtime.stream_writer`) writes are `CUSTOM` events
+  named `custom`, the write in `value` (AG-UI's `CUSTOM` event), from `agent.stream` and
+  `agent.run` alike. `agent.run` reads the graph with `astream` (the `values` and `custom`
+  modes), as `ainvoke` does.
+- **A decision the graph makes again is not a model repeating itself**: the stall guard counts
+  the same call made again only when it comes from another decision — for LangGraph, another
+  task or another call id (`Runtime.deciding`). A node its `RetryPolicy` ran a third time had
+  its harness call refused as a stall.
+
+### Added: a background task of Deep Agents' async sub-agents, found again in later turns
+
+Deep Agents' async sub-agent (an `AsyncSubAgent` in `ReAct(subagents=)`, or its
+`AsyncSubAgentMiddleware` in a graph of your own) runs a task on a server of yours while the
+chat goes on. Deep Agents keeps its list of tasks in the graph's state, and a graph the
+harness runs on its run's thread starts each turn with a new state: the task started, and
+the next turn's `check_async_task` was refused its id.
+
+- **The list goes from a conversation's turn to its next one** (`adapters.langgraph.CARRIED`:
+  the one place that names the channel), per user, thread and agent, a cancelled turn's too —
+  for `ReAct`, for a graph built with `middleware()`, and for one with neither `middleware()`
+  nor a checkpointer, whose list is read from the state each turn ends with. A graph with a
+  checkpointer of its own keeps it in its thread, as before.
+- **Across servers and restarts.** The list is kept in the process that ran the turn and in
+  the file store (`TRELLIS_FILES_URL`), under `.carried/<tenant>/<user>/<conversation>/<agent>/`,
+  which no listing of a user's files shows: the next turn has it after a restart, and on
+  another server when the servers share the store (unset, it is a folder on the server's own
+  disk). Deep Agents' record of each task and nothing else, at most 256 KiB for a
+  conversation; a store that cannot be read or written is said in the log and the list stays
+  in the process. Nothing is added to a run's record, to agent-runs or to the memory service.
+- **Turns that overlap lose no task.** What a turn ends with is merged into what is kept,
+  task by task, instead of replacing it: a turn approved after the conversation's next turn
+  ended, or a worker's turn still running while another ends, each keep their tasks. (Two
+  turns ending at the same moment could still lose one's: fixed above.) A turn
+  that waits for an approval has its list kept as it pauses: the task it started is listed
+  by the next turn meanwhile, and is still found, cancelled, when the turn is cancelled at the
+  approval.
+- **The five task tools say what they do** where the harness says it of Deep Agents' own
+  tools: a status check and the list are reads; a start, an update and a cancel are writes,
+  announced and not asked about (the tool catalog still comes first). A write's result is
+  declared the record of what was done, not a value that changes: with memory on, an earlier
+  start in a later turn's history was marked "out of date: call start_async_task again",
+  which invited a second task; it is left as it was said, and a status check's is still
+  marked.
+
+- **Each task is a child run of the turn that started it** (`bridges.async_tasks`): its
+  task's id, server and graph recorded, held in the run store while it runs (no polling), and
+  ended `SUCCESS`, `ERROR` or `CANCELLED` when a later check, list or cancel says how the task
+  ended, on any server that shares the run store.
+- **A cancelled turn cancels the tasks it started**, on their server through Deep Agents' own
+  `cancel_async_task` and as runs — cancelled while it works, at its approval, or taken over
+  by a newer message — where they ran on.
+
+Not in this release: nothing tells the chat when a task ends (the model checks in a later
+turn); a graph with neither `middleware()` nor a checkpointer loses the task of a turn
+cancelled after its start (the task is cancelled with it). See
+[docs/frameworks/react.md](docs/frameworks/react.md#a-task-in-the-background).
+
+### Fixed: the Claude Agent SDK's features through the harness, each tested on both paths
+
+Driving the bundled CLI (2.1.283) against a scripted model showed what it sends, and where a
+wrapped agent did not get what the SDK gives:
+
+- **Subagents.** Claude Code runs a subagent in the background unless its call says
+  otherwise. In a run with no conversation its child run ended at its launch, `SUCCESS` with
+  the launch text, and its calls were recorded under the run: it now stays open until its
+  task ends (`SUCCESS` with what it said; `ERROR` when it failed, was stopped, or the process
+  ended first), and says so on the run's stream (`helper_finished`; a conversation's
+  background subagent too, while the turn that started it is still answered). Two subagents
+  of one type at work at once each record their own calls (by the task's id, `agent_id`,
+  not the type's name). A subagent's forwarded text is no longer streamed as the run's.
+- **Spending.** A result's cost is its session's running total and its usage the main
+  agent's own. A query whose session ran a turn of its own, the last answer at the turn
+  limit, and a conversation's turn in a process that resumed the session were charged the
+  total again; each is charged what the cost grew by (the journal keeps the session's cost
+  across attempts). A subagent's replies' tokens count toward the run's budget.
+- **`max_budget_usd`** is Claude Code's cap on what one process spends: options with one run
+  each turn in a process of its own again, so the cap stays a query's and a conversation
+  goes on past it.
+- **One call, one question.** A tool that says nothing of what it does asked a person
+  twice for one call: governance's question, then on the resume Claude Code's own. The
+  second is not asked — whatever made governance ask (the tool's risk, a catalog rule, a
+  hook's `Ask`, a rule about the arguments a hook rewrote), the main agent's call or a
+  subagent's.
+- **Claude's own tools.** Its task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`:
+  `TodoWrite`'s successors), `EnterPlanMode` and `StructuredOutput` (`output_format`) asked
+  a person on every call — a structured answer paused its own run. They run, as `TodoWrite`
+  does.
+- **Slash commands.** A turn the CLI answered itself (`/compact`: no reply of the model's
+  in it) ended `ERROR` as a run with no answer; it ends `SUCCESS` with an empty answer, as
+  any framework's run no model replied in. A blank reply of the model's still ends
+  `ERROR` (`NO_ANSWER`).
+- **Deadlines.** A native helper's child run (a Claude, Deep Agents or OpenAI Agents
+  subagent) is recorded with the deadline of the run that started it, as a sub-agent's run
+  is: agent-runs ends one a killed server left `RUNNING` by then.
+- **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
+  takes it with `--resume` only to fork), and options with `continue_conversation` failed at
+  once (the SDK asked the journal's store for the latest session): both work.
+- **Workflows and messages to other agents.** The bundled CLI offers a dynamic workflow
+  (`Workflow`) with no server flag: one background task whose agents have no task of their
+  own, an agent's first tool call reaching the harness before any frame names it, so its
+  calls were taken for the main agent's (and the launch asked a person as an undeclared
+  tool). `SendMessage` resumed a finished background subagent as a new task no child run
+  held, or reached another Claude session. Both are disallowed, as the schedules are, with
+  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`; 2.1.283 has none and
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing of what it sends).
+
+Tested through the harness on the query path and in a live session: every hook event of the
+options' own, `can_use_tool` with its suggestions and permission updates, every option's
+flag, the system prompt and thinking forms, structured output, partial messages, the session
+options and the SDK's errors. What stays as it is:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#limits).
+
+### Fixed: a run's open children end with it when it runs out of time or is cancelled
+
+A run that ended `TIMEOUT` left a helper a framework had spawned in the foreground (a Claude
+subagent, a Deep Agents `task`, an OpenAI agent tool) `RUNNING` for ever, and a sub-agent's
+child run working inside one of its calls ended `CANCELLED`, as if its caller had gone away;
+a run its worker was asked to stop, or whose caller went away, left its helpers `RUNNING` too.
+Where the pipeline ends the run out of time or cancelled, its children still open end as it
+did (`pipeline._children_ended`): `TIMEOUT` with the run's error, or `CANCELLED` with its
+reason, and their children with them. A sub-agent's run its parent's clock cut off leaves its
+ending to its parent. A Claude subagent working in the background of its session, handed on
+past the turn that started it, is not ended with that turn (`Journal.handed_on`).
+
+### Fixed: the runs a killed server was executing are ended, not left `RUNNING`
+
+A run the harness executes in its own process — a turn of `run`/`stream`/`serve_chat`, a
+resumed one, a sub-agent's child run, a helper a framework spawned (in the foreground or in
+the background, as a Claude subagent working in its session) — is started, not claimed from
+the queue, so no lease said when nothing worked on it: a server killed with it (a crash, a
+restart) left it `RUNNING` for ever unless it had a deadline or agent-runs a maximum working
+time. Every such run is now held in the run store while it executes (`holding.Holds`, one
+place: `pipeline.attempt` for every attempt, `bridges.helpers` for the helpers open in it,
+`claude_live.Background` for a background subagent's run between its attempts): agent-runs'
+heartbeat naming the harness (`Harness.holds.name`), every 20 s for 60
+(`holding.HOLD_SECONDS`), renewed however long the attempt takes. When the server dies the
+holds stop and agent-runs' ticker ends each run `ERROR` (`holder_lost`) once its hold lapses,
+never queueing it. A run that waits for a person is not held (a pause lets go of it, and of
+the helpers open in it, which wait with it); whichever server continues it after the answer
+holds it again. A run a worker claimed keeps its lease, and takes no hold. `LocalRuns` holds
+the same way and ends a lapsed hold at its next claim, as it requeues a lapsed lease.
+
+A background subagent's question a killed server left waiting, answered in the
+conversation's next turn on another server, could continue nothing (its task went with the
+server's Claude session) and its run was left `PAUSED`, the answer lost. The turn now records
+the answer on that run and ends it `ERROR` (`holder_lost`, `claude_live.GONE`), and is told so
+(`claude_session`). An answer reaching such a run through the run store alone is ended by
+agent-runs (an answered run held when it paused that nobody holds again within 60 s).
+
+The stand-in CLI behaves as the bundled one (2.1.283) does when its SDK's process dies (stdin
+closed): with nothing in the background it ends; with a background subagent at work it goes on
+to that work's end — a call it makes has nobody to decide it and does not run — then ends.
+
+Needs the agent-runs with holds (an older one answers these heartbeats `409`: nothing is held,
+as before).
+
+### Added: a conversation's Claude Code process stays between its turns, with its background work
+
+A Claude Agent SDK turn ran in a CLI process of its own, and the next turn started another
+that resumed the session. What Claude started in the background — a subagent with
+`background`, a `Bash` command with `run_in_background` — belongs to its process: a
+background subagent held the turn open until it finished, a background command ended with the
+turn, and an approval ended both. A conversation's turn now leaves its process running
+(`bridges.claude_live`: the SDK's `ClaudeSDKClient`) and the next turn is sent into it, so
+that work goes on between the turns. A turn ends at the result of its own prompt
+(`ResultMessage.origin` none or `human`), never at one the session injected for a finished
+task; a pause ends the turn and keeps the process, and the resumed attempt is sent into it;
+cancelling a turn stops that turn only (Claude Code's own interrupt stops its background work
+too, so with any under way the turn ends at its next tool call instead). Each turn's hooks,
+permission check and harness tools still run for that turn's run. A background subagent
+keeps the child run its `Agent` call started: open until the SDK says its task ended
+(`SUCCESS` with what it said last, `ERROR` for a failed task or a session that ended first,
+`CANCELLED` for one stopped in Claude Code), its calls decided, run and recorded for that
+run — hooks, governance, `can_use_tool`, harness tools — with or without a turn being
+answered. A call of it that asks a person pauses that run and waits in Claude Code; the
+question is asked in the conversation's next turn, before its prompt, and the answer goes
+on to the run (nothing answers a child run directly today). Its limits are the agent's
+`run_timeout` and `budget`; past them, or cancelled (`agent.cancel(child_run_id)`), the task
+is stopped with the SDK's `stop_task`, that subagent only. The process's running cost is
+shared at each result by the tokens each used, so a subagent's work between two turns is
+charged to its run and the next turn its own. Any other call made between two turns (the
+main agent's, in a turn the session injected) has no run and is refused, not run unchecked,
+and the next run says so (`claude_session`). With no live process (a restart, another server, one closed for being idle, a
+run with no `thread`) a turn runs as before, resuming the session from the journal, which
+holds what was mirrored between the turns too. Limits and what is not kept:
+[docs/frameworks/claude-agent-sdk.md](docs/frameworks/claude-agent-sdk.md#conversations).
+`TaskStop` (a write) and six tools that only list or look up (reads) have a declared risk;
+they asked a person on every call. Claude Code's own schedules (`CronCreate`,
+`ScheduleWakeup`) stay off: a turn they fire has no run.
+
+### Fixed: a Claude subagent is one child run when the run store takes time to answer
+
+Claude Code says a subagent started two ways, its `Agent` call's `PreToolUse` hook and the
+message that carries the call, and each started the helper by the call's id. With a run
+store that takes time (agent-runs, over HTTP) the second came while the first was still
+being recorded and started a second child run of the same subagent, which then ended at
+once. A helper's start now takes its key one at a time (`bridges.helpers.Helpers.start`).
+
+### Fixed: OpenAI Agents and ACP features that did not work through the harness
+
+Each of the two libraries' own features was run through a wrapped agent with a scripted model
+(`tests/integration/test_openai_agents_features.py`, `test_openai_agents_mcp.py`,
+`test_acp.py`, `test_function_agent.py`); five did not work and do now:
+
+- **An SDK approval inside an agent tool.** A `needs_approval` tool of an agent called as a
+  tool (`Agent.as_tool`) paused the run, and every approval paused it again: the agent tool's
+  unfinished call was journaled as done, so the resume replayed it and the run inside never
+  continued. The call is now a pause to the bridge while the SDK holds its run waiting, its
+  child run stays open, and the approval (or rejection) continues it, from another worker too.
+- **The run's own `RunHooks`.** `framework_options={"hooks": ...}` was refused; the SDK's
+  `RunHooks` are now called beside the harness's own (which still count every reply toward
+  the budget). `starting_agent` and `input` stay the harness's.
+- **An MCP server's resources.** The governed copy of an agent's MCP server answered
+  `list_resources`, `list_resource_templates`, `read_resource` and `cached_tools` with the
+  SDK base class's defaults; they are the server's own.
+- **A shell tool's approval.** The SDK's approval of a call with no arguments of that name (a
+  `ShellTool`'s commands) showed the person an empty call: it shows the call as the model
+  made it.
+- **One question for one call (ACP).** A call of an ACP agent's own that declares nothing (a
+  tool of Kimi's own MCP servers, any tool of an agent with no profile) asked a person twice:
+  governance's question, then the agent's. `bridge.permitted(..., framework=)` asks the
+  framework's question only when no person was just asked about the call. An agent with no
+  profile is named "the agent" in it, not Kimi Code.
+
+Then, closing what was left:
+
+- **The tools the SDK runs on this machine** (`ShellTool` with a local executor,
+  `LocalShellTool`, `ApplyPatchTool`, `ComputerTool`, `CustomTool`) ran with no governance
+  and no record: an `rm -rf` the model asked for ran unseen. Each call now goes through the
+  bridge where the SDK hands it to the tool's code (`tools.convert.openai_local`): governed
+  (one that declares nothing asks; the person sees the call), journaled, recorded, counted;
+  reject and edit work; a call the tool's own `needs_approval` held is asked about once.
+- **A `handoff(agent, ...)` object's agent** ran ungoverned: it now hands off to the governed
+  copy of its agent (read from the SDK's `Handoff._agent_ref`, checked at `h.wrap`).
+- **A tool's failure** the SDK formats is recorded as a failed call; **its own timeout** as
+  that tool's call that timed out (it said "the run was cancelled"); **`failure_error_function
+  =None`** (a function tool's, an MCP server's, an agent tool's) ends the run with the error, as the SDK does; an agent tool that fails under the default policy is a failed child run whose caller reads the SDK's default text (it read the harness's `check failed: ...`).
+- **A call that pauses inside** (a question in a tool, an approval inside an agent tool)
+  counted twice toward `max_tool_calls`: once now.
+- **A `session_input_callback`** that put the earlier turns after the new input got the memory
+  context marked into an earlier question: it goes into this run's.
+
+### Fixed: a paused attempt's last words no longer stand for the run's answer in memory
+
+A graph that paused with its own `interrupt()` after the model wrote a draft sent the draft
+under the run's answer id (`conversation.answer_id`). The memory service keeps the first
+message of an id it has seen, so the answer the resumed attempt gave was dropped and the
+draft stood for it in the thread; the draft itself was stored a second time, named by the
+resumed attempt's place. A paused attempt now names its last message by what it said
+(`conversation.said_id`: who said what, and which time), like every other message that names
+nothing else, so a message said again on a later attempt keeps its id and is stored once,
+and the answer takes the answer id.
+
+### Fixed: a person's approval of a helper's call counts in the memory service
+
+A call a helper the framework spawned makes (a Deep Agents `task` sub-agent, ReAct's
+helpers, an OpenAI agent called as a tool, a Claude subagent) is recorded under the helper's
+run, but the decision on it was sent as feedback on the paused run, and the memory service
+counts an approval only where the call it approves was recorded: those approvals reached
+neither the tool's statistics nor its learned approval rule. The approval's interrupt now
+names the helper in its payload (`{"native_helper": {"run_id", "name"}}`, beside a
+sub-agent's), and the resume sends the decision on the helper's run
+(`Feedback.agent_run_id`, the run the feedback is about).
+
+### Fixed: update_schedule describes each of its parameters
+
+`update_schedule`'s `task`, `condition` and `enabled` had a type and no description, so the
+harness's own tool set check flagged its own tool. `task` and `condition` now carry
+`schedule_task`'s descriptions (the same constants), and `enabled` says that false pauses and true
+resumes; a test checks that every parameter of every tool the harness offers is described.
+`doctor.SECRETS` no longer names three fields that are not settings.
+
+### Fixed: a catalog's rules stand no more than 300 s while it cannot be read
+
+Rules read earlier stand for `GOVERNANCE_STALE_SECONDS` (300) while the tool catalog cannot be
+read; their age was judged only when a read was tried (every 30 s), so they could stand about
+half a minute longer. It is judged each time a rule is asked for: at 301 s every tool that does
+more than read asks.
+
+### Fixed: an in-process run store's temporary folder goes with the store
+
+`LocalRuns` (no `RUNS_URL`) kept a checkpoint's segments in a `trellis-runs-*` folder it made
+in the temporary directory, and nothing removed it: one left behind for every harness
+started without `RUNS_URL` (a run of this repository's tests left thousands). The folder is
+removed when the store is closed, and when a store nobody closed is collected or the process
+exits. A folder passed as `payload_root` is the caller's and stays.
+
 ### Changed: memory is asked for its whole budget unless the model's window is small
 
 The context pushed for a question was budgeted at 5% of the model's window, between 2,000

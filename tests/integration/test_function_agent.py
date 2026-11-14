@@ -289,3 +289,133 @@ async def test_a_resume_without_the_journal_still_answers_the_right_question(
     forgetful = record.model_copy(update={"metadata": {}})
     done = await agent._continue(forgetful, resolution)
     assert done.status is RunStatus.SUCCESS and done.answer == "blue"
+
+
+# --------------------------------------------------------------------------- what a target is
+async def test_an_answer_of_any_shape_is_the_runs_answer(harness: Harness) -> None:
+    """What the function returns is the answer as it is — text, a mapping, a model, nothing —
+    and what is kept with the run is its JSON."""
+    from pydantic import BaseModel
+
+    class Verdict(BaseModel):
+        ok: bool
+
+    async def mapping(input: str, agent: Runtime) -> dict[str, Any]:
+        return {"order": input, "lines": [1, 2]}
+
+    async def model(input: str, agent: Runtime) -> Verdict:
+        return Verdict(ok=True)
+
+    async def nothing(input: str, agent: Runtime) -> None:
+        return None
+
+    result = await harness.wrap(mapping, id="mapping").run("o1", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer == {"order": "o1", "lines": [1, 2]}
+    result = await harness.wrap(model, id="model").run("o1", user="u1")
+    assert result.answer == Verdict(ok=True)
+    record = await harness.runs.get(result.run_id)
+    assert record is not None and record.output == {"ok": True}
+    result = await harness.wrap(nothing, id="nothing").run("o1", user="u1")
+    assert result.status is RunStatus.SUCCESS and result.answer is None
+
+
+async def test_a_partial_and_a_bound_method_are_async_functions_too(harness: Harness) -> None:
+    import functools
+
+    async def prefixed(prefix: str, input: str, agent: Runtime) -> str:
+        return f"{prefix}{input}"
+
+    class Desk:
+        def __init__(self) -> None:
+            self.name = "desk"
+
+        async def answer(self, input: str, agent: Runtime) -> str:
+            return f"{self.name}: {input}"
+
+    partial = harness.wrap(functools.partial(prefixed, "re: "), id="partial")
+    assert (await partial.run("o1", user="u1")).answer == "re: o1"
+    method = harness.wrap(Desk().answer, id="method")
+    assert (await method.run("o1", user="u1")).answer == "desk: o1"
+
+
+async def test_a_function_that_is_not_async_is_refused_where_it_is_wrapped(
+    harness: Harness,
+) -> None:
+    """The target is an async function: a plain function (one that returns an awaitable
+    too) and an async generator are refused at ``h.wrap``, saying what a target is."""
+
+    async def fn(input: str, agent: Runtime) -> str:
+        return input
+
+    def plain(input: str, agent: Runtime) -> Any:
+        return fn(input, agent)
+
+    async def generator(input: str, agent: Runtime) -> Any:
+        yield input
+
+    for n, target in enumerate((plain, generator)):
+        with pytest.raises(ConfigurationError, match="an async function"):
+            harness.wrap(target, id=f"refused-{n}")
+
+
+async def test_tools_called_at_once_are_each_governed_and_recorded(
+    memory_harness: Harness, memory_service: Any
+) -> None:
+    """A function that calls its tools together (``asyncio.gather``), given a message list:
+    the memory context is ``agent.context`` and the list's leading system message, both calls
+    run and are recorded, the stream carries each call's events, and the turn is written."""
+    import asyncio
+
+    async def both(input: list[dict[str, Any]], agent: Runtime) -> str:
+        assert agent.context is not None and input[0] == {
+            "role": "system",
+            "content": agent.context,
+        }
+        first, second = await asyncio.gather(
+            agent.tools.call(lookup, order="o1"), agent.tools.call(lookup, order="o2")
+        )
+        return f"{first['order']} and {second['order']}"
+
+    agent = memory_harness.wrap(both, id="both")
+    events = [e async for e in agent.stream([{"role": "user", "content": "o1 and o2?"}], user="u1")]
+    await memory_harness.writes.drain()
+    assert events[-1].outcome is RunOutcome.SUCCESS and events[-1].data["result"] == "o1 and o2"
+    assert sorted(calls) == ["lookup:o1", "lookup:o2"]
+    results = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert [(r["tool"], r["status"]) for r in results] == [("lookup", "ok")] * 2
+    recorded = [(c.body["tool"], c.body["status"]) for c in memory_service.named("record_tool")]
+    assert recorded == [("lookup", "ok")] * 2
+    assert len(memory_service.named("context")) == 1
+    said = [m for c in memory_service.named("messages") for m in c.body["messages"]]
+    assert ("ASSISTANT", "o1 and o2") in [(m["role"], m["content"]) for m in said]
+
+
+async def test_a_cancel_stops_a_tool_the_function_waits_on(harness: Harness) -> None:
+    import asyncio
+
+    started = asyncio.Event()
+
+    @tool(side_effects="read")
+    async def wait(order: str) -> str:
+        """Wait for an order."""
+        started.set()
+        await asyncio.sleep(30)
+        return "late"
+
+    async def waits(input: str, agent: Runtime) -> str:
+        return str(await agent.tools.call(wait, order=input))
+
+    agent = harness.wrap(waits, id="waits")
+    events: list[Any] = []
+
+    async def consume() -> None:
+        async for event in agent.stream("o1", user="u1"):
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(started.wait(), 10)
+    await agent.cancel(events[0].run_id, reason="enough")
+    await asyncio.wait_for(task, 10)
+    assert events[-1].outcome is RunOutcome.CANCELLED and events[-1].data["reason"] == "enough"
+    [cut] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert (cut["tool"], cut["status"]) == ("wait", "cancelled")

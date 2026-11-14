@@ -190,7 +190,8 @@ class FakeBox:
             return ExecResult(exit_code=int(code), stderr=stderr)
         said = command.removeprefix("echo ") if command.startswith("echo ") else ""
         if command.startswith("touch "):
-            box.files.setdefault(command.removeprefix("touch ").removeprefix(f"{WORKDIR}/"), b"")
+            for path in command.removeprefix("touch ").split():
+                box.files.setdefault(path.removeprefix(f"{WORKDIR}/"), b"")
         if command.startswith("cat "):
             said = (await self.read(command.removeprefix("cat "))).decode()
         extra = "".join(f" {k}={v}" for k, v in (env or {}).items())

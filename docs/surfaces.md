@@ -138,9 +138,11 @@ a thread's requests to one replica: sticky sessions), else it is a `404`.
 `messageId` `<run>:activity` (one per run, `replace: true`), `activityType` `tools`, `content`
 `{"summary": "used 2 tools · ran 1 command", "tools": 2, "commands": 1}` — commands are the
 calls of `sandbox_exec`, Deep Agents' `execute` and Claude's `Bash`, tools the others, each call
-once by its id. It is derived from the stream's tool events and recorded nowhere: a reconnect
-derives it again (from agent-runs' event log on another replica), and its `id:` is the one of
-the result it follows, so the ids stay those of the run's events.
+once by its id, in every attempt of the run this replica served. It is derived from the
+stream's tool events and recorded nowhere: a reconnect derives it again (from agent-runs' event
+log on another replica), and its `id:` is the one of the result it follows, so the ids stay
+those of the run's events. A resume answered on a replica that did not serve the run's earlier
+attempts counts the calls from the resume on.
 
 Harness events map one to one onto AG-UI events (the contracts already use AG-UI's names):
 text and tool-call events carry their message and call ids, `CONTEXT_LOADED` becomes a
@@ -161,8 +163,8 @@ Nothing the client sends in the body (`forwardedProps`, the thread...) decides w
 
 JSON-RPC at `url`'s path, the agent card at `{url}/.well-known/agent-card.json` (or the
 origin's well-known path when `url` has none). The card names the agent by its id and
-describes it with the target's own `description` (or `handoff_description`, or a function's
-docstring), one JSON-RPC interface, streaming, push notifications and the trusted-identity
+describes it with `h.wrap(description=)`, else the target's own `description` (or
+`handoff_description`, or a function's docstring), one JSON-RPC interface, streaming, push notifications and the trusted-identity
 extension (`https://trellis.dev/a2a/extensions/trusted-identity/v1`); no credential is ever
 part of it.
 

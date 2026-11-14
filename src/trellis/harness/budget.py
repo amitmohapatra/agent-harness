@@ -38,8 +38,8 @@ SPENT: Final = (
     "This run's budget is spent. Do not call tools: answer now with what you have, and say "
     "that the budget was reached and what is left undone."
 )
-#: What a run's model is told when its step limit is reached (``ReAct``'s ``max_steps``, OpenAI
-#: Agents' ``max_turns``): its one last call, with no tool, answers.
+#: What a run's model is told when its step limit is reached (``ReAct``'s ``max_steps``): its
+#: one last call, with no tool, answers.
 LIMIT: Final = (
     "This run has reached its limit of {limit} steps. Do not call tools: answer now with what "
     "you found, and say what is left undone."
@@ -137,8 +137,10 @@ def account(
     output_tokens: int,
     cached: int = 0,
     cost: float | None = None,
+    calls: int = 1,
 ) -> None:
-    """One model reply's spending, on the run and every run it works inside."""
+    """One model reply's spending, on the run and every run it works inside (``calls``: 0 for
+    a cost that came apart from its replies)."""
     capped = any(r.budget is not None and r.budget.max_cost for r in _runs(runtime))
     if cost is None and capped:
         _no_cost(model or "a model")
@@ -147,7 +149,7 @@ def account(
         spent["tokens"] = spent.get("tokens", 0) + input_tokens + output_tokens
         spent["cached_tokens"] = spent.get("cached_tokens", 0) + cached
         spent["cost"] = spent.get("cost", 0.0) + (cost or 0.0)
-        spent["model_calls"] = spent.get("model_calls", 0) + 1
+        spent["model_calls"] = spent.get("model_calls", 0) + calls
 
 
 def account_reply(runtime: Runtime, reply: Any) -> None:
@@ -180,11 +182,12 @@ def gateway_cost(metadata: dict[str, Any]) -> float | None:
     return float(total) if isinstance(total, int | float) and not isinstance(total, bool) else None
 
 
-def count_tool_call(runtime: Runtime) -> None:
-    """One harness tool call, on the run and every run it works inside."""
+def count_tool_call(runtime: Runtime, *, times: int = 1) -> None:
+    """One harness tool call, on the run and every run it works inside (``times=-1``: one
+    counted that is not over — it asked a person, and is made again when the run resumes)."""
     for run in _runs(runtime):
         spent = run.replay.journal.spent
-        spent["tool_calls"] = spent.get("tool_calls", 0) + 1
+        spent["tool_calls"] = spent.get("tool_calls", 0) + times
 
 
 def reached(runtime: Runtime) -> str | None:

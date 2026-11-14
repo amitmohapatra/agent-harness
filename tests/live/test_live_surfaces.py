@@ -118,9 +118,14 @@ async def test_a2a_round_trip_with_a_remote_question(remote_url: str) -> None:
             ),
             [a2a(remote_url, name="planner")],
         )
-        paused = await agent.run(
+        approval = await agent.run(
             "the shop", user="live-ada", thread=f"live-a2a-{uuid.uuid4().hex[:6]}"
         )
+        # calling a remote agent is a write: a person approves it before it is sent
+        assert approval.status is RunStatus.PAUSED and approval.interrupt is not None
+        asked = approval.interrupt.tool_call
+        assert asked is not None and asked.tool == "planner", approval.interrupt
+        paused = await agent.resume(approval.interrupt.interrupt_id, "approve", reviewer="ada")
         # the remote agent's question became this run's own pause
         assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
         assert paused.interrupt.question == "Which region?"

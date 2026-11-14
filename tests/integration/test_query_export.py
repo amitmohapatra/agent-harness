@@ -92,6 +92,18 @@ async def test_every_framework_saves_a_querys_whole_result_as_excel(
     assert rows == [("sku", "stock"), *LOW_ROWS]  # every row, exactly: not the 200 shown
 
 
+def test_each_frameworks_tool_that_runs_code_is_known() -> None:
+    """The harness's sandbox, Deep Agents' ``execute``, Claude Code's ``Bash``, OpenAI's code
+    interpreter: a run with any of them writes its files with code."""
+    from types import SimpleNamespace
+
+    from trellis.harness.tools.export import runs_code
+
+    for name in ("sandbox_exec", "execute", "Bash", "code_interpreter"):
+        assert runs_code(SimpleNamespace(toolbox={}, native={name})) == name  # type: ignore[arg-type]
+    assert runs_code(SimpleNamespace(toolbox={}, native=set())) is None  # type: ignore[arg-type]
+
+
 async def test_claude_without_bash_saves_and_with_bash_writes_with_its_code(
     harness: Harness, stored: Path, tmp_path: Path
 ) -> None:
@@ -283,6 +295,19 @@ def test_more_rows_than_a_file_holds_are_refused(
             "aggregate, or narrow it with WHERE"
         ), told
     assert not root.exists()
+
+
+def test_a_saved_files_answer_shows_its_first_5_rows(root: Path) -> None:
+    said = ask(sql="SELECT range AS n FROM range(7)", save_as="csv", file_name="seven.csv")
+    assert said.startswith("Saved seven.csv for the user: 7 rows"), said
+    assert said.endswith("Its first rows:\nn\n0\n1\n2\n3\n4"), said  # 5 of the 7
+
+
+def test_a_file_holds_excels_1048575_rows_and_no_more(root: Path) -> None:
+    most = ask(sql="SELECT range AS n FROM range(1048575)", save_as="csv", file_name="most.csv")
+    assert most.startswith("Saved most.csv for the user: 1048575 rows"), most
+    told = ask(sql="SELECT range AS n FROM range(1048576)", save_as="csv", file_name="over.csv")
+    assert told.startswith("Error: the query has more than 1048575 rows"), told
 
 
 def test_a_failed_query_saves_nothing(root: Path) -> None:

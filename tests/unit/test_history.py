@@ -12,6 +12,7 @@ from agents import Agent as OpenAIAgent
 from agents import MessageOutputItem, SQLiteSession, ToolCallItem, ToolCallOutputItem
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver, MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
 from openai.types.responses import (
     ResponseFileSearchToolCall,
     ResponseFunctionToolCall,
@@ -85,7 +86,8 @@ def test_a_message_is_stored_as_written_and_read_back() -> None:
 
 def test_langgraph_gets_the_window_as_its_own_messages() -> None:
     history = [Said(Speaker.SYSTEM, "earlier summary"), *TURN]
-    state = LangGraphAdapter().prepare_input(None, "And b?", "context", history)
+    graph = StateGraph(MessagesState).add_node("n", lambda state: {}).add_edge(START, "n")
+    state = LangGraphAdapter().prepare_input(graph.compile(), "And b?", "context", history)
     system, summary, user, call, result, answer, asked = state["messages"]
     assert isinstance(system, SystemMessage) and system.content == "context"
     assert isinstance(summary, SystemMessage) and summary.content == "earlier summary"

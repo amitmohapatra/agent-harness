@@ -17,7 +17,19 @@ interchangeable. Both behave the same way:
   the thread its metadata names (``thread_id``) as the run's;
 * a cancel ends a queued or paused run (or one kept in its caller's process) at once, and asks
   the worker holding a running one to stop: its heartbeats say ``cancel_requested``, and the
-  run is cancelled when its lease runs out.
+  run is cancelled when its lease runs out;
+* a run of a ``concurrency_key`` is placed among the key's runs when it is started, and again
+  when it is answered, as its ``placed_at`` says (:func:`place`); one started ``RUNNING`` is
+  born to be held: nobody holding it within :data:`RESUME_GRACE_SECONDS` ends it
+  ``ERROR`` (``holder_lost``), so a process that died before its first heartbeat blocks nobody;
+* a heartbeat on a run kept in its caller's process (started ``RUNNING``, never queued) holds
+  it for the ``worker_id`` (the process running it) instead, for at most
+  :data:`MAX_HOLD_SECONDS` a heartbeat: once the hold lapses the run ends ``ERROR``
+  (``holder_lost``), never queued; a hold fences no write, a pause lets go of it, and the
+  refusal another holder gets does not name the holder.
+  Answered, a run held when it paused must be held again within :data:`RESUME_GRACE_SECONDS`
+  (whoever continues it does so at once) or it ends so too; a ``release`` by its holder lets go
+  of the hold, the run ``RUNNING``, unheld.
 
 A pause also carries the run's checkpoint — its :class:`~trellis.harness.journal.Journal`, what
 a re-run needs — and so may a heartbeat (progress: the journal after a side-effecting call, so
@@ -41,8 +53,10 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import shutil
 import tempfile
 import time
+import weakref
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -56,6 +70,7 @@ from trellis.contracts import (
     AgentError,
     ArtifactRef,
     ConfigurationError,
+    ErrorCategory,
     Interrupt,
     InterruptDecision,
     InterruptResolution,
@@ -91,6 +106,12 @@ PAGE_LIMIT: Final = 50
 #: runs are always kept. A deployment keeps its runs in agent-runs (``RUNS_URL``).
 KEEP_FINISHED: Final = 1_000
 KEEP_FINISHED_SECONDS: Final = 3600.0
+#: How long an answered run that was held when it paused may run unheld before it is ended
+#: (agent-runs' ``RESUME_GRACE``): whoever continues it holds it at once.
+RESUME_GRACE_SECONDS: Final = 60.0
+#: The longest one heartbeat holds a run kept in its caller's process, as in agent-runs: five
+#: default leases (the lapse of a hold is how a dead process's run ends).
+MAX_HOLD_SECONDS: Final = 5 * LEASE_SECONDS
 
 
 class RunArtifacts(Protocol):
@@ -228,6 +249,7 @@ class RunStore(Protocol):
         assignee: str | None = ...,
         agent_id: str | None = ...,
         thread_id: str | None = ...,
+        concurrency_key: str | None = ...,
         parent_run_id: str | None = ...,
         limit: int = ...,
         tenant: str | None = ...,
@@ -257,6 +279,26 @@ class RunStore(Protocol):
 
 
 # --------------------------------------------------------------------------- in process
+
+
+#: A run's place among the runs sharing its ``concurrency_key``: when it took it, then its id
+#: (two placed at once). An earlier place is ahead.
+Place = tuple[datetime, str]
+
+
+def place(record: RunRecord) -> Place:
+    """The place the run store gave the run ``record`` among its key's runs (its
+    ``placed_at``: when it was started, or when its latest answer was recorded), then its id.
+    A conversation's turns are answered in this order (``line``), and a queued run is claimed
+    only while no run placed before it runs. A store that sends no place (an agent-runs older
+    than ``placed_at``) cannot order a line: :class:`ConfigurationError`, never a guess."""
+    if record.placed_at is None:
+        raise ConfigurationError(
+            f"run {record.run_id} of concurrency_key {record.concurrency_key!r} came back "
+            "without placed_at: this run store is older than the harness needs to order a "
+            "conversation's turns (upgrade agent-runs to one that sends placed_at)"
+        )
+    return record.placed_at, record.run_id
 
 
 class LocalRuns:
@@ -297,6 +339,11 @@ class LocalRuns:
         #: runs that were ever queued: a resume sends them back to the queue
         self._queued: set[str] = set()
         self._leases: dict[str, tuple[str, datetime]] = {}
+        #: the runs kept in their caller's process that it holds: by whom (``None``: an answered
+        #: run whoever continues it must hold), until when
+        self._holds: dict[str, tuple[str | None, datetime]] = {}
+        #: the paused runs that were held when they paused
+        self._held_before: set[str] = set()
         #: when each running run last started running
         self._running_since: dict[str, datetime] = {}
         #: the running runs a worker holds that were asked to stop, and why
@@ -309,6 +356,14 @@ class LocalRuns:
         #: payload objects (a checkpoint's segments), in agent-runs' own filesystem store and
         #: format (``trellis.runs.payloads``), in ``payload_root`` (a temporary folder unset)
         self._payload_root = payload_root or Path(tempfile.mkdtemp(prefix="trellis-runs-"))
+        #: the temporary folder's removal (never a folder the caller gave): at :meth:`aclose`,
+        #: or when the store is collected or the process exits unclosed, as
+        #: ``tempfile.TemporaryDirectory`` removes its own
+        self._made = (
+            None
+            if payload_root
+            else weakref.finalize(self, shutil.rmtree, self._payload_root, ignore_errors=True)
+        )
         self._payloads = FilesystemBlobStore(self._payload_root)
         self._lock = asyncio.Lock()
         self.artifacts = LocalArtifacts(self)
@@ -322,11 +377,16 @@ class LocalRuns:
         if existing is not None:  # idempotent on the run id
             return existing
         record = RunRecord.from_start(start, status=status)
+        if record.concurrency_key is not None:  # placed among its key's runs: when it started
+            record = record.model_copy(update={"placed_at": record.created_at})
         self._runs[record.run_id] = record
         if status is RunStatus.QUEUED:
             self._enqueue(record.run_id)
         else:
             self._running_since[record.run_id] = record.created_at
+            if record.concurrency_key is not None:  # it takes its key's place: born to be held
+                grace = timedelta(seconds=RESUME_GRACE_SECONDS)
+                self._holds[record.run_id] = (None, record.created_at + grace)
         return record
 
     async def claim(
@@ -360,12 +420,15 @@ class LocalRuns:
 
     def _room(self, record: RunRecord) -> bool:
         """Whether a queued run may run now: no run of its tenant sharing its
-        ``concurrency_key`` is running (agent-runs' default limit, one)."""
+        ``concurrency_key`` holds it (agent-runs' default limit, one) — one a worker runs, or
+        one running in its caller's process placed before it (:func:`place`): a run placed
+        after it waits for it there."""
         key = record.concurrency_key
         return key is None or not any(
             r.status is RunStatus.RUNNING
             and r.concurrency_key == key
             and r.tenant_id == record.tenant_id
+            and (r.run_id in self._leases or place(r) < place(record))
             for r in self._runs.values()
         )
 
@@ -378,6 +441,9 @@ class LocalRuns:
         checkpoint: dict[str, Any] | None = None,
         tenant: str | None = None,
     ) -> Lease:
+        found = self._require(run_id, tenant)
+        if self._in_callers_process(found):
+            return self._hold(found, worker_id, lease_seconds, checkpoint)
         record = self._fenced(run_id, worker_id, tenant)
         if checkpoint is not None:
             record = self._move(record, record.status, checkpoint=checkpoint)
@@ -393,6 +459,17 @@ class LocalRuns:
         checkpoint: dict[str, Any] | None = None,
         tenant: str | None = None,
     ) -> RunRecord:
+        found = self._require(run_id, tenant)
+        if self._in_callers_process(found):
+            # kept in its caller's process: its holder lets go of it, and it goes on unheld
+            if self._holds.get(run_id, (None, None))[0] != worker_id:
+                raise LeaseLostError(
+                    f"{worker_id} does not hold {run_id}", code="LEASE_LOST", status=409
+                )
+            del self._holds[run_id]
+            if checkpoint is not None:
+                found = self._move(found, found.status, checkpoint=checkpoint)
+            return found
         record = self._fenced(run_id, worker_id, tenant)
         del self._leases[run_id]
         if checkpoint is not None:
@@ -438,8 +515,10 @@ class LocalRuns:
             recorded_at=datetime.now(UTC),
         )
         self._resolutions.setdefault(record.run_id, []).append(entry)
+        # a run of a key takes its place again when its answer is recorded
+        placed = {"placed_at": entry.recorded_at} if record.concurrency_key is not None else {}
         if resolution.decision is InterruptDecision.CANCEL:
-            return self._move(record, RunStatus.CANCELLED, last_resolution=resolution)
+            return self._move(record, RunStatus.CANCELLED, last_resolution=resolution, **placed)
         requeue = record.run_id in self._queued
         moved = self._move(
             record,
@@ -447,9 +526,14 @@ class LocalRuns:
             awaiting=None,
             last_resolution=resolution,
             attempt=record.attempt + 1,
+            **placed,
         )
         if requeue:
             self._enqueue(moved.run_id)
+        elif moved.run_id in self._held_before:  # whoever continues it holds it
+            self._held_before.discard(moved.run_id)
+            grace = timedelta(seconds=RESUME_GRACE_SECONDS)
+            self._holds[moved.run_id] = (None, datetime.now(UTC) + grace)
         return moved
 
     async def finish(
@@ -477,6 +561,7 @@ class LocalRuns:
         assignee: str | None = None,
         agent_id: str | None = None,
         thread_id: str | None = None,
+        concurrency_key: str | None = None,
         parent_run_id: str | None = None,
         limit: int = PAGE_LIMIT,
         tenant: str | None = None,
@@ -491,6 +576,7 @@ class LocalRuns:
             and status in (None, r.status)
             and agent_id in (None, r.agent_id)
             and thread_id in (None, r.thread_id)
+            and concurrency_key in (None, r.concurrency_key)
             and parent_run_id in (None, r.parent_run_id)
             and assignee in (None, _assignee(r))
         ]
@@ -505,6 +591,7 @@ class LocalRuns:
                 deadline=record.deadline,
                 thread_id=record.thread_id,
                 updated_at=record.updated_at,
+                placed_at=record.placed_at,
             )
 
     async def resolutions(
@@ -524,7 +611,9 @@ class LocalRuns:
         )
 
     async def aclose(self) -> None:
-        return None
+        """The temporary folder of the store's payloads removed, when it made one (once)."""
+        if self._made is not None:
+            self._made()
 
     # ------------------------------------------------------------------ internals
     def _require(self, run_id: str, tenant: str | None) -> RunRecord:
@@ -532,6 +621,36 @@ class LocalRuns:
         if record is None or tenant not in (None, record.tenant_id):
             raise NotFoundError(f"no run {run_id}", code="NOT_FOUND", status=404)
         return record
+
+    def _in_callers_process(self, record: RunRecord) -> bool:
+        """Whether the run is kept in its caller's process: ``RUNNING``, never queued, under
+        no worker's lease (a heartbeat holds it, a release lets go of it)."""
+        return record.status is RunStatus.RUNNING and record.run_id not in (
+            *self._leases,
+            *self._queued,
+        )
+
+    def _hold(
+        self,
+        record: RunRecord,
+        holder: str,
+        lease_seconds: int,
+        checkpoint: dict[str, Any] | None,
+    ) -> Lease:
+        """Hold a run kept in its caller's process for ``holder``, as agent-runs does: another
+        holder's hold in force is ``LeaseLostError`` (which does not name it), and a hold lasts
+        at most :data:`MAX_HOLD_SECONDS`, whatever was asked."""
+        moment = datetime.now(UTC)
+        held = self._holds.get(record.run_id)
+        if held is not None and held[0] not in (None, holder) and held[1] >= moment:
+            raise LeaseLostError(
+                f"{record.run_id} is held by another process", code="LEASE_LOST", status=409
+            )
+        if checkpoint is not None:
+            record = self._move(record, record.status, checkpoint=checkpoint)
+        until = moment + timedelta(seconds=min(lease_seconds, MAX_HOLD_SECONDS))
+        self._holds[record.run_id] = (holder, until)
+        return self._leased(record, holder, until)
 
     def _fenced(self, run_id: str, worker_id: str | None, tenant: str | None) -> RunRecord:
         record = self._require(run_id, tenant)
@@ -574,6 +693,12 @@ class LocalRuns:
             changes.update(awaiting=None, checkpoint=None)
             self._cancelling.pop(record.run_id, None)
         moment = datetime.now(UTC)
+        if status is not RunStatus.RUNNING:  # a hold is on a running run only
+            held = self._holds.pop(record.run_id, None)
+            if status is RunStatus.PAUSED and held is not None and held[0] is not None:
+                self._held_before.add(record.run_id)
+            elif status.final:
+                self._held_before.discard(record.run_id)
         since = self._running_since.pop(record.run_id, None)
         if since is not None and status is not RunStatus.RUNNING:  # it stops working
             changes["worked_seconds"] = record.worked_seconds + (moment - since).total_seconds()
@@ -622,6 +747,24 @@ class LocalRuns:
             if until < now:
                 del self._leases[run_id]
                 self._requeued(self._runs[run_id])
+        for run_id, (holder, until) in list(self._holds.items()):
+            if until < now:  # its holder stopped: nothing else can run it
+                stopped = (
+                    f"its holder stopped: {holder} kept the run in its own process and "
+                    f"stopped heartbeating (held until {until}), so nothing runs it"
+                    if holder is not None
+                    else "nobody took the run up after its answer: it ran in its caller's "
+                    f"process, and nothing held it by {until} (the process that ran it before "
+                    "it paused stopped while it waited)"
+                )
+                error = AgentError(
+                    code="holder_lost",
+                    category=ErrorCategory.TIMEOUT,
+                    message=stopped,
+                    retryable=False,
+                    source="agent-runs",
+                )
+                self._move(self._runs[run_id], RunStatus.ERROR, error=error)
 
     def _requeued(self, record: RunRecord) -> RunRecord:
         """A running run nobody holds any more back on the queue as its next attempt — or,

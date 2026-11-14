@@ -194,6 +194,15 @@ error that may pass; a call that does more runs once.
 governance sees them: the catalog's `risk` over the tool's own declaration.
 
 **Where.** Every harness tool call, every adapter; `governed` in Way 2 (`side_effects="read"`).
+A LangGraph graph's own tool is tried once, its error raised into the graph: when the graph
+tries the call again itself — a wrapper running it again (`ToolRetryMiddleware`), a retry
+policy of its node that retries the error (`RetryPolicy`) — its tries are the call's
+(`ToolRetryMiddleware(max_retries=2)`, `RetryPolicy(max_attempts=3)`: 3 calls); when it does
+not (no wrapper, or one that only handles the error: `ToolErrorMiddleware`, Deep Agents' file
+middleware, `ReAct`'s `GovernTools`), the harness tries it again around the graph's handling,
+one call of the run, its tries its attempts (one start and one result on the stream, one
+record, one count against `max_tool_calls`, one question; `on_error` told once if the last try
+fails; `after_tool` sees each try).
 
 **How it decides.** An error may pass when it says so (`AgentError.of(exc).retryable`: its own
 `retryable`, or its category — a timeout, a rate limit, a dependency down). An OpenAPI
@@ -227,8 +236,8 @@ them bounds them.
 | Bifrost SDK (MCP) | nothing: a tool may have side effects | 1 attempt | the call's limit (sent as the request timeout) |
 | memory SDK | reads, and writes with an idempotency key, on `429/502/503/504`, timeouts, dropped connections | 4 attempts, full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; breaker 5 / 30 s | the run's time (context push, pull tools) |
 | runs SDK | every call (each is safe to repeat) on transport errors, `429/502/503/504` | 4 attempts, 0.25 s → 5 s full jitter, `Retry-After` ≤ 30 s, 10 s per attempt; a `429` still refused then is `Throttled` (retryable, `retry_after`), never retried again by the harness ([runs.md](runs.md#admission-agent-runs-rate-limit)) | nothing: a pause or an ending must land |
-| harness tool retries | a read (or idempotent) tool after an error that may pass | 3 attempts, 0.5 s doubling, random | the tool's timeout, the run's time |
-| background writes | memory writes, judges, the grounding check | 3 attempts, 0.5 s doubling, full jitter; then the spool | the drain bound (10 s) at shutdown |
+| harness tool retries | a read (or idempotent) tool after an error that may pass — a LangGraph graph's own tool where the graph does not try it again itself (its `ToolRetryMiddleware`, its node's `RetryPolicy`) | 3 attempts, 0.5 s doubling, random | the tool's timeout, the run's time |
+| background writes | memory writes, judges, the grounding check | 6 attempts, 0.5 s doubling, full jitter (none spent while the memory client's circuit is open: the write waits its cool-down); then the spool | the drain bound (10 s) at shutdown |
 | agent-runs: run retries | a queued run its worker ended `ERROR` with a retryable error | 3 more attempts, after 10 s, 20 s, 40 s (jittered, ≤ 10 min) | the run's `timeout` and `deadline` |
 | agent-runs: lapsed leases | a queued run whose worker stopped heartbeating | up to 5 lapses, after 5 s doubling (≤ 1 min); then `ERROR` (`lease_expired`) | the run's `timeout` and `deadline` |
 
@@ -311,7 +320,12 @@ the model steps of a `ReAct` or `middleware()` graph are not asked again (the gr
 (or re-run with its key when idempotent), the run's [sandbox](sandbox.md#automatic) is the one it
 had (attached, never replaced blindly), and the working time already spent still counts against
 `timeout`. Runs kept in process (`run`, `stream`) save no progress: nobody resumes them
-after their process died. A [sub-agent](subagents.md)'s run working inside a call when the
+after their process died. Each is held in the run store while it executes instead
+(`holding`: the same heartbeat, naming the harness, every 20 s for 60; its sub-agents' child
+runs and the helpers a framework spawns in it too): when the process dies the holds stop, and
+about a minute later agent-runs ends each run `ERROR` (`holder_lost`) rather than leave it
+`RUNNING` for ever. A run waiting for a person is not held; whichever server continues it after
+the answer holds it again, and one nobody continues within 60 s of its answer is ended too. A [sub-agent](subagents.md)'s run working inside a call when the
 worker died is saved with its parent's progress, and the parent's next attempt continues it the
 same way.
 
@@ -396,6 +410,8 @@ reason=...)` with `RunsClient`, and `trellis.runs.Worker` stops your handler. Ev
 | queued, or paused for a person | `CANCELLED` at once; no worker will claim it |
 | running in this process (`run`, `stream`, a worker of this process) | its task is cancelled now: `CANCELLED`; `run` returns a `CANCELLED` result, `stream` ends with `RUN_FINISHED` (outcome `cancelled`, `data.reason`) |
 | running on a worker elsewhere | agent-runs asks that worker to stop: its next heartbeat (within 20 s) says `cancel_requested`, the worker cancels the attempt, and the run ends `CANCELLED`; a worker that never answers loses the run when its lease runs out |
+| running in another process's `run`, `stream`, `serve_chat` or `serve_a2a` | `CANCELLED` in agent-runs at once; that process stops its attempt when agent-runs refuses the run's next event or its next hold heartbeat (within 20 s) |
+| waiting its conversation's turn (in this process or another) | `CANCELLED`; it takes no turn and never runs (another process's: once its heartbeat is refused, within 20 s) |
 | already ended | `ConflictError` |
 
 **Automatic.** agent-runs keeps the reason and who asked; the pipeline ends the attempt as a
@@ -404,9 +420,12 @@ run is never retried. Who may cancel: whoever may answer the run (agent-runs' ru
 [sub-agents](subagents.md)' runs that have not ended are cancelled with it (one paused for a
 person at once), and theirs.
 
-**On failure.** A run kept in *another* process's `run`/`stream` (no worker, so no heartbeat)
-is cancelled in agent-runs at once, but that process learns only at its next write, which is
-refused (`ConflictError`): cancel such runs where they run, or `start` them for a worker.
+**On failure.** A run kept in *another* process's `run`/`stream` stops only once that process
+hears from agent-runs: a run in one long call that sends no event works on for up to 20 s after
+its cancel (what it writes then is refused, `ConflictError`). A message sent with
+`mode="interrupt"` has no such window: the process holding the turn stops it itself
+([runs.md](runs.md#a-message-to-a-busy-conversation-mode)). Without agent-runs (`LocalRuns`)
+there is no other process.
 
 ## Releasing on shutdown
 
@@ -474,7 +493,8 @@ line naming both versions.
   pass the bridge: no timeouts, retries, keys or unknown outcomes from the harness — give them
   their framework's own.
 * **MCP servers** do not receive the idempotency key (the protocol has no field for it).
-* **Cancelling an in-process run from another process** ([cancel](#cancel)).
+* **Cancelling an in-process run from another process** stops it at its next event or heartbeat,
+  not at once ([cancel](#cancel)).
 * **Without `RUNS_URL`**, `LocalRuns` keeps the working time, leases, cancels and releases as
   agent-runs does, but nothing survives a restart and nothing enforces a limit for a run no
   attempt is working on (the attempts themselves still stop on time). It keeps the last 1,000

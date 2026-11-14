@@ -12,7 +12,8 @@ A call that does more than read is marked *started* before it runs (and the jour
 the attempt after a crash knows which call was running when the worker died: it was neither
 finished nor recorded, and whether it took effect is not known (``tools/bridge.py``). A call
 whose outcome is not an output — it timed out, its effect is unknown — is recorded as that
-outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs nothing.
+outcome, so a re-run tells the model the same thing and runs nothing: every call's record is
+kept in an envelope (:data:`RECORD`), so an output is never read as one.
 
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
@@ -61,10 +62,12 @@ arguments is a new call, and an approval is asked about again.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -88,8 +91,13 @@ if TYPE_CHECKING:
 #: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
 #: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
 MAX_SEGMENTS: Final = 16
-#: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
-#: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
+#: The key a call's record is filed under, whatever its outcome: ``{RECORD: {"status": ...,
+#: "output": ..., "metadata": ...}}`` (``tools.bridge.journal_record``; read back by its
+#: ``journal_outcome``) — an envelope around every output, so one a tool shapes like a record
+#: is still its output.
+RECORD: Final = "trellis_record"
+#: The key the release before filed an outcome that was not an output under, its outputs kept
+#: bare: read still (a run paused before an upgrade), never written.
 OUTCOME: Final = "trellis_outcome"
 
 
@@ -142,10 +150,57 @@ class Save(BaseModel):
     dumped: dict[str, Any]
 
 
+#: The tool calls whose approval a person answered, read in this context while
+#: :func:`approvals_read` watches.
+_APPROVED: ContextVar[list[ToolCall] | None] = ContextVar("trellis_approvals_read", default=None)
+#: The call the code running now decides or runs (its key): :meth:`Replay.calling`.
+_CALLING: ContextVar[str | None] = ContextVar("trellis_calling", default=None)
+#: That call's identity, as its framework names it (its call id): :meth:`Replay.calling`.
+_IDENT: ContextVar[str | None] = ContextVar("trellis_call_ident", default=None)
+
+
+def calling_ident() -> str | None:
+    """The framework's id of the call the code running now decides or runs, if it named one
+    (:meth:`Replay.calling`): the call a pause asked about (``Pending.ident``)."""
+    return _IDENT.get()
+
+
+@contextlib.contextmanager
+def approvals_read() -> Iterator[list[ToolCall]]:
+    """The tool calls whose approval (``Runtime.approve``: governance's question about a call)
+    the code it holds read a person's recorded answer to, tasks it starts included: whether a
+    person approved — or denied — the call that code decided, whatever made governance ask (a
+    catalog rule, a hook's ``Ask``, a rule about the arguments a hook rewrote), the call as
+    asked about. Any other question answered meanwhile (a hook's own ``ask``, ``ask_user``, a
+    form) is no answer about a call, and is not among them."""
+    read: list[ToolCall] = []
+    token = _APPROVED.set(read)
+    try:
+        yield read
+    finally:
+        _APPROVED.reset(token)
+
+
+def approval_read(call: ToolCall) -> None:
+    """A person's recorded answer to the approval of ``call`` was read: for
+    :func:`approvals_read`."""
+    watching = _APPROVED.get()
+    if watching is not None:
+        watching.append(call)
+
+
 def content_key(kind: str, *parts: Any) -> str:
     """A stable key for a question or a call: same content, same key, across processes."""
     text = json.dumps([kind, *parts], sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
+
+
+def call_key(tool: str, args: Any) -> str:
+    """What a tool call is — ``tool`` called with ``args`` — as one key, wherever it is made:
+    the journal files the call's record under it, a pending question names its call by it,
+    and the call's id and idempotency key are the run's id, this key and which time the run
+    makes the call (``tools.bridge``)."""
+    return content_key("call", tool, args)
 
 
 class Made(BaseModel):
@@ -172,6 +227,9 @@ class Pending(BaseModel):
 
     #: The framework's own handle on the pause (LangGraph's interrupt id), when it has one.
     native_id: str | None = None
+    #: The framework's id of the call the pause asked about, when it named one: whose answer
+    #: it is (``Journal.answered_by``).
+    ident: str | None = None
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
@@ -225,14 +283,37 @@ class Journal(BaseModel):
     #: how many tool calls the run has made to their end: the place of the next, where an
     #: attempt goes on from the framework's own state (its session, its serialised run)
     place: int = 0
+    #: how far the calls made before the call the run paused on read each record and answer
+    #: (``"c:<key>"``, ``"a:<key>"``: its cursor), where an attempt goes on from the
+    #: framework's own state: it does not make those calls again, so the call it makes again
+    #: reads its own records, not an earlier identical call's (:meth:`Replay.paused`)
+    cursors: dict[str, int] = Field(default_factory=dict)
+    #: per call record (``calls``, in its order), the answers and records the call read
+    #: besides its own (``"a:<key>"``: its approval...), by cursor: a re-run that replays the
+    #: call reads past them too, so an identical call after it reads its own (:meth:`Replay.call`)
+    reads: dict[str, list[dict[str, int]]] = Field(default_factory=dict)
+    #: per answer (``answers``, in its order), the framework's id of the call it answered, when
+    #: it named one: a rejection is that call's — an attempt that goes on from the framework's
+    #: own state gives it to that call only (the paused call made again under its id, or still
+    #: waiting), and a new call, even an identical one, is asked (:meth:`Replay.answer`)
+    answered_by: dict[str, list[str | None]] = Field(default_factory=dict)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
     #: the journals of the sub-agents' runs working inside the run's tool calls now, by run id
     children: dict[str, Journal] = Field(default_factory=dict)
+    #: the runs of the helpers handed on past the attempt that started them (a Claude subagent
+    #: its conversation's live session keeps at work in the background:
+    #: ``bridges.helpers.Helpers.detached``): whoever keeps each going ends it, never a later
+    #: attempt — on any worker
+    handed_on: list[str] = Field(default_factory=list)
     #: the framework's own conversation, when it keeps one the next attempt continues (a
     #: Claude Agent SDK session): what it already did — its built-in tools — is not done again
     session: str | None = None
+    #: that session's running cost, as the last of its results this run was charged carried
+    #: it (a Claude Agent SDK result's cost is its session's, the turns and the attempts
+    #: before it included): its next result is charged what the cost grew by
+    session_cost: float | None = None
     #: the transcripts of the framework's own sessions, by session, as its session store
     #: mirrors them (``bridges.claude.JournalSessions``): a resume on any machine continues them
     transcripts: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
@@ -327,29 +408,30 @@ class Journal(BaseModel):
         self.saved(save)
         return save.checkpoint
 
-    def approved_in_framework(self, resolution: InterruptResolution) -> None:
+    def approved_in_framework(
+        self, resolution: InterruptResolution, gated: Sequence[tuple[str, Any]] | None = None
+    ) -> None:
         """The calls the open pause — a framework's own approval gate — approved by
-        ``resolution``, filed for governance (:attr:`approved`): every call it holds on an
-        approval, the first with its edited arguments on an edit."""
-        if self.pending is None or resolution.decision not in (
-            InterruptDecision.APPROVE,
-            InterruptDecision.EDIT,
-        ):
+        ``resolution``, filed for governance (:attr:`approved`), so a person answers once for
+        a call whichever gate asks. ``gated``: the calls a gate of several runs as decided,
+        each as approved or edited (LangChain's ``HumanInTheLoopMiddleware``, read by its
+        adapter); else the one call of the pause's own approval, with its edited arguments on
+        an edit."""
+        if self.pending is None:
             return
         interrupt = self.pending.interrupt
-        payload = interrupt.payload or {}
-        actions = payload.get("action_requests")
-        if isinstance(actions, list) and payload.get("review_configs") is not None:
-            calls = [(a.get("name"), a.get("args") or {}) for a in actions]
+        if gated is not None:
+            calls = list(gated)
+        elif resolution.decision not in (InterruptDecision.APPROVE, InterruptDecision.EDIT):
+            return
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
             if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
                 return  # governance's own question: its answer is read where the call asks
-            calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
+            edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
+            args = edited if isinstance(edited, dict) else interrupt.tool_call.args
+            calls = [(interrupt.tool_call.tool, args)]
         else:
             return  # the harness's own question: governance asked it
-        edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
-        if isinstance(edited, dict) and calls:
-            calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:
@@ -357,7 +439,12 @@ class Journal(BaseModel):
         is one a later attempt's model makes again (:attr:`again`: one call a place)."""
         if self.pending is None:
             return
-        self.answers.setdefault(self.pending.key, []).append(resolution.model_dump(mode="json"))
+        answers = self.answers.setdefault(self.pending.key, [])
+        answers.append(resolution.model_dump(mode="json"))
+        if self.pending.ident is not None:  # whose answer it is
+            by = self.answered_by.setdefault(self.pending.key, [])
+            by.extend(None for _ in range(len(answers) - 1 - len(by)))
+            by.append(self.pending.ident)
         inside = self.pending.inside
         if inside is not None:
             self.again = [m for m in self.again if m.at != inside.at] + [inside]
@@ -368,7 +455,19 @@ class Journal(BaseModel):
 class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
-    __slots__ = ("_goes_on", "_made", "_seen", "_session", "_turns", "journal", "resumed", "where")
+    __slots__ = (
+        "_announced",
+        "_began",
+        "_goes_on",
+        "_made",
+        "_seeded",
+        "_seen",
+        "_session",
+        "_turns",
+        "journal",
+        "resumed",
+        "where",
+    )
 
     def __init__(self, journal: Journal, *, goes_on: bool = False) -> None:
         self.journal = journal
@@ -381,12 +480,85 @@ class Replay:
         #: before are not made again
         self._goes_on = goes_on
         self._session = journal.session
+        #: the cursors this attempt has started where the calls made before left them
+        #: (:meth:`_index`), and where each call's own reads began (:meth:`calling`)
+        self._seeded: set[str] = set()
+        self._began: dict[str, dict[str, int]] = {}
+        #: the framework's ids of the calls it said it is making, by call (:meth:`announced`)
+        self._announced: dict[str, list[str]] = defaultdict(list)
         #: the step a call is being made in now (its graph's checkpoint id), for a graph that
         #: keeps a checkpoint (``adapters.langgraph``); ``None`` elsewhere
         self.where: Callable[[], str | None] | None = None
         #: the checkpoint the attempt's graph resumed from: the records of the steps before it
         #: are passed over (:meth:`_index`)
         self.resumed: str | None = None
+
+    def _continues(self) -> bool:
+        """Whether the attempt goes on from the framework's own state — its serialised run, or
+        the session the journal holds while the framework keeps to it: the calls made before
+        are not made again."""
+        kept = self._session is not None and self.journal.session == self._session
+        return self._goes_on or kept
+
+    @contextlib.contextmanager
+    def calling(self, key: str, *, again: bool = False, ident: str | None = None) -> Iterator[None]:
+        """The code inside decides or runs one call of ``key`` (a harness tool's call, a
+        framework's own call its permission check asks about): what it reads of the journal
+        is that call's (``again``: the same call's check goes on — Claude Code's own question
+        after the ``PreToolUse`` decision), read again when the run pauses on it and an
+        attempt that goes on makes it again (:meth:`paused`). ``ident``: the framework's id of
+        the call, whose answers are its own (``Journal.answered_by``)."""
+        if not again or key not in self._began:
+            self._began[key] = {}
+        token, named = _CALLING.set(key), _IDENT.set(ident)
+        try:
+            yield
+        finally:
+            _IDENT.reset(named)
+            _CALLING.reset(token)
+
+    def announced(self, key: str, ident: str) -> None:
+        """The framework makes call ``key`` under its id ``ident`` (a call it hands the harness
+        later, through its MCP server, where the id is not given): :meth:`claimed`."""
+        self._announced[key].append(ident)
+
+    def claimed(self, key: str) -> str | None:
+        """The framework's id of call ``key`` it made, the first it said and not yet taken."""
+        idents = self._announced.get(key)
+        return idents.pop(0) if idents else None
+
+    def cursor(self) -> dict[str, int]:
+        """How far this attempt has read the journal now: each cursor read so far."""
+        return {name: self._seen[name] for name in self._seeded}
+
+    def paused(self, *, since: dict[str, int] | None = None) -> None:
+        """The run pauses on the call the code running now decides or runs: how far the calls
+        made before it read each record and answer is kept (``Journal.cursors``) — the cursors as
+        they are, the paused call's own put back where it began — so an attempt that goes on
+        from the framework's own state, which makes only the paused call again, starts there
+        (:meth:`_index`). ``since``: the cursors when the work the framework begins again
+        started (a subagent paused in its work: ``Helpers.begun_again``), all of whose reads
+        are put back. An attempt run again from its input makes every call again: it keeps
+        nothing of an earlier attempt's."""
+        kept = dict(self.journal.cursors) if self._continues() else {}
+        kept.update(self._seen)
+        calling = _CALLING.get()
+        if calling is not None:
+            kept.update(self._began.get(calling, {}))
+        if since is not None:
+            kept.update({name: since.get(name, self._seed(name)) for name in self._seeded})
+        self.journal.cursors = {name: n for name, n in kept.items() if n}
+
+    def _seed(self, name: str) -> int:
+        """Where cursor ``name`` starts in this attempt: past the reads of the calls made
+        before, where the attempt goes on from the framework's own state."""
+        return self.journal.cursors.get(name, 0) if self._continues() else 0
+
+    def _moved(self, name: str) -> None:
+        """Cursor ``name`` moves on: where it was, kept for the call reading it now."""
+        calling = _CALLING.get()
+        if calling is not None:
+            self._began.setdefault(calling, {}).setdefault(name, self._seen[name])
 
     def exclusive(self, key: str) -> asyncio.Lock:
         """What one call of ``key`` holds from its replay to its record: identical calls made
@@ -401,12 +573,11 @@ class Replay:
         from the framework's own state: then it is the next after the calls already made
         (``Journal.place``)."""
         if self._made is None:
-            kept = self._session is not None and self.journal.session == self._session
-            if not (self._goes_on or kept):
+            if not self._continues():
                 self.journal.place = 0  # run again from its input
             self._made = self.journal.place
         at, self._made = self._made, self._made + 1
-        key = content_key("call", tool, args)
+        key = call_key(tool, args)
         paused = next((m for m in self.journal.again if m.at == at and m.tool == tool), None)
         if paused is None or self.occurrence(key) < len(self.journal.calls.get(key, ())):
             return Made(tool=tool, args=args, at=at)
@@ -420,7 +591,12 @@ class Replay:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""
         index = self._index("a", key, len(self.journal.answers.get(key, ())))
         recorded = self.journal.answers.get(key, [])
+        while index < len(recorded) and self._anothers(key, index):
+            self._moved(f"a:{key}")
+            index += 1
+            self._seen[f"a:{key}"] = index
         if index < len(recorded):
+            self._moved(f"a:{key}")
             self._seen[f"a:{key}"] = index + 1
             self._mark("a", key, index, self._here())
             return InterruptResolution.model_validate(recorded[index])
@@ -429,7 +605,23 @@ class Replay:
     def answered(self, key: str) -> bool:
         """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""
         given = len(self.journal.answers.get(key, ()))
-        return self._index("a", key, given) < given
+        index = self._index("a", key, given)
+        while index < given and self._anothers(key, index):
+            index += 1
+        return index < given
+
+    def _anothers(self, key: str, index: int) -> bool:
+        """Whether the ``index``-th answer of ``key`` is another call's rejection: where the
+        attempt goes on from the framework's own state, a rejection filed for a call its
+        framework named is that call's (``Journal.answered_by``), and a call of another id —
+        a new one, identical or not — is asked again."""
+        by = self.journal.answered_by.get(key, [])
+        owner = by[index] if index < len(by) else None
+        ident = _IDENT.get()
+        if owner is None or ident is None or owner == ident or not self._continues():
+            return False
+        decision = self.journal.answers[key][index].get("decision")
+        return decision == InterruptDecision.REJECT.value
 
     def occurrence(self, key: str) -> int:
         """Which occurrence of ``key`` the next call is (0 for the first)."""
@@ -452,19 +644,34 @@ class Replay:
             self.journal.started.pop(key, None)
 
     def call(self, key: str) -> tuple[bool, Any]:
-        """``(True, output)`` when this occurrence of the call already ran."""
+        """``(True, output)`` when this occurrence of the call already ran — and what it read
+        besides is read past (``Journal.reads``: its approval's answer, which the next
+        identical call does not take for its own)."""
         index = self.occurrence(key)
         recorded = self.journal.calls.get(key, [])
         if index >= len(recorded):
             return False, None
+        self._moved(f"c:{key}")
         self._seen[f"c:{key}"] = index + 1
+        reads = self.journal.reads.get(key, [])
+        for name, n in (reads[index] if index < len(reads) else {}).items():
+            kind, read = name.split(":", 1)
+            self._index(kind, read, 0)  # seeded where the attempt starts it
+            self._moved(name)
+            self._seen[name] += n
         tags = self.journal.steps.get(f"c:{key}")
         if tags is not None and index < len(tags) and tags[index] is not None:
             self._mark("c", key, index, self._here())  # a step's record: now this step's
         return True, recorded[index]
 
     def record_call(
-        self, key: str, output: Any, *, tool: str | None = None, stepped: bool = False
+        self,
+        key: str,
+        output: Any,
+        *,
+        tool: str | None = None,
+        stepped: bool = False,
+        scope: str | None = None,
     ) -> None:
         """Record what this occurrence of ``key`` produced: a tool's output (``tool`` names
         it, and it stays offered after a pause), or a model step of a loop the harness runs.
@@ -474,7 +681,20 @@ class Replay:
         recorded = self.journal.calls.setdefault(key, [])
         index = self.occurrence(key)
         recorded.append(output)
+        self._moved(f"c:{key}")
         self._seen[f"c:{key}"] = index + 1
+        # what the call read besides its own record, when it is the call being made (the
+        # code inside its ``calling``, or ``scope``: its key, after its framework ran it)
+        began = self._began.get(scope or key, {}) if (scope or _CALLING.get()) == key else {}
+        read = {
+            name: self._seen[name] - n
+            for name, n in began.items()
+            if name.startswith("a:") and self._seen[name] > n
+        }
+        if read or key in self.journal.reads:
+            reads = self.journal.reads.setdefault(key, [])
+            reads.extend({} for _ in range(len(recorded) - 1 - len(reads)))
+            reads.append(read)
         if stepped:
             self._mark("c", key, len(recorded) - 1, self._here())
         if tool is not None and tool not in self.journal.used:
@@ -505,6 +725,11 @@ class Replay:
             del entries[:gone], tags[:gone]
             if not entries:
                 kept.pop(key, None)
+            parallel = self.journal.reads if kind == "c" else self.journal.answered_by
+            if key in parallel:
+                del parallel[key][:gone]
+                if not entries:
+                    del parallel[key]
             if not tags:
                 del steps[marked]
             self._seen[marked] = max(0, self._seen[marked] - gone)
@@ -523,6 +748,9 @@ class Replay:
         from (made in an earlier attempt: the graph does not make that call again, so this one
         is a later step's)."""
         seen = f"{kind}:{key}"
+        if seen not in self._seeded:
+            self._seeded.add(seen)  # the calls made before are not made again: past theirs
+            self._seen[seen] = max(self._seen[seen], self._seed(seen))
         index = self._seen[seen]
         tags = self.journal.steps.get(seen)
         if tags is None or self.resumed is None:

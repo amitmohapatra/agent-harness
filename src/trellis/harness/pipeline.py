@@ -13,7 +13,9 @@ worker's claimed run (``agent.execute``), a sub-agent's call, ``serve_chat``, ``
 is left of its time. The attempt works at most that (:class:`Budget`: its ``timeout`` — the
 agent's default, ``h.wrap(run_timeout=)``, when the run names none — less the time it already
 worked, and its ``deadline``) and then ends ``TIMEOUT``; cancelled (``agent.cancel``), it ends
-``CANCELLED`` with the reason.
+``CANCELLED`` with the reason. Either way the children it still has open — a sub-agent's run
+inside one of its calls, a helper a framework spawned in the foreground — end with it, as it
+ended (:func:`_children_ended`).
 """
 
 from __future__ import annotations
@@ -21,15 +23,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+import uuid
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
 
 from trellis.contracts import (
     AgentError,
@@ -48,7 +53,7 @@ from trellis.contracts import (
     ToolCall,
     ToolOutcome,
 )
-from trellis.harness import budget, conversation, sandbox, schedules, skills, snapshots
+from trellis.harness import background, budget, conversation, sandbox, schedules, skills, snapshots
 from trellis.harness.adapters import convert
 from trellis.harness.adapters.base import (
     FRAMEWORK_OPTIONS,
@@ -59,25 +64,39 @@ from trellis.harness.adapters.base import (
     merged,
     query_of,
 )
-from trellis.harness.adapters.langgraph import FOREIGN, HITL, holds, is_hitl
+from trellis.harness.adapters.langgraph import (
+    DECISION_SCHEMA,
+    FOREIGN,
+    HITL,
+    carries,
+    hitl_approved,
+    hitl_calls,
+    holds,
+    is_hitl,
+)
 from trellis.harness.asking import Question, RunCancelled
+from trellis.harness.bridges.helpers import held
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
 from trellis.harness.budget import Budget as Spending
 from trellis.harness.clients.memory import DOCUMENTS
 from trellis.harness.conversation import (
+    INTERRUPTED,
     Live,
     Mode,
     answer_id,
     identified,
     question_id,
     steering,
+    steering_elsewhere,
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
+from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
-from trellis.harness.history import Said, Speaker
+from trellis.harness.history import Said, Speaker, notification_in
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
+from trellis.harness.journal import Journal, Pending, Replay, call_key, governance_held
+from trellis.harness.line import Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
@@ -85,6 +104,7 @@ from trellis.harness.schedules import Fired
 from trellis.harness.telemetry import RunTrace, agent_span, decided, metrics, output
 from trellis.harness.tools import bridge, stored
 from trellis.harness.tools.base import SOURCES
+from trellis.harness.tools.results import merged as merged_state
 from trellis.memory.models import PromptContext
 from trellis.runs import RELEASED, ConflictError, Job, LeaseLostError
 
@@ -102,6 +122,8 @@ UNANSWERED_CUT: Final = (
     "the model's last reply reached its output limit (its max_tokens) before it gave an answer"
 )
 UNANSWERED: Final = "the model's last reply had no text"
+#: Why a child still open when the run that started it answered is cancelled.
+ENDED_FIRST: Final = "the run that started it ended first"
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,23 +205,24 @@ async def attempt(
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace).
 
     A run of a conversation (its thread) waits while another run of the same conversation and
-    agent works in this process: a second message to a busy conversation is answered after
-    the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's are not held here. ``mode`` says
-    what a run sent while another holds the conversation's turn does instead of waiting
-    (``conversation.Mode``: :func:`_arrived`)."""
-    if job is not None or parent is not None:
-        turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
-    else:
-        key = Identity.of(record).conversation
-        live = agent.turns.live(key)
-        if live is not None and mode is not Mode.QUEUE:
-            answered = await _arrived(agent, record, input, live, mode=mode, listener=listener)
-            if answered is not None:
-                return answered
-        turn = agent.turns.taken(key, record.run_id, steers=agent.adapter.steers(agent.target))
-    async with turn as live:
-        result = await _attempt(
+    agent works, in this process or another: a second message to a busy conversation is
+    answered after the first, never beside it, in the order of the run store's line
+    (``line``; queued runs wait the same way in the run store, by their ``concurrency_key``).
+    A sub-agent's run and a worker's do not wait here. ``mode`` says what a run sent while
+    another holds the conversation's turn does instead of waiting (``conversation.Mode``:
+    :func:`_arrived`; a turn held in another process: ``line``).
+
+    A run this process executes without a worker's lease — every run but a claimed one — is
+    held in the run store while its attempt is under way, waiting its turn included
+    (``holding``): a process that dies with it leaves a run the store ends, not one
+    ``RUNNING`` for ever. A claimed run is its lease's (its worker heartbeats it)."""
+    held: contextlib.AbstractAsyncContextManager[Any] = (
+        contextlib.nullcontext()
+        if job is not None
+        else agent.harness.holds.holding(record.run_id, record.tenant_id)
+    )
+    async with held:
+        return await _turned(
             agent,
             record,
             input,
@@ -210,14 +233,62 @@ async def attempt(
             remaining=remaining,
             observe=observe,
             parent=parent,
+            mode=mode,
         )
-        if live is not None:
-            live.result = result
-        return result
 
 
-#: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
-INTERRUPTED: Final = "interrupted by a newer message of the conversation"
+async def _turned(
+    agent: Agent,
+    record: RunRecord,
+    input: Any,
+    *,
+    journal: Journal | None,
+    resolution: InterruptResolution | None,
+    listener: Callable[[RunEvent], None] | None,
+    job: Job | None,
+    remaining: float | None,
+    observe: Callable[[PromptContext | None], None] | None,
+    parent: Runtime | None,
+    mode: Mode,
+) -> Result:
+    """The attempt (:func:`attempt`): the conversation's turn taken — or what a run sent
+    while another holds it does instead — then :func:`_attempt`. A worker's run and a
+    sub-agent's take none: the queue's claim, and the parent's call, are their turns."""
+    work = functools.partial(
+        _attempt,
+        agent,
+        record,
+        input,
+        journal=journal,
+        resolution=resolution,
+        listener=listener,
+        job=job,
+        remaining=remaining,
+        observe=observe,
+        parent=parent,
+    )
+    if job is not None or parent is not None:
+        return await work()
+    key = Identity.of(record).conversation
+    h = agent.harness
+    line = (
+        None
+        if record.concurrency_key is None
+        else Line(h.runs, record, agent.turns.seen, h.followers)
+    )
+    working = agent.turns.live(key)
+    if working is not None and mode is not Mode.QUEUE:
+        answered = await _arrived(agent, record, input, working, mode=mode, listener=listener)
+        if answered is not None:
+            return answered
+    elif line is not None and mode is Mode.STEER and await line.ahead():
+        steering_elsewhere(agent.id)  # nothing carries a message to a run working elsewhere
+    steers = agent.adapter.steers(agent.target)
+    async with agent.turns.taken(key, record.run_id, steers=steers, line=line) as live:
+        if live is None:
+            return await _left_the_line(agent, record, journal, listener)
+        live.result = await work()
+        return live.result
 
 
 async def _arrived(
@@ -246,6 +317,37 @@ async def _arrived(
     if not taken or answered is None or answered.status not in conversation.ANSWERED:
         return None  # it ended first, or without an answer: the message takes its own turn
     return await _answered_by(agent, record, answered, listener)
+
+
+async def _left_the_line(
+    agent: Agent,
+    record: RunRecord,
+    journal: Journal | None,
+    listener: Callable[[RunEvent], None] | None,
+) -> Result:
+    """A run that takes no turn — cancelled while it waited in its conversation's line
+    (``agent.cancel``, here or on another process), or ended in the run store before its turn
+    came (its deadline, its time limit) — runs nothing: one cancelled is ended ``CANCELLED``
+    here (with the sandbox a paused attempt left it), one ended is as the store says, and its
+    stream is its start and that ending."""
+    identity = Identity.of(record)
+    events = _emitter(agent, identity, record.attempt, listener, None)
+    events.emit(RunEventType.RUN_STARTED, data={"agent_id": agent.id})
+    reason = agent.turns.cancelled(record.run_id)
+    if reason is not None:
+        if await _settle_cancelled(agent, identity, events, None, spent={}, reason=reason):
+            await sandbox.ended(agent, journal.sandbox if journal else None, record.run_id)
+        return Result(run_id=record.run_id, status=RunStatus.CANCELLED)
+    found = await agent.harness.runs.get(record.run_id, tenant=record.tenant_id)
+    assert found is not None
+    outcome = RunOutcome.from_status(found.status)
+
+    async def written() -> None:
+        """Nothing to write: the run store ended it."""
+
+    await events.settle(lambda: events.finished(outcome, error=found.error), written)
+    metrics.run_finished(agent.id, outcome.value)
+    return Result.of(found)
 
 
 async def _answered_by(
@@ -300,7 +402,7 @@ async def _attempt(
         remaining = job.remaining_seconds
     budget = _budget(agent, record, remaining)
     journal = journal or Journal()
-    continued = _continued_session(agent, identity, journal, record.attempt, parent)
+    continued = await _continued_session(agent, identity, journal, record.attempt, parent)
     unresumable = await _unheld(agent, identity, journal, resolution)
     pending = journal.pending
     events = _emitter(agent, identity, record.attempt, listener, job)
@@ -329,9 +431,14 @@ async def _attempt(
         continued=continued,
         frontend=Frontend.of(record.metadata),
         scheduled=None if parent is not None else Fired.of(record.metadata),
+        notification=(
+            notification_in(input)
+            if parent is None and background.NOTIFIED in record.metadata
+            else None
+        ),
     )
     events.trace_run = runtime.trace_run
-    _earlier_results(agent, runtime)
+    await _earlier_results(agent, runtime)
     decision = _started(agent, runtime, record, resolution)
     extracted: Extracted | None = None
     pushed: PromptContext | None = None
@@ -383,28 +490,67 @@ async def _attempt(
         agent, runtime, journal, extracted, pushed=pushed, error=error, timed_out=timed_out
     )
     _kept_session(agent, runtime, journal, result)
-    _kept_results(agent, runtime, journal, result)
+    await _kept_results(agent, runtime, journal, result)
     await schedules.ended(agent, runtime, result)
     await agent.hooks.ended(runtime, result)
     return result
 
 
-def _continued_session(
+async def _continued_session(
     agent: Agent, identity: Identity, journal: Journal, attempt: int, parent: Runtime | None
 ) -> bool:
     """A conversation's turn on a target that keeps a session of its own (``Adapter.sessions``:
     the Claude Agent SDK's, an ACP agent's) continues the one its framework kept for the
     conversation's last turn in this process (``Agent.sessions``): its first attempt starts
     with that session in its journal — the journal's own session path, as a resume after a
-    pause takes it. Whether it does."""
-    if not agent.adapter.sessions or parent is not None or attempt != 1 or journal.session:
+    pause takes it — unless another worker served a turn of the conversation since
+    (:func:`_served_elsewhere`): the session kept here, which never saw that turn, is
+    dropped, and the turn starts a new one, as on a worker that kept none. Whether it does."""
+    if not agent.adapter.sessions or parent is not None or identity.conversation == identity.run_id:
         return False
-    kept = agent.sessions.get(identity.conversation)
+    conversation, mine = identity.conversation, agent.turned.get(identity.conversation)
+    agent.turned[conversation] = identity.run_id  # the latest turn this process served
+    if attempt != 1 or journal.session:
+        return False
+    kept = agent.sessions.get(conversation)
     if kept is None:
+        return False
+    if mine is not None and await _served_elsewhere(agent, identity, mine):
+        agent.sessions.pop(conversation)
         return False
     journal.session, transcripts = kept
     journal.transcripts = {name: list(entries) for name, entries in transcripts.items()}
     return True
+
+
+async def _served_elsewhere(agent: Agent, identity: Identity, mine: str) -> bool:
+    """Whether a turn of the conversation was started after ``mine`` — the latest this
+    process served — and not here: by another worker, whose framework session this
+    process's never saw (the run store's turns of the thread, of this user and agent; a
+    queued one has not started yet). The listing is newest first: it is read up to ``mine``,
+    or the first run last touched before ``mine`` began — the turns after are older — so a
+    conversation of any length costs its own read and one page, and one read more for each
+    run touched since."""
+    runs, tenant = agent.harness.runs, identity.tenant
+    served = await runs.get(mine, tenant=tenant)
+    if served is None:
+        return False
+    async for summary in runs.iterate(
+        thread_id=identity.thread, agent_id=identity.agent_id, tenant=tenant, max_pages=1
+    ):
+        if summary.run_id == mine or summary.updated_at < served.created_at:
+            break
+        if summary.run_id == identity.run_id or summary.status is RunStatus.QUEUED:
+            continue
+        turn = await runs.get(summary.run_id, tenant=tenant)
+        if (
+            turn is not None
+            and turn.parent_run_id is None
+            and turn.user_id == identity.user
+            and turn.created_at > served.created_at
+        ):
+            return True
+    return False
 
 
 def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
@@ -420,29 +566,154 @@ def _kept_session(agent: Agent, runtime: Runtime, journal: Journal, result: Resu
         agent.sessions[runtime.conversation] = (journal.session, dict(journal.transcripts))
 
 
-def _earlier_results(agent: Agent, runtime: Runtime) -> None:
+async def _earlier_results(agent: Agent, runtime: Runtime) -> None:
     """A conversation's turn reads the large results its earlier turns saved in this process
     (``Agent.results``) as its own (``tools.query.saved``): its history names their paths, and
     a follow-up's ``read_file`` or ``query_result`` on one finds it — as Deep Agents keeps its
-    files in the thread's state. A run with no conversation of its own, or a child run, has
-    none."""
+    files in the thread's state — and starts with the graph state its last turn ended with
+    (``Runtime.carried``: the channels a graph with no thread of its own carries,
+    ``adapters.langgraph.CARRIED``): what this process kept of it, and over it what the file
+    store keeps (:func:`_carried`), which has the turns other servers ran. A run with no
+    conversation of its own, or a child run, has none."""
     if runtime.parent is not None or runtime.conversation == runtime.run_id:
         return
     runtime.earlier_results, tools = agent.results.of(runtime.conversation)
     for path, tool in tools.items():
         runtime.kept_from.setdefault(path, tool)
+    runtime.carried = agent.results.state(runtime.conversation)
+    if carries(agent.target):
+        runtime.carried = merged_state(runtime.carried, await _carried(agent, runtime))
 
 
-def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
-    """The large results a conversation's turn saved, kept for its later turns
-    (:func:`_earlier_results`); a paused turn keeps them in its journal until it ends."""
-    if (
-        journal.results
-        and runtime.parent is None
-        and runtime.conversation != runtime.run_id
-        and result.status is not RunStatus.PAUSED
-    ):
+async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result: Result) -> None:
+    """The large results a conversation's turn saved and the graph state it ended with
+    (``Runtime.carried``), kept for its later turns (:func:`_earlier_results`) — the state in
+    the file store too (:func:`_keep_carried`). A paused turn keeps its results in its journal
+    until it ends; its state is kept as it pauses: what it holds of the world outside (a
+    background task it started) is so whether the turn is ever approved or not. Then an outcome
+    its background tasks reached after it last read them is told (``background.left``)."""
+    if runtime.parent is not None or runtime.conversation == runtime.run_id:
+        return
+    if runtime.carried:
+        agent.results.left(runtime.conversation, runtime.carried)
+        await _keep_carried(agent, runtime)
+    if journal.results and result.status is not RunStatus.PAUSED:
         agent.results.add(runtime.conversation, journal.results, runtime.kept_from)
+    # an outcome its background tasks reached since it last read them, told by a turn of its own
+    await background.left(agent, runtime, result)
+
+
+#: Where the file store (``harness.files``) keeps what a conversation carries from turn to
+#: turn (``Runtime.carried``), below its root: a folder that is no tenant's (``files.part``
+#: starts none with a dot), so no listing of a user's files shows it; then the tenant, the
+#: user, the conversation and the agent, and in it one file per turn that kept it
+#: (:func:`_kept_name`). And the most bytes one turn keeps there.
+CARRIED_FOLDER: Final = ".carried"
+CARRIED_BYTES: Final = 256 * 1024
+#: The suffix of a turn's file in that folder.
+CARRIED_SUFFIX: Final = ".json"
+
+
+def _carried_at(agent: Agent, runtime: Runtime) -> str:
+    scope = (runtime.tenant, runtime.user, runtime.conversation, agent.id)
+    return "/".join([CARRIED_FOLDER, *map(part, scope)])
+
+
+def _kept_name(runtime: Runtime) -> str:
+    """The name of the file a turn keeps what its conversation carries in: new for each time a
+    turn keeps it — when (so files read in that order merge the newer over the older), the run,
+    and a part of its own — so no turn ever writes over a file another turn wrote."""
+    return f"{time.time_ns():020d}-{part(runtime.run_id)}-{uuid.uuid4().hex[:8]}{CARRIED_SUFFIX}"
+
+
+async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
+    """What the file store keeps of the graph state the conversation's turns ended with
+    (:func:`_keep_carried`), wherever they ran: the lists turns on other servers, or before a
+    restart, left — merged, the newer over the older. None kept: none; a file that cannot be
+    read is said in the log and left out — the turn starts with what this process kept."""
+    return (await _read_carried(agent, runtime))[0]
+
+
+async def _read_carried(agent: Agent, runtime: Runtime) -> tuple[dict[str, Any], list[str]]:
+    """:func:`_carried`, and the files it merged — and those that hold no state (a write cut
+    off, another program's file): the files a turn that keeps its own over them supersedes. A
+    file that could not be read at all (the store out of reach) is neither."""
+    folder = _carried_at(agent, runtime)
+    files = agent.harness.files
+    merged: dict[str, Any] = {}
+    read: list[str] = []
+    try:
+        listed = await files.files(folder)
+    except Exception as exc:
+        _not_read(runtime, f"{type(exc).__name__}: {exc}")
+        return merged, read
+    names = sorted(n for where, n, size in listed if where == folder and size is not None)
+    for name in names:
+        try:
+            data = await files.read(folder, name)
+        except Exception as exc:
+            _not_read(runtime, f"{type(exc).__name__}: {exc}")
+            continue
+        if data is None:
+            continue  # merged into another turn's file meanwhile, and removed
+        read.append(name)
+        try:
+            found = json.loads(data)
+        except ValueError as exc:
+            _not_read(runtime, f"{name}: {exc}")
+            continue
+        if not isinstance(found, dict):
+            _not_read(runtime, f"{name}: it is not a graph state by channel")
+            continue
+        merged = merged_state(merged, found)
+    return merged, read
+
+
+def _not_read(runtime: Runtime, problem: str) -> None:
+    log.warning("run %s: what the conversation carries was not read: %s", runtime.run_id, problem)
+
+
+async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
+    """The graph state the turn ended with, kept in the file store for the conversation's next
+    turn on any server, merged over what is kept there (``results.merged``) — JSON, at most
+    :data:`CARRIED_BYTES`. A state that cannot be kept there (not JSON, past the bound, the
+    store out of reach) is said in the log: this process keeps it all the same
+    (``Agent.results``).
+
+    The file store has no conditional write (fsspec writes a file whole, with no generation or
+    ``If-Match`` to compare), so no turn writes over another's: each keeps a file of its own
+    (:func:`_kept_name`) holding what it read merged with its own state, and only then removes
+    the files it read — each one's state is in its file now. Two turns ending together on two
+    servers, each reading before the other writes, each keep their file, and the next turn
+    merges both: no task is lost whatever the order of their reads, writes and removals."""
+    folder = _carried_at(agent, runtime)
+    files = agent.harness.files
+    kept, read = await _read_carried(agent, runtime)
+    state = merged_state(kept, runtime.carried)
+    if state == kept:
+        return  # what is kept holds this turn's state already
+    try:
+        data = json.dumps(state).encode()
+        if len(data) > CARRIED_BYTES:
+            raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
+        await files.put(folder, _kept_name(runtime), data, source=CARRIED_FOLDER)
+    except Exception as exc:
+        problem = f"{type(exc).__name__}: {exc}"
+        log.warning(
+            "run %s: what the conversation carries was not kept: %s", runtime.run_id, problem
+        )
+        return
+    for name in read:  # superseded: what each held is in this turn's file
+        try:
+            await files.remove(folder, name)
+        except Exception as exc:  # left: merged again by the next turn, and removed then
+            log.warning(
+                "run %s: a superseded file of what the conversation carries was not removed: "
+                "%s: %s",
+                runtime.run_id,
+                type(exc).__name__,
+                exc,
+            )
 
 
 async def _worked(
@@ -476,6 +747,8 @@ async def _worked(
     await agent.hooks.started(runtime)
     if (cancelled := await schedules.stale(runtime)) is not None:
         return Extracted(answer=cancelled), pushed
+    if await background.stale(runtime):  # told already: nothing to deliver
+        return Extracted(answer=schedules.NO_REPORT), pushed
     extracted = await _invoked(
         agent,
         runtime,
@@ -506,15 +779,61 @@ async def _cancelled(
     stalled = STALLED in exc.args and runtime.stalled is not None
     stopped = not stalled and _out_of_time(job, exc)
     if not (stalled or stopped) and (runtime.cancelled is None or task.uncancel()):
-        settles = job is None or (job.cancel_requested and RELEASED not in exc.args)
+        # a sub-agent's run its parent's clock cut off ends with its parent, as it ends
+        # (``_children_ended``): out of time
+        settles = (job is None and not _parent_out_of_time(runtime)) or (
+            job is not None and job.cancel_requested and RELEASED not in exc.args
+        )
         identity, events = runtime.identity, runtime.events
         ended = settles and await _settle_cancelled(
             agent, identity, events, runtime.worker_id, spent=budget.spent(runtime)
         )
         if ended:
+            await _children_ended(
+                agent, identity.run_id, identity.tenant, RunStatus.CANCELLED, kept=journal.handed_on
+            )
             await sandbox.ended(agent, journal.sandbox, identity.run_id, runtime.added)
         raise exc
     return stopped
+
+
+def _parent_out_of_time(runtime: Runtime) -> bool:
+    """Whether the run whose call this one works in (a sub-agent's parent) is past its time:
+    its clock is what cut this attempt off."""
+    parent = runtime.parent
+    return parent is not None and parent.ends_at is not None and time.monotonic() >= parent.ends_at
+
+
+async def _children_ended(
+    agent: Agent,
+    run_id: str,
+    tenant: str,
+    status: RunStatus,
+    *,
+    kept: Collection[str] = (),
+    error: AgentError | None = None,
+    reason: str | None = None,
+) -> None:
+    """The run ended — whatever its final ``status`` — with children still open — a
+    sub-agent's run its call was working on, a helper a framework spawned in the foreground —
+    that nothing else will end: each ends as the run did, and so do theirs. Out of time or
+    failed (its ``error``: a stalled model call's too), they end with that status and error;
+    cancelled, they are cancelled with its ``reason``; answered without them, they are
+    cancelled (:data:`ENDED_FIRST`). A helper handed on past its attempt (``kept``: the run's
+    ``Journal.handed_on``, a Claude subagent working in the background of its session — only
+    a conversation's turn has one) is its keeper's to end, and goes on."""
+    runs = agent.harness.runs
+    async for child in runs.iterate(parent_run_id=run_id, status=RunStatus.RUNNING, tenant=tenant):
+        if child.run_id in kept:
+            continue
+        with contextlib.suppress(ConflictError, LeaseLostError):  # it ended meanwhile
+            if error is not None:
+                await runs.finish(child.run_id, status, error=error, tenant=tenant)
+            else:
+                await runs.cancel(child.run_id, reason=reason, tenant=tenant)
+        # a background task at work here, apart from the run's call, stops with it
+        agent.harness.background.stop(child.run_id, reason or "its parent ended")
+        await _children_ended(agent, child.run_id, tenant, status, error=error, reason=reason)
 
 
 def _stalled(runtime: Runtime) -> Exception | None:
@@ -591,8 +910,9 @@ async def _concluded(
     if paused is not None:
         await sandbox.paused(runtime)
         return await _paused(agent, runtime, journal, paused, extracted)
+    ended = True  # here: not ended, or taken over, elsewhere already
     if runtime.cancelled is not None:
-        await _settle_cancelled(
+        ended = await _settle_cancelled(
             agent,
             runtime.identity,
             runtime.events,
@@ -621,8 +941,34 @@ async def _concluded(
         await sandbox.delivered(runtime)
         result = await _succeeded(agent, runtime, extracted, pushed)
     if not _again(runtime, result):
+        if ended:  # the run's end is final: its open children end with it, as it ended
+            await _open_children_ended(agent, runtime, journal, result)
         await sandbox.ended(agent, journal.sandbox, runtime.run_id, runtime.added)
     return result
+
+
+async def _open_children_ended(
+    agent: Agent, runtime: Runtime, journal: Journal, result: Result
+) -> None:
+    """The children the run still has open end with it, as ``result`` says it ended
+    (:func:`_children_ended`), but those handed on and — unless it was cancelled — its
+    background tasks: the turn's end is not theirs (:func:`background.of_turn`). The run has
+    ended already: a run store that cannot be read now is logged, and the run's result stands."""
+    kept = journal.handed_on
+    if runtime.cancelled is None:
+        kept = [*kept, *background.of_turn(runtime)]
+    try:
+        await _children_ended(
+            agent,
+            runtime.run_id,
+            runtime.tenant,
+            result.status,
+            kept=kept,
+            error=result.error,
+            reason=ENDED_FIRST if runtime.cancelled is None else runtime.cancelled,
+        )
+    except Exception as exc:
+        log.warning("run %s: its open children could not be ended: %s", runtime.run_id, exc)
 
 
 def _unanswered(agent: Agent, runtime: Runtime, extracted: Extracted | None) -> AgentError | None:
@@ -684,8 +1030,18 @@ def _emitter(
     store = event_log(agent.harness.runs)
     if store is not None:
         worker = None if job is None else job.worker_id
+        ended = (
+            None
+            if job is not None
+            else functools.partial(agent.harness._lost, identity.run_id, identity.tenant)
+        )
         log_ = RunLog(
-            store, identity.run_id, tenant=identity.tenant, worker_id=worker, events=events
+            store,
+            identity.run_id,
+            tenant=identity.tenant,
+            worker_id=worker,
+            events=events,
+            ended=ended,
         )
         events.record(log_)
     return events
@@ -759,7 +1115,10 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
     pending = journal.pending
     goes_on = False
     if resolution is not None and pending is not None:
-        journal.approved_in_framework(resolution)
+        held = pending.interrupt.payload or {}
+        journal.approved_in_framework(
+            resolution, hitl_approved(held, resolution) if is_hitl(held) else None
+        )
         # from the framework's serialised run, the attempt goes on where the run paused
         goes_on = bool(pending.native_state)
         if goes_on and not governance_held(pending):
@@ -848,6 +1207,9 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     runtime._asked += 1
     ident = interrupt_id(runtime.run_id, runtime.attempt, runtime._asked)
     if native.tool is not None:
+        # the framework goes on from its saved run: what the calls before read stays read
+        helpers = runtime.helpers
+        runtime.replay.paused(since=None if helpers is None else helpers.begun_again())
         interrupt = Interrupt(
             interrupt_id=ident,
             tenant_id=runtime.tenant,
@@ -857,6 +1219,9 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
             tool_call=ToolCall(
                 tool=native.tool, args=native.args or {}, idempotency_key=native.native_id
             ),
+            # a call a helper's work holds (an agent tool's own tool): the helper, whose run
+            # recorded it
+            payload=held(runtime),
         )
         return Pending(
             key=native.tool,
@@ -868,6 +1233,10 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     if is_hitl(value):
         return _middleware_approval(runtime, ident, native)
     asked = Question.described(value)  # what ask(...) takes, mapped the one way ask maps it
+    if asked.schema is None and native.schema is not None:
+        # the answer the graph takes (``interrupt(response_schema=...)``): checked on the resume
+        # (``answer_problem``), so one that does not fit is asked again, not run
+        asked = dataclasses.replace(asked, expects=native.schema)
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
@@ -880,26 +1249,24 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
 
 def _middleware_approval(runtime: Runtime, ident: str, native: NativePause) -> Pending:
     """LangChain's ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) paused on the
-    calls it holds: an approval of the first, the whole request (every call, each one's
-    ``allowed_decisions``) in the payload; the resume answers all of them."""
+    calls it holds — a batch, or one call (``interrupt_mode="per_call"``): an approval of the
+    first, the whole request (every call, each one's ``allowed_decisions``, or the schema of
+    the decision a per-call request takes) in the payload; the resume answers all of them."""
     request = json.loads(json.dumps(native.value, default=str))
-    actions = request["action_requests"]
-    first, more = actions[0], len(actions) - 1
-    question = f"Approve {first['name']}?"
+    if native.schema is not None:
+        request[DECISION_SCHEMA] = native.schema
+    calls = hitl_calls(request)
+    (name, args), more = calls[0], len(calls) - 1
+    question = f"Approve {name}?"
     if more:
         question += f" (and {more} more call{'s' if more > 1 else ''})"
-    args = first.get("args")
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
         run_id=runtime.run_id,
         reason=InterruptReason.APPROVAL,
         question=question,
-        tool_call=ToolCall(
-            tool=first["name"],
-            args=args if isinstance(args, dict) else {},
-            idempotency_key=native.native_id,
-        ),
+        tool_call=ToolCall(tool=name, args=args, idempotency_key=native.native_id),
         payload=request,
     )
     return Pending(key=HITL, interrupt=interrupt, native_id=native.native_id)
@@ -974,8 +1341,9 @@ async def _succeeded(
     answer = extracted.answer
     if runtime.budget_spent is not None:
         return await _partial(agent, runtime, extracted)
-    # a scheduled run with nothing to report (or reported already) is not delivered
-    if quiet := schedules.quiet(runtime, answer):
+    # a scheduled run with nothing to report (or reported already) is not delivered, and
+    # neither is a background task's outcome a turn of the conversation told already
+    if quiet := schedules.quiet(runtime, answer) or background.quiet(runtime, answer):
         answer = schedules.NO_REPORT
     await runtime.events.settle(
         lambda: runtime.events.finished(
@@ -1060,7 +1428,11 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
     said: list[Said] = list(extracted.transcript) if extracted is not None else []
     if not said and extracted is not None and isinstance(extracted.answer, str):
         said = [Said(Speaker.ASSISTANT, extracted.answer)] if extracted.answer else []
-    asked = [Said(Speaker.USER, runtime.task)] if runtime.task else []
+    # the question as the framework kept it (a graph's middleware may have redacted it)
+    task = (extracted.asked if extracted is not None else None) or runtime.task
+    asked = [Said(Speaker.USER, task)] if runtime.task else []
+    if not asked and runtime.notification is not None:  # a notification it was given to say
+        asked = [runtime.notification]
     # a message steered into the run that its framework does not report: after the question
     reported = {s.id for s in said}
     steered = [
@@ -1068,7 +1440,10 @@ def _transcript(runtime: Runtime, extracted: Extracted | None, status: RunStatus
         for s in runtime.steers
         if question_id(runtime.conversation, s.run_id) not in reported
     ]
-    return _with_facts(identified([*asked, *steered, *said], runtime), runtime, status)
+    messages = identified(
+        [*asked, *steered, *said], runtime, answered=status is not RunStatus.PAUSED
+    )
+    return _with_facts(messages, runtime, status)
 
 
 #: What a person's decision on a tool call is, in the run record's words.
@@ -1093,16 +1468,12 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
     journal = runtime.replay.journal
     outcomes: dict[str, list[ToolOutcome]] = {}
     for call, outcome in journal.trajectory:
-        outcomes.setdefault(content_key("call", call.tool, call.args), []).append(outcome)
+        outcomes.setdefault(call_key(call.tool, call.args), []).append(outcome)
     calls = {c.id: c for s in said for c in s.tool_calls}
     out: list[Said] = []
     for s in said:
         called = calls.get(s.tool_call_id or "")
-        found = (
-            outcomes.get(content_key("call", called.name, dict(called.arguments)))
-            if called
-            else None
-        )
+        found = outcomes.get(call_key(called.name, dict(called.arguments))) if called else None
         if s.role is not Speaker.TOOL or not found:
             out.append(s)
             continue
@@ -1152,7 +1523,8 @@ async def _settle_cancelled(
     """End the run ``CANCELLED`` (a cancelled run carries no error: the ``reason`` —
     ``agent.cancel``'s, a person's — goes on its ``RUN_FINISHED`` event and in the log, with
     what it ``spent`` until then), and say whether it was ended here (not ended, or taken
-    over, elsewhere already)."""
+    over, elsewhere already): its open children then end with it (:func:`_children_ended`,
+    its caller's to call)."""
 
     async def write() -> bool:
         try:
@@ -1175,9 +1547,11 @@ async def _settle_cancelled(
 
 
 def jsonable(value: Any) -> Any:
-    """An answer as a run record stores it."""
+    """An answer as a run record stores it (a dataclass as its fields: a LangGraph state)."""
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return to_jsonable_python(value, fallback=str)
     try:
         json.dumps(value)
     except (TypeError, ValueError):

@@ -79,6 +79,40 @@ async def test_a_known_key_outlives_an_outage_and_is_read_again_later(
         await harness._tenant()
 
 
+async def test_the_memory_tools_are_listed_again_every_10_minutes_the_last_kept_while_down(
+    harness: Harness,
+    memory_service: FakeMemoryService,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(fresh_module.time, "monotonic", lambda: now[0])
+    offered: list[list[str]] = []
+
+    async def looks(input: str, agent: Runtime) -> str:
+        offered.append(sorted(agent.toolbox))
+        return input
+
+    agent = harness.wrap(looks, id="looks", without={"schedules"})
+    await agent.run("q", user="u")
+    now[0] += 599
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 1  # within 10 minutes: the listing kept
+    now[0] += 2
+    memory_service.failures["agent_tools"] = 503
+    with caplog.at_level(logging.WARNING, logger="trellis.fresh"):
+        await agent.run("q", user="u")
+    assert "agent tools could not be read again" in caplog.text  # asked again: it is down
+    assert offered[2] == offered[0] != []  # the last listing stands
+    del memory_service.failures["agent_tools"]
+    now[0] += 29
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 1  # not asked again within 30 s
+    now[0] += 2
+    await agent.run("q", user="u")
+    assert len(memory_service.named("agent_tools")) == 2
+
+
 async def test_memory_tools_that_cannot_be_listed_leave_the_run_without_them(
     harness: Harness, memory_service: FakeMemoryService
 ) -> None:
@@ -124,7 +158,7 @@ async def test_a_catalog_that_cannot_be_read_makes_writes_ask_and_the_run_goes_o
     assert done.status is RunStatus.SUCCESS and done.answer == "ordered"
 
 
-@pytest.mark.parametrize("failure", [503, 429, 422, "timeout", "malformed"])
+@pytest.mark.parametrize("failure", [503, 504, 429, 422, "timeout", "malformed"])
 async def test_a_context_that_fails_any_way_is_a_warning(
     harness: Harness, memory_service: FakeMemoryService, failure: int | str
 ) -> None:
@@ -135,7 +169,7 @@ async def test_a_context_that_fails_any_way_is_a_warning(
     assert any(w["name"] == "warning" and "no memory context" in w["message"] for w in warnings)
 
 
-@pytest.mark.parametrize("failure", [401, 403, 422, 429, 503, "timeout"])
+@pytest.mark.parametrize("failure", [401, 403, 422, 429, 503, 504, "timeout"])
 async def test_a_record_that_fails_any_way_never_fails_the_run(
     harness: Harness, memory_service: FakeMemoryService, failure: int | str
 ) -> None:
@@ -144,3 +178,17 @@ async def test_a_record_that_fails_any_way_never_fails_the_run(
     assert result.status is RunStatus.SUCCESS
     await harness.writes.drain()
     assert harness.writes.failed == 1  # reported, counted
+
+
+async def test_a_context_past_the_services_deadline_is_asked_again_and_reaches_the_run(
+    memory_service: FakeMemoryService,
+) -> None:
+    """The service's request deadline answers ``504 TIMEOUT`` (retryable, ``Retry-After``):
+    the client asks again and the run gets its context, no warning."""
+    memory_service.deadline_times["context"] = 1
+    async with Harness(config=Settings(), memory=memory_service.client(max_retries=1)) as h:
+        events = [e async for e in h.wrap(echo, id="echo").stream("q", user="u")]
+    assert events[-1].type is RunEventType.RUN_FINISHED
+    assert len(memory_service.named("context")) == 1  # the 504 came before the route ran
+    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
+    assert not any("no memory context" in str(w.get("message")) for w in warnings), warnings
