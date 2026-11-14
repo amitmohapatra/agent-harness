@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,12 @@ import pytest
 
 from tests.features.conftest import ADAPTERS, eventually, harness, memory_sql
 from tests.features.kit import armed, ledger, lookup, record, tool_records
+from tests.support.adapters import BUILDERS
+from tests.support.arm import arm
 from tests.support.planned import PlannedChat
 from trellis import ReAct, mcp, stdio
 from trellis.contracts import RunStatus
+from trellis.harness.automatic import JournalBackend
 from trellis.harness.evals import grounding
 
 pytestmark = pytest.mark.timeout(300)
@@ -36,19 +40,17 @@ SERVER = Path(__file__).parents[1] / "support" / "mcp_server.py"
 async def test_a_model_that_never_answers_ends_the_run_timeout_within_its_limit(
     adapter: str, tmp_path: Path, uid: str
 ) -> None:
-    from tests.support.adapters import BUILDERS
-    from tests.support.arm import arm
-
     async with harness() as h:
+        plan = [("lookup", {"sku": "A-1"})]
         if adapter == "react_da":
-            target, tools = ReAct(system_prompt="You work.", model=PlannedChat([], stall=60)), []
-        else:
-            target, tools = await BUILDERS["react" if adapter == "react_da" else adapter](
-                h, [lookup], tmp_path, [("lookup", {"sku": "A-1"})], stall=60
+            model = PlannedChat(plan, stall=60)
+            target, tools = (
+                ReAct(system_prompt="You work.", model=model, backend=JournalBackend()),
+                [lookup],
             )
+        else:
+            target, tools = await BUILDERS[adapter](h, [lookup], tmp_path, plan, stall=60)
         agent = arm(h.wrap(target, id=f"stall-{adapter}-{uid}"), tools)
-        import time
-
         started = time.monotonic()
         done = await agent.run("Check A-1.", user=f"ty-{uid}", thread="c", run_timeout=4)
         took = time.monotonic() - started
@@ -75,8 +77,9 @@ async def test_the_step_limit_ends_with_the_models_answer_and_runs_nothing_past_
 ) -> None:
     plan = [("lookup", {"sku": f"S-{n}"}) for n in range(6)]
     async with harness() as h:
-        target = ReAct(system_prompt="You work.", model=PlannedChat(plan), max_steps=3,
-                       tools=[lookup])
+        target = ReAct(
+            system_prompt="You work.", model=PlannedChat(plan), max_steps=3, tools=[lookup]
+        )
         agent = h.wrap(target, id=f"steps-{uid}")
         events = [e async for e in agent.stream("Check six.", user=f"vi-{uid}", thread="c")]
     ran = [e for e in ledger() if e.startswith("lookup:S-")]
@@ -96,8 +99,7 @@ async def test_an_mcp_servers_tools_are_governed_and_recorded(
     notes = mcp(stdio(sys.executable, str(SERVER)), name="notes")
     plan = [("notes-read_note", {"path": f"/inbox/{uid}"})]
     async with harness() as h:
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"mcp-{adapter}-{uid}",
-                               tools=[notes])
+        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"mcp-{adapter}-{uid}", tools=[notes])
         done = await agent.run("Read my note.", user=f"wy-{uid}", thread="c")
         await h.writes.drain()
     assert done.status is RunStatus.SUCCESS, done  # a read: unasked
@@ -126,8 +128,10 @@ async def test_evaluate_verifies_answers_against_their_contexts_in_memory(
 
         agent = h.wrap(answer, id=f"eval-{uid}")
         report = await h.evaluate(
-            agent, [{"input": "When does the Rotterdam warehouse open?"}],
-            evaluators=[grounding()], user=user,
+            agent,
+            [{"input": "When does the Rotterdam warehouse open?"}],
+            evaluators=[grounding()],
+            user=user,
         )
     scores = [s for item in report.items for s in item.scores if s.name == "grounding"]
     assert scores and scores[0].value is not None and scores[0].value > 0.5, report
@@ -145,9 +149,12 @@ PENDING = {
 
 @pytest.mark.plan("BG", "BG-01", "BG-02", "BG-04", "BG-05", "BG-07", "BG-09", "BG-10", "WF-08")
 @pytest.mark.parametrize("branch", list(PENDING))
-@pytest.mark.xfail(strict=True, reason="background work pending on an unmerged branch "
-                   "(react-background: harness-native tasks, L4; bg-kimi: Kimi work across its "
-                   "process exit, L5; bg-claude-da: a Claude workflow as one child run, L6)")
+@pytest.mark.xfail(
+    strict=True,
+    reason="background work pending on an unmerged branch "
+    "(react-background: harness-native tasks, L4; bg-kimi: Kimi work across its "
+    "process exit, L5; bg-claude-da: a Claude workflow as one child run, L6)",
+)
 def test_background_work_of_an_unmerged_branch(branch: str) -> None:
     import importlib
 

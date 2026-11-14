@@ -83,22 +83,22 @@ async def test_every_route_the_harness_calls_speaks_its_openapi_document(
     doc.write_text("# Terms\n\nPallets are delivered on Mondays by Uline.\n")
     async with harness() as h:
         added = await h.add_document(doc, user=user, wait=120)
-        agent, _ = await armed("react", h, tmp_path, plan, id=agent_id,
-                               tools=[write, ask_user()])
-        handle = await agent.start("Order two A-1 for me.", user=user, thread=thread,
-                                   document_ids=[added.document_id])
+        agent, _ = await armed("react", h, tmp_path, plan, id=agent_id, tools=[write, ask_user()])
+        handle = await agent.start(
+            "Order two A-1 for me.", user=user, thread=thread, document_ids=[added.document_id]
+        )
         worker = h.worker([agent], concurrency=1)
         assert await worker.run_once()
         first = await record(handle.id)
         assert first.status is RunStatus.PAUSED and first.awaiting is not None
         await h.inbox(f"user:{user}")
-        await agent.resume(first.awaiting.interrupt_id, "approve", reviewer=user,
-                           remember="always")
+        await agent.resume(first.awaiting.interrupt_id, "approve", reviewer=user, remember="always")
         assert await worker.run_once()
         second = await record(handle.id)
         assert second.status is RunStatus.PAUSED, second  # the date question
-        await agent.resume(second.awaiting.interrupt_id, "answer", answer="2026-11-20",
-                           reviewer=user)
+        await agent.resume(
+            second.awaiting.interrupt_id, "answer", answer="2026-11-20", reviewer=user
+        )
         assert await worker.run_once()
         assert (await record(handle.id)).status is RunStatus.SUCCESS
         await agent.schedule("0 3 * * *", user=user, input="nightly")
@@ -125,8 +125,10 @@ async def test_every_route_the_harness_calls_speaks_its_openapi_document(
 
 def test_the_documented_route_lists_name_real_routes() -> None:
     """The two lists above are routes of the documents (a renamed route fails here first)."""
-    for api, routes in ((OpenAPI.load(MEMORY_OPENAPI), MEMORY_ROUTES),
-                        (OpenAPI.load(RUNS_OPENAPI), RUNS_ROUTES)):
+    for api, routes in (
+        (OpenAPI.load(MEMORY_OPENAPI), MEMORY_ROUTES),
+        (OpenAPI.load(RUNS_OPENAPI), RUNS_ROUTES),
+    ):
         known = {(v.upper(), tpl) for v, _, tpl in api.operations}
         assert routes <= known, sorted(routes - known)
     assert re.search(r"POST /v1/runs/\{id\}/payloads", Path("docs/runs.md").read_text())

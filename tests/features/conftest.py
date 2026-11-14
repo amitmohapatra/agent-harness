@@ -290,9 +290,7 @@ class Traffic:
         )
 
     def of(self, service: str, method: str, path: str) -> list[Exchange]:
-        return [
-            x for x in self.seen if (x.service, x.method, x.path) == (service, method, path)
-        ]
+        return [x for x in self.seen if (x.service, x.method, x.path) == (service, method, path)]
 
 
 @pytest.fixture
@@ -398,7 +396,9 @@ class FaultProxy:
                 proxy.hits.append((request.method, path, 504))
                 return timeout(path)
             headers = {
-                k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")
+                k: v
+                for k, v in request.headers.items()
+                if k.lower() not in ("host", "content-length")
             }
             async with httpx.AsyncClient(base_url=proxy.target, timeout=TIMEOUT) as client:
                 got = await client.request(
@@ -484,5 +484,10 @@ def run_periodic_now(task: str, queue: str) -> None:
         f" ('{queue}', '{task}', jsonb_build_object('timestamp', extract(epoch from now())::int),"
         " 40)"
     )
-    subprocess.run(["psql", MEMORY_DSN, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", statement],
-                   capture_output=True, text=True, check=True, timeout=60)
+    subprocess.run(
+        ["psql", MEMORY_DSN, "-qAt", "-v", "ON_ERROR_STOP=1", "-c", statement],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )

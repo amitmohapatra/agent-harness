@@ -50,8 +50,9 @@ async def test_always_allow_is_kept_for_the_user_in_every_conversation(
     name, user = f"order_{uid}", f"ola-{uid}"
     plan = [(name, {"sku": "A-1", "qty": 2})]
     async with harness() as h:
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"always-{adapter}-{uid}",
-                               tools=[write_tool(name)])
+        agent, _ = await armed(
+            adapter, h, tmp_path, plan, id=f"always-{adapter}-{uid}", tools=[write_tool(name)]
+        )
         first = await agent.run("Order two A-1.", user=user, thread="c1")
         assert first.interrupt is not None, first
         assert "always" in options(first), options(first)  # offered: memory keeps it
@@ -70,8 +71,9 @@ async def test_always_allow_is_kept_for_the_user_in_every_conversation(
 
     assert len(await eventually(kept, within=60)) == 1  # one permission, in memory
     async with harness() as h:  # another process, another conversation of the same user
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"always-{adapter}-{uid}",
-                               tools=[write_tool(name)])
+        agent, _ = await armed(
+            adapter, h, tmp_path, plan, id=f"always-{adapter}-{uid}", tools=[write_tool(name)]
+        )
         again = await agent.run("Order two A-1 again.", user=user, thread="c2")
         assert again.status is RunStatus.SUCCESS and again.interrupt is None, again
         stranger = await agent.run("Order two A-1.", user=f"pat-{uid}", thread="c1")
@@ -151,10 +153,12 @@ async def test_the_catalogs_risk_and_rule_decide_and_reach_a_running_agent(
                 {"name": write_name, "approve_when": "qty > 100"},
             ]
         )
-        plan = [(read_name, {"sku": "A-1"}), (write_name, {"sku": "A-1", "qty": 5}),
-                (write_name, {"sku": "A-1", "qty": 500})]
-        agent, _ = await armed("react", h, tmp_path, plan, id=f"cat-{uid}",
-                               tools=[peek_tool, buy])
+        plan = [
+            (read_name, {"sku": "A-1"}),
+            (write_name, {"sku": "A-1", "qty": 5}),
+            (write_name, {"sku": "A-1", "qty": 500}),
+        ]
+        agent, _ = await armed("react", h, tmp_path, plan, id=f"cat-{uid}", tools=[peek_tool, buy])
         first = await agent.run("Peek, buy 5, buy 500.", user=f"wu-{uid}", thread="c")
         assert first.interrupt is not None and first.interrupt.tool_call.tool == read_name
         second = await agent.resume(first.interrupt.interrupt_id, "approve", reviewer="wu")
@@ -167,8 +171,14 @@ async def test_the_catalogs_risk_and_rule_decide_and_reach_a_running_agent(
         # the rule tightened while this agent lives: within the refresh, 5 asks too
         await admin.advanced.tools.put_catalog([{"name": write_name, "approve_when": "qty > 1"}])
         await asyncio.sleep(31)
-        agent2, _ = await armed("react", h, tmp_path, [(write_name, {"sku": "A-1", "qty": 5})],
-                                id=f"cat2-{uid}", tools=[peek_tool, buy])
+        agent2, _ = await armed(
+            "react",
+            h,
+            tmp_path,
+            [(write_name, {"sku": "A-1", "qty": 5})],
+            id=f"cat2-{uid}",
+            tools=[peek_tool, buy],
+        )
         later = await agent2.run("Buy 5.", user=f"wu-{uid}", thread="c9")
         assert later.interrupt is not None, later
         assert "qty > 1" in later.interrupt.question

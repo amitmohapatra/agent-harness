@@ -45,10 +45,10 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 | MEM-03 | Never recalled for another user or tenant, checked in the store | `test_conversation_scope.py` | X01 | `test_a_restricted_key_answers_only_its_persons_runs` | `security/test_isolation.py`, `test_retrieval_isolation.py` | `test_mem_recall.py` (both tests: recall, inventory, context, other tenant; visibility keys and thread owners read from the DB) | pass |
 | MEM-03b | A user's inventory (GET /v1/memories) lists what they said | — | — | — | `e2e/test_list_and_cache_surface.py` (user-scoped writes only) | `test_mem_lifecycle.py::test_the_users_inventory_lists_what_they_said_in_a_chat` | **xfail: BUG-M3** |
 | MEM-04 | Extraction: a sentence becomes a fact (the verbatim turn beside it); the same fact said again is one fact; a correction replaces it | — | — | — | `integration/test_dedup_memories.py`, `test_replacement_across_conversations.py` | `test_mem_lifecycle.py::test_a_fact_said_in_three_chats_is_one_fact_and_a_correction_replaces_it` | pass |
-| MEM-04b | Consolidation into beliefs (a model, scripted): one cited line per facet, a repeat kept not duplicated, the person's own, in their next context | — | — | — | `integration/test_beliefs*.py` (stand-in model in process) | `test_mem_beliefs.py::test_facts_are_consolidated_into_cited_beliefs_once` (the service's real job, a scripted OpenAI-compatible endpoint registered as the tenant's model key) | see run results |
-| MEM-05 | Forgetting what the user said asks a person, then it is gone from recall and the store | `test_memory_forget.py` (fake service) | F42d (fake service) | — | `integration/test_forgetting.py`, `test_concurrent_forget.py` | `test_mem_lifecycle.py::test_forgetting_the_users_words_asks_then_they_are_gone[9]`, `::test_forgetting_a_fact_read_from_the_users_words_asks_first`, `::test_the_user_may_forget_what_an_agent_relayed_for_them` | **xfail: BUG-M1, BUG-M2** |
+| MEM-04b | Consolidation into beliefs (a model, scripted): one cited line per facet, a repeat kept not duplicated, the person's own, in their next context | — | — | — | `integration/test_beliefs*.py` (stand-in model in process) | `test_mem_beliefs.py::test_facts_are_consolidated_into_cited_beliefs_once` (the service's real job, a scripted OpenAI-compatible endpoint registered as the tenant's model key, policy `reflection` only) | pass |
+| MEM-05 | Forgetting what the user said asks a person, then it is gone from recall and the store | `test_memory_forget.py` (fake service) | F42d (fake service) | — | `integration/test_forgetting.py`, `test_concurrent_forget.py`, `test_agent_relayed_user_facts.py` (+2 on the memory branch) | `test_mem_lifecycle.py::test_forgetting_the_users_words_asks_then_they_are_gone[9]`, `::test_the_user_may_forget_what_an_agent_relayed_for_them` (pass with the BUG-M2 fix, agent-memory-service `claude/cool-maxwell-w5avo8-features`); `::test_forgetting_a_fact_read_from_the_users_words_asks_first` | pass (with the M2 fix); **xfail: BUG-M1** |
 | MEM-05b | Erasing a user (admin): nothing any read returns | — | — | — | — | `test_mem_lifecycle.py::test_erasing_a_user_leaves_nothing_any_read_returns` | **xfail: BUG-M4** |
-| MEM-06 | Retention: memories past the tenant's `retention_days` are forgotten | — | — | — | `integration/test_forgetting.py` (retention sweep, in process) | — | prior (service suite); not run e2e: the sweep is a daily periodic job, see Gaps |
+| MEM-06 | Retention: memories past the tenant's `retention_days` are forgotten, today's kept, another tenant's untouched | — | — | — | `integration/test_forgetting.py` (retention sweep, in process) | `test_mem_jobs.py::test_retention_forgets_what_is_older_than_the_tenants_policy` (the daily sweep run on demand, a row's age moved back) | pass |
 | MEM-07 | Profile blocks an agent edits are in every next chat of the user, no one else's | — | — | `test_a_profile_block_an_agent_edits_is_in_the_next_context` (react) | `integration/test_profile_and_summary.py`, `test_about_user.py` | `test_mem_lifecycle.py::test_a_profile_the_agent_edits_is_in_every_next_chat[9]` | pass |
 | MEM-07b | The memory budget given to the model: 8,000 tokens, a quarter of a known window under 32,000, never under 2,000 | `test_memory_window.py` | — | — | `e2e/test_window_flow.py` | `test_mem_lifecycle.py::test_the_memory_budget_follows_the_models_window[3]` | pass |
 | MEM-07c | The memories a run cites are capped (50) on its outcome | unit | — | — | — | `test_mem_lifecycle.py::test_the_memories_a_run_cites_are_capped` | pass |
@@ -62,7 +62,7 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 | MEM-11 | Every route refuses a missing or unknown key; platform routes refuse tenant keys; admin routes refuse the service key | — | — | `test_the_key_names_the_tenant_and_its_role` | `security/test_tenant_binding.py`, `agent/test_api_tenancy.py` | `test_mem_resilience.py::test_every_route_but_the_probes_refuses_a_missing_or_unknown_key`, `::test_the_platform_and_admin_routes_refuse_lesser_keys` | pass |
 | MEM-13 | Two chats of one user writing at once lose nothing, duplicate nothing | — | X03 | — | `integration/test_concurrent_forget.py` | `test_mem_lifecycle.py::test_two_chats_of_one_user_writing_at_once_lose_nothing` | pass |
 | MEM-14 | Documents: added for a user, cited by their next context | — | — | `test_a_document_added_for_a_user_is_in_their_next_context`, `test_a_runs_context_draws_on_the_documents_it_names` | `e2e/test_files_flow.py` | `test_con.py` (added and named by a queued run) | prior + pass |
-| MEM-15 | Archive read path: a purged message is read back from its verified segment | — | — | — | `integration/test_archive.py` | — | prior (service suite); see Gaps |
+| MEM-15 | Archive read path: messages archived into a verified segment; once purged in the hot store, the thread reads back whole from the segment | — | — | — | `integration/test_archive.py` | `test_mem_jobs.py::test_a_purged_message_is_read_back_whole_from_its_archive_segment` (the hourly purge run on demand past its 24 h grace) | pass |
 
 ## Runs (RUN)
 
@@ -189,10 +189,11 @@ planned endpoint)) unless said.
 
 ## Gaps (not proven end to end, why)
 
-* **MEM-06 retention** and **MEM-15 the archive read path** run as the memory service's periodic
-  jobs (daily retention, hourly archive purge after a 24 h grace); proven by its own suite in
-  process. An end-to-end proof needs the job triggered on demand (no route exists) — a test
-  would have to insert a Procrastinate job row; left out rather than written against internals.
+* **MEM-06 retention** and **MEM-15 the archive read path** are the memory service's periodic
+  jobs (daily retention; the hourly archive purge after a 24 h grace). No route runs them on
+  demand, so their tests queue the job the way the worker's scheduler does (one row in
+  Procrastinate's queue: `conftest.run_periodic_now`) and move a row's age back
+  (`conftest.move_clock`): the only two writes the suite makes to a service's database.
 * **DST**: the service's clock. **Sandbox**: Docker. **Gateway features** (Code Mode, the key's
   MCP tools, stored prompts): no Bifrost gateway here (live suite's 30 skips).
 
@@ -201,3 +202,30 @@ planned endpoint)) unless said.
 See the branch report (and the strict xfails' reasons): BUG-M1..M4 in the memory service, H1 in
 the harness (P3), two false positives fixed in the shared invariant checker, F-504 (the memory
 service answers `504` on routes whose OpenAPI lists no `504`).
+
+## How to run
+
+The suite needs a running memory service and agent-runs (two API replicas on one database, and
+its ticker), and reads their databases with `psql`. It skips every test when they are not set.
+
+```bash
+export MEMORY_URL=http://127.0.0.1:18680 RUNS_URL=http://127.0.0.1:18690 \
+       FEAT_RUNS_URL_2=http://127.0.0.1:18691            # the second agent-runs replica
+export TRELLIS_API_KEY=...        # a service key of tenant A (acts for anyone)
+export TRELLIS_ADMIN_KEY=...      # tenant A's administrator key
+export TRELLIS_API_KEY_OTHER=...  # a service key of tenant B (the tenant boundary)
+export FEAT_KEY_ALICE=...         # a service key of tenant A restricted to user:alice
+export FEAT_PLATFORM_KEY=...      # the memory service's platform (bootstrap) key
+export FEAT_MEMORY_DSN=postgresql://.../memory FEAT_RUNS_DSN=postgresql://.../runs
+export FEAT_RUNS_LAUNCH=.../start_runs.sh   # starts an agent-runs API: `api <port>`, `migrate`,
+                                            # `downgrade -- <rev>` (RUN-09, RUN-13)
+export TRELLIS_MEMORY_OPENAPI=.../agent-memory-service/docs/openapi.json \
+       TRELLIS_RUNS_OPENAPI=.../agent-runs/docs/openapi.json
+make test-features          # or: pytest -m features tests/features -k MEM  (by file or name)
+pytest -m features tests/features --collect-only -q   # every test, its plan IDs in its markers
+```
+
+The agent-runs ticker runs with `RUNS__LIMITS__RETENTION_DAYS=30` (RUN-11); the memory
+service with its job worker in the API process (the live suite's `mem_api.py`), no model.
+Every test's teardown checks the plan's invariants INV-1..INV-10
+(`tests/support/invariants.py`).

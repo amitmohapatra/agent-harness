@@ -67,18 +67,38 @@ class ScriptedReflection:
             for m in filter(None, map(FACT.match, lines)):
                 n, text = m[1], m[2].strip()
                 if text in beliefs:
-                    entries.append({"op": "keep", "facts": [f"F{n}"], "belief": f"B{beliefs[text]}",
-                                    "text": "", "facet": ""})
+                    entries.append(
+                        {
+                            "op": "keep",
+                            "facts": [f"F{n}"],
+                            "belief": f"B{beliefs[text]}",
+                            "text": "",
+                            "facet": "",
+                        }
+                    )
                 else:
-                    entries.append({"op": "add", "facts": [f"F{n}"], "belief": "", "text": text,
-                                    "facet": self.facet(text)})
+                    entries.append(
+                        {
+                            "op": "add",
+                            "facts": [f"F{n}"],
+                            "belief": "",
+                            "text": text,
+                            "facet": self.facet(text),
+                        }
+                    )
             return {"entries": entries}
         if system.startswith("Check each claim"):
-            return {"verdicts": [{"line": f"L{m[1]}", "label": "SUPPORTED"}
-                                 for m in map(CLAIM.match, lines) if m]}
+            return {
+                "verdicts": [
+                    {"line": f"L{m[1]}", "label": "SUPPORTED"} for m in map(CLAIM.match, lines) if m
+                ]
+            }
         if system.startswith("Rewrite each claim"):
-            return {"rewrites": [{"line": f"L{m[1]}", "text": m[2]}
-                                 for m in map(CLAIM.match, lines) if m]}
+            return {
+                "rewrites": [
+                    {"line": f"L{m[1]}", "text": m[2]} for m in map(CLAIM.match, lines) if m
+                ]
+            }
         return {}
 
     def app(self) -> Starlette:
@@ -95,21 +115,31 @@ class ScriptedReflection:
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": "scripted",
-                    "choices": [{"index": 0, "finish_reason": "stop",
-                                 "message": {"role": "assistant", "content": content}}],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": content},
+                        }
+                    ],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
                 }
             )
 
-        return Starlette(routes=[Route("/v1/models", models), Route("/v1/chat/completions", chat,
-                                                                     methods=["POST"])])
+        return Starlette(
+            routes=[
+                Route("/v1/models", models),
+                Route("/v1/chat/completions", chat, methods=["POST"]),
+            ]
+        )
 
 
 @pytest.fixture
 def reflection() -> Iterator[ScriptedReflection]:
     model = ScriptedReflection()
-    server = uvicorn.Server(uvicorn.Config(model.app(), host="127.0.0.1", port=model.port,
-                                           log_level="error"))
+    server = uvicorn.Server(
+        uvicorn.Config(model.app(), host="127.0.0.1", port=model.port, log_level="error")
+    )
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     while not server.started:
@@ -141,8 +171,13 @@ async def test_facts_are_consolidated_into_cited_beliefs_once(
         t = admin.administer(tenant)
         service = await t.keys.issue("service", "beliefs")
         await t.set_model_key(
-            {"base_url": f"http://127.0.0.1:{reflection.port}/v1", "gateway": "openai-compatible",
-             "auth": "bearer", "model": "scripted", "api_key": "scripted"}
+            {
+                "base_url": f"http://127.0.0.1:{reflection.port}/v1",
+                "gateway": "openai-compatible",
+                "auth": "bearer",
+                "model": "scripted",
+                "api_key": "scripted",
+            }
         )
         await t.set_model_policy(["reflection"], read_assist=False)
     user = f"rita-{uid}"
@@ -184,7 +219,9 @@ async def test_facts_are_consolidated_into_cited_beliefs_once(
         await h.writes.drain()
     asked = len(reflection.requests)
     await eventually(lambda: _more(reflection, asked), within=240, every=5)
-    live = [b for b in beliefs_of(tenant, user) if b["deleted_at"] is None and not b["superseded_by"]]
+    live = [
+        b for b in beliefs_of(tenant, user) if b["deleted_at"] is None and not b["superseded_by"]
+    ]
     assert sorted(b["text"] for b in live) == texts, live  # no duplicate belief
     # another user of the tenant has no belief of rita's
     assert not beliefs_of(tenant, f"other-{uid}")

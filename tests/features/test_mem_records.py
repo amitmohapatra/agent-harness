@@ -53,7 +53,11 @@ async def test_a_paused_and_approved_run_is_recorded_once(
 
     async def transcript() -> list[dict]:
         rows = messages_of_run(run_id)
-        return rows if any(r["role"] == "ASSISTANT" and "wired 5" in r["content"] for r in rows) else []
+        return (
+            rows
+            if any(r["role"] == "ASSISTANT" and "wired 5" in r["content"] for r in rows)
+            else []
+        )
 
     rows = await eventually(transcript, within=60)
     assert rows, messages_of_run(run_id)

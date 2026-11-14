@@ -156,7 +156,9 @@ async def _forget_by_the_agent(
     ``fact`` the reading, ``turn`` the verbatim turn) must ask that user, then forget it."""
     user, agent_id = f"fay-{uid}", f"forget-{adapter}-{uid}"
     # a reading that is not lasting (a fact, not a preference): its turn is kept beside it
-    await tell(adapter, tmp, agent_id, user, "chat-1", "My locker code is 4417 and I work in Lisbon.")
+    await tell(
+        adapter, tmp, agent_id, user, "chat-1", "My locker code is 4417 and I work in Lisbon."
+    )
     rows = await eventually(lambda: _facts(user), within=90)
     assert rows, live_facts(user)
     if pick == "turn":
@@ -206,25 +208,21 @@ async def test_forgetting_a_fact_read_from_the_users_words_asks_first(
 
 
 @pytest.mark.plan("MEM-05")
-async def test_the_user_may_forget_what_an_agent_relayed_for_them(
-    tmp_path: Path, uid: str
-) -> None:
+async def test_the_user_may_forget_what_an_agent_relayed_for_them(tmp_path: Path, uid: str) -> None:
     user, agent_id = f"gus-{uid}", f"own-{uid}"
     await tell("react", tmp_path, agent_id, user, "chat-1", FACT)
     rows = await eventually(lambda: _facts(user), within=90)
     async with harness() as h:
         ctx = await scope_of(h, user)  # the user, no agent: the person themselves
         await ctx.forget(rows[0]["memory_id"])
-    assert memory_sql(
-        "select deleted_at from memories where memory_id = :1", rows[0]["memory_id"]
-    )[0]["deleted_at"]
+    assert memory_sql("select deleted_at from memories where memory_id = :1", rows[0]["memory_id"])[
+        0
+    ]["deleted_at"]
 
 
 @pytest.mark.plan("MEM-03")
 @pytest.mark.xfail(strict=True, reason=BUG_M3)
-async def test_the_users_inventory_lists_what_they_said_in_a_chat(
-    tmp_path: Path, uid: str
-) -> None:
+async def test_the_users_inventory_lists_what_they_said_in_a_chat(tmp_path: Path, uid: str) -> None:
     user = f"hep-{uid}"
     await tell("react", tmp_path, f"inv-{uid}", user, "chat-1", "My locker code is 5528.")
     await eventually(lambda: _with(user, "5528"), within=90)
@@ -376,9 +374,7 @@ async def test_the_memories_a_run_cites_are_capped(tmp_path: Path, uid: str) -> 
 
 
 @pytest.mark.plan("MEM-13", "INV-2")
-async def test_two_chats_of_one_user_writing_at_once_lose_nothing(
-    tmp_path: Path, uid: str
-) -> None:
+async def test_two_chats_of_one_user_writing_at_once_lose_nothing(tmp_path: Path, uid: str) -> None:
     user, agent_id = f"lu-{uid}", f"busy-{uid}"
     texts = [f"My office number {n} is room {uid}{n}." for n in range(6)]
 

@@ -61,13 +61,15 @@ async def test_ask_user_pauses_in_agent_runs_and_the_answer_resumes_elsewhere(
         agent, _ = await armed(adapter, h, tmp_path, plan, id=agent_id, tools=[ask_user()])
         bad = None
         try:
-            await agent.resume(paused.interrupt.interrupt_id, "answer", answer="next week",
-                               reviewer=user)
+            await agent.resume(
+                paused.interrupt.interrupt_id, "answer", answer="next week", reviewer=user
+            )
         except Exception as exc:
             bad = exc
         assert bad is not None  # an answer that does not fit the question is refused
-        done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer="2026-11-20",
-                                  reviewer=user)
+        done = await agent.resume(
+            paused.interrupt.interrupt_id, "answer", answer="2026-11-20", reviewer=user
+        )
     assert done.status is RunStatus.SUCCESS and done.answer == "Done. 2026-11-20", done
     assert (await record(done.run_id)).last_resolution.answer == "2026-11-20"
 
@@ -79,19 +81,24 @@ async def test_a_sub_agent_is_a_child_run_and_cancelling_the_parent_cancels_it(
 ) -> None:
     user = f"bea-{uid}"
     async with harness() as h:
+
         async def research(input: str, agent: Runtime) -> str:
             """Research a topic and report what was found."""
             return str(await agent.tools.call("lookup", sku=str(input)))
 
         child = arm(h.wrap(research, id=f"research-{adapter}-{uid}"), [lookup])
         plan = [(child.id, {"message": "A-1"})]
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"parent-{adapter}-{uid}",
-                               tools=[child])
+        agent, _ = await armed(
+            adapter, h, tmp_path, plan, id=f"parent-{adapter}-{uid}", tools=[child]
+        )
         done = await agent.run("Research A-1.", user=user, thread="c")
         assert done.status is RunStatus.SUCCESS, done
         assert "stock of A-1 is 3" in str(done.answer), done.answer
-    kids = runs_sql("select run_id, agent_id, status, user_id, parent_run_id from agent_runs"
-                    " where parent_run_id = :1", done.run_id)
+    kids = runs_sql(
+        "select run_id, agent_id, status, user_id, parent_run_id from agent_runs"
+        " where parent_run_id = :1",
+        done.run_id,
+    )
     assert [(k["agent_id"], k["status"], k["user_id"]) for k in kids] == [
         (f"research-{adapter}-{uid}", "SUCCESS", user)
     ], kids
@@ -103,8 +110,9 @@ async def test_a_sub_agent_is_a_child_run_and_cancelling_the_parent_cancels_it(
     async with harness() as h:
         asking = arm(h.wrap(_asking_child(), id=f"asker-{adapter}-{uid}"), [ask_user()])
         plan = [(asking.id, {"message": "which day"})]
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"parent2-{adapter}-{uid}",
-                               tools=[asking])
+        agent, _ = await armed(
+            adapter, h, tmp_path, plan, id=f"parent2-{adapter}-{uid}", tools=[asking]
+        )
         paused = await agent.run("Ask the helper.", user=user, thread="c2")
         assert paused.status is RunStatus.PAUSED, paused
         await agent.cancel(paused.run_id, reason="the user changed their mind")
@@ -116,7 +124,8 @@ async def test_a_sub_agent_is_a_child_run_and_cancelling_the_parent_cancels_it(
         return rows if rows and all(r["status"] == "CANCELLED" for r in rows) else []
 
     assert await eventually(children_cancelled, within=60), runs_sql(
-        "select status from agent_runs where parent_run_id = :1", paused.run_id)
+        "select status from agent_runs where parent_run_id = :1", paused.run_id
+    )
 
 
 def _asking_child() -> Any:
@@ -135,8 +144,9 @@ async def test_a_budget_ends_the_run_partial_and_is_kept_with_its_record(
     plan = [("lookup", {"sku": "A-1"}), ("lookup", {"sku": "B-2"}), ("lookup", {"sku": "C-3"})]
     async with harness() as h:
         agent, _ = await armed(adapter, h, tmp_path, plan, id=f"budget-{adapter}-{uid}")
-        done = await agent.run("Check three.", user=f"cy-{uid}", thread="c",
-                               budget=Budget(max_tool_calls=2))
+        done = await agent.run(
+            "Check three.", user=f"cy-{uid}", thread="c", budget=Budget(max_tool_calls=2)
+        )
     assert done.status is RunStatus.PARTIAL, done
     assert done.error is not None and done.error.code == "BUDGET_EXCEEDED", done.error
     assert ledger().count("lookup:C-3") == 0  # the third call never ran
@@ -178,12 +188,12 @@ async def test_a_credential_never_reaches_a_trace(
     email = f"ops-{uid}@example.com"
     plan = [("notify", {"email": email, "api_key": SECRET})]
     async with harness() as h:
-        agent, _ = await armed(adapter, h, tmp_path, plan, id=f"obs-{adapter}-{uid}",
-                               tools=[notify])
+        agent, _ = await armed(
+            adapter, h, tmp_path, plan, id=f"obs-{adapter}-{uid}", tools=[notify]
+        )
         done = await agent.run("Tell ops.", user=f"ed-{uid}", thread="c")
     assert done.status is RunStatus.SUCCESS, done
-    traced = json.dumps([dict(s.attributes or {}) for s in spans.get_finished_spans()],
-                        default=str)
+    traced = json.dumps([dict(s.attributes or {}) for s in spans.get_finished_spans()], default=str)
     assert spans.get_finished_spans(), "no span"
     assert SECRET not in traced
     assert email in traced  # the rest goes as it is
@@ -200,8 +210,10 @@ async def test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_ro
     plan = [
         ("big_report", {"rows": rows}),
         ("read_file", {"file_path": path, "offset": rows - 3}),
-        ("query_result", {"file_path": path,
-                          "sql": "SELECT count(*) AS n, max(line) AS last FROM result"}),
+        (
+            "query_result",
+            {"file_path": path, "sql": "SELECT count(*) AS n, max(line) AS last FROM result"},
+        ),
     ]
     async with harness() as h:
         agent, built = await armed(adapter, h, tmp_path, plan, id=f"large-{adapter}-{uid}")

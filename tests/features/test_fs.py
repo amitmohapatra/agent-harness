@@ -47,23 +47,35 @@ async def test_a_saved_file_is_served_to_its_user_alone_from_another_replica(
             app = FastAPI()
             h.wrap(export, id=agent_id).serve_chat(app)
             apps.append(app)
-        with Served(apps[0]) as one, Served(apps[1]) as two:
-            async with httpx.AsyncClient(timeout=60, follow_redirects=False) as c:
-                run_id = f"run_{uid}files"
-                started = await c.post(f"{one.url}/agui/run", headers=identity(user), json={
-                    "threadId": "t", "runId": run_id,
-                    "messages": [{"id": "m1", "role": "user", "content": "export"}]})
-                assert started.status_code == 200, started.text
-                assert "stock.csv" in started.text  # the file event on the stream
-                got = await c.get(f"{two.url}/agui/runs/{run_id}/files/stock.csv",
-                                  headers=identity(user))
-                assert got.status_code == 200 and got.content == data, got.status_code
-                other = await c.get(f"{two.url}/agui/runs/{run_id}/files/stock.csv",
-                                    headers=identity(f"lev-{uid}"))
-                assert other.status_code == 404  # only the run's own user
-                missing = await c.get(f"{two.url}/agui/runs/{run_id}/files/other.csv",
-                                      headers=identity(user))
-                assert missing.status_code == 404
+        async with (
+            Served(apps[0]) as one,
+            Served(apps[1]) as two,
+            httpx.AsyncClient(timeout=60, follow_redirects=False) as c,
+        ):
+            run_id = f"run_{uid}files"
+            started = await c.post(
+                f"{one.url}/agui/run",
+                headers=identity(user),
+                json={
+                    "threadId": "t",
+                    "runId": run_id,
+                    "messages": [{"id": "m1", "role": "user", "content": "export"}],
+                },
+            )
+            assert started.status_code == 200, started.text
+            assert "stock.csv" in started.text  # the file event on the stream
+            got = await c.get(
+                f"{two.url}/agui/runs/{run_id}/files/stock.csv", headers=identity(user)
+            )
+            assert got.status_code == 200 and got.content == data, got.status_code
+            other = await c.get(
+                f"{two.url}/agui/runs/{run_id}/files/stock.csv", headers=identity(f"lev-{uid}")
+            )
+            assert other.status_code == 404  # only the run's own user
+            missing = await c.get(
+                f"{two.url}/agui/runs/{run_id}/files/other.csv", headers=identity(user)
+            )
+            assert missing.status_code == 404
     kept = list(store.rglob("stock.csv"))
     assert len(kept) == 1 and user in str(kept[0]) and "feat" in str(kept[0]), kept
     assert kept[0].read_bytes() == data
@@ -78,14 +90,17 @@ async def test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_ba
     text = "\n".join(f"row {i:06d} sku-{i % 97:03d} qty {i % 13}" for i in range(rows))
     path = f"/large_tool_results/{content_key('result', text)}"
     sql = "SELECT line FROM result WHERE line LIKE '%sku-007%' ORDER BY line"
-    plan = [("big_report", {"rows": rows}),
-            ("query_result", {"file_path": path, "sql": sql, "save_as": "csv"})]
+    plan = [
+        ("big_report", {"rows": rows}),
+        ("query_result", {"file_path": path, "sql": sql, "save_as": "csv"}),
+    ]
     async with harness(files_url=str(store)) as h:
         agent, _ = await armed("react", h, tmp_path, plan, id=agent_id, tools=[big_report])
         events = [e async for e in agent.stream("Export sku-007.", user=user, thread="t")]
     assert events[-1].type is RunEventType.RUN_FINISHED
-    files = [e.data for e in events if e.type is RunEventType.CUSTOM
-             and e.data.get("name") == "file"]
+    files = [
+        e.data for e in events if e.type is RunEventType.CUSTOM and e.data.get("name") == "file"
+    ]
     assert files, [e.data for e in events if e.type is RunEventType.CUSTOM]
     saved = list(store.rglob("*.csv"))
     assert len(saved) == 1, saved
@@ -109,7 +124,9 @@ async def test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_ba
 
 
 @pytest.mark.plan("FS", "F73")
-@pytest.mark.skip(reason="the sandbox needs a Docker daemon, which this machine has not (plan "
-                  "L20); in process: tests/integration/test_sandbox*.py and matrix F73")
+@pytest.mark.skip(
+    reason="the sandbox needs a Docker daemon, which this machine has not (plan "
+    "L20); in process: tests/integration/test_sandbox*.py and matrix F73"
+)
 async def test_sandbox() -> None:  # pragma: no cover
     ...

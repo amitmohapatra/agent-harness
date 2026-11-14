@@ -37,8 +37,9 @@ pytestmark = pytest.mark.timeout(300)
 async def test_retention_forgets_what_is_older_than_the_tenants_policy(uid: str) -> None:
     tenant = f"featret{uid}"
     async with MemoryClient(MEMORY_URL, api_key=PLATFORM_KEY, timeout=60) as platform:
-        created = await platform.admin.create_tenant(f"Ret {uid}", tenant_id=tenant,
-                                                     retention_days=1)
+        created = await platform.admin.create_tenant(
+            f"Ret {uid}", tenant_id=tenant, retention_days=1
+        )
     async with MemoryClient(MEMORY_URL, api_key=created.admin_key.token, timeout=60) as admin:
         service = await admin.administer(tenant).keys.issue("service", "ret")
     user = f"ola-{uid}"
@@ -48,11 +49,15 @@ async def test_retention_forgets_what_is_older_than_the_tenants_policy(uid: str)
         new = await ctx.remember(f"My new badge is NEW{uid}.")
     async with harness() as feat:
         keep = await feat.memory.client.bind(tenant_id="feat", user_id=user).remember(  # type: ignore[union-attr]
-            f"Elsewhere my badge was FEAT{uid}.")
+            f"Elsewhere my badge was FEAT{uid}."
+        )
     old_id, new_id, keep_id = (getattr(m, "memory_id", None) or m.id for m in (old, new, keep))
     for memory_id in (old_id, keep_id):
-        move_clock(MEMORY_DSN, "update memories set created_at = now() - interval '3 days'"
-                   " where memory_id = :1", memory_id)
+        move_clock(
+            MEMORY_DSN,
+            "update memories set created_at = now() - interval '3 days' where memory_id = :1",
+            memory_id,
+        )
     run_periodic_now("periodic.retention", "reconcile")
 
     async def forgotten() -> bool:
@@ -60,9 +65,15 @@ async def test_retention_forgets_what_is_older_than_the_tenants_policy(uid: str)
         return bool(rows and rows[0]["deleted_at"])
 
     assert await eventually(forgotten, within=90)
-    rows = {r["memory_id"]: r["deleted_at"] for r in memory_sql(
-        "select memory_id, deleted_at from memories where memory_id in (:1, :2, :3)",
-        old_id, new_id, keep_id)}
+    rows = {
+        r["memory_id"]: r["deleted_at"]
+        for r in memory_sql(
+            "select memory_id, deleted_at from memories where memory_id in (:1, :2, :3)",
+            old_id,
+            new_id,
+            keep_id,
+        )
+    }
     assert rows[new_id] is None  # today's is kept
     assert rows[keep_id] is None  # another tenant's policy (none) is its own
     async with harness(key=service.token) as h:
@@ -76,39 +87,63 @@ async def test_a_purged_message_is_read_back_whole_from_its_archive_segment(
     tmp_path: Path, uid: str
 ) -> None:
     user = f"pia-{uid}"
-    big = [f"Line {n} of my inventory notes for {uid}: " + "pallet bay row " * 400 for n in range(3)]
+    big = [
+        f"Line {n} of my inventory notes for {uid}: " + "pallet bay row " * 400 for n in range(3)
+    ]
     async with harness() as h:
         thread = await h.conversation(user=user, thread="notes")
-        ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user,  # type: ignore[union-attr]
-                                   agent_id=f"arch-{uid}", thread_id=thread)
+        ctx = h.memory.client.bind(
+            tenant_id=await h._tenant(),
+            user_id=user,  # type: ignore[union-attr]
+            agent_id=f"arch-{uid}",
+            thread_id=thread,
+        )
         await ctx.history.add([("USER", text) for text in big])
 
     async def archived() -> list[dict]:
-        rows = memory_sql("select message_id, archive_status, archive_segment_id from messages"
-                          " where thread_id = :1", thread)
+        rows = memory_sql(
+            "select message_id, archive_status, archive_segment_id from messages"
+            " where thread_id = :1",
+            thread,
+        )
         return rows if rows and all(r["archive_status"] == "ARCHIVED" for r in rows) else []
 
     rows = await eventually(archived, within=180, every=3)
     assert rows, memory_sql("select archive_status from messages where thread_id = :1", thread)
-    segments = memory_sql("select status, checksum_sha256, message_count from archive_segments"
-                          " where thread_id = :1", thread)
+    segments = memory_sql(
+        "select status, checksum_sha256, message_count from archive_segments where thread_id = :1",
+        thread,
+    )
     assert segments and all(s["status"] == "VERIFIED" for s in segments), segments
-    move_clock(MEMORY_DSN, "update messages set archived_at = now() - interval '2 days'"
-               " where thread_id = :1", thread)
+    move_clock(
+        MEMORY_DSN,
+        "update messages set archived_at = now() - interval '2 days' where thread_id = :1",
+        thread,
+    )
     run_periodic_now("periodic.archive_purge", "archive")
 
     async def purged() -> bool:
-        got = memory_sql("select count(*) as n from messages where thread_id = :1"
-                         " and archive_status = 'PURGED'", thread)
+        got = memory_sql(
+            "select count(*) as n from messages where thread_id = :1 and archive_status = 'PURGED'",
+            thread,
+        )
         return got[0]["n"] == len(big)
 
     assert await eventually(purged, within=120, every=3), memory_sql(
-        "select archive_status, content is null as empty from messages where thread_id = :1",
-        thread)
-    assert all(r["empty"] for r in memory_sql(
-        "select content is null as empty from messages where thread_id = :1", thread))
+        "select archive_status, content is null as empty from messages where thread_id = :1", thread
+    )
+    assert all(
+        r["empty"]
+        for r in memory_sql(
+            "select content is null as empty from messages where thread_id = :1", thread
+        )
+    )
     async with harness() as h:
-        ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user,  # type: ignore[union-attr]
-                                   agent_id=f"arch-{uid}", thread_id=thread)
+        ctx = h.memory.client.bind(
+            tenant_id=await h._tenant(),
+            user_id=user,  # type: ignore[union-attr]
+            agent_id=f"arch-{uid}",
+            thread_id=thread,
+        )
         history = await ctx.history(limit=50)
     assert [m.content for m in history] == big  # whole, from the segment

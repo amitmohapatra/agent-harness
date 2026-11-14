@@ -50,7 +50,8 @@ async def schedule_in_chat(tmp: Path, agent_id: str, user: str, thread: str, **a
         plan = [("schedule_task", args)]
         agent, _ = await armed("react", h, tmp, plan, id=agent_id)
         done = await approve_all(
-            agent, await agent.run("Schedule it, please.", user=user, thread=thread),
+            agent,
+            await agent.run("Schedule it, please.", user=user, thread=thread),
             reviewer=user,
         )
         assert done.status is RunStatus.SUCCESS, done
@@ -70,8 +71,9 @@ async def fire(schedule_id: str) -> str:
         return got.json()["run_id"]
 
 
-async def work(tmp: Path, agent_id: str, plan: list[Any], *, hooks: Any = (),
-               target: Any = None) -> None:
+async def work(
+    tmp: Path, agent_id: str, plan: list[Any], *, hooks: Any = (), target: Any = None
+) -> None:
     """One worker claims and executes the agent's queued runs until none is left."""
     async with harness() as h:
         if target is None:
@@ -89,9 +91,15 @@ async def test_a_schedule_set_in_chat_fires_into_the_users_conversation(
     tmp_path: Path, uid: str
 ) -> None:
     agent_id, user, thread = f"sch-{uid}", f"una-{uid}", "chat-1"
-    row = await schedule_in_chat(tmp_path, agent_id, user, thread,
-                                 task="check stock of A-1", when="0 9 * * *",
-                                 timezone="Europe/Lisbon")
+    row = await schedule_in_chat(
+        tmp_path,
+        agent_id,
+        user,
+        thread,
+        task="check stock of A-1",
+        when="0 9 * * *",
+        timezone="Europe/Lisbon",
+    )
     assert row["cadence"] == "0 9 * * *" and row["timezone"] == "Europe/Lisbon"
     assert row["enabled"] is True
     meta = row["schedule_metadata"]
@@ -103,6 +111,7 @@ async def test_a_schedule_set_in_chat_fires_into_the_users_conversation(
     queued = await record(run_id)
     assert queued.status is RunStatus.QUEUED
     assert queued.on_behalf_of == user and queued.metadata["schedule_id"] == row["schedule_id"]
+
     async def check(input: Any, agent: Runtime) -> str:
         # a function: a planned model would count the chat's earlier turn (schedule_task's
         # call, replayed by memory's window) as one of its own steps
@@ -129,8 +138,11 @@ async def test_a_schedule_set_in_chat_fires_into_the_users_conversation(
     # the fired run was offered none of the schedule tools (it does its task)
     async with runs_http() as c:
         events = (await c.get(f"/v1/runs/{run_id}/events", params={"limit": 500})).json()
-    assert not any("schedule_task" in json.dumps(e["event"].get("data", {})) for e in events
-                   if e["event"]["type"] == "TOOL_CALL_START")
+    assert not any(
+        "schedule_task" in json.dumps(e["event"].get("data", {}))
+        for e in events
+        if e["event"]["type"] == "TOOL_CALL_START"
+    )
     async with runs_http() as c:
         await c.delete(f"/v1/schedules/{row['schedule_id']}")
 
@@ -140,12 +152,17 @@ async def test_missed_fires_fire_once_and_an_overlapping_fire_is_skipped(
     tmp_path: Path, uid: str
 ) -> None:
     agent_id, user = f"miss-{uid}", f"val-{uid}"
-    row = await schedule_in_chat(tmp_path, agent_id, user, "c", task="daily report",
-                                 when="0 9 * * *")
+    row = await schedule_in_chat(
+        tmp_path, agent_id, user, "c", task="daily report", when="0 9 * * *"
+    )
     sid = row["schedule_id"]
     # an outage: the fire was due three days ago
-    move_clock(RUNS_DSN, "update agent_schedules set next_fire_at = now() - interval '3 days'"
-               " where schedule_id = :1", sid)
+    move_clock(
+        RUNS_DSN,
+        "update agent_schedules set next_fire_at = now() - interval '3 days'"
+        " where schedule_id = :1",
+        sid,
+    )
 
     async def fired() -> list[dict]:
         return runs_sql("select run_id, status from agent_runs where agent_id = :1", agent_id + "")
@@ -161,8 +178,12 @@ async def test_missed_fires_fire_once_and_an_overlapping_fire_is_skipped(
     after = runs_sql("select next_fire_at from agent_schedules where schedule_id = :1", sid)[0]
     assert datetime.fromisoformat(after["next_fire_at"]) > datetime.now(UTC)
     # the run still queued, the next fire due again: skipped, nothing queued beside it
-    move_clock(RUNS_DSN, "update agent_schedules set next_fire_at = now() - interval '1 minute'"
-               " where schedule_id = :1", sid)
+    move_clock(
+        RUNS_DSN,
+        "update agent_schedules set next_fire_at = now() - interval '1 minute'"
+        " where schedule_id = :1",
+        sid,
+    )
     import asyncio
 
     await asyncio.sleep(15)  # three ticks
@@ -178,17 +199,25 @@ async def test_a_once_schedule_is_gone_after_its_run_and_a_condition_that_fails_
     tmp_path: Path, uid: str
 ) -> None:
     agent_id, user = f"once-{uid}", f"wes-{uid}"
-    once = await schedule_in_chat(tmp_path, agent_id, user, "c1", task="remind me to call",
-                                  in_minutes=120, once=True)
+    once = await schedule_in_chat(
+        tmp_path, agent_id, user, "c1", task="remind me to call", in_minutes=120, once=True
+    )
     run_id = await fire(once["schedule_id"])
     await work(tmp_path, agent_id, [])
     assert (await record(run_id)).status is RunStatus.SUCCESS
-    assert not runs_sql("select 1 from agent_schedules where schedule_id = :1",
-                        once["schedule_id"])  # gone
+    assert not runs_sql(
+        "select 1 from agent_schedules where schedule_id = :1", once["schedule_id"]
+    )  # gone
 
-    watch = await schedule_in_chat(tmp_path, f"{agent_id}-w", user, "c2",
-                                   task="tell me when A-1 stock is under 2", when="0 8 * * *",
-                                   condition="stock of A-1 under 2")
+    watch = await schedule_in_chat(
+        tmp_path,
+        f"{agent_id}-w",
+        user,
+        "c2",
+        task="tell me when A-1 stock is under 2",
+        when="0 8 * * *",
+        condition="stock of A-1 under 2",
+    )
     quiet_id = await fire(watch["schedule_id"])
 
     async def nothing(input: Any, agent: Runtime) -> str:
@@ -215,8 +244,7 @@ async def test_three_failed_runs_in_a_row_pause_the_schedule_and_say_so(
     tmp_path: Path, uid: str
 ) -> None:
     agent_id, user = f"brk-{uid}", f"xia-{uid}"
-    row = await schedule_in_chat(tmp_path, agent_id, user, "c", task="sync stock",
-                                 when="0 7 * * *")
+    row = await schedule_in_chat(tmp_path, agent_id, user, "c", task="sync stock", when="0 7 * * *")
     sid, runs = row["schedule_id"], []
     for _ in range(3):
         runs.append(await fire(sid))
@@ -225,8 +253,9 @@ async def test_three_failed_runs_in_a_row_pause_the_schedule_and_say_so(
     assert [e.status for e in ended] == [RunStatus.ERROR] * 3, ended
     assert "paused" in ended[-1].error.message and "sync stock" in ended[-1].error.message
     assert "paused" not in ended[0].error.message
-    kept = runs_sql("select enabled, schedule_metadata from agent_schedules where schedule_id = :1",
-                    sid)[0]
+    kept = runs_sql(
+        "select enabled, schedule_metadata from agent_schedules where schedule_id = :1", sid
+    )[0]
     assert kept["enabled"] is False
     assert kept["schedule_metadata"][chat_schedules.FAILURES] == 3
     async with runs_http() as c:
@@ -240,13 +269,15 @@ async def test_a_schedule_untouched_for_90_days_asks_still_need_this(
     tmp_path: Path, uid: str
 ) -> None:
     agent_id, user = f"old-{uid}", f"yan-{uid}"
-    row = await schedule_in_chat(tmp_path, agent_id, user, "c", task="weekly audit",
-                                 when="0 6 * * 1")
+    row = await schedule_in_chat(
+        tmp_path, agent_id, user, "c", task="weekly audit", when="0 6 * * 1"
+    )
     sid = row["schedule_id"]
     old = (datetime.now(UTC) - timedelta(days=100)).isoformat()
     async with runs_http() as c:
-        patched = await c.patch(f"/v1/schedules/{sid}",
-                                json={"metadata": {chat_schedules.TOUCHED: old}})
+        patched = await c.patch(
+            f"/v1/schedules/{sid}", json={"metadata": {chat_schedules.TOUCHED: old}}
+        )
         assert patched.status_code == 200, patched.text
     run_id = await fire(sid)
     await work(tmp_path, agent_id, [("lookup", {"sku": "A-1"})])
@@ -254,8 +285,10 @@ async def test_a_schedule_untouched_for_90_days_asks_still_need_this(
     assert paused.status is RunStatus.PAUSED, paused
     assert paused.awaiting and "Still need this?" in paused.awaiting.question
     assert "lookup:A-1" not in ledger()  # nothing done before the answer
-    assert runs_sql("select enabled from agent_schedules where schedule_id = :1",
-                    sid)[0]["enabled"] is False
+    assert (
+        runs_sql("select enabled from agent_schedules where schedule_id = :1", sid)[0]["enabled"]
+        is False
+    )
     async with harness() as h:
         agent, _ = await armed("react", h, tmp_path, [], id=agent_id)
         await agent.resume(paused.awaiting.interrupt_id, "answer", answer="none", reviewer=user)
@@ -303,12 +336,22 @@ async def test_schedules_are_upserted_listed_patched_and_deleted(tmp_path: Path,
     agent_id = f"code-{uid}"
     async with harness() as h:
         agent, _ = await armed("react", h, tmp_path, [], id=agent_id, run_timeout=120)
-        first = await agent.schedule("0 4 * * *", user=f"amy-{uid}", input="nightly",
-                                     priority=7, concurrency_key=f"k-{uid}",
-                                     without=["judges"])
-        again = await agent.schedule("0 4 * * *", user=f"amy-{uid}", input="nightly",
-                                     priority=7, concurrency_key=f"k-{uid}",
-                                     without=["judges"])
+        first = await agent.schedule(
+            "0 4 * * *",
+            user=f"amy-{uid}",
+            input="nightly",
+            priority=7,
+            concurrency_key=f"k-{uid}",
+            without=["judges"],
+        )
+        again = await agent.schedule(
+            "0 4 * * *",
+            user=f"amy-{uid}",
+            input="nightly",
+            priority=7,
+            concurrency_key=f"k-{uid}",
+            without=["judges"],
+        )
         assert again.schedule_id == first.schedule_id
     async with runs_http() as c:
         listed = await c.get("/v1/schedules", params={"agent_id": agent_id})

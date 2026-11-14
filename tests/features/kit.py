@@ -85,7 +85,9 @@ async def approve_all(agent: Agent, result: Result, *, reviewer: str = "lee", **
     for _ in range(10):
         if result.interrupt is None:
             return result
-        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer=reviewer, **kw)
+        result = await agent.resume(
+            result.interrupt.interrupt_id, "approve", reviewer=reviewer, **kw
+        )
     raise AssertionError(f"still paused after ten approvals: {result}")
 
 
@@ -159,16 +161,24 @@ async def recall_text(
     assert h.memory is not None
     ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
     found = await ctx.search(query, kinds=list(kinds), limit=50)
-    return json.dumps(found.model_dump(mode="json") if hasattr(found, "model_dump") else
-                      [f.model_dump(mode="json") for f in found], default=str)
+    return json.dumps(
+        found.model_dump(mode="json")
+        if hasattr(found, "model_dump")
+        else [f.model_dump(mode="json") for f in found],
+        default=str,
+    )
 
 
 async def inventory_text(h: Harness, user: str) -> str:
     assert h.memory is not None
     ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
     page = await ctx.advanced.memories.page(limit=100)
-    return json.dumps(page.model_dump(mode="json") if hasattr(page, "model_dump") else
-                      [p.model_dump(mode="json") for p in page], default=str)
+    return json.dumps(
+        page.model_dump(mode="json")
+        if hasattr(page, "model_dump")
+        else [p.model_dump(mode="json") for p in page],
+        default=str,
+    )
 
 
 async def scope_of(h: Harness, user: str, *, agent: str | None = None, thread: str | None = None):

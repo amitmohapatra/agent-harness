@@ -5,6 +5,14 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: what the feature suite against the real services found
+
+`make test-features` (`tests/features`) proves each documented feature's purpose against the
+real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVERAGE.md](docs/research/FEATURE_COVERAGE.md)).
+
+- **`trellis doctor` reported every working agent-runs as failing.** Its runs check sent the
+  key as a bearer token; agent-runs reads it from `X-API-Key` only, and answered `401`.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

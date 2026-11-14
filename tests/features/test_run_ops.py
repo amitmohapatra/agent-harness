@@ -113,16 +113,23 @@ async def test_a_run_ended_past_the_retention_is_deleted_with_its_log(uid: str) 
         old = (await c.post("/v1/runs", json={"tenant_id": "feat", "agent_id": agent})).json()
         new = (await c.post("/v1/runs", json={"tenant_id": "feat", "agent_id": agent})).json()
         for run in (old, new):
-            await c.post(f"/v1/runs/{run['run_id']}/finish",
-                         json={"status": "SUCCESS", "output": "ok", "error": None})
-        move_clock(RUNS_DSN, "update agent_runs set updated_at = now() - interval '45 days',"
-                   " created_at = now() - interval '46 days' where run_id = :1", old["run_id"])
+            await c.post(
+                f"/v1/runs/{run['run_id']}/finish",
+                json={"status": "SUCCESS", "output": "ok", "error": None},
+            )
+        move_clock(
+            RUNS_DSN,
+            "update agent_runs set updated_at = now() - interval '45 days',"
+            " created_at = now() - interval '46 days' where run_id = :1",
+            old["run_id"],
+        )
 
         async def gone() -> bool:
             return (await c.get(f"/v1/runs/{old['run_id']}")).status_code == 404
 
         assert await eventually(gone, within=150, every=5), runs_sql(
-            "select status, updated_at from agent_runs where run_id = :1", old["run_id"])
+            "select status, updated_at from agent_runs where run_id = :1", old["run_id"]
+        )
         assert (await c.get(f"/v1/runs/{new['run_id']}")).status_code == 200  # kept
     assert not runs_sql("select 1 from run_events where run_id = :1", old["run_id"])
     assert not runs_sql("select 1 from run_resolutions where run_id = :1", old["run_id"])
@@ -137,6 +144,7 @@ async def test_the_schema_goes_down_and_up_again_with_a_run_in_it(uid: str) -> N
         subprocess.run, ["psql", admin, "-qAt", "-c", f"create database {db}"], check=True
     )
     try:
+
         def step(*args: str) -> None:
             done = launched(*args, FT_DB_RUNS_OVERRIDE=db)
             assert done.wait(timeout=180) == 0, args
@@ -148,8 +156,12 @@ async def test_the_schema_goes_down_and_up_again_with_a_run_in_it(uid: str) -> N
         try:
             await _up(url)
             async with runs_http(url=url) as c:
-                run = (await c.post("/v1/runs", json={"tenant_id": "feat", "agent_id": "mig",
-                                                      "input": {"q": "kept"}})).json()
+                run = (
+                    await c.post(
+                        "/v1/runs",
+                        json={"tenant_id": "feat", "agent_id": "mig", "input": {"q": "kept"}},
+                    )
+                ).json()
         finally:
             stopped(api)
         step("downgrade", "", "-1")  # one revision down and up again: the run is kept
@@ -164,12 +176,22 @@ async def test_the_schema_goes_down_and_up_again_with_a_run_in_it(uid: str) -> N
             stopped(api)
         step("downgrade", "", "base")
         dsn = admin.rsplit("/", 1)[0] + f"/{db}"
-        tables = (await asyncio.to_thread(
-            subprocess.run,
-            ["psql", dsn, "-qAt", "-c", "select count(*) from pg_tables"
-             " where schemaname = 'public' and tablename = 'agent_runs'"],
-            capture_output=True, text=True, check=True,
-        )).stdout.strip()
+        tables = (
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "psql",
+                    dsn,
+                    "-qAt",
+                    "-c",
+                    "select count(*) from pg_tables"
+                    " where schemaname = 'public' and tablename = 'agent_runs'",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        ).stdout.strip()
         assert tables == "0"  # down to base: no table left
         step("migrate")
         api = launched("api", str(port), FT_DB_RUNS_OVERRIDE=db)

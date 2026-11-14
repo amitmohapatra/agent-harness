@@ -21,8 +21,6 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -56,24 +54,28 @@ async def concierge(input: Any, agent: Runtime) -> str:
 
 
 class Served:
-    """An app served by uvicorn on a port of its own, in this process."""
+    """An app served by uvicorn on a port of its own, in this test's event loop (the harness
+    the app uses lives in this loop: a server thread of its own would share its clients
+    across loops)."""
 
     def __init__(self, app: FastAPI, port: int | None = None) -> None:
         self.port = port or free_port()
         self.url = f"http://127.0.0.1:{self.port}"
-        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port,
-                                                    log_level="error"))
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error", lifespan="off")
+        )
+        self.task: asyncio.Task[None] | None = None
 
-    def __enter__(self) -> Served:
-        self.thread.start()
-        while not self.server.started:
-            time.sleep(0.05)
+    async def __aenter__(self) -> Served:
+        self.task = asyncio.create_task(self.server.serve())
+        while not self.server.started:  # noqa: ASYNC110 - uvicorn offers no event to await
+            await asyncio.sleep(0.05)
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    async def __aexit__(self, *exc: object) -> None:
         self.server.should_exit = True
-        self.thread.join(timeout=10)
+        if self.task is not None:
+            await self.task
 
 
 def identity(user: str) -> dict[str, str]:
@@ -92,53 +94,78 @@ async def test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_o
             app = FastAPI()
             h.wrap(concierge, id=agent_id).serve_chat(app)
             apps.append(app)
-        with Served(apps[0]) as one, Served(apps[1]) as two:
-            async with httpx.AsyncClient(timeout=60) as c:
-                message = [{"id": "m1", "role": "user", "content": "book a table"}]
-                first = await c.post(f"{one.url}/agui/run", headers=identity(user),
-                                     json={"threadId": thread, "runId": run_id,
-                                           "messages": message})
-                assert first.status_code == 200, first.text
-                events = decode(first.text)
-                paused = events[-1][1]
-                assert paused["outcome"]["type"] == "interrupt"
-                interrupt_id = paused["outcome"]["interrupts"][0]["id"]
-                # the other replica: replays the run from agent-runs' log, after event 1
-                replay = await c.get(f"{two.url}/agui/runs/{run_id}/events",
-                                     headers={**identity(user), "Last-Event-ID": "1"})
-                assert replay.status_code == 200, replay.text
-                assert decode(replay.text) == events[1:] or decode(replay.text) == events[2:]
-                # someone else's run is not theirs to read, nor to cancel
-                other = await c.get(f"{two.url}/agui/runs/{run_id}/events",
-                                    headers=identity(f"hal-{uid}"))
-                assert other.status_code == 404
-                nope = await c.post(f"{two.url}/agui/runs/{run_id}/cancel",
-                                    headers=identity(f"hal-{uid}"))
-                assert nope.status_code == 404
-                # problem documents: no identity, a bad mode, an answer that does not fit
-                anon = await c.post(f"{two.url}/agui/run", json={"threadId": thread,
-                                                                 "messages": message})
-                assert anon.status_code == 401
-                assert anon.headers["content-type"].startswith("application/problem+json")
-                bad_mode = await c.post(f"{two.url}/agui/run", headers=identity(user), json={
-                    "threadId": f"{thread}-x", "messages": message,
-                    "forwardedProps": {"mode": "shout"}})
-                assert bad_mode.status_code == 422
-                misfit = await c.post(f"{two.url}/agui/run", headers=identity(user), json={
+        async with (
+            Served(apps[0]) as one,
+            Served(apps[1]) as two,
+            httpx.AsyncClient(timeout=60) as c,
+        ):
+            message = [{"id": "m1", "role": "user", "content": "book a table"}]
+            first = await c.post(
+                f"{one.url}/agui/run",
+                headers=identity(user),
+                json={"threadId": thread, "runId": run_id, "messages": message},
+            )
+            assert first.status_code == 200, first.text
+            events = decode(first.text)
+            paused = events[-1][1]
+            assert paused["outcome"]["type"] == "interrupt"
+            interrupt_id = paused["outcome"]["interrupts"][0]["id"]
+            # the other replica: replays the run from agent-runs' log, after event 1
+            replay = await c.get(
+                f"{two.url}/agui/runs/{run_id}/events",
+                headers={**identity(user), "Last-Event-ID": "1"},
+            )
+            assert replay.status_code == 200, replay.text
+            assert decode(replay.text) == events[1:] or decode(replay.text) == events[2:]
+            # someone else's run is not theirs to read, nor to cancel
+            other = await c.get(
+                f"{two.url}/agui/runs/{run_id}/events", headers=identity(f"hal-{uid}")
+            )
+            assert other.status_code == 404
+            nope = await c.post(
+                f"{two.url}/agui/runs/{run_id}/cancel", headers=identity(f"hal-{uid}")
+            )
+            assert nope.status_code == 404
+            # problem documents: no identity, a bad mode, an answer that does not fit
+            anon = await c.post(
+                f"{two.url}/agui/run", json={"threadId": thread, "messages": message}
+            )
+            assert anon.status_code == 401
+            assert anon.headers["content-type"].startswith("application/problem+json")
+            bad_mode = await c.post(
+                f"{two.url}/agui/run",
+                headers=identity(user),
+                json={
+                    "threadId": f"{thread}-x",
+                    "messages": message,
+                    "forwardedProps": {"mode": "shout"},
+                },
+            )
+            assert bad_mode.status_code == 422
+            misfit = await c.post(
+                f"{two.url}/agui/run",
+                headers=identity(user),
+                json={
                     "threadId": thread,
-                    "resume": [{"interruptId": interrupt_id, "payload": "sunday"}]})
-                assert misfit.status_code == 409 and "BAD_RESUME" in misfit.text
-                # resumed on the other replica
-                resumed = await c.post(f"{two.url}/agui/run", headers=identity(user), json={
+                    "resume": [{"interruptId": interrupt_id, "payload": "sunday"}],
+                },
+            )
+            assert misfit.status_code == 409 and "BAD_RESUME" in misfit.text
+            # resumed on the other replica
+            resumed = await c.post(
+                f"{two.url}/agui/run",
+                headers=identity(user),
+                json={
                     "threadId": thread,
-                    "resume": [{"interruptId": interrupt_id, "payload": "friday"}]})
-                done = decode(resumed.text)
-                assert done[-1][1]["outcome"] == {"type": "success"}
-                assert done[-1][1]["result"] == "Booked for friday."
-                assert done[0][0] > events[-1][0]  # numbering continues across attempts
-                ended = await c.post(f"{one.url}/agui/runs/{run_id}/cancel",
-                                     headers=identity(user))
-                assert ended.status_code == 409  # it ended
+                    "resume": [{"interruptId": interrupt_id, "payload": "friday"}],
+                },
+            )
+            done = decode(resumed.text)
+            assert done[-1][1]["outcome"] == {"type": "success"}
+            assert done[-1][1]["result"] == "Booked for friday."
+            assert done[0][0] > events[-1][0]  # numbering continues across attempts
+            ended = await c.post(f"{one.url}/agui/runs/{run_id}/cancel", headers=identity(user))
+            assert ended.status_code == 409  # it ended
     assert (await record(run_id)).status is RunStatus.SUCCESS
 
 
@@ -150,29 +177,43 @@ async def test_a2a_the_card_is_public_and_a_call_needs_a_trusted_identity(uid: s
         port = free_port()
         url = f"http://127.0.0.1:{port}/a2a"
         agent.serve_a2a(app, url)
-        with Served(app, port):
-            async with httpx.AsyncClient(timeout=60) as c:
-                card = await c.get(f"{url}/.well-known/agent-card.json")
-                assert card.status_code == 200, card.text
-                assert "Books tables." in card.text and (API_KEY or "x") not in card.text
-                call = {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
-                    "message": {"messageId": "m1", "role": "ROLE_USER",
-                                "parts": [{"text": "hello"}]}}}
-                anon = await c.post(url, json=call)
-                assert anon.status_code == 401
-                long_identity = {"x-trellis-identity": json.dumps(
-                    {"user_id": "x" * 4100})}
-                too_long = await c.post(url, json=call, headers=long_identity)
-                assert too_long.status_code == 401
-                foreign = await c.post(url, json=call, headers={"x-trellis-identity": json.dumps(
-                    {"tenant_id": "someone-else", "user_id": "ivo"})})
-                assert foreign.status_code == 401
-                ok = await c.post(url, json=call, headers=identity(f"ivo-{uid}"))
-                assert ok.status_code == 200, ok.text
-                assert "You said hello" in ok.text, ok.text
+        async with Served(app, port), httpx.AsyncClient(timeout=60) as c:
+            card = await c.get(f"{url}/.well-known/agent-card.json")
+            assert card.status_code == 200, card.text
+            assert "Books tables." in card.text and (API_KEY or "x") not in card.text
+            call = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "SendMessage",
+                "params": {
+                    "message": {
+                        "messageId": "m1",
+                        "role": "ROLE_USER",
+                        "parts": [{"text": "hello"}],
+                    }
+                },
+            }
+            anon = await c.post(url, json=call)
+            assert anon.status_code == 401
+            long_identity = {"x-trellis-identity": json.dumps({"user_id": "x" * 4100})}
+            too_long = await c.post(url, json=call, headers=long_identity)
+            assert too_long.status_code == 401
+            foreign = await c.post(
+                url,
+                json=call,
+                headers={
+                    "x-trellis-identity": json.dumps(
+                        {"tenant_id": "someone-else", "user_id": "ivo"}
+                    )
+                },
+            )
+            assert foreign.status_code == 401
+            ok = await c.post(url, json=call, headers=identity(f"ivo-{uid}"))
+            assert ok.status_code == 200, ok.text
+            assert "You said hello" in ok.text, ok.text
 
 
-WORKER_MODULE = '''
+WORKER_MODULE = """
 import asyncio, os
 from tests.support.invariants import record_in_process
 from tests.features.conftest import harness
@@ -190,7 +231,7 @@ async def slow(input, agent):
 
 
 h.wrap(slow, id=os.environ["FEAT_AGENT"])
-'''
+"""
 
 
 @pytest.mark.plan("SURF", "F03", "LR-04")
@@ -201,13 +242,26 @@ async def test_the_worker_cli_works_the_queue_and_releases_on_sigterm(
     agent_id = f"cli-{uid}"
     (tmp_path / f"feat_worker_{uid}.py").write_text(WORKER_MODULE)
     ledger = tmp_path / "ledger"
-    env = {**os.environ, "FEAT_AGENT": agent_id, "FEAT_LEDGER": str(ledger),
-           "PYTHONPATH": f"{tmp_path}:{os.getcwd()}:{os.environ.get('PYTHONPATH', '')}",
-           "SCEN_TRAFFIC": str(invariants.traffic_file("worker"))}
+    env = {
+        **os.environ,
+        "FEAT_AGENT": agent_id,
+        "FEAT_LEDGER": str(ledger),
+        "PYTHONPATH": f"{tmp_path}:{os.getcwd()}:{os.environ.get('PYTHONPATH', '')}",
+        "SCEN_TRAFFIC": str(invariants.traffic_file("worker")),
+    }
     process = subprocess.Popen(  # noqa: ASYNC220 - the worker outlives this call: no wait
-        [sys.executable, "-m", "trellis.harness.worker", f"feat_worker_{uid}:h",
-         "--concurrency", "2"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+        [
+            sys.executable,
+            "-m",
+            "trellis.harness.worker",
+            f"feat_worker_{uid}:h",
+            "--concurrency",
+            "2",
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     try:
         async with harness() as h:
@@ -238,8 +292,14 @@ async def test_the_worker_cli_works_the_queue_and_releases_on_sigterm(
 
 @pytest.mark.plan("SURF")
 def test_doctor_finds_the_services_and_says_the_keys_tenant_and_role() -> None:
-    done = subprocess.run([sys.executable, "-m", "trellis.harness.doctor"], capture_output=True,
-                          text=True, timeout=120, env=os.environ.copy(), check=False)
+    done = subprocess.run(
+        [sys.executable, "-m", "trellis.harness.doctor"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=os.environ.copy(),
+        check=False,
+    )
     said = done.stdout
     assert "ok    runs:" in said and "ok    memory:" in said, said  # both services reached
     assert "a service key of tenant feat" in said, said  # the key's tenant and role
