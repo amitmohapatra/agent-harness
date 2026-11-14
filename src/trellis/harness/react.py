@@ -359,15 +359,6 @@ def ReAct(
         provided=provided,
     )
     tasks = _background(native, helpers, strategies, max_steps=max_steps)
-    # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
-    # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's
-    general = _native(
-        dict(GENERAL_PURPOSE_SUBAGENT),
-        call_timeout=call_timeout,
-        max_steps=max_steps,
-        max_repeats=max_repeats,
-        provided=provided,
-    )
     own_helpers = {s.get("name") for s in native}
     profiled = _profiled(chat, window)
     cached, middleware = ours.prompt_cache(middleware)
@@ -385,6 +376,16 @@ def ReAct(
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
+    # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
+    # way to say what it is): the run's tools and the loop's guards, as any other of ReAct's,
+    # and the agent's skills, as Deep Agents gives the one it builds itself
+    general = _native(
+        {**GENERAL_PURPOSE_SUBAGENT, **({"skills": skills} if skills else {})},
+        call_timeout=call_timeout,
+        max_steps=max_steps,
+        max_repeats=max_repeats,
+        provided=provided,
+    )
     # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
     # outside the graph's state — a disk, a store, a sandbox — governed) and its summarization
     # of the older turns, unless the window is known to have no room for them

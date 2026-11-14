@@ -48,6 +48,12 @@ own, compacts the conversation when the model asks: its tool is declared a read 
 declared nothing, so every call asked a person)
 ([react.md](docs/frameworks/react.md#compaction-on-request)).
 
+### Changed: `ReAct`'s general-purpose helper has the agent's skills
+
+With `skills=`, the general-purpose helper (`task`) is given the agent's skills, as Deep
+Agents gives the one it builds itself: its instructions list them and it reads them. Without
+`skills=` nothing changes.
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

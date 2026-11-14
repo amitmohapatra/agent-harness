@@ -320,8 +320,9 @@ A declarative sub-agent is given `StallGuard`, `ModelCallLimitMiddleware`, `Mode
 `ReAct`'s. One that names no `tools` has the run's tools, as Deep Agents gives such a sub-agent
 the main agent's (`HarnessTools` and `GovernTools` are given to it: `ReAct`'s tools are offered
 per model call, not built into the graph); one that names its own `tools` has exactly those.
-Deep Agents' general-purpose helper is given the same way, unless you name a sub-agent
-`general-purpose` yourself.
+Deep Agents' general-purpose helper is given the same way — with the agent's `skills`, as
+Deep Agents gives the one it builds itself — unless you name a sub-agent `general-purpose`
+yourself.
 
 **Yours, opt-in** — `ReAct(..., middleware=[...])`, added to the harness's (one named as the
 harness's is refused, `middleware()` itself among them). Each works the same in any

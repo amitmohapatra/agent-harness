@@ -412,3 +412,22 @@ async def test_a_framework_with_no_skills_slot_has_the_skills_before_its_model_f
     assert [e.get("versions") for e in events_of(events, "skills")] == [
         {"sql-review": "t1", "tone": "u1"}
     ]
+
+
+async def test_the_general_purpose_helper_has_the_agents_skills(harness: Harness) -> None:
+    """Deep Agents gives its own general-purpose helper the agent's skills; ``ReAct``'s, built
+    with the loop's guards, is given them the same way (its spec's ``skills``)."""
+    model = ScriptedChatModel(
+        turns=[
+            ("task", {"description": "review the SQL", "subagent_type": "general-purpose"}),
+            ("read_file", {"file_path": SKILL, "limit": 1000}),
+            "reviewed",
+            "done",
+        ]
+    )
+    agent = harness.wrap(ReAct("You review SQL.", model, skills=combine(store_with())), id="lead")
+    result = await agent.run("review this", user="ada")
+    assert result.answer == "done"
+    helper = str(model.seen[1][0].content)  # the helper's instructions
+    assert "sql-review" in helper and "Reviews SQL." in helper  # Deep Agents' own listing
+    assert "Check every JOIN." in tool_said(model)  # and it read the skill
