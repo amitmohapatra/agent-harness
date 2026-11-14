@@ -17,6 +17,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fsspec.implementations.memory import MemoryFileSystem
 
+from tests.support.arm import arm
 from trellis import Harness, Runtime, Settings
 from trellis.contracts import ToolError
 from trellis.harness.agui.sse import decode
@@ -135,6 +136,31 @@ async def test_a_store_that_signs_links_is_a_short_lived_redirect() -> None:
     assert served.status_code == 307
     assert served.headers["location"].startswith("https://storage.example/")
     assert SigningMemory.signed[-1][1] == 300  # a link signed for 5 minutes
+
+
+async def test_a_kept_files_record_names_the_runs_last_20_tool_calls(tmp_path: Path) -> None:
+    from trellis import tool
+
+    @tool(side_effects="read")
+    def row(n: int) -> int:
+        """A row of the sales table, by its number."""
+        return n
+
+    seen: dict[str, Any] = {}
+
+    async def exports(input: Any, agent: Runtime) -> str:
+        for n in range(21):
+            await agent.tools.call("row", n=n)
+        await agent.save_file("rows.csv", b"n\n1\n", source="export")
+        seen["record"] = await agent.agent.harness.files.record(agent.files_folder(), "rows.csv")
+        return "kept"
+
+    harness = Harness(config=Settings(files_url=tmp_path.as_uri()))
+    result = await arm(harness.wrap(exports, id="rows"), [row]).run("go", user="u")
+    await harness.aclose()
+    assert result.answer == "kept", result.error
+    calls = seen["record"]["calls"]
+    assert len(calls) == 20 and calls[0]["args"] == {"n": 1}  # the last 20, the first left out
 
 
 async def test_the_journal_names_each_file_once_with_what_made_it() -> None:
