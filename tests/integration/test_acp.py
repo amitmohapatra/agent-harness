@@ -1150,6 +1150,17 @@ async def test_a_turn_the_agent_could_not_finish_fails_the_run_with_the_agents_r
         assert "provider.api_error" in done.error.message and "500" in done.error.message
 
 
+async def test_the_agents_plan_is_an_event_of_the_run(harness: Harness, tmp_path: Path) -> None:
+    """Kimi's todo list reaches an ACP client as a plan (``session/update`` ``plan``): its
+    entries are the run's ``plan`` event, for a surface that shows what the agent is at."""
+    agent = harness.wrap(fake(tmp_path, [{"plan": True}, {"text": "ok"}]), id="plans-its-work")
+    events = [e async for e in agent.stream("x", user="u1")]
+    plans = [e.data for e in events if e.data.get("name") == "plan"]
+    assert plans == [
+        {"name": "plan", "entries": [{"content": "look", "priority": "high", "status": "pending"}]}
+    ]
+
+
 async def test_a_refusal_fails_the_run(harness: Harness, tmp_path: Path) -> None:
     result = await harness.wrap(fake(tmp_path, [{"stop": "refusal"}]), id="no").run("x", user="u1")
     assert result.status is RunStatus.ERROR and result.error is not None

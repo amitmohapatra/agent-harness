@@ -16,6 +16,11 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Added: Kimi's plan is a run event
+
+Kimi's todo list reaches an ACP client as its plan (`session/update` `plan`), which the
+harness dropped. Each state of it is now a `CUSTOM` event named `plan` with Kimi's entries.
+
 ### Fixed: a turn Kimi could not finish fails the run, with Kimi's reason
 
 Kimi answers a prompt whose turn failed (its provider's error, past Kimi's own retries)

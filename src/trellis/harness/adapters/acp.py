@@ -191,6 +191,9 @@ EDITED: Final = (
     "A reviewer changed the arguments of your call to {tool}, so it was not run. Call {tool} "
     "again now with exactly these arguments: {args}"
 )
+#: The run event the agent's plan is (ACP's ``plan`` update: Kimi's todo list), its entries
+#: as the agent tells them (``content``, ``status``, ``priority``).
+PLAN: Final = "plan"
 #: Why a run failed whose agent could not finish its turn: the agent's own error for it.
 FAILED_TURN: Final = "the agent could not finish its turn: {why}"
 #: What a person is asked when the agent offers options and says nothing with them.
@@ -1436,9 +1439,12 @@ class Attempt:
     async def _seen(self, update: Any) -> bool:
         """A session update: a tool call running or ending (recorded; a sub-agent's a helper of
         the run); the stall watch follows the calls. Whether a call ended."""
-        from acp.schema import ToolCallProgress
+        from acp.schema import AgentPlanUpdate, ToolCallProgress
 
         runtime = self.runtime
+        if isinstance(update, AgentPlanUpdate):  # the agent's plan (Kimi's todo list), as it is
+            entries = [entry.model_dump(exclude_none=True) for entry in update.entries]
+            runtime.events.custom(PLAN, entries=entries)
         if not isinstance(update, ToolCallProgress):
             return False
         call = self.calls.get(update.tool_call_id)

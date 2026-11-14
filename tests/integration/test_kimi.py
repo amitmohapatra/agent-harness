@@ -509,6 +509,26 @@ async def test_a_rejected_bash_call_is_not_run_and_kimi_reads_why(
     assert not (tmp_path / "kimi-work" / "build").exists()
 
 
+async def test_kimis_todo_list_is_the_runs_plan_event(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's ``TodoList`` is its plan over ACP: each state of it is a ``plan`` event of the
+    run, its entries as Kimi tells them."""
+    todos = [
+        {"title": "read the code", "status": "in_progress"},
+        {"title": "fix it", "status": "pending"},
+    ]
+    endpoint.plan = [("TodoList", {"todos": todos})]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-todos")
+    events = [e async for e in agent.stream("plan your work", user="u1")]
+    assert events[-1].error is None
+    [plan] = [e.data["entries"] for e in events if e.data.get("name") == "plan"]
+    assert [(entry["content"], entry["status"]) for entry in plan] == [
+        ("read the code", "in_progress"),
+        ("fix it", "pending"),
+    ]
+
+
 def _provider_down(body: dict[str, Any]) -> Any:
     raise RuntimeError("the provider is down")
 
