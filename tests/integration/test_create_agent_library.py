@@ -40,6 +40,7 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.decisions import BaseDecisionModel, ClassifierResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
@@ -52,7 +53,8 @@ from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService, pushed
 from tests.support.runlog import LoggedRuns
 from trellis import Harness, Settings
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ModelError, RunEventType, RunStatus
+from trellis.harness.middleware import ModelHooks
 
 ran: list[str] = []
 
@@ -459,6 +461,75 @@ async def test_a_call_auto_mode_blocks_after_a_person_rejected_another_is_record
     assert results(runs.logged(done.run_id)) == [("order", "error")]
 
 
+# ------------------------------------------------------- sync-only hooks, the library's tracing
+class SyncBefore(AgentMiddleware):
+    """A middleware with a sync ``before_model`` alone."""
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        ran.append("before_model")
+        return None
+
+
+class SyncWrap(AgentMiddleware):
+    """A middleware with a sync ``wrap_tool_call`` alone."""
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        return handler(request)
+
+
+async def test_a_sync_only_middleware_runs_as_it_does_under_langchains_own_async_run(
+    harness: Harness,
+) -> None:
+    """The harness runs a graph asynchronously, and a middleware with only sync hooks is
+    what it is under LangChain's own ``ainvoke``: a sync ``before_model`` runs (LangGraph runs
+    it for the async graph), and a sync-only ``wrap_tool_call`` is LangChain's own error, in
+    its own words — the harness neither patches the library nor words it otherwise."""
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    graph = create_agent(model, tools=[stock], middleware=[SyncBefore()])
+    result = await harness.wrap(graph, id="sync-before").run("a?", user="u")
+    assert result.answer == "7" and ran == ["before_model", "stock a", "before_model"]
+
+    def wrapped() -> Any:
+        calls = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+        return create_agent(calls, tools=[stock], middleware=[SyncWrap()])
+
+    with pytest.raises(NotImplementedError, match="awrap_tool_call is not available"):
+        await wrapped().ainvoke({"messages": [{"role": "user", "content": "a?"}]})
+    under = await harness.wrap(wrapped(), id="sync-wrap").run("a?", user="u")
+    assert under.status is RunStatus.ERROR and under.error is not None
+    assert "awrap_tool_call is not available" in under.error.message
+
+
+class Seen(BaseCallbackHandler):
+    """A callback handler of the graph's builder: LangChain's own tracing seam."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        self.started.append("model")
+
+    def on_tool_start(self, serialized: Any, input_str: str, **kwargs: Any) -> None:
+        self.started.append(str(kwargs.get("name") or serialized.get("name")))
+
+
+async def test_the_librarys_own_callbacks_see_the_run_beside_the_harnesss_spans(
+    harness: Harness, spans: Any
+) -> None:
+    """A callback handler given the LangChain way (``framework_options``: the run's
+    ``RunnableConfig``) sees every model and tool call of the run, as on its own; the harness
+    adds its spans (the run's, the tool's) and replaces none of the library's tracing."""
+    seen = Seen()
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    agent = harness.wrap(
+        create_agent(model, tools=[stock]), id="traced", framework_options={"callbacks": [seen]}
+    )
+    assert (await agent.run("a?", user="u")).answer == "7"
+    assert seen.started == ["model", "stock", "model"]
+    names = {span.name.split(" ")[0] for span in spans.get_finished_spans()}
+    assert {"invoke_agent", "execute_tool"} <= names
+
+
 # ---------------------------------------------------------------------- the calls' limits
 @pytest.mark.parametrize("how", ["end", "error"])
 async def test_model_call_limit_middleware_ends_the_run_as_it_is_told_to(
@@ -502,6 +573,55 @@ async def test_model_retry_middleware_asks_the_model_again(harness: Harness) -> 
     graph = create_agent(model, tools=[stock], middleware=[retry])
     result = await harness.wrap(graph, id="again").run("a?", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "7"
+
+
+@pytest.mark.parametrize(
+    ("retries", "fails", "requests", "again"),
+    [
+        (None, 1, 1, True),  # no retry of the graph's: a worker may run the run again
+        (0, 1, 1, True),  # a retry middleware that retries nothing: the same
+        (2, 2, 3, None),  # the graph's retries met the failures: the run answers
+        (2, 9, 3, False),  # its retries spent: nobody runs the run again on top of them
+    ],
+)
+async def test_a_failing_model_is_tried_again_by_one_owner(
+    harness: Harness, retries: int | None, fails: int, requests: int, again: bool | None
+) -> None:
+    """Who tries a failed model call again has one owner. A graph with LangChain's
+    ``ModelRetryMiddleware`` retries as the library does; a failure that outlasts those
+    retries is reported as one a retry will not help (``retryable`` false: the run store runs
+    a retryable failure again, attempt after attempt — three tries, not three per attempt).
+    A graph with no retry of its own reports the failure as one a worker may run again."""
+    model = Flaky(turns=["answered"], errors=[ModelError("503", retryable=True)] * fails)
+    retry = ModelRetryMiddleware(
+        max_retries=retries or 0, on_failure="error", initial_delay=0.0, jitter=False
+    )
+    graph = create_agent(model, tools=[], middleware=[] if retries is None else [retry])
+    result = await harness.wrap(graph, id="retried").run("x", user="u")
+    assert fails - len(model.errors) + len(model.seen) == requests
+    if again is None:
+        assert result.status is RunStatus.SUCCESS and result.answer == "answered"
+    else:
+        assert result.error is not None and result.error.retryable is again
+
+
+class OwnRetries(Flaky):
+    """A chat model with LangChain's ``max_retries`` setting: its client retries, or not."""
+
+    max_retries: int | None = None
+
+
+@pytest.mark.parametrize(("own", "again"), [(None, False), (2, False), (0, True)])
+async def test_a_model_whose_client_retries_is_not_run_again_on_top(
+    harness: Harness, own: int | None, again: bool
+) -> None:
+    """A chat model's own client retries a failed request (``max_retries``; unset is the
+    provider SDK's default, which retries): its failure has been retried already and is not
+    reported as one to run again. With ``max_retries=0`` nothing retried, and it is."""
+    model = OwnRetries(turns=["x"], errors=[ModelError("503", retryable=True)], max_retries=own)
+    graph = create_agent(model, tools=[], middleware=[ModelHooks()])
+    result = await harness.wrap(graph, id="client").run("x", user="u")
+    assert result.error is not None and result.error.retryable is again
 
 
 async def test_model_fallback_middleware_asks_the_next_model_with_the_same_tools(

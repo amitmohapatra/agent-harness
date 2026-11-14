@@ -168,6 +168,7 @@ async def test_a_question_with_any_number_of_tools_fits_with_what_is_said_of_the
 def test_a_signature_is_a_tools_name_and_arguments() -> None:
     tool = made("supplier_info", random.Random(0))
     bare = ours._signature(tool)
+    assert isinstance(bare, dict)  # no provider fields of its own: a plain definition
     function = bare["function"]
     assert function["name"] == "supplier_info" and function["description"] == ours.FIT_SIGNATURE
     assert function["parameters"]["properties"] == {

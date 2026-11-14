@@ -310,6 +310,19 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
   `context_window=`), or build the graph without `middleware()` and keep yours. `ReAct`
   refuses the same with a `ConfigurationError` naming the middleware and the parameter that
   sets it.
+* The harness runs a graph asynchronously (`astream`), so a middleware is what it is under
+  LangChain's own `ainvoke`: a sync `before_model` or `after_model` runs, and a middleware
+  with only the sync `wrap_tool_call` or `wrap_model_call` fails with LangChain's own
+  `NotImplementedError` ("... is not available"): give it the async hook
+  (`awrap_tool_call`, `awrap_model_call`). The harness does not patch the library to run it.
+* MCP elicitation through LangChain's own MCP adapter is not mapped to the run's question:
+  `langchain.mcp` (langchain 1.5) raises a LangGraph interrupt of type `mcp_elicitation` for
+  a server's question, and it needs `fastmcp`, which trellis-harness does not depend on
+  (`import langchain.mcp.elicitation` fails with `No module named 'fastmcp'` in a tested
+  install; `langchain-mcp-adapters` is not a dependency either). Such an interrupt reaches
+  the run as a graph's own `interrupt(...)`: asked as it is, answered with the raw value. An
+  MCP server given the harness's way (`mcp(...)`) asks through the run's `ask`, one question
+  with the server's schema ([tools.md](../tools.md#a-server-that-asks-mcp-elicitation)).
 * With a `PIIMiddleware`: the run store keeps the run's input as it was given — a retry and
   a resume run the graph from it — so the stored input is not redacted; and a run that fails
   before its graph returns a state records the question as it was asked, not as the

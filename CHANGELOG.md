@@ -103,6 +103,15 @@ A library's feature works as the library does it; the harness governs, records a
 - What a decision model used (`langchain_core.decisions`: the classifier of
   `AutoModeMiddleware` and `ModelRouterMiddleware`) is counted in the run's budget, and a
   call `AutoModeMiddleware` blocks is on the run's events and records as a failed call.
+- A failed model call is tried again by one owner: where the graph (`ModelRetryMiddleware`,
+  a retrying node) or the model's own client (`max_retries`) already retried, a failure that
+  still ends the run is reported not retryable, so the run store does not run the whole run
+  again on top of those tries.
+- Fitting the window keeps a tool's provider fields (`extras`: `defer_loading`,
+  `cache_control`) and leaves a provider's own tool (web search, code execution) as it is.
+- A graph that summarizes its own history (LangChain's `SummarizationMiddleware`, Deep
+  Agents' summarization) beside `middleware()`: fitting the window after it keeps the
+  summary when it leaves older turns out (the summary itself was dropped with them).
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks
