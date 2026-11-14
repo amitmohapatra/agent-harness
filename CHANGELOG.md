@@ -79,6 +79,10 @@ does with your own tools and settings ([openai-agents.md](docs/frameworks/openai
   later runs.
 - **An MCP server that retries itself owns its tries** (`max_retry_attempts`): the harness's
   read retries no longer multiply them.
+- **An edited computer action runs only an action of the SDK's computer interface**, with
+  that action's arguments. An approver's edit (or a hook's rewrite) that names another method
+  of your computer object, or arguments that are not the action's, is refused: nothing of the
+  computer is called, and the model is told the call was not run.
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
