@@ -24,10 +24,10 @@ log = logging.getLogger("trellis.harness")
 #: ``pyproject.toml`` writes it (``>=lowest,<first not tested``).
 TESTED: Final[Mapping[str, tuple[str, str]]] = {
     "langgraph": ("1.2", "1.3"),
-    "langchain": ("1.4", "1.5"),
-    "langchain-core": ("1.6", "1.7"),
+    "langchain": ("1.5", "1.6"),
+    "langchain-core": ("1.8", "1.9"),
     "langchain-openai": ("1.6", "1.7"),
-    "deepagents": ("0.7.19", "0.8"),
+    "deepagents": ("0.7.38", "0.8"),
     "openai-agents": ("0.22.3", "0.23"),
     "claude-agent-sdk": ("0.2.160", "0.3"),
     "a2a-sdk": ("1.1", "1.2"),

@@ -46,16 +46,16 @@ trellis = "trellis.harness.doctor:cli"
 # the `langchain` package: LangChain v1 agents are LangGraph graphs.
 langgraph = [
   "langgraph>=1.2,<1.3",
-  "langchain-core>=1.6,<1.7",
-  "langchain>=1.4,<1.5",
+  "langchain-core>=1.8,<1.9",
+  "langchain>=1.5,<1.6",
 ]
-deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.19,<0.8"]
+deepagents = ["trellis-harness[langgraph]", "deepagents>=0.7.38,<0.8"]
 # ``ReAct(...)``: a LangChain ``create_agent`` graph with Deep Agents' context middleware
 # (eviction, summarization, dangling-call repair), its model a ``ChatOpenAI`` on the gateway.
 react = [
   "trellis-harness[langgraph]",
   "langchain-openai>=1.6,<1.7",
-  "deepagents>=0.7.19,<0.8",
+  "deepagents>=0.7.38,<0.8",
 ]
 openai-agents = ["openai-agents>=0.22.3,<0.23"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
