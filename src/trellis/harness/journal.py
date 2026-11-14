@@ -26,7 +26,7 @@ sub-agent's run working inside one of the run's tool calls keeps its journal in 
 (``children``), so the run's progress saves the child's too; the run's sandbox is named here as
 soon as it exists (``sandbox``), so every later attempt works in that one
 (``trellis.harness.sandbox``); a graph that checkpoints into the run
-(``middleware.RunCheckpointer``) keeps its latest checkpoint here (``graph``), and a large tool
+(``middleware.RunCheckpointer``) keeps its checkpoints here (``graph``), and a large tool
 result the model read a preview of is kept whole here (``results``), for ``read_file``.
 
 Every call that ran is also on the run's trajectory (``trajectory``), in order: the calls and
@@ -40,7 +40,7 @@ the step it was made in — the graph checkpoint the step started from (``steps`
 :attr:`Replay.where`). An attempt passes over the records of the steps before the checkpoint it
 resumed from (:attr:`Replay.resumed`), so a later step's identical call runs, and is asked about,
 as a new one; and as a graph that checkpoints into its run moves past a step, that step's
-records are dropped (:meth:`Replay.passed`): its journal holds the graph's latest checkpoint and
+records are dropped (:meth:`Replay.passed`): its journal holds the graph's checkpoints and
 the records of the step under way, however long the run.
 
 Calls made at once (a framework running several tools together) take their occurrences in the
@@ -306,8 +306,9 @@ class Journal(BaseModel):
     #: the sandbox the run's sandbox tools work in, as its reference (``sandbox.SandboxRef``):
     #: recorded as soon as it exists, so every later attempt works in the same one
     sandbox: dict[str, Any] | None = None
-    #: the graph's latest checkpoint and its pending writes, by namespace, when the graph keeps
-    #: them in the run (``middleware.RunCheckpointer``): a resume continues where it stopped
+    #: the graph's latest checkpoint and its pending writes, by namespace, with the earlier
+    #: ones (its ``history``), when the graph keeps them in the run
+    #: (``middleware.RunCheckpointer``): a resume continues where it stopped
     graph: dict[str, Any] | None = None
     #: the step each tool call record (``"c:<key>"``) and each answer a call read
     #: (``"a:<key>"``) was made in, in their order: the graph checkpoint the step started from

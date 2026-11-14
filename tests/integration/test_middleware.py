@@ -612,23 +612,23 @@ async def test_read_file_pages_a_result_of_the_conversation_by_its_calls_id(
 
 
 # --------------------------------------------------------------------------- RunCheckpointer
-async def test_the_checkpoint_is_the_latest_only_and_lives_in_memory_outside_a_run() -> None:
+async def test_every_checkpoint_is_kept_and_lives_in_memory_outside_a_run() -> None:
     saver = RunCheckpointer()
     model = ScriptedChatModel(turns=["one", "two"])
     target = graph(model, checkpointer=saver)
     config: Any = {"configurable": {"thread_id": "t"}}
     await target.ainvoke({"messages": [HumanMessage("a")]}, config)
     await target.ainvoke({"messages": [HumanMessage("b")]}, config)
-    assert list(saver._threads["t"]) == [""]  # one namespace, one checkpoint
+    assert list(saver._threads["t"]) == [""]  # one namespace
     state = await target.aget_state(config)
     assert [m.content for m in state.values["messages"]] == ["a", "one", "b", "two"]
     found = [c async for c in saver.alist(config)]
-    assert len(found) == 1 and found[0].parent_config is not None
+    assert len(found) > 2 and found[0].parent_config is not None
     latest = found[0].config
     assert await saver.aget_tuple(latest) is not None
-    assert await saver.aget_tuple(found[0].parent_config) is None  # pruned
+    assert await saver.aget_tuple(found[0].parent_config) is not None  # kept: time travel
     assert [c async for c in saver.alist(None, filter={"source": "nope"})] == []
-    assert [c async for c in saver.alist(None, before=latest)] == []
+    assert len([c async for c in saver.alist(None, before=latest)]) == len(found) - 1
     assert len([c async for c in saver.alist(None, limit=1)]) == 1
     await saver.adelete_thread("t")
     assert await saver.aget_tuple(config) is None

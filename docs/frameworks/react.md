@@ -282,8 +282,9 @@ asked for a chart, a model had saved an SVG there and told the user to open it.
 | `response_format`, parallel tool calls | LangChain's and LangGraph's |
 
 Deep Agents keeps `messages` and `files` as deltas (LangGraph's `DeltaChannel`); the run's
-checkpointer keeps the latest checkpoint only, with each delta channel's last snapshot and the
-writes since beside it, so a resume on any worker rebuilds them whole.
+checkpointer keeps each delta channel's last snapshot and the writes since beside the latest
+checkpoint, so a resume on any worker rebuilds them whole — and at any earlier checkpoint of
+the run's history ([below](#checkpoint-history-langgraphs-time-travel)).
 
 **The harness's** — [`middleware()`](#middleware-on-your-own-graph), in this order:
 
@@ -300,7 +301,7 @@ writes since beside it, so a resume on any worker rebuilds them whole.
 | `FitWindow` | a request over the window (95% of it, less the reply's tokens; `context_window=`, else the model's profile) made to fit before the call, never a failure for its size ([below](#when-a-request-does-not-fit)) |
 | `ModelHooks` | the run's `on_error` hooks for a model call that failed, its `chat` span (redacted, usage, finish reasons), `call_timeout` and what is left of the run's time, the stored `system_prompt` pinned for the run, the gateway's headers on a routed model, the tools of a part the run is `without=` left out, the run's question kept ahead of a summary (not an earlier turn's replayed before it), and the day it is after the instructions ([tools.md](../tools.md#what-day-it-is)); a call whose arguments are not JSON answered with what was wrong. A model error is a `ModelError`, retryable for a timeout, a lost connection, or a status in bifrost-sdk's `RETRYABLE` (408, 409, 425, 429, 500, 502, 503, 504) |
 
-The graph's checkpointer is `RunCheckpointer()`: the latest checkpoint, in the run's journal — a
+The graph's checkpointer is `RunCheckpointer()`: every checkpoint, in the run's journal — a
 resume after a pause, a crash or a requeue continues the graph where it stopped.
 
 Last of what changes a request, where Deep Agents puts its own, both bases (and `middleware()`
@@ -736,6 +737,42 @@ always was.
   what to do instead, never run, and recorded as the run's rejected call.
 * Approved, the plan is in the graph's state (kept in the run: a resume in any worker keeps
   it) and each call is governed as ever: a write still asks.
+
+### Checkpoint history: LangGraph's time travel
+
+`RunCheckpointer` keeps every checkpoint, as LangGraph's own savers do (`InMemorySaver` stores
+each under its id and prunes none; the Postgres saver likewise) — the Claude Agent SDK's file
+checkpoints are the opt-in one (`enable_file_checkpointing: bool = False`, which
+`rewind_files` needs). So LangGraph's own API works on a `ReAct` graph, and on a
+`middleware()` graph, as on any saver:
+
+```python
+graph = ReAct("...", model, tools=[...])
+config = {"configurable": {"thread_id": "t"}}
+states = [s async for s in graph.aget_state_history(config)]     # newest first
+await graph.ainvoke(None, states[3].config)                      # continue from an earlier one
+await graph.aupdate_state(states[3].config, {"messages": [...]})  # or fork it
+```
+
+In a harness run the thread is the run, and its history is the run's: kept in its journal,
+saved with its progress, for as long as the run store keeps the run (no setting of its own) —
+read with the same `aget_state_history` from code in the run (a tool, a hook, a node), on the
+run's id.
+
+What it costs, measured on a scripted run (`ReAct`, no sub-agent): about 7 checkpoints a tool
+step and 10 a turn, each about 2 KB in the journal (its checkpoint and metadata, base64 in
+JSON), and what each step wrote, once. One tool call and an answer: 17 checkpoints, 36 KB
+against 4.5 KB for the latest alone; eleven tool calls: 87 checkpoints, 217 KB against 17 KB.
+A save still sends what the step added; the journal is compared in memory at each save, and
+written whole every 16th.
+
+**A run is not rewound yet.** Continuing a harness run from an earlier checkpoint would make
+again the calls it made since, and the run store has no entry for it (`agent.resume` answers
+an interrupt at the latest checkpoint; a new `agent.run` is a new thread). Until there is one
+that asks a person about the writes it would repeat, a fork of a run's own thread from code
+inside it is refused (`RewindRefused`), so no write is ever made again behind governance. A
+graph with a checkpointer of its own keeps LangGraph's time travel across runs
+([langgraph.md](langgraph.md)).
 
 ## Limits
 

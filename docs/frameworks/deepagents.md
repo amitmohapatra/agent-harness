@@ -47,7 +47,7 @@ Without `middleware()` the graph still runs governed and narrowed (said once at 
 the gateway's MCP tools and the memory tools, the step limit, the stall guard, the hooks and
 `call_timeout` are what it adds ([react.md](react.md#middleware-on-your-own-graph)). Any
 checkpointer of yours works too (`InMemorySaver`, Postgres); `RunCheckpointer()` keeps the
-latest checkpoint in the run's journal — Deep Agents' delta-kept `messages` and `files`
+run's checkpoints in the run's journal — Deep Agents' delta-kept `messages` and `files`
 included — so a resume on another worker continues it. A graph built with `middleware()` and
 no checkpointer is run with it. Runnable:
 [examples/02_way1_deepagents/middleware.py](../../examples/02_way1_deepagents/middleware.py).

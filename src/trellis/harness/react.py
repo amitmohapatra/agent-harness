@@ -644,7 +644,7 @@ def _native(
     call_timeout: float | None,
     max_steps: int,
     max_repeats: int,
-    provided: Any,
+    provided: Any = None,
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,

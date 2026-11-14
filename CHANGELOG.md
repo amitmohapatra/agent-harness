@@ -22,6 +22,17 @@ Kimi's is not. The run reads only, presents its plan with LangChain's `write_tod
 approves it once (LangChain's `HumanInTheLoopMiddleware`), then it acts under the usual
 governance ([react.md](docs/frameworks/react.md#plan-mode)).
 
+### Changed: `RunCheckpointer` keeps every checkpoint
+
+As LangGraph's own savers do: `get_state_history`, `update_state` and a thread continued from
+a `checkpoint_id` work on a `ReAct` or `middleware()` graph. In a harness run the history is in
+the run's journal (about 2 KB a checkpoint, 17 checkpoints for a one-tool turn), for as long
+as the run store keeps the run; a journal written by an earlier release is read as it is, and
+an earlier release reads this one's (the latest checkpoint's record is unchanged). A run's own
+thread forked from an earlier checkpoint inside the run is refused (`RewindRefused`): rewinding
+a run has no governed entry yet
+([react.md](docs/frameworks/react.md#checkpoint-history-langgraphs-time-travel)).
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

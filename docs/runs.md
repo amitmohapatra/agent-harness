@@ -203,7 +203,9 @@ earlier steps' calls again, so the journal keeps each call's record with the ste
 to an earlier one (`add_item("apple")` again, the same refund asked once more) runs, and is
 approved, as a new call — only a call of the step under way replays. As the graph's checkpoint
 in the run moves past a step, that step's records are dropped: the journal of a `ReAct` or
-`middleware()` run is its latest checkpoint and one step's records, however many steps it takes.
+`middleware()` run is its checkpoints (each about 2 KB, and what each step wrote, once:
+[react.md](frameworks/react.md#checkpoint-history-langgraphs-time-travel)) and one step's
+records, however many steps it takes.
 Each output on the run's [trajectory](evaluation.md) is kept as the event stream previews it
 (2000 characters). The graph's state itself is the framework's: it grows with the conversation
 unless the graph summarizes it (Deep Agents' summarization).

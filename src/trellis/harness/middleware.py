@@ -3173,32 +3173,44 @@ class CheckpointUnreadable(HarnessError):
     code = "CHECKPOINT_UNREADABLE"
 
 
+class RewindRefused(HarnessError):
+    """A harness run's graph was continued from an earlier checkpoint than its latest
+    (LangGraph's ``update_state`` or a ``checkpoint_id`` on the run's own thread, from code
+    inside the run): refused — the run's history is read (``get_state_history``), never forked."""
+
+    code = "REWIND_REFUSED"
+
+
 #: Outside a run, how many threads :class:`RunCheckpointer` keeps (the most recently used).
 THREADS_KEPT: Final = 10_000
 
 
 class RunCheckpointer(BaseCheckpointSaver[int]):
-    """A checkpointer that keeps the latest checkpoint only — and, in a harness run whose
-    ``thread_id`` is the run (``LangGraphAdapter`` sees to it), keeps it in the run's journal
-    (``Journal.graph``), saved with the run's progress and with its pause. A resume in any
-    worker continues where the graph stopped: the model is not asked again, a summary is not
-    written again, a tool that finished beside a pause is not run again. Outside a run it is
-    an in-memory checkpointer.
+    """A checkpointer that keeps every checkpoint, as LangGraph's own savers do (its
+    ``get_state_history``, ``update_state`` and a thread continued from a ``checkpoint_id``
+    work on it as on ``InMemorySaver``) — and, in a harness run whose ``thread_id`` is the
+    run (``LangGraphAdapter`` sees to it), keeps them in the run's journal (``Journal.graph``),
+    saved with the run's progress and with its pause, for as long as the run store keeps the
+    run. A resume in any worker continues where the graph stopped: the model is not asked
+    again, a summary is not written again, a tool that finished beside a pause is not run
+    again. Outside a run it is an in-memory checkpointer.
 
-    A channel kept as deltas (LangGraph's ``DeltaChannel``: Deep Agents' ``messages`` and
-    ``files``) is stored in a checkpoint only every so many updates (its snapshot); in between
-    the graph rebuilds it from the writes since (``get_delta_channel_history``). With the
-    latest checkpoint only, those writes would be gone: each such channel keeps its last
-    snapshot and the writes applied since, beside the checkpoint (``deltas``), and they are
-    what the history returns — a new snapshot starts them again, so they never hold more than
-    the channel's own updates since its last one.
+    A namespace's record is its latest checkpoint — its pending writes, and each delta
+    channel's last snapshot with the writes applied since (``deltas``: LangGraph's
+    ``DeltaChannel``, Deep Agents' ``messages`` and ``files``, is stored in a checkpoint only
+    every so many updates and rebuilt from the writes in between) — and its ``history``: every
+    earlier checkpoint, oldest first, each with the writes applied after it. A delta channel
+    at an earlier checkpoint is rebuilt from that history (:meth:`_delta_history`).
 
     As the root graph's checkpoint moves past a step, the journal's records of that step's
-    calls go (``Replay.passed``): the graph never makes them again, so a long run's journal is
-    its latest checkpoint and the records of the step under way. A checkpoint that cannot be
-    read back fails the run (:class:`CheckpointUnreadable`). The thread ends with the run; what
-    its conversation carries to its next turn (``adapters.langgraph.CARRIED``) is read from
-    each checkpoint as it is kept (``Runtime.carried``)."""
+    calls go (``Replay.passed``): the graph does not make them again. Inside a run, a
+    checkpoint that follows an earlier one than the latest — a rewind — is refused
+    (:class:`RewindRefused`): continued from there, the run would make again the calls it
+    made since, and nothing yet asks a person about the writes among them. A checkpoint that
+    cannot be read back fails the run (:class:`CheckpointUnreadable`). The thread ends with
+    the run; what its conversation carries to its next turn
+    (``adapters.langgraph.CARRIED``) is read from each checkpoint as it is kept
+    (``Runtime.carried``)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -3235,19 +3247,20 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         thread_id, ns = _where(config)
         record = self._slot(thread_id).get(ns) or {}
-        wanted = get_checkpoint_id(config)
-        latest = record.get("id")
-        if latest is None or (wanted and wanted != latest):
-            return None
+        found = _kept(record).get(str(get_checkpoint_id(config) or record.get("id")))
+        return None if found is None else self._tuple(thread_id, ns, found)
+
+    def _tuple(self, thread_id: str, ns: str, record: Mapping[str, Any]) -> CheckpointTuple:
+        """A kept checkpoint (the latest's record, or one of its ``history``) as LangGraph's."""
         parent = record.get("parent")
         return CheckpointTuple(
-            config=_config(thread_id, ns, latest),
+            config=_config(thread_id, ns, record["id"]),
             checkpoint=self._loaded(record["checkpoint"]),
             metadata=self._loaded(record["metadata"]),
             pending_writes=[
                 (task, channel, self._loaded(value))
                 for checkpoint_id, task, _, channel, value, _ in record.get("writes", [])
-                if checkpoint_id == latest
+                if checkpoint_id == record["id"]
             ],
             parent_config=_config(thread_id, ns, parent) if parent else None,
         )
@@ -3260,16 +3273,21 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> Iterator[CheckpointTuple]:
+        """The kept checkpoints, the newest first (LangGraph's order), read back one at a
+        time: ``limit`` of them cost ``limit`` reads."""
         threads = [_configurable(config)["thread_id"]] if config else list(self._threads)
-        found = [
-            tuple_
+        ceiling = str(get_checkpoint_id(before)) if before is not None else None
+        found = (
+            self._tuple(thread_id, ns, record)
             for thread_id in threads
-            for ns in list(self._slot(thread_id))
-            if (tuple_ := self.get_tuple(_config(thread_id, ns, None))) is not None
-            and all(tuple_.metadata.get(k) == v for k, v in (filter or {}).items())
-            and (before is None or _id(tuple_) < str(get_checkpoint_id(before)))
-        ]
-        yield from found[:limit]
+            for ns, kept in list(self._slot(thread_id).items())
+            for checkpoint_id, record in sorted(_kept(kept).items(), reverse=True)
+            if ceiling is None or checkpoint_id < ceiling
+        )
+        matching = (
+            t for t in found if all(t.metadata.get(k) == v for k, v in (filter or {}).items())
+        )
+        yield from itertools.islice(matching, limit)
 
     def put(
         self,
@@ -3282,20 +3300,36 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         slot = self._slot(thread_id)
         before = slot.get(ns) or {}
         parent = _configurable(config).get("checkpoint_id")
-        kept = before.get("writes", [])
+        latest = before.get("id")
+        history: list[dict[str, Any]] = before.get("history") or []
+        if latest is not None and latest not in (parent, checkpoint["id"]):
+            # it follows an earlier checkpoint than the latest: a fork of the thread
+            runtime = current()
+            if runtime is not None and runtime.run_id == thread_id:
+                raise RewindRefused(
+                    f"run {thread_id}: its graph continues from its latest checkpoint, not "
+                    f"from an earlier checkpoint ({parent}): a run's history is read "
+                    "(get_state_history), and a run is not rewound from code inside it"
+                )
+            followed = _kept(before).get(str(parent)) or {}
+            deltas = self._delta_history(before, str(parent), list(before.get("deltas") or {}))
+        else:
+            followed, deltas = before, before.get("deltas") or {}
         # the writes the new checkpoint applied — those of the one it follows — in the order
         # they were applied (the tasks' paths, LangGraph's ``apply_writes``), not finished in
         applied = sorted(
-            (w for w in kept if w[0] == parent and before.get("id") == parent),
-            key=lambda w: (w[5], w[2]),
+            (w for w in followed.get("writes", []) if w[0] == parent), key=lambda w: (w[5], w[2])
         )
+        if latest is not None and latest != checkpoint["id"]:
+            history.append(_archived(before, first=not history))
         slot[ns] = {
             "id": checkpoint["id"],
             "checkpoint": self._dumped(checkpoint),
             "metadata": self._dumped(get_checkpoint_metadata(config, metadata)),
             "parent": parent,
-            "writes": [w for w in kept if w[0] >= checkpoint["id"]],
-            "deltas": self._deltas(before.get("deltas") or {}, checkpoint, metadata, applied),
+            "writes": [w for w in before.get("writes", []) if w[0] >= checkpoint["id"]],
+            "deltas": self._deltas(deltas, checkpoint, metadata, applied),
+            "history": history,
         }
         runtime = current()
         if not ns and runtime is not None and runtime.run_id == thread_id:
@@ -3329,19 +3363,52 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             deltas[name] = {**entry, "writes": [*entry["writes"], *added]} if added else entry
         return deltas
 
+    def _delta_history(
+        self, record: Mapping[str, Any], checkpoint_id: str, channels: Sequence[str]
+    ) -> dict[str, Any]:
+        """Each of ``channels`` at the kept checkpoint ``checkpoint_id``, as ``deltas`` keeps
+        one (its last stored value and the writes applied since): the latest's and the first
+        kept one's as kept; any other's from the writes applied after each checkpoint before
+        it, back to the nearest that stores the channel whole — or to the first one kept
+        (LangGraph's own walk of the parent chain, over what the record holds)."""
+        kept = _kept(record)
+        target = kept.get(checkpoint_id) or {}
+        if "deltas" in target:  # the latest, or the first one kept: as it was rebuilt
+            return {name: target["deltas"].get(name) or _EMPTY for name in channels}
+        found: dict[str, Any] = {name: {"seed": None, "writes": []} for name in channels}
+        left = set(channels)
+        cursor = kept.get(str(target.get("parent")))
+        while cursor is not None and left:
+            applied = sorted(cursor.get("writes", []), key=lambda w: (w[5], w[2]))
+            values = self._loaded(cursor["checkpoint"])["channel_values"]
+            base = cursor.get("deltas") or {}
+            for name in sorted(left):
+                added = [[w[1], w[4]] for w in applied if w[0] == cursor["id"] and w[3] == name]
+                entry = found[name]
+                entry["writes"] = [*added, *entry["writes"]]
+                if name in values:  # stored whole: the history starts from it
+                    entry["seed"] = self._dumped(values[name])
+                elif name in base:  # the first checkpoint kept: what it was rebuilt from
+                    entry["seed"] = base[name]["seed"]
+                    entry["writes"] = [*base[name]["writes"], *entry["writes"]]
+                else:
+                    continue
+                left.discard(name)
+            cursor = kept.get(str(cursor.get("parent")))
+        return found
+
     def get_delta_channel_history(
         self, *, config: RunnableConfig, channels: Sequence[str]
     ) -> Mapping[str, DeltaChannelHistory]:
-        """The delta channels' last stored values and the writes since, for the latest
-        checkpoint (an earlier one is not kept: nothing)."""
+        """The delta channels' last stored values and the writes since, at a kept checkpoint
+        (the latest when the config names none; one not kept: nothing)."""
         thread_id, ns = _where(config)
         record = self._slot(thread_id).get(ns) or {}
-        wanted = get_checkpoint_id(config)
-        latest = not wanted or wanted == record.get("id")
-        deltas = (record.get("deltas") or {}) if latest else {}
+        wanted = str(get_checkpoint_id(config) or record.get("id"))
+        deltas = self._delta_history(record, wanted, channels) if wanted in _kept(record) else {}
         found: dict[str, DeltaChannelHistory] = {}
         for name in channels:
-            entry = deltas.get(name) or {"seed": None, "writes": []}
+            entry = deltas.get(name) or _EMPTY
             history: DeltaChannelHistory = {
                 "writes": [(task, name, self._loaded(value)) for task, value in entry["writes"]]
             }
@@ -3364,7 +3431,9 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     ) -> None:
         thread_id, ns = _where(config)
         checkpoint_id = _configurable(config)["checkpoint_id"]
-        record = self._slot(thread_id).setdefault(ns, {})
+        latest = self._slot(thread_id).setdefault(ns, {})
+        # an earlier checkpoint's (the thread continued from it) are kept with it
+        record = next((r for r in latest.get("history", ()) if r["id"] == checkpoint_id), latest)
         kept: list[list[Any]] = record.setdefault("writes", [])
         # by (checkpoint, task, index), in the order kept: a write of a key it holds is the
         # same write (kept), unless a special one (a negative index), which replaces it
@@ -3422,6 +3491,29 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
         self.delete_thread(thread_id)
 
 
+#: A delta channel nothing is kept of.
+_EMPTY: Final[Mapping[str, Any]] = {"seed": None, "writes": []}
+
+
+def _kept(record: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """A namespace's kept checkpoints by id: its ``history`` and its latest (none: a record
+    that holds only writes, or nothing)."""
+    if record.get("id") is None:
+        return {}
+    return {r["id"]: r for r in (*record.get("history", ()), record)}
+
+
+def _archived(record: Mapping[str, Any], *, first: bool) -> dict[str, Any]:
+    """The latest checkpoint's ``record`` as its ``history`` keeps it once another follows:
+    with the writes applied after it; its ``deltas`` only when it is the ``first`` kept (what
+    every later one is rebuilt from: :meth:`RunCheckpointer._delta_history`)."""
+    kept = {k: record[k] for k in ("id", "checkpoint", "metadata", "parent")}
+    kept["writes"] = [w for w in record.get("writes", []) if w[0] == record["id"]]
+    if first:
+        kept["deltas"] = record.get("deltas") or {}
+    return kept
+
+
 def _where(config: RunnableConfig) -> tuple[str, str]:
     configurable = _configurable(config)
     return str(configurable["thread_id"]), str(configurable.get("checkpoint_ns", ""))
@@ -3429,10 +3521,6 @@ def _where(config: RunnableConfig) -> tuple[str, str]:
 
 def _configurable(config: RunnableConfig) -> dict[str, Any]:
     return dict(config.get("configurable") or {})
-
-
-def _id(found: CheckpointTuple) -> str:
-    return str(_configurable(found.config)["checkpoint_id"])
 
 
 def _config(thread_id: str, ns: str, checkpoint_id: str | None) -> RunnableConfig:
@@ -3449,6 +3537,7 @@ __all__ = [
     "HarnessTools",
     "ModelHooks",
     "ReadTools",
+    "RewindRefused",
     "RunCheckpointer",
     "StallGuard",
     "model_error",
