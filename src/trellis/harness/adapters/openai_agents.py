@@ -67,7 +67,7 @@ from trellis.contracts import (
     ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
-from trellis.harness import conversation, snapshots
+from trellis.harness import snapshots
 from trellis.harness.adapters.base import (
     Extracted,
     HistoryIn,
@@ -252,10 +252,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
         from agents.exceptions import MaxTurnsExceeded
 
-        helpers = Helpers(run.runtime, self.name)
-        options = _options(run.runtime, target, native_input)
-        agent = self._agent(target, run, helpers, await _gated(run))
-        hooks = _hooks(options.pop("hooks", None))
+        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
         try:
             given = await self._input(agent, native_input)
             result = await Runner.run(agent, given, hooks=hooks, **options)
@@ -275,10 +272,7 @@ class OpenAIAgentsAdapter:
         from agents import Runner
         from agents.exceptions import MaxTurnsExceeded
 
-        helpers = Helpers(run.runtime, self.name)
-        options = _options(run.runtime, target, native_input)
-        agent = self._agent(target, run, helpers, await _gated(run))
-        hooks = _hooks(options.pop("hooks", None))
+        helpers, agent, hooks, options = await self._prepared(target, native_input, run)
         given = await self._input(agent, native_input)
         result = Runner.run_streamed(agent, given, hooks=hooks, **options)
         streamed = result
@@ -396,6 +390,16 @@ class OpenAIAgentsAdapter:
             )
 
     # ------------------------------------------------------------------ internals
+    async def _prepared(
+        self, target: Any, native_input: Any, run: Invocation
+    ) -> tuple[Helpers, Any, Any, dict[str, Any]]:
+        """What an attempt runs with, streamed or not: its helpers, the governed copy of its
+        agent, the harness's ``RunHooks`` around the run's own, and ``Runner.run``'s options."""
+        helpers = Helpers(run.runtime, self.name)
+        options = _options(run.runtime, target, native_input)
+        agent = self._agent(target, run, helpers, await _gated(run))
+        return helpers, agent, _hooks(options.pop("hooks", None)), options
+
     @staticmethod
     def _agent(
         target: Any,
@@ -456,7 +460,7 @@ def governed_agents(
     shared: Sequence[Any] = (),
     helpers: Helpers | None = None,
     gated: Mapping[str, ToolSpec] | None = None,
-    nested: Callable[[Any, Any], Any] | None = None,
+    nested: Callable[[Any, Any], Any],
 ) -> Any:
     """``target`` and every agent reachable through its handoffs and its agent tools
     (``Agent.as_tool``), each a copy whose own tools are governed
@@ -471,8 +475,8 @@ def governed_agents(
     gives them. A tool an agent carries already (built with the harness) is not added twice. A
     ``Handoff`` object (``handoff(agent, ...)``) is kept with all it gives the SDK — its name,
     its input filter, its callback — and hands off to the governed copy of its agent
-    (:func:`_handed`). With ``helpers``, each agent tool's call is a helper of the run; with
-    ``nested``, its child run's config is the one ``nested`` makes of its agent and its own
+    (:func:`_handed`). With ``helpers``, each agent tool's call is a helper of the run; its
+    child run's config is the one ``nested`` makes of its agent and its own
     (:func:`_child_config`), and its model calls are watched (:func:`_running`). The function
     tools ``gated`` names (those governance may ask about, :func:`_gated`) are held at the
     SDK's own approval gate when it asks (``tools.convert.openai_agents.held``). The agents you
@@ -538,7 +542,8 @@ def governed_capability(capability: Any) -> Any:
     if isinstance(made, Memory) and made.generate is not None:
         generate = made.generate
         runtime = current()
-        provider = None if runtime is None else _provider_of(runtime)
+        assert runtime is not None  # the run's copy of an agent is made inside the run
+        provider = _provider_of(runtime)
         made.generate = dataclasses.replace(
             generate,
             phase_one_model=through_run(generate.phase_one_model, provider),
@@ -593,9 +598,10 @@ def _capability_served(capability: Any, model: Any, asked: Mapping[str, Any]) ->
     from agents.exceptions import UserError
     from agents.models.chatcmpl_converter import Converter
 
-    runtime = current()
-    if runtime is None or not isinstance(model, str):
+    if not isinstance(model, str):
         return
+    runtime = current()
+    assert runtime is not None  # the SDK prepares the run's sandbox agent inside the run
     gateway = runtime.agent.harness.model_gateway
     route = _route_of(gateway, runtime.framework_options)
     if route is None or not routes(route, model) or _whole(gateway, model):
@@ -619,21 +625,19 @@ def through_run(model: Any, provider: Any) -> Any:
     """A sandbox ``Memory``'s model (its ``phase_one_model``/``phase_two_model``) asked through
     the model route of the run whose sandbox it summarises: a name, through ``provider`` (the
     run's, :func:`_provider_of` — the route it was made with, so a sandbox you keep and close
-    after the run still asks through it; ``None``: the route of the run asking), each reply's
+    after the run still asks through it), each reply's
     usage counted toward the budget of the run it is asked in and its call watched for a
     stall. Two of one name are the same model (the SDK compares a session's memory configs).
     A model object is your own: as it is."""
     return _through_run_class()(model, provider) if isinstance(model, str) else model
 
 
-def _provider_of(runtime: Runtime | None) -> Any:
+def _provider_of(runtime: Runtime) -> Any:
     """The model provider of ``runtime``'s run as the harness routes it (:func:`_routed`): its
     ``RunConfig.model_provider``, on Bifrost for the names a ``MultiProvider`` leaves to its
-    default provider; outside a run, the SDK's default."""
+    default provider."""
     from agents import RunConfig
 
-    if runtime is None:
-        return RunConfig().model_provider
     gateway = runtime.agent.harness.model_gateway
     route = _route_of(gateway, runtime.framework_options)
     if route is not None:
@@ -660,8 +664,7 @@ def _through_run_class() -> type:
             return hash(self.name)
 
         def _model(self) -> Any:
-            provider = self._provider or _provider_of(current())
-            return provider.get_model(self.name)
+            return self._provider.get_model(self.name)
 
         async def get_response(self, *args: Any, **kwargs: Any) -> Any:
             runtime = current()
@@ -765,10 +768,22 @@ def _worded(error: BaseException) -> str | None:
     return None
 
 
+#: The SDK's ``MCPServer`` method that says how a failed call is told to the model, which the
+#: governed server wraps (a private name: checked where the class is made).
+FAILURE_FUNCTION: Final = "_get_failure_error_function"
+
+
 @functools.cache
 def _governed_server() -> type:
     from agents.mcp import MCPServer
     from mcp.types import CallToolResult, TextContent
+
+    if not hasattr(MCPServer, FAILURE_FUNCTION):
+        raise ConfigurationError(
+            f"this OpenAI Agents SDK's MCPServer no longer has {FAILURE_FUNCTION}, which the "
+            "harness wraps so a pause inside an MCP call stops the run instead of becoming an "
+            "error text: use a tested SDK release (docs/versioning.md)"
+        )
 
     class Governed(MCPServer, GovernedServer):  # type: ignore[misc]
         def __init__(self, inner: Any) -> None:  # the SDK's own state is the inner server's
@@ -886,13 +901,13 @@ CHILD_CONFIG: Final = "run_config"
 CHILD_HOOKS: Final = "hooks"
 
 
-def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any] | None = None) -> Any | None:
+def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any]) -> Any | None:
     """An agent tool (``Agent.as_tool``) as a copy that runs ``agent`` — the governed copy of
     its own — with everything else as it was given (its input, its run options, its output
     extractor): ``None`` when its invoke is not of the shape this SDK release builds (its own
-    agent then runs as it is, said once). With ``nested``, its child run is given the config
-    ``nested`` makes of ``agent`` and the tool's own ``run_config`` (:func:`_child_config`) in
-    place of the calling run's, and the harness's ``RunHooks`` around its own ``hooks`` —
+    agent then runs as it is, said once). Its child run is given the config ``nested`` makes
+    of ``agent`` and the tool's own ``run_config`` (:func:`_child_config`) in place of the
+    calling run's, and the harness's ``RunHooks`` around its own ``hooks`` —
     every model call of the child watched for a stall (its usage the agent tool's helper
     counts: ``tools.convert.openai_agents._helped``)."""
     from agents import FunctionTool
@@ -903,14 +918,16 @@ def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any] | None = N
     invoker = tool.on_invoke_tool
     impl = getattr(invoker, "_invoke_tool_impl", None)
     code = getattr(impl, "__code__", None)
-    if not isinstance(tool, FunctionTool) or code is None or RUNS_AGENT not in code.co_freevars:
+    closes = {RUNS_AGENT, CHILD_CONFIG, CHILD_HOOKS}
+    if not isinstance(tool, FunctionTool) or code is None or not closes <= set(code.co_freevars):
         return None
     assert impl is not None
     cells = dict(zip(code.co_freevars, impl.__closure__ or (), strict=True))
-    given = {RUNS_AGENT: agent}
-    if nested is not None:
-        given[CHILD_CONFIG] = nested(agent, cells[CHILD_CONFIG].cell_contents)
-        given[CHILD_HOOKS] = ChildModelHooks(cells[CHILD_HOOKS].cell_contents)
+    given = {
+        RUNS_AGENT: agent,
+        CHILD_CONFIG: nested(agent, cells[CHILD_CONFIG].cell_contents),
+        CHILD_HOOKS: ChildModelHooks(cells[CHILD_HOOKS].cell_contents),
+    }
     closure = tuple(
         types.CellType(given[name]) if name in given else cell for name, cell in cells.items()
     )
@@ -1154,7 +1171,7 @@ def _at_turn_limit(runtime: Runtime, error: Any, options: Mapping[str, Any]) -> 
     from agents.run_config import DEFAULT_MAX_TURNS
 
     limit = options.get("max_turns", DEFAULT_MAX_TURNS)
-    items = list(error.run_data.new_items) if error.run_data is not None else []
+    items = list(error.run_data.new_items)  # the SDK's, set wherever it raises the error
     said = [s.content for s in said_in(items) if s.role is Speaker.ASSISTANT and s.content]
     runtime.budget_spent = f"its turn limit (max_turns={limit}) was reached"
     log.warning("run %s stopped: the turn limit (%s) was reached", runtime.run_id, limit)
@@ -1468,7 +1485,7 @@ def _whole(gateway: Any, name: str | None) -> bool:
 
     if not _openai_shared.get_use_responses_by_default():
         return True
-    return bool(gateway.keeps_responses(name or get_default_model()))
+    return cast("Bifrost", gateway).keeps_responses(name or get_default_model())
 
 
 def _route_of(gateway: Any, options: Mapping[str, Any]) -> Any | None:
@@ -1701,18 +1718,20 @@ async def _decided(result: Any, runtime: Runtime) -> Any | None:
     approvals on a resume and does not ask the gate again: each is decided now, in order,
     after the answer to the one before (an approval for the conversation lets the rest of its
     tool's calls run). A call the SDK's own ``needs_approval`` holds runs unasked, its tool's
-    later calls in the run too (``always_approve``), when the person allowed that tool for
-    this conversation (``conversation.allowed``: one question for the conversation, as
-    governance asks it). ``None`` when none waits, or the first asks: its pause is
-    governance's, as the first call's was."""
+    later calls in the run too (``always_approve``), when the person allowed that tool beyond
+    one call (``bridge.unasked``: for the conversation, its schedule or always, never an
+    ``irreversible`` tool — the one rule governance's own questions follow). ``None`` when
+    none waits, or the first asks: its pause is governance's, as the first call's was."""
     from trellis.harness.tools.convert.openai_agents import asked_again
+    from trellis.harness.tools.convert.openai_local import spec_of
 
     if runtime.pending is not None:  # a call of this attempt's reply asked: the run's pause
         return None
     for item in result.interruptions:
         asks = await asked_again(item, result.context_wrapper)
-        if asks is None:  # the SDK's own gate: unasked when the conversation allowed the tool
-            if item.name not in await conversation.allowed(runtime):
+        if asks is None:  # the SDK's own gate: unasked when its tool was allowed beyond a call
+            spec = spec_of(runtime, item.name)
+            if not await bridge.unasked(spec, _asked_about(item)):
                 continue
             state = result.to_state()
             state.approve(item, always_approve=True)

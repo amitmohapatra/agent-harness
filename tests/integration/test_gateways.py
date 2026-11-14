@@ -295,12 +295,14 @@ async def test_what_bifrost_would_drop_for_a_provider_it_converts_is_refused(
                     name="searcher",
                     model="anthropic/claude-x",
                     tools=[WebSearchTool()],
+                    prompt={"id": "pmpt_1"},
                     model_settings=ModelSettings(truncation="auto"),
                 ),
                 id="hosted",
             )
         said = str(refused.value)
         assert "'searcher': tool 'web_search'" in said and "ModelSettings.truncation" in said
+        assert "a stored prompt (Agent.prompt)" in said
         plain = h.wrap(Agent(name="plain", model="anthropic/claude-x"), id="plain")
         threaded = await plain.run("x", user="u", framework_options={"conversation_id": "c1"})
         assert threaded.status.value == "ERROR" and threaded.error is not None
@@ -311,6 +313,78 @@ async def test_what_bifrost_would_drop_for_a_provider_it_converts_is_refused(
     assert answered.answer == "converted", answered.error
     assert fake.responses.requests[0]["model"] == "anthropic/claude-x"
     assert on_openai is not None  # OpenAI's models keep it whole
+
+
+@pytest.mark.parametrize(
+    ("capability", "dropped"),
+    [("Compaction", "its request parameters (context_management)"), ("Filesystem", "its tool")],
+)
+async def test_a_sandbox_capability_bifrost_would_drop_is_refused_before_any_model_call(
+    monkeypatch: pytest.MonkeyPatch, capability: str, dropped: str
+) -> None:
+    """A sandbox capability's Responses parameter (``Compaction``) or hosted tool
+    (``Filesystem``'s ``apply_patch``) is made inside the SDK's run: on a model Bifrost
+    converts to chat completions the run is refused there, before its first model call."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig, capabilities
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    fake = FakeGateway(turns=["never asked"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    target = SandboxAgent(
+        name="box",
+        model="anthropic/claude-x",
+        capabilities=[capabilities.Shell(), getattr(capabilities, capability)()],
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        agent = h.wrap(target, id="box", framework_options={"run_config": config})
+        result = await agent.run("x", user="u")
+    assert result.error is not None and fake.responses.requests == []
+    assert f"the sandbox capability {capability} needs the Responses API" in result.error.message
+    assert dropped in result.error.message
+
+
+async def test_a_sandbox_capability_goes_whole_to_a_model_bifrost_serves_on_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On an OpenAI model the request reaches the provider whole: a sandbox ``Compaction``'s
+    ``context_management`` is in the Responses request Bifrost is sent."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig, capabilities
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    fake = FakeGateway(turns=["compacted"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    target = SandboxAgent(
+        name="box", model="gpt-x", capabilities=[capabilities.Shell(), capabilities.Compaction()]
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        result = await h.wrap(target, id="box", framework_options={"run_config": config}).run(
+            "x", user="u"
+        )
+    assert result.answer == "compacted", result.error
+    [request] = fake.responses.requests
+    assert request["model"] == "openai/gpt-x" and request["context_management"]
+
+
+def test_an_application_on_chat_completions_keeps_the_sdks_own_limits() -> None:
+    """``set_default_openai_api("chat_completions")`` is the application's choice: the harness
+    refuses nothing the SDK would itself refuse or ignore on that API."""
+    from agents import WebSearchTool, set_default_openai_api
+
+    set_default_openai_api("chat_completions")
+    try:
+        h = Harness(
+            config=Settings(llm_gateway="bifrost", llm_base_url=URL),
+            gateway=FakeGateway().gateway(),
+        )
+        h.wrap(Agent(name="s", model="anthropic/claude-x", tools=[WebSearchTool()]), id="chat")
+    finally:
+        set_default_openai_api("responses")
 
 
 async def test_a_name_the_runs_multiprovider_gives_its_own_provider_keeps_it(
@@ -377,7 +451,7 @@ async def test_a_sandbox_memorys_models_go_through_bifrost_in_and_after_the_run(
         made.append(governed_capability(memory).generate.phase_one_model)
         return await ask(made[-1])
 
-    fake = FakeGateway(turns=["in the run", "after the run"])
+    fake = FakeGateway(turns=["in the run", "after the run", "streamed"])
     fake.serve_models(monkeypatch)
     settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     model = ScriptedModel([("summarise", {}), "done"])
@@ -385,7 +459,11 @@ async def test_a_sandbox_memorys_models_go_through_bifrost_in_and_after_the_run(
         agent = h.wrap(Agent(name="m", model=model, tools=[summarise]), id="mem")
         events = [e async for e in agent.stream("go", user="u")]
         assert await ask(made[0]) == "after the run"  # its route kept: no run to read it from
-    assert [r["model"] for r in fake.responses.requests] == ["openai/gpt-m"] * 2
+        streamed = made[0].stream_response(
+            None, "summarise", ModelSettings(), [], None, [], ModelTracing.DISABLED
+        )
+        assert [e.type async for e in streamed][-1] == "response.completed"
+    assert [r["model"] for r in fake.responses.requests] == ["openai/gpt-m"] * 3
     assert fake.responses.headers[0]["x-bf-dim-agent"] == "mem"
     assert events[-1].data["spent"]["tokens"] == 15  # the phase's reply, counted in the run
 

@@ -198,12 +198,6 @@ class ModelGateway(ABC):
     def routed(self, model: str) -> str:
         """``model`` as this route names it."""
 
-    def keeps_responses(self, model: str) -> bool:
-        """Whether a Responses API request for ``model`` reaches its provider whole on this
-        route — its hosted tools, a stored prompt, a server-side thread, compaction (the OpenAI
-        Agents SDK's default API): a route that passes the request on as it is does."""
-        return True
-
     @abstractmethod
     def judge(self, model: str) -> OpenAICompatibleJudge:
         """``model`` as a judge asks it, on this route (a gateway's own judge client, with the

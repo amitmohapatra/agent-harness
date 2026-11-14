@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from agents import (
 from agents.memory.session import SessionABC
 from agents.models.multi_provider import MultiProvider
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.models.openai_provider import OpenAIProvider
 from pydantic import BaseModel
 
 from tests.support.arm import declaring
@@ -46,7 +48,7 @@ def said_by_user(items: Any) -> list[Any]:
     return [i.get("content") for i in items if isinstance(i, dict) and i.get("role") == "user"]
 
 
-# --------------------------------------------------------------------------- sessions (P0)
+# --------------------------------------------------------------------------- sessions
 async def test_a_session_given_on_wrap_is_each_conversations_own(
     harness: Harness, tmp_path: Path
 ) -> None:
@@ -138,7 +140,7 @@ async def test_a_run_config_given_as_a_dict_is_the_sdks(harness: Harness) -> Non
     assert bad.error is not None and "Unknown run_config settings: no_such" in bad.error.message
 
 
-# --------------------------------------------------------------------------- tool outputs (P1)
+# --------------------------------------------------------------------------- tool outputs
 class Ship(BaseModel):
     order: str
     state: str
@@ -188,7 +190,7 @@ async def test_a_tools_own_result_reaches_the_model_and_the_sdk_as_it_returned_i
     assert stopped.answer == "order='o2' state='shipped'"  # the SDK's final output of it
 
 
-# --------------------------------------------------------------------------- server threads (P1)
+# --------------------------------------------------------------------------- server threads
 class ChatScripted(OpenAIChatCompletionsModel):
     """The SDK's chat completions model (which ignores a server-side thread), scripted."""
 
@@ -217,6 +219,8 @@ def test_who_keeps_a_server_thread_is_the_models_route() -> None:
     theirs = RunConfig(model_provider=MultiProvider(openai_use_responses=False))
     on_chat = {**options, "run_config": theirs}  # its OpenAI provider on chat completions
     assert adapter.thread_store(named, on_chat) is None
+    own = {**options, "run_config": RunConfig(model_provider=OpenAIProvider(api_key="k"))}
+    assert adapter.thread_store(named, own) == ServerThread("conversation_id")  # at its word
 
 
 async def test_a_server_thread_the_model_ignores_leaves_memory_the_history(
@@ -228,7 +232,7 @@ async def test_a_server_thread_the_model_ignores_leaves_memory_the_history(
     assert memory_service.named("context")[-1].body.get("window") is True
 
 
-# --------------------------------------------------------------------------- agent tools (P2, P3)
+# --------------------------------------------------------------------------- agent tools
 async def test_an_agent_tools_own_run_config_gets_the_runs_day_and_not_its_steering(
     harness: Harness,
 ) -> None:
@@ -310,7 +314,7 @@ async def test_an_agent_tools_child_model_calls_are_watched_and_counted_once(
     assert events[-1].data["spent"]["tokens"] == 10  # the child's reply, once
 
 
-# --------------------------------------------------------------------------- detection (P2)
+# --------------------------------------------------------------------------- detection
 def test_an_agent_subclass_of_your_own_is_an_openai_agent_and_realtime_is_refused() -> None:
     class Mine(Agent[Any]):
         pass
@@ -322,7 +326,7 @@ def test_an_agent_subclass_of_your_own_is_an_openai_agent_and_realtime_is_refuse
         adapters.detect(RealtimeAgent(name="r"))
 
 
-# --------------------------------------------------------------------------- approvals (P3)
+# --------------------------------------------------------------------------- approvals
 async def test_an_sdk_approval_allowed_for_the_conversation_sticks(harness: Harness) -> None:
     """The SDK's own ``needs_approval`` tool, approved "for this conversation"
     (``remember="run"``): its later calls run unasked — in the run (the SDK's
@@ -360,7 +364,7 @@ async def test_an_sdk_approval_allowed_for_the_conversation_sticks(harness: Harn
     assert other.status is RunStatus.PAUSED
 
 
-# --------------------------------------------------------------------------- MCP retries (P3)
+# --------------------------------------------------------------------------- MCP retries
 async def test_an_mcp_server_that_retries_owns_its_tries(harness: Harness) -> None:
     """A read the server tries again itself (``max_retry_attempts``) is tried once by the
     harness — the library owns the tries when it makes them; without, the harness's read
@@ -406,7 +410,7 @@ async def test_an_mcp_server_that_retries_owns_its_tries(harness: Harness) -> No
         assert result.answer == "gave up" and server.calls == tried, (retries, server.calls)
 
 
-# --------------------------------------------------------------------------- upgrade (P3)
+# --------------------------------------------------------------------------- upgrade
 async def test_a_run_state_saved_by_sdk_0_22_resumes_on_this_release() -> None:
     """A run paused on an SDK approval under openai-agents 0.22.3 (its ``RunState`` schema
     1.17, kept as the run's checkpoint) continues on this release as the harness resumes it."""
@@ -428,7 +432,7 @@ async def test_a_run_state_saved_by_sdk_0_22_resumes_on_this_release() -> None:
     assert result.final_output == "shipped" and ran == ["o1"]
 
 
-# --------------------------------------------------------------------------- sandbox memory (P1)
+# --------------------------------------------------------------------------- sandbox memory
 async def test_a_sandbox_memorys_own_model_calls_go_through_the_run(harness: Harness) -> None:
     """A sandbox ``Memory``'s extraction and consolidation models, named, are made through the
     run's model route (its provider), their usage counted toward the run's budget; the copy
@@ -444,16 +448,14 @@ async def test_a_sandbox_memorys_own_model_calls_go_through_the_run(harness: Har
             return phase if model_name == "phase-model" else ScriptedModel([])
 
     memory = Memory(generate=MemoryGenerateConfig(phase_one_model="phase-model"))
-    made = governed_capability(memory)
-    assert made.generate == governed_capability(memory).generate  # the same names, the same
-    assert memory.generate.phase_one_model == "phase-model"  # yours, unchanged
 
     @function_tool
     async def summarise() -> str:
         """Summarise."""
-        reply = await made.generate.phase_one_model.get_response(
-            None, "x", None, [], None, [], None
-        )
+        made, again = governed_capability(memory).generate, governed_capability(memory).generate
+        assert made == again  # the same names are the same models, as the SDK compares them
+        assert hash(made.phase_one_model) == hash(again.phase_one_model)
+        reply = await made.phase_one_model.get_response(None, "x", None, [], None, [], None)
         return str(reply.output[0].content[0].text)
 
     model = ScriptedModel([("summarise", {}), "done"])
@@ -465,9 +467,58 @@ async def test_a_sandbox_memorys_own_model_calls_go_through_the_run(harness: Har
     events = [e async for e in agent.stream("go", user="u")]
     assert phase.inputs == ["x"]
     assert events[-1].data["spent"]["tokens"] >= 10  # the phase's 7 + 3 counted
+    assert memory.generate is not None and memory.generate.phase_one_model == "phase-model"
 
 
-# --------------------------------------------------------------------------- pass-throughs (P3)
+def test_a_sandbox_memory_that_generates_is_said_where_it_is_wrapped(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Its consolidation agent's file writes are the SDK's own, outside governance: said once,
+    at ``h.wrap``, with what to do; a ``Memory`` that only reads says nothing."""
+    from agents.sandbox import SandboxAgent
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.capabilities.memory import Memory
+
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        reads = [Shell(), Memory(generate=None)]
+        harness.wrap(SandboxAgent(name="reads", capabilities=reads), id="reads")
+        assert "generates memories" not in caplog.text
+        harness.wrap(SandboxAgent(name="learns", capabilities=[Shell(), Memory()]), id="learns")
+    assert "'learns' has a Memory that generates memories" in caplog.text
+    assert "Memory(generate=None)" in caplog.text
+
+
+async def test_a_run_with_tool_hooks_governs_the_sandboxs_tools_through_them(
+    harness: Harness,
+) -> None:
+    """With tool hooks, a sandbox tool's call is the hooks' first (it is not held at the
+    SDK's gate): a ``before_tool`` hook sees ``exec_command`` and may deny it."""
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    from trellis import Deny, Hooks
+    from trellis.contracts import ToolCall
+
+    seen: list[str] = []
+
+    class NoShell(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            seen.append(call.tool)
+            return Deny("no shell here")
+
+    model = ScriptedModel([("exec_command", {"cmd": "echo hi"}), "gave up"])
+    target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(
+        target, id="hooked", hooks=[NoShell()], framework_options={"run_config": config}
+    )
+    result = await agent.run("go", user="u")
+    assert result.answer == "gave up" and seen == ["exec_command"]
+    assert "no shell here" in str(model.outputs()[-1])
+
+
+# --------------------------------------------------------------------------- pass-throughs
 @pytest.mark.parametrize("kind", ["async_sqlite", "advanced_sqlite", "sqlalchemy"])
 async def test_the_sdks_session_backends_keep_the_conversation(
     harness: Harness, tmp_path: Path, kind: str
@@ -536,14 +587,14 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
     sse = MCPServerSse(params={"url": "http://mcp.test/sse"}, name="sse")
     manager = MCPServerManager([sse])
     target = Agent(name="m", model=ScriptedModel(["ok"]), mcp_servers=[*manager.all_servers])
-    copy = governed_agents(target, added=[], agent_id="sse")
+    copy = governed_agents(target, added=[], agent_id="sse", nested=lambda _agent, own: own)
     [governed] = copy.mcp_servers
     assert isinstance(governed, GovernedServer) and governed._inner is sse
     agent = harness.wrap(target, id="sse")
     assert await agent.adapter.native(agent.target) == []
 
 
-# --------------------------------------------------------------------------- sandbox (P1)
+# --------------------------------------------------------------------------- sandbox
 async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_sandbox(
     harness: Harness,
 ) -> None:

@@ -271,6 +271,29 @@ async def asked(
     return call if rejected is None else rejected
 
 
+async def _checked(runtime: Runtime, spec: ToolSpec, args: dict[str, Any]) -> Decision:
+    """Governance's decision on a call a framework holds at a gate of its own; a rule that
+    could not be evaluated is recorded on the run."""
+    governance = runtime.agent.harness._governance(runtime.tenant)
+    decision = await governance.check(
+        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
+    )
+    if decision.error is not None:
+        runtime.events.warning(decision.error.code, decision.error.message)
+    return decision
+
+
+async def unasked(spec: ToolSpec, args: dict[str, Any]) -> bool:
+    """For a framework that asks its own user about a call at a gate of its own (OpenAI
+    Agents' ``needs_approval``): whether the call runs without that question, because its tool
+    was allowed beyond one call (:func:`_allowed`: for the rest of the run, the conversation,
+    its schedule, or always) — never an ``irreversible`` tool, which asks every call."""
+    runtime = current()
+    assert runtime is not None  # a framework asks inside the run it works for
+    decision = await _checked(runtime, spec, args)
+    return await _allowed(runtime, decision, ours=True) is not None
+
+
 async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     """For a framework that holds a call at its own approval gate before it runs it (OpenAI
     Agents' ``needs_approval``): whether governance asks a person about this call, as it would
@@ -281,12 +304,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
     as ever. Only a tool the harness runs is held (never a confined one: ``_gated``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    governance = runtime.agent.harness._governance(runtime.tenant)
-    decision = await governance.check(
-        spec.name, args, side_effects=spec.side_effects, agent_id=runtime.agent_id
-    )
-    if decision.error is not None:  # a rule that could not be evaluated: recorded on the run
-        runtime.events.warning(decision.error.code, decision.error.message)
+    decision = await _checked(runtime, spec, args)
     journal = runtime.replay.journal
     if (
         not decision.asks
