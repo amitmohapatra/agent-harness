@@ -41,6 +41,9 @@ A library's feature works as the library does it; the harness governs, records a
   decision is governance's too (one question a call); an edit of a batch of several calls is
   refused unless it gives one decision for each. `interrupt(response_schema=...)` is the
   question's `expects`.
+- A tool `langchain.mcp` (or `langchain-mcp-adapters`) made of an MCP server's is governed by
+  the server's annotations (`metadata["mcp"]["tool"]["annotations"]`): a read-only one runs
+  unasked.
 - A model called in a graph's sync node is accounted and watched for stalls.
 
 ### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
