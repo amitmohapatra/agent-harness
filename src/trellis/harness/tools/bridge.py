@@ -600,13 +600,19 @@ def _repeated(
     ``RetryPolicy`` runs again, a tool node's call a wrapper tries again, the same call id in
     the same task), or another action of the same OpenAI computer call (a batch of three
     ``Down`` presses, and the screenshot after them) — is part of it: neither counted nor
-    starting a count of its own, and refused when that decision was."""
-    last, times, made_by = runtime.repeating
-    again = decision is not None and decision == made_by
+    starting a count of its own, and refused when that decision was. So is the same call made
+    again in the same step of its framework (``Replay.here``: a checkpointed graph's step, whose
+    tool node runs each identical call of the model's reply): one step's calls, not a model
+    making the call step after step."""
+    last, times, made_by, stepped = runtime.repeating
+    step = runtime.replay.here()
+    again = (decision is not None and decision == made_by) or (
+        step is not None and step == stepped and key == last
+    )
     if again:
         key = last  # the decision is counted by the call it began with
     times = times if again else times + 1 if key == last else 1
-    runtime.repeating = (key, times, decision)
+    runtime.repeating = (key, times, decision, step)
     if times < MAX_REPEATS:
         return None
     if times == MAX_REPEATS and not again:

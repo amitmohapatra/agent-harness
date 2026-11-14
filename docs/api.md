@@ -167,7 +167,7 @@ await agent.start(...same but mode..., priority=0, concurrency_key=None) -> RunH
 | Argument | Default | What it is |
 |---|---|---|
 | `input` | required | the framework's input: a string, a message list, a dict (queued runs: JSON) |
-| `user` | required | whom the run is for: its memory scope, its approvals' default assignee |
+| `user` | required | whom the run is for: its memory scope, and whom its questions (`ask`) are asked of unless they name someone; a tool call's approval is anyone's unless a `before_tool` hook's `Ask` names an `assignee` ([interrupts.md](interrupts.md#who-reviews-on-which-screen-a-before_tool-hook)) |
 | `thread` | none (the run is its own) | the conversation — `user`'s own name for it: memory's thread, LangGraph's `thread_id`, the default `concurrency_key` are keyed by the tenant, the user and the thread (`h.conversation`), so two users' threads named alike are two conversations |
 | `tenant` | the key's tenant | only for a platform key |
 | `run_timeout` | the agent's (`h.wrap(run_timeout=)`) | the most working time in seconds, across attempts, pauses not counted → `TIMEOUT` ([reliability.md](reliability.md#run-time-limit-and-deadline)) |

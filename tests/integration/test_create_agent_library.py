@@ -22,6 +22,7 @@ from langchain.agents.middleware import (
     ExtendedModelResponse,
     FilesystemFileSearchMiddleware,
     HostExecutionPolicy,
+    HumanInTheLoopMiddleware,
     LLMToolEmulator,
     LLMToolSelectorMiddleware,
     ModelCallLimitMiddleware,
@@ -49,7 +50,8 @@ from pydantic import BaseModel, Field
 
 from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService, pushed
-from trellis import Harness
+from tests.support.runlog import LoggedRuns
+from trellis import Harness, Settings
 from trellis.contracts import RunEventType, RunStatus
 
 ran: list[str] = []
@@ -430,6 +432,31 @@ async def test_a_call_auto_mode_blocks_is_recorded_and_its_classifier_is_paid_fr
     [blocked] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert blocked.status == "error"
     assert events[-1].data["spent"]["tokens"] == 42
+
+
+@pytest.mark.parametrize("mode", ["batched", "per_call"])
+async def test_a_call_auto_mode_blocks_after_a_person_rejected_another_is_recorded(
+    mode: Any,
+) -> None:
+    """A run where a person rejected a call at the library's own gate
+    (``HumanInTheLoopMiddleware``), then ``AutoModeMiddleware`` blocked another: the block is
+    a failed call of the run, on its events; the rejection is the person's decision — no
+    failed call — whatever the gate's mode."""
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), ("order", {"sku": "b"}), "done"])
+    gate = HumanInTheLoopMiddleware(interrupt_on={"stock": True}, interrupt_mode=mode)
+    guard = AutoModeMiddleware(tools=["order"], classifier=Risky())
+    graph = create_agent(
+        model, tools=[stock, order], middleware=[gate, guard], checkpointer=InMemorySaver()
+    )
+    runs = LoggedRuns()
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = h.wrap(graph, id="gated")
+        paused = await agent.run("stock a, then order b", user="u", thread="t")
+        assert paused.interrupt is not None, paused
+        done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="lee")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    assert ran == []
+    assert results(runs.logged(done.run_id)) == [("order", "error")]
 
 
 # ---------------------------------------------------------------------- the calls' limits

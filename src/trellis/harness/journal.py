@@ -285,6 +285,10 @@ class Journal(BaseModel):
     #: ``needs_approval`` tool), by content: governance counts that approval, once each, and
     #: does not ask again (``approved_in_framework``)
     approved: list[str] = Field(default_factory=list)
+    #: the calls a person rejected at a framework's own approval gate (LangChain's
+    #: ``HumanInTheLoopMiddleware``), by content: each is that person's decision — the failed
+    #: message the gate answers it with is no failed call of the run (:meth:`rejected_by_person`)
+    rejected: list[str] = Field(default_factory=list)
     #: the tool calls the run's answered pauses came from within, which a later attempt's
     #: model makes again, each at its place (:meth:`Replay.made`)
     again: list[Made] = Field(default_factory=list)
@@ -305,6 +309,11 @@ class Journal(BaseModel):
     #: own state gives it to that call only (the paused call made again under its id, or still
     #: waiting), and a new call, even an identical one, is asked (:meth:`Replay.answer`)
     answered_by: dict[str, list[str | None]] = Field(default_factory=dict)
+    #: per call record (``calls``, in its order), the framework's id of the call it is, when it
+    #: named one: in the step its framework makes again, or an attempt that goes on from the
+    #: framework's own state, the record is that call's — an identical call under another id
+    #: (the model's reply made it twice) is another call, not a replay (:meth:`Replay.occurrence`)
+    called_by: dict[str, list[str | None]] = Field(default_factory=dict)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
@@ -470,6 +479,19 @@ class Journal(BaseModel):
             return  # the harness's own question: governance asked it
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
+    def rejected_in_framework(self, calls: Sequence[tuple[str, Any]]) -> None:
+        """The calls a person rejected at a framework's own approval gate (:attr:`rejected`)."""
+        self.rejected += [content_key("rejected", name, args) for name, args in calls]
+
+    def rejected_by_person(self, tool: str, args: Any) -> bool:
+        """Whether a call a wrapper of the graph refused is one a person rejected at the
+        framework's gate (:attr:`rejected`) — taken: one rejection, one call."""
+        key = content_key("rejected", tool, args)
+        if key not in self.rejected:
+            return False
+        self.rejected.remove(key)
+        return True
+
     def answered(self, resolution: InterruptResolution) -> None:
         """File the answer to the open pause, and close it: the tool call it came from within
         is one a later attempt's model makes again (:attr:`again`: one call a place)."""
@@ -625,43 +647,82 @@ class Replay:
 
     def answer(self, key: str) -> InterruptResolution | None:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""
-        index = self._index("a", key, len(self.journal.answers.get(key, ())))
         recorded = self.journal.answers.get(key, [])
-        while index < len(recorded) and self._anothers(key, index):
-            self._moved(f"a:{key}")
-            index += 1
-            self._seen[f"a:{key}"] = index
+        index = self._answer_at(key)
         if index < len(recorded):
             self._moved(f"a:{key}")
-            self._seen[f"a:{key}"] = index + 1
-            self._mark("a", key, index, self._here())
+            self._seen[f"a:{key}"] = max(self._seen[f"a:{key}"], index + 1)
+            self._mark("a", key, index, self.here())
             return InterruptResolution.model_validate(recorded[index])
+        if index > self._seen[f"a:{key}"]:  # past the other calls' answers
+            self._moved(f"a:{key}")
+            self._seen[f"a:{key}"] = index
         return None
 
     def answered(self, key: str) -> bool:
         """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""
+        return self._answer_at(key) < len(self.journal.answers.get(key, ()))
+
+    def _answer_at(self, key: str) -> int:
+        """Where this occurrence of ``key``'s answer is: the answer to the call its framework
+        names, in a step its framework makes again by their ids (:meth:`here`); else the next
+        answer that is not another call's (:meth:`_anothers`) — past the last when none is."""
         given = len(self.journal.answers.get(key, ()))
         index = self._index("a", key, given)
+        ident = _IDENT.get()
+        if ident is not None and self.here() is not None:
+            by = self.journal.answered_by.get(key, [])
+            own = next((n for n, named in enumerate(by) if named == ident), None)
+            if own is not None:
+                return own
         while index < given and self._anothers(key, index):
             index += 1
-        return index < given
+        return index
 
     def _anothers(self, key: str, index: int) -> bool:
-        """Whether the ``index``-th answer of ``key`` is another call's rejection: where the
-        attempt goes on from the framework's own state, a rejection filed for a call its
-        framework named is that call's (``Journal.answered_by``), and a call of another id —
-        a new one, identical or not — is asked again."""
+        """Whether the ``index``-th answer of ``key`` is another call's: in a step its
+        framework makes again by their ids (:meth:`here`: one model reply's identical calls),
+        any answer filed for a call it named (``Journal.answered_by``) is that call's; where
+        the attempt goes on from the framework's own state, a rejection is — and a call of
+        another id, a new one, identical or not, is asked again."""
         by = self.journal.answered_by.get(key, [])
         owner = by[index] if index < len(by) else None
         ident = _IDENT.get()
-        if owner is None or ident is None or owner == ident or not self._continues():
+        if owner is None or ident is None or owner == ident:
+            return False
+        if self.here() is not None:
+            return True
+        if not self._continues():
             return False
         decision = self.journal.answers[key][index].get("decision")
         return decision == InterruptDecision.REJECT.value
 
     def occurrence(self, key: str) -> int:
-        """Which occurrence of ``key`` the next call is (0 for the first)."""
-        return self._index("c", key, len(self.journal.calls.get(key, ())))
+        """Which occurrence of ``key`` the next call is (0 for the first): the record of the
+        call its framework names (``called_by``), where that names it; else the next record no
+        other call named claims (:meth:`_named`), or a new one."""
+        recorded = len(self.journal.calls.get(key, ()))
+        index = self._index("c", key, recorded)
+        ident, by = _IDENT.get(), self.journal.called_by.get(key, [])
+        if ident is None:
+            return index
+        own = next(
+            (n for n, named in enumerate(by) if named == ident and self._named(key, n)), None
+        )
+        if own is not None:
+            return own
+        while index < min(recorded, len(by)) and by[index] is not None and self._named(key, index):
+            index += 1
+        return index
+
+    def _named(self, key: str, index: int) -> bool:
+        """Whether the ``index``-th record of ``key`` belongs to the call its framework named it
+        for: the framework makes its calls again by their ids — the attempt goes on from its own
+        state, or the record was made in the step it makes again (:meth:`here`)."""
+        if self._continues():
+            return True
+        here, tags = self.here(), self.journal.steps.get(f"c:{key}", [])
+        return here is not None and index < len(tags) and tags[index] == here
 
     def interrupted(self, key: str) -> bool:
         """Whether this occurrence of ``key`` started in an earlier attempt and never ended."""
@@ -688,7 +749,7 @@ class Replay:
         if index >= len(recorded):
             return False, None
         self._moved(f"c:{key}")
-        self._seen[f"c:{key}"] = index + 1
+        self._seen[f"c:{key}"] = max(self._seen[f"c:{key}"], index + 1)
         reads = self.journal.reads.get(key, [])
         for name, n in (reads[index] if index < len(reads) else {}).items():
             kind, read = name.split(":", 1)
@@ -697,7 +758,7 @@ class Replay:
             self._seen[name] += n
         tags = self.journal.steps.get(f"c:{key}")
         if tags is not None and index < len(tags) and tags[index] is not None:
-            self._mark("c", key, index, self._here())  # a step's record: now this step's
+            self._mark("c", key, index, self.here())  # a step's record: now this step's
         return True, recorded[index]
 
     def record_call(
@@ -718,7 +779,12 @@ class Replay:
         index = self.occurrence(key)
         recorded.append(output)
         self._moved(f"c:{key}")
-        self._seen[f"c:{key}"] = index + 1
+        self._seen[f"c:{key}"] = max(self._seen[f"c:{key}"], index + 1)
+        ident = _IDENT.get()
+        if ident is not None or key in self.journal.called_by:
+            by = self.journal.called_by.setdefault(key, [])
+            by.extend(None for _ in range(len(recorded) - 1 - len(by)))
+            by.append(ident)
         # what the call read besides its own record, when it is the call being made (the
         # code inside its ``calling``, or ``scope``: its key, after its framework ran it)
         began = self._began.get(scope or key, {}) if (scope or _CALLING.get()) == key else {}
@@ -732,14 +798,14 @@ class Replay:
             reads.extend({} for _ in range(len(recorded) - 1 - len(reads)))
             reads.append(read)
         if stepped:
-            self._mark("c", key, len(recorded) - 1, self._here())
+            self._mark("c", key, len(recorded) - 1, self.here())
         if tool is not None and tool not in self.journal.used:
             self.journal.used.append(tool)
 
     def effected(self, key: str) -> None:
         """The call ``key`` — one that does more than read — is made in the step under way
         (``Journal.effects``)."""
-        self.journal.effects.append((self._here(), key))
+        self.journal.effects.append((self.here(), key))
 
     def read(self, key: str) -> None:
         """The record just made of ``key`` is a read's its framework ran: answered from the
@@ -782,11 +848,16 @@ class Replay:
             del entries[:gone], tags[:gone]
             if not entries:
                 kept.pop(key, None)
-            parallel = self.journal.reads if kind == "c" else self.journal.answered_by
-            if key in parallel:
-                del parallel[key][:gone]
-                if not entries:
-                    del parallel[key]
+            beside = (
+                (self.journal.reads, self.journal.called_by)
+                if kind == "c"
+                else (self.journal.answered_by,)
+            )
+            for parallel in beside:
+                if key in parallel:
+                    del parallel[key][:gone]
+                    if not entries:
+                        del parallel[key]
             if not tags:
                 del steps[marked]
             self._seen[marked] = max(0, self._seen[marked] - gone)
@@ -797,7 +868,9 @@ class Replay:
                 else:
                     del self.journal.started[key]
 
-    def _here(self) -> str | None:
+    def here(self) -> str | None:
+        """The step a call is being made in now (:attr:`where`); ``None`` where the framework
+        keeps no checkpoint, or outside one of its steps."""
         return None if self.where is None else self.where()
 
     def _index(self, kind: str, key: str, length: int) -> int:
@@ -812,7 +885,7 @@ class Replay:
         tags = self.journal.steps.get(seen)
         if tags is None or self.resumed is None:
             return index
-        here = self._here()
+        here = self.here()
         while (
             index < min(length, len(tags))
             and (tag := tags[index]) is not None

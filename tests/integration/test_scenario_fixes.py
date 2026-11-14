@@ -169,6 +169,39 @@ async def test_scn2_the_same_call_made_twice_in_a_run_has_two_ids() -> None:
         assert len({e.message_id for e in results}) == 2, results
 
 
+async def test_a_paused_and_approved_run_of_a_target_without_call_ids_records_each_call_once() -> (
+    None
+):
+    """H-ID: a target whose framework names no call (a function: ``agent.tools.call``) makes
+    the same read twice, then a payment that asks; approved, it is run again from its input,
+    both reads replayed. Each call that ran is recorded once in the memory service, starts
+    once on the run's stream under one id across both attempts, the two identical reads under
+    two ids."""
+    memory = FakeMemoryService()
+    runs = LoggedRuns()
+    async with Harness(config=Settings(), runs=runs, memory=memory.client()) as h:
+
+        async def target(input: Any, agent: Runtime) -> str:
+            await agent.tools.call("look", key="a")
+            await agent.tools.call("look", key="a")
+            await agent.tools.call("pay", amount=3)
+            return "done"
+
+        agent = arm(h.wrap(target, id="hid"), [look, pay])
+        paused = await agent.run("go", user="ada", thread="t1")
+        assert paused.interrupt is not None and paused.interrupt.tool_call is not None, paused
+        done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="ada")
+        assert done.status is RunStatus.SUCCESS, done.error
+        await h.writes.drain()
+    recorded = [call.body["tool"] for call in memory.named("record_tool")]
+    assert recorded == ["look", "look", "pay"], recorded
+    started = tool_events(runs.logged(done.run_id), RunEventType.TOOL_CALL_START)
+    assert [tool for _, tool in started] == ["look", "look", "pay"], started
+    assert len({call_id for call_id, _ in started}) == 3, started
+    ended = tool_events(runs.logged(done.run_id), RunEventType.TOOL_CALL_RESULT)
+    assert ended == started, ended
+
+
 @RUN_AGAIN
 async def test_scn3_a_replayed_call_is_not_announced_again(build: Build) -> None:
     """SCN-3: a target with no state of its own (a graph with no checkpointer, a function) is
@@ -257,6 +290,42 @@ async def test_scn3_the_activity_line_of_a_run_resumed_where_it_paused_counts_ev
     resumed = await _served(LoggedRuns(), two_nodes(checkpointed=False), both)
     activity = [e for e in resumed if e["type"] == "ACTIVITY_SNAPSHOT"]
     assert activity[-1]["content"]["tools"] == 2, activity
+
+
+async def test_agui_event_ids_are_the_same_on_every_replica() -> None:
+    """H-AGUI: a run paused and resumed on the replica that served it, then read by a client
+    that reconnects to another replica (agent-runs' event log): every event has the same id on
+    both — across both attempts — and a reconnect with ``Last-Event-ID`` set to any event's id
+    goes on with the next one: no event repeated, none skipped."""
+    runs = LoggedRuns()
+
+    async def served(client: httpx.AsyncClient) -> list[tuple[int, dict[str, Any]]]:
+        said = {"threadId": "t1", "messages": [{"id": "u1", "role": "user", "content": "go"}]}
+        first = decode((await client.post("/agui/run", json=said)).text)
+        [entry] = first[-1][1]["outcome"]["interrupts"]
+        resume = {"interruptId": entry["id"], "payload": True}
+        answer = {"threadId": "t1", "messages": [], "resume": [resume]}
+        return first + decode((await client.post("/agui/run", json=answer)).text)
+
+    build = two_nodes(checkpointed=False)
+    here = await _served(runs, build, served)
+    run_id = here[-1][1]["runId"]
+    assert here[-1][1]["type"] == "RUN_FINISHED" and here[-1][1]["result"] == "done", here[-1]
+
+    async def read(client: httpx.AsyncClient) -> list[list[tuple[int, dict[str, Any]]]]:
+        path = f"/agui/runs/{run_id}/events"
+        whole = decode((await client.get(path)).text)
+        after = [
+            decode((await client.get(path, headers={"Last-Event-ID": str(n)})).text)
+            for n, _ in whole
+        ]
+        return [whole, *after]
+
+    there, *reconnected = await _served(runs, build, read)
+    assert [(n, e["type"]) for n, e in there] == [(n, e["type"]) for n, e in here], there
+    numbers = [n for n, _ in there]
+    for (n, _), rest in zip(there, reconnected, strict=True):
+        assert [m for m, _ in rest] == [m for m in numbers if m > n], (n, rest)
 
 
 # --------------------------------------------------------------------- a slow or absent memory
