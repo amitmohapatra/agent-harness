@@ -141,7 +141,7 @@ from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
-from trellis.harness.journal import content_key
+from trellis.harness.journal import call_key, content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
@@ -550,7 +550,7 @@ async def _kept_update(
     record alone gives the message the model read. Serialized as LangGraph serializes a step's
     writes; an update that cannot be (a value its serializer does not take) is left out, said
     in the log — the call's replay is then its message."""
-    recorded = runtime.replay.journal.calls.get(content_key("call", call["name"], call["args"]))
+    recorded = runtime.replay.journal.calls.get(call_key(call["name"], call["args"]))
     if not recorded or bridge.journal_outcome(call["name"], recorded[-1]).output != outcome.output:
         return  # not journaled as this call's (the paused call made again in other words)
     try:

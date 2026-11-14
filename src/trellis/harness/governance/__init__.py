@@ -54,7 +54,7 @@ from trellis.harness.governance.decision import (
     decide,
 )
 from trellis.harness.hooks import Chain, Deny, Hooks, denied
-from trellis.harness.journal import content_key
+from trellis.harness.journal import call_key
 from trellis.harness.settings import Settings
 from trellis.harness.tools.base import UNDECLARED, SideEffects, Tool, execute, invoked
 from trellis.memory import MemoryClient
@@ -241,7 +241,7 @@ class Governance:
                 "a decision is recorded for an agent in a tenant: pass agent_id= and tenant="
             )
         args = dict(decision.args)
-        key = content_key("call", decision.tool, args)
+        key = call_key(decision.tool, args)
         interrupt = Interrupt(
             interrupt_id=stable_id(run_id, key, prefix="int_"),
             tenant_id=self.tenant,

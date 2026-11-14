@@ -74,7 +74,7 @@ from trellis.harness.conversation import allowed, result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, RECORD, Made, content_key
+from trellis.harness.journal import OUTCOME, RECORD, Made, call_key, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
@@ -160,10 +160,10 @@ async def call(
             source="tools",
         )
     made = runtime.replay.made(tool.name, args)  # the paused call made again runs as it was
-    key = content_key("call", tool.name, made.args)
+    key = call_key(tool.name, made.args)
     step = runtime.next_step() if step is None else step
     # the call's identity: its framework's id (given, or said before its MCP request came)
-    ident = call_id or runtime.replay.claimed(content_key("call", tool.name, args))
+    ident = call_id or runtime.replay.claimed(call_key(tool.name, args))
     async with runtime.replay.exclusive(key):
         with runtime.replay.calling(key, ident=ident):
             outcome = await _called(
@@ -189,7 +189,7 @@ def firsts(calls: Iterable[tuple[str, str, Any]]) -> dict[str, str]:
     first: dict[str, str] = {}
     repeats: dict[str, str] = {}
     for call_id, tool, args in calls:
-        earlier = first.setdefault(content_key("call", tool, args), call_id)
+        earlier = first.setdefault(call_key(tool, args), call_id)
         if earlier != call_id:
             repeats[call_id] = earlier
     return repeats
@@ -230,7 +230,7 @@ async def permitted(
     framework's id of the call, whose answers are its own (``Replay.calling``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     with runtime.replay.calling(key, ident=call_id):
         replayed, output = runtime.replay.call(key)  # it ran for the run (:func:`observed`)
@@ -264,7 +264,7 @@ async def asked(
     propagates."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     why = FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
@@ -296,7 +296,7 @@ async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
         or runtime.replay.answered(content_key("approve", spec.name, args))
     ):
         return False
-    key = content_key("call", spec.name, args)
+    key = call_key(spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     try:
         await runtime.approve(call, decision, await _offered(runtime, decision))

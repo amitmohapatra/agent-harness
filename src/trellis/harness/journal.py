@@ -195,6 +195,14 @@ def content_key(kind: str, *parts: Any) -> str:
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
 
 
+def call_key(tool: str, args: Any) -> str:
+    """What a tool call is — ``tool`` called with ``args`` — as one key, wherever it is made:
+    the journal files the call's record under it, a pending question names its call by it,
+    and the call's id and idempotency key are the run's id, this key and which time the run
+    makes the call (``tools.bridge``)."""
+    return content_key("call", tool, args)
+
+
 class Made(BaseModel):
     """A tool call as the model made it: its arguments, and its place among the run's tool
     calls, as a run from its input counts them (0: the first)."""
@@ -568,7 +576,7 @@ class Replay:
                 self.journal.place = 0  # run again from its input
             self._made = self.journal.place
         at, self._made = self._made, self._made + 1
-        key = content_key("call", tool, args)
+        key = call_key(tool, args)
         paused = next((m for m in self.journal.again if m.at == at and m.tool == tool), None)
         if paused is None or self.occurrence(key) < len(self.journal.calls.get(key, ())):
             return Made(tool=tool, args=args, at=at)

@@ -82,7 +82,7 @@ from trellis.harness.files import part
 from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
+from trellis.harness.journal import Journal, Pending, Replay, call_key, governance_held
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
@@ -1359,16 +1359,12 @@ def _with_facts(said: list[Said], runtime: Runtime, status: RunStatus) -> list[S
     journal = runtime.replay.journal
     outcomes: dict[str, list[ToolOutcome]] = {}
     for call, outcome in journal.trajectory:
-        outcomes.setdefault(content_key("call", call.tool, call.args), []).append(outcome)
+        outcomes.setdefault(call_key(call.tool, call.args), []).append(outcome)
     calls = {c.id: c for s in said for c in s.tool_calls}
     out: list[Said] = []
     for s in said:
         called = calls.get(s.tool_call_id or "")
-        found = (
-            outcomes.get(content_key("call", called.name, dict(called.arguments)))
-            if called
-            else None
-        )
+        found = outcomes.get(call_key(called.name, dict(called.arguments))) if called else None
         if s.role is not Speaker.TOOL or not found:
             out.append(s)
             continue

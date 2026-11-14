@@ -101,7 +101,7 @@ from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
-from trellis.harness.journal import Pending, content_key
+from trellis.harness.journal import Pending, call_key
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
@@ -1259,7 +1259,7 @@ class Attempt:
             # its call through the harness's MCP server names no call: said here
             known = self.calls.get(tool_call.tool_call_id)
             args = known.args if known is not None else _args(tool_call.raw_input, None)
-            called = content_key("call", name.removeprefix(HARNESS_PREFIX), args)
+            called = call_key(name.removeprefix(HARNESS_PREFIX), args)
             self.runtime.replay.announced(called, tool_call.tool_call_id)
             return _chosen(options, "allow_once")
         if self.profile is not None and name in self.profile.questions:
