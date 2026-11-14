@@ -28,10 +28,11 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import RetryPolicy
 
 from tests.support.chat_model import ScriptedChatModel
+from tests.support.journals import journal_of
 from tests.support.memory import FakeMemoryService
-from trellis import Harness, ReAct
+from trellis import Budget, Harness, ReAct
 from trellis.contracts import RunEventType, RunStatus, ToolOutcome, ToolStatus
-from trellis.harness.hooks import Hooks
+from trellis.harness.hooks import Ask, Hooks
 from trellis.harness.tools import base
 from trellis.harness.tools.bridge import MAX_REPEATS
 
@@ -470,6 +471,168 @@ async def test_where_the_graph_does_not_retry_its_tool_the_harnesss_retries_stan
     result = await harness.wrap(graph_of(model), id="shelf").run("a?", user="u")
     assert result.answer == "7" and ran == ["stock a"] * 3
     assert told(model).content == "a: 7"
+
+
+# ------------------------------------------------------- the harness's tries: one call
+def builders(saver: Any = None) -> list[Any]:
+    """``create_agent``, Deep Agents and ``ReAct`` over the graph's own ``stock`` (and
+    ``tools``), with ``saver`` as their checkpointer where one is given (ReAct keeps its own)."""
+
+    def agent(model: Any, tools: list[Any]) -> Any:
+        return create_agent(model, tools, checkpointer=saver)
+
+    def deep_agent(model: Any, tools: list[Any]) -> Any:
+        return create_deep_agent(model=model, tools=tools, checkpointer=saver)
+
+    def react_agent(model: Any, tools: list[Any]) -> Any:
+        return ReAct(system_prompt="Count.", model=model, tools=tools)
+
+    return [agent, deep_agent, react_agent]
+
+
+BUILT = ["create_agent", "deep agent", "react"]
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+async def test_the_harnesss_tries_of_a_graphs_tool_are_one_call_of_the_run(
+    memory_harness: Harness, memory_service: FakeMemoryService, built: str
+) -> None:
+    """The harness tries a read whose error may pass again around the graph's handling of the
+    error — and the run sees one call, as when it tried it within the call: one start and one
+    result on the stream (AG-UI's ``TOOL_CALL_*``), one record, one call of the run's
+    ``max_tool_calls`` budget (a budget of two has room for it, and is not reached), and no
+    stall."""
+    refused(2)
+    build = dict(zip(BUILT, builders(), strict=True))[built]
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    agent = memory_harness.wrap(build(model, [stock]), id="one", budget=Budget(max_tool_calls=2))
+    events = [e async for e in agent.stream("a?", user="u")]
+    read = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert ran == ["stock a"] * 3 and read[-1].content == "a: 7"
+    starts = [e for e in events if e.type is RunEventType.TOOL_CALL_START]
+    assert [e.data["tool"] for e in starts] == ["stock"]
+    assert results(events) == [("stock", "ok")]
+    assert not [e for e in events if e.type is RunEventType.RUN_ERROR]
+    finished = events[-1]
+    assert finished.outcome is not None and finished.outcome.value == "success"
+    assert finished.data["spent"]["tool_calls"] == 1
+    await memory_harness.writes.drain()
+    [record] = memory_service.named("record_tool")
+    assert record.body["status"] == "ok"
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+async def test_the_harnesss_tries_never_stop_a_call_as_a_stall(
+    harness: Harness, built: str
+) -> None:
+    """``MAX_REPEATS`` calls with the same arguments in a row are a model looping; the
+    harness's own tries of one call are not: the same call in two model steps, each tried 3
+    times, runs every time, and nothing is said of a stall."""
+    refused(2)
+    build = dict(zip(BUILT, builders(), strict=True))[built]
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), ("stock", {"sku": "a"}), "7"])
+    events = [
+        e async for e in harness.wrap(build(model, [stock]), id="loop").stream("a?", user="u")
+    ]
+    assert ran == ["stock a"] * 4 and told(model).content == "a: 7"
+    assert not [e for e in events if e.type is RunEventType.CUSTOM and "stall" in str(e.data)]
+    assert results(events) == [("stock", "ok"), ("stock", "ok")]
+
+
+class Asking(Hooks):
+    """A rule of the run's own that asks a person before each call of ``stock``."""
+
+    async def before_tool(self, call: Any) -> Ask | None:
+        return Ask("Look the stock up?") if call.tool == "stock" else None
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+async def test_a_call_that_asks_is_asked_about_once_across_the_harnesss_tries(
+    harness: Harness, built: str
+) -> None:
+    """A read a hook asks a person about, approved, fails twice and is tried again: the
+    approval covers its tries — one question for one call."""
+    refused(2)
+    build = dict(zip(BUILT, builders(InMemorySaver()), strict=True))[built]
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    agent = harness.wrap(build(model, [stock]), id="asks", hooks=[Asking()])
+    paused = await agent.run("a?", user="u", thread="t")
+    assert paused.interrupt is not None and ran == []
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None, done.error
+    assert ran == ["stock a"] * 3 and done.answer == "7"
+
+
+class Watching(Hooks):
+    """The run's ``on_error`` hooks: each failed call they are told of."""
+
+    def __init__(self) -> None:
+        self.failed: list[str] = []
+
+    async def on_error(self, stage: Any, error: Exception) -> None:
+        self.failed.append(f"{stage}: {error}")
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+@pytest.mark.parametrize("refusals", [2, 3])
+async def test_the_on_error_hooks_are_told_of_a_failed_call_not_of_its_failed_tries(
+    harness: Harness, built: str, refusals: int
+) -> None:
+    """A call the harness tries again: the run's ``on_error`` hooks hear of its failure once —
+    when its last try fails — and not at all when a try works, as when it tried it within the
+    call."""
+    refused(refusals)
+    build = dict(zip(BUILT, builders(), strict=True))[built]
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "done"])
+    watching = Watching()
+    graph = (  # create_agent's run goes on past the error: its wrapper answers it
+        create_agent(model, [stock], middleware=[ToolErrorMiddleware(lambda e, r: str(e))])
+        if built == "create_agent"
+        else build(model, [stock])
+    )
+    await harness.wrap(graph, id="hooked", hooks=[watching]).run("a?", user="u")
+    assert ran == ["stock a"] * 3
+    said = [f for f in watching.failed if f.startswith("tool")]
+    assert said == ([] if refusals == 2 else ["tool: shelf service refused the connection"])
+
+
+paid: list[int] = []
+
+
+@lc_tool
+def pay_now(amount: int) -> str:
+    """Pay."""
+    paid.append(amount)
+    return f"paid {amount}"
+
+
+pay_now.metadata = {"side_effects": "irreversible"}
+
+
+@pytest.mark.usefixtures("_quick_retries")
+@pytest.mark.parametrize("built", BUILT)
+async def test_a_call_tried_again_beside_a_pause_is_not_run_again_on_the_resume(
+    harness: Harness, built: str
+) -> None:
+    """A read that fails twice runs beside a payment that asks: its tries end — the third
+    working, journaled — before the run pauses; the resume replays it and pays once. The
+    run's budget counts each call once: the read, and the payment once it ran."""
+    refused(2)
+    paid.clear()
+    build = dict(zip(BUILT, builders(InMemorySaver()), strict=True))[built]
+    model = ScriptedChatModel(turns=[[("stock", {"sku": "a"}), ("pay_now", {"amount": 5})], "done"])
+    agent = harness.wrap(build(model, [stock, pay_now]), id="beside")
+    paused = await agent.run("a? and pay 5", user="u", thread="t")
+    assert paused.interrupt is not None and ran == ["stock a"] * 3 and paid == []
+    journal = await journal_of(harness.runs, await harness.runs.get(paused.run_id))
+    assert journal.spent["tool_calls"] == 1  # the read, once; the payment not yet
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and done.answer == "done", done.error
+    assert ran == ["stock a"] * 3 and paid == [5]
 
 
 # --------------------------------------------------------------------------- one question
