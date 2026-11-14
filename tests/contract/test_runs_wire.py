@@ -197,6 +197,10 @@ class RunsService:
         listed = self.store.iterate(
             status=RunStatus(status) if status else None,
             assignee=params.get("assignee"),
+            agent_id=params.get("agent_id"),
+            thread_id=params.get("thread_id"),
+            concurrency_key=params.get("concurrency_key"),
+            parent_run_id=params.get("parent_run_id"),
             tenant=self._tenant(request),
         )
         return [summary async for summary in listed]
