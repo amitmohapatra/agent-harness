@@ -239,7 +239,9 @@ class Writes:
             except CircuitOpenError as down:
                 # the service is down (its client's circuit is open): nothing was sent, and the
                 # write waits it out, queued, its attempts whole for when the circuit lets it by
-                await asyncio.sleep(max(down.retry_after or 0.0, WRITE_BACKOFF_SECONDS))
+                cool = max(down.retry_after or 0.0, WRITE_BACKOFF_SECONDS)
+                log.warning("trellis write: %s waits %gs, not sent: %s", item.label, cool, down)
+                await asyncio.sleep(cool)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

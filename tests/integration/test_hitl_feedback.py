@@ -3,6 +3,7 @@ sent with a fixed id the client may retry and the service stores once."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -180,16 +181,29 @@ async def test_a_brief_memory_outage_is_retried_and_counted_once(
     assert stored["verdict"] == "approve"
 
 
-async def test_a_lasting_memory_outage_is_reported_and_the_run_still_continues(
-    memory_harness: Harness, memory_service: FakeMemoryService
+async def test_a_lasting_memory_outage_holds_its_writes_and_the_run_still_continues(
+    memory_service: FakeMemoryService,
 ) -> None:
+    """The decision's feedback and the run's outcome both go to a route that is down: the run
+    goes on, and the writes are not given up while the outage lasts (SCN-6: they were "failed
+    and is lost" after three tries) — the client's circuit opens, they wait its cool-down, and
+    they are delivered, once, when the route answers again."""
     memory_service.fail.add("feedback")
-    agent = arm(memory_harness.wrap(_wipes, id="ops"), [wipe])
-    paused = await agent.run("wipe d1", user="u")
-    assert paused.interrupt is not None
-    result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
-    await memory_harness.writes.drain()
-    assert result.status is RunStatus.SUCCESS and result.answer == "wiped d1"
-    # the decision's feedback and the run's outcome both went to the downed route
-    assert memory_harness.writes.failed == 2
-    assert _decided(memory_service) == []
+    client = memory_service.client()
+    breaker = client._transport.breaker
+    breaker.open_seconds = 0.05  # its cool-down (30 s) within the test
+    async with Harness(config=Settings(), memory=client) as h:
+        agent = arm(h.wrap(_wipes, id="ops"), [wipe])
+        paused = await agent.run("wipe d1", user="u")
+        assert paused.interrupt is not None
+        result = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="boss")
+        assert result.status is RunStatus.SUCCESS and result.answer == "wiped d1"
+        async with asyncio.timeout(30):
+            while breaker.state == "closed":  # noqa: ASYNC110 - the circuit's state
+                await asyncio.sleep(0.01)
+        assert h.writes.failed == 0 and _decided(memory_service) == []
+        memory_service.fail.clear()
+        await h.writes.drain()
+        assert h.writes.failed == 0
+    [stored] = _decided(memory_service)
+    assert stored["verdict"] == "approve"
