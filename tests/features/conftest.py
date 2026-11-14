@@ -36,6 +36,7 @@ import httpx
 import pytest
 
 from tests.support.adapters import BUILDERS, SYSTEM
+from tests.support.invariants import invariants  # noqa: F401  (INV-1..10 at every teardown)
 from tests.support.planned import FINAL, Call, PlannedChat
 from trellis import Harness, ReAct, Runtime, Settings
 from trellis.harness.automatic import JournalBackend
@@ -333,3 +334,117 @@ def fresh_ledger() -> Iterator[None]:
     kit.LEDGER.clear()
     yield
     kit.LEDGER.clear()
+
+
+# --------------------------------------------------------------------------- a faulty network
+class FaultProxy:
+    """A proxy in front of the memory service, on a port of its own, that injects what the
+    network and an overloaded service do: ``rules[(method, path_prefix)]`` is ``"504"`` (the
+    service's own deadline answer, the request never forwarded), ``"504-after"`` (forwarded
+    and committed, then answered 504: the deadline firing after the work), or a count
+    ``("504", n)`` for the first ``n`` matching requests. ``down()`` stops it (connections
+    refused), ``up()`` starts it again on the same port."""
+
+    def __init__(self, target: str) -> None:
+        import socket
+
+        self.target = target.rstrip("/")
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        self.port = sock.getsockname()[1]
+        sock.close()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.rules: dict[tuple[str, str], Any] = {}
+        self.hits: list[tuple[str, str, int]] = []
+        self._server: Any = None
+        self._thread: Any = None
+
+    def _rule(self, method: str, path: str) -> str | None:
+        for (m, prefix), rule in self.rules.items():
+            if m == method and path.startswith(prefix):
+                if isinstance(rule, tuple):
+                    kind, left = rule
+                    if left <= 0:
+                        return None
+                    self.rules[(m, prefix)] = (kind, left - 1)
+                    return kind
+                return rule
+        return None
+
+    def _app(self) -> Any:
+        from starlette.applications import Starlette
+        from starlette.requests import Request
+        from starlette.responses import Response
+        from starlette.routing import Route
+
+        proxy = self
+
+        def timeout(path: str) -> Response:
+            body = {
+                "type": "urn:trellis:problem:timeout",
+                "title": "Timeout",
+                "status": 504,
+                "detail": "The request exceeded its 5 s read deadline",
+                "instance": path,
+                "code": "TIMEOUT",
+                "retryable": True,
+            }
+            return Response(json.dumps(body), 504, media_type="application/problem+json")
+
+        async def forward(request: Request) -> Response:
+            path = request.url.path
+            rule = proxy._rule(request.method, path)
+            if rule == "504":
+                proxy.hits.append((request.method, path, 504))
+                return timeout(path)
+            headers = {
+                k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")
+            }
+            async with httpx.AsyncClient(base_url=proxy.target, timeout=TIMEOUT) as client:
+                got = await client.request(
+                    request.method,
+                    path,
+                    params=request.query_params,
+                    content=await request.body(),
+                    headers=headers,
+                )
+            if rule == "504-after":
+                proxy.hits.append((request.method, path, 504))
+                return timeout(path)
+            proxy.hits.append((request.method, path, got.status_code))
+            drop = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+            return Response(
+                got.content,
+                got.status_code,
+                headers={k: v for k, v in got.headers.items() if k.lower() not in drop},
+            )
+
+        methods = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+        return Starlette(routes=[Route("/{path:path}", forward, methods=methods)])
+
+    def up(self) -> None:
+        import threading
+
+        import uvicorn
+
+        config = uvicorn.Config(self._app(), host="127.0.0.1", port=self.port, log_level="error")
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def down(self) -> None:
+        if self._server is not None:
+            self._server.should_exit = True
+            self._thread.join(timeout=10)
+            self._server = None
+
+
+@pytest.fixture
+def memory_proxy() -> Iterator[FaultProxy]:
+    proxy = FaultProxy(MEMORY_URL or "")
+    proxy.up()
+    yield proxy
+    proxy.down()

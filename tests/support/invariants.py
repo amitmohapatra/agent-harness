@@ -72,6 +72,12 @@ SECRET_VARIABLES: Final = (
     "OPENAI_API_KEY",
 )
 CREDENTIAL_HEADERS: Final = ("authorization", "x-api-key", "x-trellis-api-key")
+#: the memory service's own agent tools: the service logs their calls itself, the harness
+#: records none (docs/memory.md, "What is recorded")
+SERVICE_LOGGED: Final = frozenset(
+    {"memory_search", "memory_remember", "memory_update", "memory_forget", "profile_edit",
+     "tool_search"}
+)
 
 
 def _netloc(url: str | None) -> str | None:
@@ -388,7 +394,7 @@ class Invariants:
             ):
                 continue  # memory off: nothing to record into
             got = recorded.get(run_id, Counter())
-            missing = [k for k in ran if k not in got and not k.startswith("memory_")]
+            missing = [k for k in ran if k not in got and k.split(":", 1)[0] not in SERVICE_LOGGED]
             ghost = [k for k in got if k not in ran]
             if missing:
                 out.append(f"INV-2 run {run_id}: calls that ran have no tool record: {missing[:3]}")

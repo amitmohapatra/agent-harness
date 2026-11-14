@@ -129,3 +129,50 @@ def feedback_rows(run_id: str) -> list[dict[str, Any]]:
 
 
 ADMIN: Final = ADMIN_KEY
+
+
+def user_key(user: str, tenant: str = "feat") -> str:
+    """The visibility key of a user's own memories (USER visibility)."""
+    return f"user:{tenant}/{user}"
+
+
+def memories_of(user: str, *, tenant: str = "feat", live: bool = True) -> list[dict[str, Any]]:
+    """The memories a user may read as their own, from the store: every scope (a thread's
+    memories carry the user's key, not ``user_id``)."""
+    pattern = f'%"{user_key(user, tenant)}"%'
+    rows = memory_sql(
+        "select memory_id, tenant_id, user_id, scope_level, memory_type, content, predicate,"
+        " normalized_hash, visibility, visibility_keys, superseded_by, valid_to,"
+        " temporal_status, reinforcement_count, deleted_at, expires_at, created_at"
+        " from memories where visibility_keys::text like :1",
+        pattern,
+    )
+    if live:
+        rows = [r for r in rows if r["deleted_at"] is None and r["superseded_by"] is None]
+    return rows
+
+
+async def recall_text(
+    h: Harness, user: str, query: str, kinds: Sequence[str] = ("memory", "message")
+) -> str:
+    """Everything the memory service's recall answers ``user`` for ``query``, as text."""
+    assert h.memory is not None
+    ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
+    found = await ctx.search(query, kinds=list(kinds), limit=50)
+    return json.dumps(found.model_dump(mode="json") if hasattr(found, "model_dump") else
+                      [f.model_dump(mode="json") for f in found], default=str)
+
+
+async def inventory_text(h: Harness, user: str) -> str:
+    assert h.memory is not None
+    ctx = h.memory.client.bind(tenant_id=await h._tenant(), user_id=user)
+    page = await ctx.advanced.memories.page(limit=100)
+    return json.dumps(page.model_dump(mode="json") if hasattr(page, "model_dump") else
+                      [p.model_dump(mode="json") for p in page], default=str)
+
+
+async def scope_of(h: Harness, user: str, *, agent: str | None = None, thread: str | None = None):  # noqa: ANN201
+    """The memory SDK bound to a user (and an agent, a conversation) of ``h``'s tenant."""
+    from tests.features.conftest import scope
+
+    return await scope(h, user=user, agent=agent, thread=thread)

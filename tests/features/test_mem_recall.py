@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 import pytest
 
 from tests.features.conftest import (
@@ -15,10 +17,9 @@ from tests.features.conftest import (
     OTHER_KEY,
     eventually,
     harness,
-    memory_http,
     memory_sql,
 )
-from tests.features.kit import armed
+from tests.features.kit import armed, inventory_text, memories_of, recall_text, user_key
 from trellis.contracts import RunStatus
 
 pytestmark = pytest.mark.timeout(300)
@@ -29,11 +30,7 @@ SEARCH = ("memory_search", {"query": "favourite warehouse", "kinds": ["memory", 
 
 
 def facts_of(user: str) -> list[dict]:
-    return memory_sql(
-        "select tenant_id, user_id, memory_type, content, visibility, visibility_keys,"
-        " superseded_by, deleted_at from memories where user_id = :1 and deleted_at is null",
-        user,
-    )
+    return memories_of(user)
 
 
 @pytest.mark.plan("MEM-02", "MEM-03", "INV-5")
@@ -58,7 +55,7 @@ async def test_a_fact_told_in_one_chat_is_known_in_the_next_and_to_no_one_else(
     assert rows, facts_of(user)
     assert {r["tenant_id"] for r in rows} == {"feat"}
     assert all("Rotterdam" in r["content"] for r in rows if r["memory_type"] != "OBSERVATION")
-    assert all(user in " ".join(r["visibility_keys"]) for r in rows), rows  # the user's alone
+    assert all(user_key(user) in r["visibility_keys"] for r in rows), rows  # the user's alone
 
     # the user's next chat, in another process: pushed to the model, and found by its tool
     async with harness() as h:
@@ -94,39 +91,38 @@ async def test_recall_and_the_inventory_never_cross_a_user_or_a_tenant(
     """The service's own reads, asked directly as another user and as another tenant: none
     returns a memory of the user's, and the database holds them under the user alone."""
     user = f"cara-{uid}"
+    code = str(int(uid, 16) % 900_000 + 100_000)  # this test's own secret
     async with harness() as h:
         agent, _ = await armed("react", h, tmp_path, [], id=f"iso-{uid}")
-        await agent.run("My locker code is 4417 and I work in Lisbon.", user=user, thread="t")
+        await agent.run(f"My locker code is {code} and I work in Lisbon.", user=user, thread="t")
         await h.writes.drain()
-    await eventually(lambda: _any(user), within=90)
-    query = {"query": "locker code Lisbon", "kinds": ["memory", "message"], "limit": 50}
-    async with memory_http() as mine:
-        got = await mine.post("/v1/recall", json={**query, "scope": {"user_id": user}})
-        assert got.status_code == 200, got.text
-        assert "4417" in got.text  # the user's own recall finds it
-        stranger = await mine.post(
-            "/v1/recall", json={**query, "scope": {"user_id": f"dan-{uid}"}}
-        )
-        assert stranger.status_code == 200 and "4417" not in stranger.text
-        listed = await mine.get("/v1/memories", params={"user_id": f"dan-{uid}", "limit": 100})
-        assert listed.status_code == 200 and "4417" not in listed.text
-    async with memory_http(OTHER_KEY) as foreign:
-        got = await foreign.post("/v1/recall", json={**query, "scope": {"user_id": user}})
-        assert got.status_code == 200 and "4417" not in got.text
-        listed = await foreign.get("/v1/memories", params={"user_id": user, "limit": 100})
-        assert "4417" not in listed.text
+    rows = await eventually(lambda: _any(user), within=90)
+    assert rows, memories_of(user)
+    query = "locker code Lisbon"
+    async with harness() as h:
+        assert code in await recall_text(h, user, query)  # the user's own recall finds it
+        assert code not in await recall_text(h, f"dan-{uid}", query)
+        assert code not in await inventory_text(h, f"dan-{uid}")
+    async with harness(key=OTHER_KEY) as foreign:
+        assert code not in await recall_text(foreign, user, query)
+        assert code not in await inventory_text(foreign, user)
     owners = memory_sql(
-        "select distinct tenant_id, user_id from memories where content like '%4417%'"
-        " and deleted_at is null"
+        "select distinct tenant_id, visibility_keys::text as keys from memories"
+        " where content like '%' || :1 || '%' and deleted_at is null",
+        code,
     )
-    assert {(o["tenant_id"], o["user_id"]) for o in owners} <= {("feat", user)}, owners
+    assert owners and {o["tenant_id"] for o in owners} == {"feat"}, owners
+    for o in owners:  # readable by the user (and the agent acting for them), nobody else
+        keys = json.loads(o["keys"])
+        assert user_key(user) in keys and all(user in k for k in keys), keys
     said = memory_sql(
-        "select distinct t.tenant_id, t.user_id from messages m join threads t"
+        "select distinct t.tenant_id, t.owner_user_id as user_id from messages m join threads t"
         " on t.thread_id = m.thread_id and t.tenant_id = m.tenant_id"
-        " where m.content like '%4417%'"
+        " where m.content like '%' || :1 || '%'",
+        code,
     )
     assert {(o["tenant_id"], o["user_id"]) for o in said} == {("feat", user)}, said
 
 
 async def _any(user: str) -> list[dict]:
-    return [r for r in facts_of(user) if r["memory_type"] != "OBSERVATION"]
+    return [r for r in memories_of(user) if r["memory_type"] != "OBSERVATION"]
