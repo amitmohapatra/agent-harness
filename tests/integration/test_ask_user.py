@@ -508,3 +508,24 @@ def test_a_forms_field_with_several_picks_is_an_array_of_its_options() -> None:
     }
     both = regions.model_copy(update={"default": ["north", "west"]})
     assert both.line("Regions") == "Regions (north or west): north, west"
+
+
+def test_the_sandbox_deep_agents_and_claude_shells_each_ran_a_command() -> None:
+    from trellis.contracts import AgentExecutionContext, RunEvent, RunEventType
+    from trellis.harness.agui.activity import Activity
+
+    context = AgentExecutionContext.create(tenant_id="t", agent_id="a", agent_run_id="run_1")
+    line = Activity()
+    said = []
+    for n, tool_name in enumerate(("sandbox_exec", "execute", "Bash", "lookup")):
+        ended = RunEvent.of(
+            context,
+            RunEventType.TOOL_CALL_RESULT,
+            0,
+            tool_call_id=f"c{n}",
+            data={"tool": tool_name},
+        )
+        event = line.seen(ended)
+        assert event is not None
+        said.append(event.content["summary"])  # type: ignore[index]
+    assert said[-1] == "used 1 tool · ran 3 commands"
