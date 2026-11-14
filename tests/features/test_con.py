@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 from tests.features.conftest import Traffic, harness
@@ -74,33 +76,48 @@ async def test_every_route_the_harness_calls_speaks_its_openapi_document(
         return f"ordered {qty} of {sku}"
 
     write = tool(order, name=f"con_order_{uid}", side_effects="write")
+    other = tool(order, name=f"con_restock_{uid}", side_effects="write")
     plan = [
         ("memory_search", {"query": "pallets", "kinds": ["memory", "message"]}),
         (f"con_order_{uid}", {"sku": "A-1", "qty": 2}),
         ("ask_user", {"question": "Which day?", "kind": "date"}),
+        (f"con_restock_{uid}", {"sku": "B-2", "qty": 1}),
     ]
     doc = tmp_path / "terms.md"
-    doc.write_text("# Terms\n\nPallets are delivered on Mondays by Uline.\n")
+    doc.write_text(f"# Terms {uid}\n\nPallets are delivered on Mondays by Uline.\n")
     async with harness() as h:
         added = await h.add_document(doc, user=user, wait=120)
-        agent, _ = await armed("react", h, tmp_path, plan, id=agent_id, tools=[write, ask_user()])
+        tools = [write, other, ask_user()]
+        agent, _ = await armed("react", h, tmp_path, plan, id=agent_id, tools=tools)
         handle = await agent.start(
             "Order two A-1 for me.", user=user, thread=thread, document_ids=[added.document_id]
         )
         worker = h.worker([agent], concurrency=1)
-        assert await worker.run_once()
-        first = await record(handle.id)
+
+        async def step() -> Any:
+            assert await worker.run_once()
+            return await record(handle.id)
+
+        first = await step()
         assert first.status is RunStatus.PAUSED and first.awaiting is not None
         await h.inbox(f"user:{user}")
+        # "always" for the first write: a tool permission kept in memory
         await agent.resume(first.awaiting.interrupt_id, "approve", reviewer=user, remember="always")
-        assert await worker.run_once()
-        second = await record(handle.id)
+        second = await step()
         assert second.status is RunStatus.PAUSED, second  # the date question
         await agent.resume(
             second.awaiting.interrupt_id, "answer", answer="2026-11-20", reviewer=user
         )
-        assert await worker.run_once()
-        assert (await record(handle.id)).status is RunStatus.SUCCESS
+        third = await step()
+        assert third.status is RunStatus.PAUSED, third  # the second write
+        # "for this conversation": read back from the run store's resolutions by later runs
+        await agent.resume(third.awaiting.interrupt_id, "approve", reviewer=user, remember="run")
+        assert (await step()).status is RunStatus.SUCCESS
+    async with harness() as h:  # a later run of the conversation, another process
+        again = [(f"con_restock_{uid}", {"sku": "B-2", "qty": 5})]
+        agent, _ = await armed("react", h, tmp_path, again, id=agent_id, tools=tools)
+        later = await agent.run("Restock B-2.", user=user, thread=thread)
+        assert later.status is RunStatus.SUCCESS and later.interrupt is None, later
         await agent.schedule("0 3 * * *", user=user, input="nightly")
         await h.writes.drain()
         await asyncio.sleep(1)
@@ -113,7 +130,10 @@ async def test_every_route_the_harness_calls_speaks_its_openapi_document(
         tpl = template(api, x.method, x.path)
         assert tpl is not None, f"{x.service}: {x.method} {x.path} is in no document"
         hit[x.service].add((x.method, tpl))
-        violations += [f"{x.service}: {v}" for v in api.request(x.request)]
+        try:
+            violations += [f"{x.service}: {v}" for v in api.request(x.request)]
+        except httpx.RequestNotRead:  # a streamed upload (a document): not a JSON body to check
+            assert x.request.headers.get("content-type", "").startswith("multipart/"), x.path
         if x.response is not None:
             violations += [f"{x.service}: {v}" for v in api.response(x.request, x.response)]
     assert not violations, "\n".join(dict.fromkeys(violations))

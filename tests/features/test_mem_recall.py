@@ -125,3 +125,27 @@ async def test_recall_and_the_inventory_never_cross_a_user_or_a_tenant(
 
 async def _any(user: str) -> list[dict]:
     return [r for r in memories_of(user) if r["memory_type"] != "OBSERVATION"]
+
+
+@pytest.mark.plan("MEM-03", "MEM-14", "INV-5")
+async def test_two_users_adding_the_same_file_each_get_a_document_of_their_own(
+    tmp_path: Path, uid: str
+) -> None:
+    """The same bytes under the same name, added for two users of one tenant: two documents,
+    each its user's, each cited by its user's next context. (The SDK keyed the upload on the
+    bytes alone: the second user got the first's document id back and could not read it.)"""
+    doc = tmp_path / "terms.md"
+    doc.write_text(f"# Terms {uid}\n\nPallets are delivered on Mondays by Uline.\n")
+    async with harness() as h:
+        first = await h.add_document(doc, user=f"ivy-{uid}", wait=120)
+        second = await h.add_document(doc, user=f"jon-{uid}", wait=120)
+    assert first.document_id != second.document_id
+    owners = memory_sql(
+        "select document_id, owner_user_id from documents where document_id in (:1, :2)",
+        first.document_id,
+        second.document_id,
+    )
+    assert {(o["document_id"], o["owner_user_id"]) for o in owners} == {
+        (first.document_id, f"ivy-{uid}"),
+        (second.document_id, f"jon-{uid}"),
+    }
