@@ -24,14 +24,14 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 
 | Area | Features | Purpose already proven end to end (before) | Added end to end (this branch) | Defects found |
 |---|---|---|---|---|
-| Memory (MEM) | 24 | 9 (live) | 24 (about 90 test cases with the per-adapter ones) | 5 in the memory service (BUG-M1..M5; M2 and M5 fixed), F-504 (contract) |
+| Memory (MEM) | 24 | 9 (live) | 23 (about 90 test cases with the per-adapter ones) | 5 in the memory service (BUG-M1..M5; M2 and M5 fixed), F-504 (contract) |
 | Runs (RUN) | 13 | 6 (live) + every route in the service suite (in process) | 13 (17 tests) | — |
-| Schedules (SCH) | 12 | 3 (live) | 11 + DST skipped (9 tests) | — |
-| Files, query, sandbox (FS) | 6 | 1 (live) | 5 (sandbox skipped: no Docker) | — |
-| Surfaces (SURF) | 8 | 4 (live) | 8 (5 tests) | — |
-| Contracts (CON) | 3 | 2 (contract suite, in process) | 3 (2 tests + INV-7 on every test) | — |
-| Harness inventory (HAR) | 38 | 30 (matrix in process; 17 also live) | 14 (on every applicable adapter: about 75 test cases) | H-DOC (fixed), F-DATE (agent-runs SDK) |
-| **Total** | **104** | **55** | **80** | **8** (3 fixed) |
+| Schedules (SCH) | 9 | 3 (live) | 8 + DST skipped (9 tests) | — |
+| Files, query, sandbox (FS) | 6 | 1 (live) | 3 (+2 proven in process, the sandbox skipped: no Docker) | — |
+| Surfaces (SURF) | 6 | 4 (live) | 6 (5 tests) | H-DOC (fixed) |
+| Contracts (CON) | 3 | 2 (contract suite, in process) | 2 (+ INV-7 on every test) | — |
+| Harness inventory (HAR) | 29 | 15 (live; all 29 in process: matrix, integration) | 22 (on every applicable adapter: about 75 test cases) | F-DATE (agent-runs SDK) |
+| **Total** | **90** | **40** | **77** | **8** (3 fixed) |
 
 (The counts are features, not tests; a feature proven before and again here counts in both.)
 
