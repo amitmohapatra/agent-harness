@@ -39,6 +39,7 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.decisions import BaseDecisionModel, ClassifierResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
@@ -431,6 +432,75 @@ async def test_a_call_auto_mode_blocks_is_recorded_and_its_classifier_is_paid_fr
     [blocked] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert blocked.status == "error"
     assert events[-1].data["spent"]["tokens"] == 42
+
+
+# ------------------------------------------------------- sync-only hooks, the library's tracing
+class SyncBefore(AgentMiddleware):
+    """A middleware with a sync ``before_model`` alone."""
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        ran.append("before_model")
+        return None
+
+
+class SyncWrap(AgentMiddleware):
+    """A middleware with a sync ``wrap_tool_call`` alone."""
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        return handler(request)
+
+
+async def test_a_sync_only_middleware_runs_as_it_does_under_langchains_own_async_run(
+    harness: Harness,
+) -> None:
+    """The harness runs a graph asynchronously, and a middleware with only sync hooks is
+    what it is under LangChain's own ``ainvoke``: a sync ``before_model`` runs (LangGraph runs
+    it for the async graph), and a sync-only ``wrap_tool_call`` is LangChain's own error, in
+    its own words — the harness neither patches the library nor words it otherwise."""
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    graph = create_agent(model, tools=[stock], middleware=[SyncBefore()])
+    result = await harness.wrap(graph, id="sync-before").run("a?", user="u")
+    assert result.answer == "7" and ran == ["before_model", "stock a", "before_model"]
+
+    def wrapped() -> Any:
+        calls = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+        return create_agent(calls, tools=[stock], middleware=[SyncWrap()])
+
+    with pytest.raises(NotImplementedError, match="awrap_tool_call is not available"):
+        await wrapped().ainvoke({"messages": [{"role": "user", "content": "a?"}]})
+    under = await harness.wrap(wrapped(), id="sync-wrap").run("a?", user="u")
+    assert under.status is RunStatus.ERROR and under.error is not None
+    assert "awrap_tool_call is not available" in under.error.message
+
+
+class Seen(BaseCallbackHandler):
+    """A callback handler of the graph's builder: LangChain's own tracing seam."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+
+    def on_chat_model_start(self, serialized: Any, messages: Any, **kwargs: Any) -> None:
+        self.started.append("model")
+
+    def on_tool_start(self, serialized: Any, input_str: str, **kwargs: Any) -> None:
+        self.started.append(str(kwargs.get("name") or serialized.get("name")))
+
+
+async def test_the_librarys_own_callbacks_see_the_run_beside_the_harnesss_spans(
+    harness: Harness, spans: Any
+) -> None:
+    """A callback handler given the LangChain way (``framework_options``: the run's
+    ``RunnableConfig``) sees every model and tool call of the run, as on its own; the harness
+    adds its spans (the run's, the tool's) and replaces none of the library's tracing."""
+    seen = Seen()
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    agent = harness.wrap(
+        create_agent(model, tools=[stock]), id="traced", framework_options={"callbacks": [seen]}
+    )
+    assert (await agent.run("a?", user="u")).answer == "7"
+    assert seen.started == ["model", "stock", "model"]
+    names = {span.name.split(" ")[0] for span in spans.get_finished_spans()}
+    assert {"invoke_agent", "execute_tool"} <= names
 
 
 # ---------------------------------------------------------------------- the calls' limits

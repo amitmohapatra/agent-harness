@@ -310,6 +310,11 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
   `context_window=`), or build the graph without `middleware()` and keep yours. `ReAct`
   refuses the same with a `ConfigurationError` naming the middleware and the parameter that
   sets it.
+* The harness runs a graph asynchronously (`astream`), so a middleware is what it is under
+  LangChain's own `ainvoke`: a sync `before_model` or `after_model` runs, and a middleware
+  with only the sync `wrap_tool_call` or `wrap_model_call` fails with LangChain's own
+  `NotImplementedError` ("... is not available"): give it the async hook
+  (`awrap_tool_call`, `awrap_model_call`). The harness does not patch the library to run it.
 * With a `PIIMiddleware`: the run store keeps the run's input as it was given — a retry and
   a resume run the graph from it — so the stored input is not redacted; and a run that fails
   before its graph returns a state records the question as it was asked, not as the
