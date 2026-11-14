@@ -93,7 +93,7 @@ TOOLS: Final = (
     "cancel_async_task",
     "list_async_tasks",
 )
-#: What the five tools do, as the harness declares Deep Agents' own (``middleware.ASYNC_TASKS``).
+#: What the five tools do, as the harness declares them (``task_tools.TOOLS``).
 RISKS: Final = {
     "start_async_task": "write",
     "update_async_task": "write",
@@ -1945,3 +1945,39 @@ async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_
     second = await say(agent, "anything new?")
     assert second.answer == f"Done: {RESULT}", second.error
     assert len([m for m in model.seen[2] if notified(m) is not None]) == 1  # told once
+
+
+async def test_arch_19_a_task_whose_run_is_gone_from_the_store_is_held_no_more(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run of a task this process holds is no longer in the run store (deleted): the next
+    read ends the holding — the hold let go, the reads over — and raises nothing (ARCH-19)."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    agent = chat(harness, server, Model(turns=[START, reports_the_id]))
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    watching = agent.adapter.tasks._kept[task.run_id].watching
+    read = harness.runs.get
+
+    async def gone(run_id: str, **more: Any) -> RunRecord | None:
+        return None if run_id == task.run_id else await read(run_id, **more)
+
+    monkeypatch.setattr(harness.runs, "get", gone)
+    await asyncio.wait_for(asyncio.gather(watching, return_exceptions=True), 10)
+    assert watching.exception() is None
+    assert not harness.holds.holds(task.run_id) and not agent.adapter.tasks._kept
+    server.release()
+
+
+def test_perf_4_a_task_held_long_is_read_less_and_less_often() -> None:
+    """The reads of a task this process holds back off as it ages, with jitter: 10 s at most
+    at first, then up to every 2 minutes — an hour's holding reads the task at most 70 times
+    (every 10 s: 360), and no two holders stay in step (PERF-4)."""
+    waits: list[float] = []
+    while sum(waits) < 3600:
+        waits.append(async_tasks.wait_before(len(waits)))
+    assert len(waits) <= 70, len(waits)
+    assert waits[0] <= 10 and max(waits) <= 120
+    assert min(waits) >= 5  # never a burst
+    assert len({round(w, 3) for w in waits[-10:]}) > 1  # jitter: not a fixed period

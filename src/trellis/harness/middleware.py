@@ -132,6 +132,7 @@ from trellis.harness import (
     accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,
     snapshots,
+    task_tools,
 )
 from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import (
@@ -158,8 +159,6 @@ from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
-    FRESHNESS,
-    STATIC,
     UNDECLARED,
     SideEffects,
     Sourced,
@@ -262,23 +261,10 @@ FILES_CHANNEL: Final = "files"
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
-#: Deep Agents' tools for the background tasks of its async sub-agents
-#: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
-#: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
-ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
-    "start_async_task": "write",
-    "update_async_task": "write",
-    "cancel_async_task": "write",
-    "check_async_task": "read",
-    "list_async_tasks": "read",
-}
-#: What a write among them says of its result: the record of what was done (the task's id,
-#: that it was sent or stopped), no value that changes — an earlier one is never marked out of
-#: date with the advice to call the tool again, which would start a second task. A status and
-#: the list are values that change: live, as any tool's by default.
-ASYNC_TASK_DONE: Final[Mapping[str, Any]] = {FRESHNESS: STATIC}
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
+#: Where the code of a tool the harness made for a graph lives: its background-task tools.
+HARNESS_CODE: Final = ("trellis.harness.bridges.background_tasks",)
 
 
 def framework_made(tool: Any) -> bool:
@@ -286,8 +272,20 @@ def framework_made(tool: Any) -> bool:
     of the built-ins the harness knows by name — the graph's state tools, Deep Agents' file
     tools and ``execute``. A tool of the agent's own with a built-in's name says what it does
     itself, as any other does."""
+    return _code_of(tool).startswith(FRAMEWORK_CODE)
+
+
+def confined(tool: Any) -> bool:
+    """Whether a write of the graph's own ``tool`` keeps to what the run owns, so it is
+    announced rather than asked (``Tool.confined``): a framework's own tool, under its own
+    permission flow, or one the harness made for the graph (:data:`HARNESS_CODE`: a
+    sub-agent's task, whose own calls are governed in its run) — never a tool of the agent's."""
+    return framework_made(tool) or _code_of(tool).startswith(HARNESS_CODE)
+
+
+def _code_of(tool: Any) -> str:
     code = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
-    return (getattr(code, "__module__", None) or "").startswith(FRAMEWORK_CODE)
+    return getattr(code, "__module__", None) or ""
 
 
 def outside_state(name: str) -> dict[str, Any]:
@@ -303,9 +301,8 @@ def declare_files(graph: Any) -> None:
     ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
     is: those calls only change the state, which its checkpoint keeps. Deep Agents'
     :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
-    (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
-    :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
-    own (:func:`framework_made`)."""
+    and what its result is (``task_tools``) — a tool that says so itself keeps its word. Only
+    the framework's own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -331,10 +328,9 @@ def declare_files(graph: Any) -> None:
                 tool.metadata = {**said, **outside_state(name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
-            elif name in ASYNC_TASKS and "side_effects" not in said:
-                done = ASYNC_TASKS[name] == "write" and not data_of(said, strict=False)
-                given = ASYNC_TASK_DONE if done else {}
-                tool.metadata = {**said, **given, "side_effects": ASYNC_TASKS[name]}
+            elif (risk := task_tools.TOOLS.get(str(name))) and "side_effects" not in said:
+                given = {} if data_of(said, strict=False) else task_tools.result_of(str(name))
+                tool.metadata = {**said, **given, "side_effects": risk}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
@@ -471,7 +467,7 @@ async def governed_call(
             reported[:] = [(done, failure)]
             raise failure
         tasks = getattr(runtime.agent.adapter, "tasks", None)
-        if tasks is not None and call["name"] in ASYNC_TASKS and framework_made(own):
+        if tasks is not None and call["name"] in task_tools.TOOLS and framework_made(own):
             # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
             try:
                 await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
@@ -494,8 +490,9 @@ async def governed_call(
             raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
-    # Deep Agents' files: its own. In a tool node, tried again around the graph's handling
-    made = Tool(spec, run, confined=framework_made(own), deferring=_CALLING.get())
+    # Deep Agents' files, a task handed on: the run's own. In a tool node, tried again around
+    # the graph's handling
+    made = Tool(spec, run, confined=confined(own), deferring=_CALLING.get())
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
@@ -2103,7 +2100,9 @@ def _unread(state: Mapping[str, Any]) -> dict[str, Any]:
     messages = state.get("messages") or []
     answered = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
     told = [
-        m for m in messages[answered + 1 :] if (notified(m) or {}).get("source") == ASYNC_SUBAGENT
+        m
+        for m in messages[answered + 1 :]
+        if (notified(m) or {}).get("source") == task_tools.SOURCE
     ]
     if not told:
         return {}
@@ -2113,10 +2112,6 @@ def _unread(state: Mapping[str, Any]) -> dict[str, Any]:
         "messages": [RemoveMessage(id=str(m.id)) for m in told],
         "async_tasks": {t: {**tasks[t], "status": "running"} for t in ids if t in tasks},
     }
-
-
-#: The notification source of a background task's outcome (Deep Agents' ``lc_source``).
-ASYNC_SUBAGENT: Final = "async_subagent"
 
 
 class StallGuard(AgentMiddleware):

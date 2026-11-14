@@ -37,12 +37,11 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
-from trellis.harness import background
+from trellis.harness import background, task_tools
 from trellis.harness.adapters.langgraph import notified
 from trellis.harness.agent import Agent
 from trellis.harness.automatic import without_tools
-from trellis.harness.background import TOOLS
-from trellis.harness.middleware import ASYNC_TASK_DONE
+from trellis.harness.conversation import Mode
 from trellis.harness.runtime import current
 
 #: The state key of a ``ReAct`` graph's model calls so far in the run (LangChain's
@@ -50,11 +49,11 @@ from trellis.harness.runtime import current
 STEPS: Final = "thread_model_call_count"
 #: Deep Agents' argument schema of each tool.
 SCHEMAS: Final[Mapping[str, type]] = {
-    "start_async_task": StartAsyncTaskSchema,
-    "check_async_task": CheckAsyncTaskSchema,
-    "update_async_task": UpdateAsyncTaskSchema,
-    "cancel_async_task": CancelAsyncTaskSchema,
-    "list_async_tasks": ListAsyncTasksSchema,
+    task_tools.START: StartAsyncTaskSchema,
+    task_tools.CHECK: CheckAsyncTaskSchema,
+    task_tools.UPDATE: UpdateAsyncTaskSchema,
+    task_tools.CANCEL: CancelAsyncTaskSchema,
+    task_tools.LIST: ListAsyncTasksSchema,
 }
 
 
@@ -74,13 +73,13 @@ class BackgroundTasks(AgentMiddleware):
         subagents: Mapping[str, Agent | None],
         *,
         described: Mapping[str, str],
-        strategies: Mapping[str, str] | None = None,
+        strategies: Mapping[str, Mode] | None = None,
         max_steps: int | None = None,
     ) -> None:
         super().__init__()
         self.max_steps = max_steps
         self.offered = background.Offered(subagents, described=described, strategies=strategies)
-        self.tools = [self._tool(name) for name in TOOLS]
+        self.tools = [self._tool(name) for name in task_tools.TOOLS]
 
     def compiled(self, graphs: Mapping[str, Any]) -> None:
         """The compiled graphs of the Deep Agents sub-agents among the sub-agents, by name
@@ -89,9 +88,8 @@ class BackgroundTasks(AgentMiddleware):
 
     def _tool(self, name: str) -> Any:
         """One of the five tools as a LangChain tool: Deep Agents' name and arguments, its work
-        the harness's (``Offered.call``), saying what it does (``background.SIDE_EFFECTS``; the
-        result of a start, an update and a cancel a record of what was done:
-        ``middleware.ASYNC_TASK_DONE``)."""
+        the harness's (``Offered.call``), saying what it does and what its result is as Deep
+        Agents' own is said to (``task_tools``)."""
         offered = self.offered
 
         async def run(runtime: ToolRuntime, **args: Any) -> Any:
@@ -102,14 +100,13 @@ class BackgroundTasks(AgentMiddleware):
             message = ToolMessage(said, tool_call_id=runtime.tool_call_id)
             return Command(update={"messages": [message], "async_tasks": changed})
 
-        done = ASYNC_TASK_DONE if name in background.DONE else {}
         return StructuredTool.from_function(
             name=name,
             coroutine=run,
             description=offered.descriptions[name],
             infer_schema=False,
             args_schema=SCHEMAS[name],
-            metadata={**done, "side_effects": background.SIDE_EFFECTS[name]},
+            metadata={**task_tools.result_of(name), "side_effects": task_tools.TOOLS[name]},
         )
 
     # ------------------------------------------------------------------ offered where they work
@@ -121,7 +118,7 @@ class BackgroundTasks(AgentMiddleware):
         runtime = current()
         if runtime is not None and runtime.attended:
             return await handler(request)
-        return await handler(without_tools(request, TOOLS))
+        return await handler(without_tools(request, tuple(task_tools.TOOLS)))
 
     # ------------------------------------------------------------------ the pull
     async def abefore_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:
@@ -133,7 +130,7 @@ class BackgroundTasks(AgentMiddleware):
             return None
         messages = state.get("messages") or []
         noted = (notified(messages[-1]) if messages else None) or {}
-        event = noted.get("data") if noted.get("source") == background.SOURCE else None
+        event = noted.get("data") if noted.get("source") == task_tools.SOURCE else None
         recorded = await background.recorded(run, event, state.get("async_tasks") or {})
         tasks = {**(state.get("async_tasks") or {}), **recorded}
         if run.attended:

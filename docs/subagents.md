@@ -196,11 +196,11 @@ turn that works on after the turn replied, apart from it, held in the run store;
 new messages meanwhile, and the task's result comes back as a notification at the next model
 call or turn, or by a turn of the chat's own when it is idle (its thread stream delivers it).
 Its questions are asked through the chat, as a sub-agent's are through its parent; cancelling
-the turn cancels it. The tools and the task record are Deep Agents' async sub-agent ones, and
-the mechanism is the harness's own (`trellis.harness.background`): an adapter with no
-background of its own plugs into it — a tool that starts a child run calls `background.start`
-(or starts the run itself) and the outcome reaches the chat by `background.delivered`, which
-takes any child run of a chat's turn ([react.md](frameworks/react.md#a-task-in-the-background)).
+the turn cancels it. The tools and the task record are Deep Agents' async sub-agent ones,
+governed as Deep Agents' own are for a task on a server (a start, an update and a cancel are
+announced writes; a check and the list read), and the mechanism is the harness's own
+(`trellis.harness.background`); a task belongs to the conversation that started it
+([react.md](frameworks/react.md#a-task-in-the-background)).
 
 ## Limits
 

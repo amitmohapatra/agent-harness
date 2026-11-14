@@ -23,11 +23,19 @@ chat's own on its thread stream when it is idle; its questions asked through the
   earlier turns); the records it updates are carried with the task list; the extra model turn
   after a final answer counts against `max_steps`, and past it the run keeps its answer
   instead of LangChain's "Model call limits exceeded".
-- A task held by a server is read every 10 s: an idle chat is told how it ended, a task whose
+- A task held by a server is read after 10 s at most, then less and less often (up to every
+  two minutes, with jitter): an idle chat is told how it ended, a task whose
   run was cancelled from another server is cancelled on its server, and a follow-up to a task
   that ended is a run of its own.
 - An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
 - An empty task list is not carried.
+
+### Changed: the five task tools are governed one way, on a server or in the harness
+
+- `start_async_task`, `update_async_task` and `cancel_async_task` are writes wherever the task
+  runs, announced on the run's stream and not asked about; `check_async_task` and
+  `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
+  cancel of a harness task no longer pauses a chat for an approval.
 
 ### Security: a background task belongs to the conversation that started it (SEC-R-1)
 

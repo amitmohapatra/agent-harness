@@ -4,6 +4,7 @@ reads a message the user did not type (``history``, ``adapters.langgraph``)."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,7 +20,7 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-from trellis.harness import background
+from trellis.harness import background, pipeline
 from trellis.harness.a2a.executor import _payload
 from trellis.harness.a2a.translate import value_part
 from trellis.harness.adapters.langgraph import (
@@ -496,3 +497,39 @@ def test_sec_r_1_a_run_is_given_messages_never_what_the_harness_keeps_or_marks()
     adapter = LangGraphAdapter()
     assert adapter.prepare_input(None, given, None) == {"messages": [plain], "topic": "tides"}
     assert adapter.prepare_input(None, {"async_tasks": {"task_1": TASK}}, None) == {}
+
+
+async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run's next attempt, begun while the earlier one still hands its outcome on, stays
+    known as at work once the earlier one is over: it can be stopped, and is cut off when the
+    harness closes (ARCH-7)."""
+    runs = LocalRuns()
+    record = await stored(runs, RunStatus.SUCCESS)
+    handing_on, release, working = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    attempts: list[int] = []
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) > 1:  # the next attempt: at work until the test ends
+            working.set()
+            await asyncio.Event().wait()
+
+    async def then(found: RunRecord) -> None:  # the first attempt's outcome, still handed on
+        handing_on.set()
+        await release.wait()
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    first = tasks._at_work["run_1"]
+    await handing_on.wait()
+    tasks.run(agent, record)  # the answer came: its next attempt
+    await working.wait()
+    release.set()
+    await first
+    assert tasks.at_work("run_1")
+    await tasks.aclose()

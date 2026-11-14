@@ -69,6 +69,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.conversation import Mode
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
 from trellis.harness.removed import removed
@@ -450,27 +451,36 @@ def ReAct(
     return _described(graph, named, window, instructions, [*run, *helpers])
 
 
-def _strategies(subagents: Sequence[Any]) -> dict[str, str]:
+#: What Deep Agents' ``update_strategy`` says a follow-up does with the task's run at work, as
+#: the conversation's modes: ``interrupt`` stops it, ``enqueue`` waits for it.
+UPDATE_STRATEGIES: Final[Mapping[str, Mode]] = {
+    "interrupt": Mode.INTERRUPT,
+    "enqueue": Mode.QUEUE,
+}
+
+
+def _strategies(subagents: Sequence[Any]) -> dict[str, Mode]:
     """Each Deep Agents sub-agent's ``update_strategy`` (Deep Agents' ``AsyncSubAgent`` key,
-    taken by one that runs in the harness too, for its tasks' follow-ups), out of its spec: an
-    ``AsyncSubAgent`` keeps its own, which Deep Agents reads."""
-    found: dict[str, str] = {}
+    taken by one that runs in the harness too, for its tasks' follow-ups:
+    :data:`UPDATE_STRATEGIES`), out of its spec: an ``AsyncSubAgent`` keeps its own, which Deep
+    Agents reads."""
+    found: dict[str, Mode] = {}
     for given in subagents:
         if isinstance(given, dict) and "update_strategy" in given and "graph_id" not in given:
             strategy = given.pop("update_strategy")
-            if strategy not in ("interrupt", "enqueue"):
+            if strategy not in UPDATE_STRATEGIES:
                 raise ConfigurationError(
                     f"{given.get('name')}: update_strategy is 'interrupt' or 'enqueue', "
                     f"not {strategy!r}"
                 )
-            found[str(given["name"])] = strategy
+            found[str(given["name"])] = UPDATE_STRATEGIES[strategy]
     return found
 
 
 def _background(
     native: Sequence[Mapping[str, Any]],
     helpers: Sequence[Any],
-    strategies: Mapping[str, str],
+    strategies: Mapping[str, Mode],
     *,
     max_steps: int,
 ) -> Any:

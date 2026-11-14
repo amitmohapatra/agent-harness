@@ -552,9 +552,16 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
 * **Check, list, update, cancel** — read the run store from any server. `update_async_task`
   follows Deep Agents' `update_strategy` (a `SubAgent` dict may carry it): `interrupt`, the
   default, cancels the task's run at work and continues its conversation
-  (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`). A start and an
-  update hand work on (reads, as `task` is: each call the sub-agent makes is governed on its
-  own); a cancel stops work, a write a person approves in a chat.
+  (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`).
+* **Approvals** — as for a task on a server (below): a check and the list
+  are reads; a start, an update and a cancel are writes, announced on the stream and not
+  asked about (each call the sub-agent makes is governed in its own run). To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
+  the agent and the chat thread. The tools, the questions asked through the chat and each
+  read act on a task's run only then; a task id from another conversation is answered as one
+  this conversation does not track. A run's input names no task list (`async_tasks` in a
+  mapping input is left out), and a message a chat client gives is never a notification.
 * **With the turn** — a turn that is cancelled cancels the tasks it started (their attempts
   stop); one out of time leaves them working: the turn's clock is not theirs.
 * **Notifications in the conversation** — the turn's question stays the user's message; a
@@ -596,7 +603,8 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   for that turn is not marked read — the next turn is told it, memory on or off): each new outcome is a
   notification after the conversation's messages — a user-role message the user did not type,
   marked with langchain-core's notification metadata, which the harness treats so (below). When
-  no turn works, the server holding the task's run reads it every 10 s: ended, its run ends
+  no turn works, the server holding the task's run reads it — after 10 s at most at first, then
+  less and less often, up to every two minutes, never two servers in step —: ended, its run ends
   and the chat is told by a turn of its own, as a harness task's outcome is
   ([above](#a-task-in-the-background)). `update_async_task` and `cancel_async_task` reach it by
   its id.

@@ -12,9 +12,10 @@ turn, as the task does — kept as a Claude subagent working in the background i
   it again on its server: a run of its own here too, the child of the turn that sent it;
 * **held and read** — handed on past the turn's attempt (``Helpers.detached``) and held in the
   run store from this process (``holding``) while the task runs: a process that dies with it
-  leaves a run the store ends (cut off). Every :data:`WATCH_SECONDS` this process reads the
-  task (:meth:`AsyncTasks._watch`): ended on its server (Deep Agents' own ``check_async_task``),
-  its run ends and the chat is told how — a turn of the chat's own when it is idle, as a
+  leaves a run the store ends (cut off). This process reads the task
+  (:meth:`AsyncTasks._watch`: after :data:`WATCH_SECONDS` at first, then less and less often,
+  :func:`wait_before`): ended on its server (Deep Agents' own ``check_async_task``), its run
+  ends and the chat is told how — a turn of the chat's own when it is idle, as a
   harness task's outcome is (``background.delivered``); its run ended elsewhere (its turn
   cancelled from another server), the task is cancelled on its server;
 * **its end** — when Deep Agents' own tools say the task ended: a later check or list
@@ -37,6 +38,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import random
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -46,6 +48,7 @@ from trellis.contracts import AgentError, RunRecord, RunStatus, stable_id
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
+from trellis.harness.task_tools import CANCEL, CHECK, START, UPDATE
 from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
@@ -54,14 +57,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.harness")
 
-#: Deep Agents' tools that start a task and cancel one (``middleware.ASYNC_TASKS`` has all five).
-START: Final = "start_async_task"
-UPDATE: Final = "update_async_task"
-CHECK: Final = "check_async_task"
-CANCEL: Final = "cancel_async_task"
-#: How often the process holding a task's run reads the task: how it goes on its server (Deep
-#: Agents' own ``check_async_task``) and whether its run was ended elsewhere.
+#: How long the process holding a task's run waits before it first reads the task — how it
+#: goes on its server (Deep Agents' own ``check_async_task``) and whether its run was ended
+#: elsewhere — and how many times that at most between two reads of a task that has run long
+#: (:func:`wait_before`).
 WATCH_SECONDS: Final = 10.0
+WATCH_SLOWEST: Final = 12
 #: The statuses Deep Agents takes for a task that has ended (its ``_TERMINAL_STATUSES``), and
 #: how the task's run ends for each.
 ENDED: Final[Mapping[str, RunStatus]] = {
@@ -78,6 +79,14 @@ CANCELLED_WITH: Final = "the run that started the task was cancelled"
 #: The most tasks one agent keeps held in this process: past it the oldest is let go, and the
 #: run store ends its run once its hold lapses (cut off), as a process that stopped leaves it.
 KEPT: Final = MAXSIZE
+
+
+def wait_before(reads: int) -> float:
+    """The seconds before a held task's next read, after ``reads`` of them: twice as long
+    each time, from :data:`WATCH_SECONDS` to :data:`WATCH_SLOWEST` times that, less a random
+    part (up to half), so the holders of many tasks do not read in step."""
+    slower = min(2**reads, WATCH_SLOWEST)
+    return WATCH_SECONDS * slower * random.uniform(0.5, 1.0)
 
 
 def run_of(tenant: str, agent_id: str, task_id: str, again: str | None = None) -> str:
@@ -188,17 +197,22 @@ class AsyncTasks:
             kept.watching.cancel()
 
     async def _watch(self, run_id: str) -> None:
-        """Every :data:`WATCH_SECONDS` while this process holds ``run_id``: its run ended
-        elsewhere (cancelled with its turn from another server) cancels the task on its server;
-        the task ended on its server ends its run, and the chat is told how
+        """While this process holds ``run_id``, read less and less often (:func:`wait_before`):
+        its run ended elsewhere (cancelled with its turn from another server) cancels the task
+        on its server; the task ended on its server ends its run, and the chat is told how
         (``background.delivered``: a turn of its own when it is idle)."""
+        reads = 0
         while True:
-            await asyncio.sleep(WATCH_SECONDS)
+            await asyncio.sleep(wait_before(reads))
+            reads += 1
             kept = self._kept.get(run_id)
             if kept is None:
                 return
             record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
-            assert record is not None  # its turn started it
+            if record is None:  # gone from the run store: nothing to hold, or to end
+                del self._kept[run_id]
+                self._released(kept)
+                return
             if record.status is RunStatus.CANCELLED:  # with its turn, on another server
                 await self.stopped(run_id, CANCELLED_WITH)
                 return
@@ -232,8 +246,8 @@ class AsyncTasks:
         elif status is not RunStatus.SUCCESS and status is not RunStatus.CANCELLED:
             event["error"] = background.FAILED
         record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
-        assert record is not None  # its turn started it
-        await background.delivered(kept.agent, record, update=event)
+        if record is not None:
+            await background.delivered(kept.agent, record, update=event)
 
     async def _closed(self, run_id: str, kept: Kept, status: RunStatus, said: str) -> None:
         """The task's run held here (``kept``) ended ``status`` outside any attempt (``said``:

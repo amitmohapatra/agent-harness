@@ -23,13 +23,14 @@ from typing import Any, Final
 import pytest
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
-from tests.integration.test_react_async_subagent import Model
+from tests.integration.test_react_async_subagent import RISKS, Model
 from tests.support.arm import arm
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import (
     ConfigurationError,
     InterruptDecision,
     InterruptResolution,
+    RunEvent,
     RunStart,
     RunStatus,
 )
@@ -43,6 +44,7 @@ from trellis.harness.frontend import Frontend
 from trellis.harness.harness import LOCAL_TENANT
 from trellis.harness.result import Result
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.base import max_age
 
 USER: Final = "ada"
 ROOT: Final = Path(__file__).resolve().parents[2]
@@ -85,7 +87,7 @@ def told(messages: list[BaseMessage]) -> list[dict[str, Any]]:
     return [
         (notified(m) or {}).get("data") or {}
         for m in messages
-        if (notified(m) or {}).get("source") == background.SOURCE
+        if (notified(m) or {}).get("source") == "async_subagent"
     ]
 
 
@@ -370,10 +372,7 @@ async def test_check_list_and_cancel_reach_the_task(harness: Harness, gate: Gate
     assert listed.answer == (
         f"1 tracked task(s):\n- task_id: {task.thread_id}  agent: research  status: running"
     )
-    asked = await chatted(agent, "stop it")  # a cancel stops work: a write, asked in a chat
-    assert asked.interrupt is not None and asked.interrupt.tool_call is not None
-    assert asked.interrupt.tool_call.tool == "cancel_async_task"
-    cancelled = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer=USER)
+    cancelled = await chatted(agent, "stop it")  # a write, announced: nobody is asked
     assert cancelled.status is RunStatus.SUCCESS, cancelled.error
     assert cancelled.answer == f"Cancelled async subagent task: {task.thread_id}"
     ended = await harness.runs.get(task.run_id)
@@ -381,6 +380,42 @@ async def test_check_list_and_cancel_reach_the_task(harness: Harness, gate: Gate
     assert not harness.background.at_work(task.run_id)  # its attempt stopped here too
     none = await chatted(agent, "anything running?")
     assert none.answer == "No async subagent tasks tracked."
+
+
+async def test_arch_14_the_five_tools_do_here_what_they_do_on_a_server(
+    harness: Harness, gate: Gate
+) -> None:
+    """One interface, governed one way wherever the task runs (ARCH-14): the run's tool set
+    has each of the five with the risk Deep Agents' own has on a server, and a write's result
+    is the record of what was done — never out of date."""
+    agent = chat(harness, gate, Model(turns=[]))
+    own = {spec.name: spec for spec in await agent.adapter.native(agent.target)}
+    assert {name: own[name].side_effects for name in TOOLS} == RISKS
+    assert {name: max_age(own[name]) for name in TOOLS} == {
+        "start_async_task": None,
+        "update_async_task": None,
+        "cancel_async_task": None,
+        "check_async_task": 0.0,
+        "list_async_tasks": 0.0,
+    }
+
+
+@pytest.mark.parametrize("name", TOOLS)
+async def test_arch_14_a_read_runs_and_a_write_is_announced_and_none_asks_a_person(
+    harness: Harness, gate: Gate, name: str
+) -> None:
+    """In a chat a person reads, as on a server: a check and the list run, a start, an update
+    and a cancel are announced on the run's stream, and nobody is asked about any (the tool
+    catalog may say more)."""
+    args = {"description": "d", "subagent_type": "research", "task_id": "t", "message": "m"}
+    agent = chat(harness, gate, Model(turns=[(name, args), "done"]))
+    record = await agent._opened("go", user=USER, thread=THREAD, tenant=None, app=Frontend())
+    events: list[RunEvent] = []
+    done = await pipeline.attempt(agent, record, "go", listener=events.append)
+    assert done.status is RunStatus.SUCCESS, done.error  # it ran: no pause for an approval
+    notices = [e.data["tool"] for e in events if e.data.get("name") == "tool_notice"]
+    assert notices == ([name] if RISKS[name] == "write" else [])
+    gate.opened.set()
 
 
 async def test_a_check_of_a_finished_task_has_its_result(harness: Harness, gate: Gate) -> None:
@@ -429,7 +464,7 @@ async def test_an_update_sends_the_task_new_instructions_as_its_update_strategy_
     wrapped = harness.wrap(writer, id="writer")
     agent = harness.wrap(ReAct("You help.", model, subagents=[wrapped]), id="chat")
     if strategy == "enqueue":  # a wrapped agent's tasks: the strategy its ReAct gives them
-        _found_in(agent.target).offered.strategies["writer"] = "enqueue"
+        _found_in(agent.target).offered.strategies["writer"] = Mode.QUEUE
     first = await chatted(agent, "write about lighthouses")
     task = await task_run(harness, first.run_id)
     await until(lambda: heard == ["lighthouses"])
@@ -870,7 +905,7 @@ async def test_outside_a_harness_run_the_tasks_middleware_steps_aside(gate: Gate
 def test_an_update_strategy_is_deep_agents_own() -> None:
     queued = {"name": "notes", "description": "Notes.", "update_strategy": "enqueue"}
     graph = ReAct("You help.", Model(turns=[]), subagents=[queued])
-    assert _found_in(graph).offered.strategies == {"notes": "enqueue"}
+    assert _found_in(graph).offered.strategies == {"notes": Mode.QUEUE}
     assert "update_strategy" not in queued  # Deep Agents is given its own spec
     spec = {"name": "notes", "description": "Notes.", "update_strategy": "later"}
     with pytest.raises(ConfigurationError, match="notes: update_strategy is 'interrupt' or"):
