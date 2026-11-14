@@ -106,6 +106,51 @@ not hold:
   context the `UserPromptSubmit` hook adds): Claude Code itself says the date once a session
   and again only when the day changes (its `date_change` reminder), never the hour.
 
+### Fixed: what an independent review of the adapters found
+
+- **The run's `after_tool` hooks decide what the model reads of a failed call again.** A tool
+  that raised had its error handed back to its framework as it was, whatever a hook made of
+  the call: a LangGraph graph's wrapper or `ToolRetryMiddleware` worded it, the OpenAI SDK's
+  failure function worded it, and a tool the SDK runs here returned its own result over a
+  hook's. Now a failure a hook makes a result is that result, and a failure a hook rewords is
+  still delivered as the framework delivers a failed call — raised into the graph (its retry,
+  its wrappers and its tool node act on it), told by the SDK's failure policy (which may end
+  the run), raised to the SDK as the same error saying the hook's words — the model reading
+  the hook's words.
+- **A call that asks waits for the calls of its model step however LangGraph runs them.**
+  `create_agent` (and Deep Agents) runs each call as a task of its own: the wait for a
+  `ToolNode`'s other calls never applied, LangGraph cancelled the write beside the call that
+  asked, and the resumed run told the model its effect was unknown.
+- **A computer call's actions are one decision.** A batch pressing the same key three times
+  was read as a model looping: the third press was skipped, unsaid, and the run marked
+  stalled. The same computer call step after step is still stopped, and an action that does
+  not run is told to the model in its next call.
+- **Two turns of a conversation ending together keep both their tasks** (the carried task
+  list), on one server or two, in any order. The file store has no conditional write, so no
+  turn writes over another's any more: each keeps a file of its own under the conversation's
+  folder (what it read merged with its own state), readers merge every file there, and a turn
+  removes the files it read only once its own holds them.
+- **A LangGraph graph's retry policy is the only one for its own tools.** The harness tried a
+  read whose error may pass again inside each of the graph's tries:
+  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times, a node's
+  `RetryPolicy(max_attempts=3)` 9 times. A graph's own tool is now tried once by the bridge,
+  and tried again around the graph's handling of its error only where the graph did not try
+  it again itself — seen as it happens: a wrapper running the call a second time, or a retry
+  policy of its node that retries the error. `ToolRetryMiddleware(max_retries=2)` and
+  `RetryPolicy(max_attempts=3)` call the tool 3 times; under a wrapper that only handles the
+  error (`ToolErrorMiddleware`, Deep Agents' file middleware, `ReAct`'s `GovernTools`), or none,
+  the harness's 3 tries stand — one call of the run, as before, its tries its attempts: one
+  start and one result on the stream, one record, one count against `max_tool_calls`, one
+  question for a call that asks, and the `on_error` hooks told once if its last try fails
+  (the `after_tool` hooks see each try, whose words the graph's handling of it carries).
+- **An OpenAI function tool's own `timeout` is always that tool's timed-out call.** Counted
+  from when its task began, a call whose task began late (another call holding the loop) was
+  recorded as cut by a cancelled run, its start left open; it is counted from when the SDK
+  made the call, as the SDK counts it.
+- **One call, one question.** A person's answer about a call covers its framework's own tries
+  of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
+  second time); an edited call, or the same call of a new model step, is asked about anew.
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries
@@ -134,7 +179,8 @@ worked as the library gives them. Five did not:
 - **A call that asks waits for the calls a `ToolNode` runs beside it.** The node stops at the
   first call that raises and leaves the others running: a write beside a call waiting for an
   approval ended after the run's pause was recorded, and the resumed run told the model its
-  effect was unknown ("interrupted by a crash").
+  effect was unknown ("interrupted by a crash"). (This missed `create_agent`, which runs each
+  call as a task of its own: fixed above.)
 - **A Deep Agent with a `mode="fork"` sub-agent is wrapped.** `h.wrap` never returned: a fork
   runs the graphs it is one of, and reading the sub-agents' file tools went round.
 
@@ -149,7 +195,8 @@ Four more where the harness restricted what the library does:
   the model reads the failure and the run goes on.
 - **The graph's own text for a failed call is what the model reads**: a `ToolNode`'s
   `handle_tool_errors` text reached the model as `"<tool> failed: <text>"`. The run's
-  `after_tool` hooks still have the last word.
+  `after_tool` hooks still have the last word (for an error the tool raised, only since the
+  fix above).
 - **What a node writes to LangGraph's `custom` stream mode is on the run's events**:
   `get_stream_writer()` (and a middleware's `runtime.stream_writer`) writes are `CUSTOM` events
   named `custom`, the write in `value` (AG-UI's `CUSTOM` event), from `agent.stream` and
@@ -182,7 +229,8 @@ the next turn's `check_async_task` was refused its id.
   in the process. Nothing is added to a run's record, to agent-runs or to the memory service.
 - **Turns that overlap lose no task.** What a turn ends with is merged into what is kept,
   task by task, instead of replacing it: a turn approved after the conversation's next turn
-  ended, or a worker's turn still running while another ends, each keep their tasks. A turn
+  ended, or a worker's turn still running while another ends, each keep their tasks. (Two
+  turns ending at the same moment could still lose one's: fixed above.) A turn
   that waits for an approval has its list kept as it pauses: the task it started is listed
   by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
 - **The five task tools say what they do** where the harness says it of Deep Agents' own

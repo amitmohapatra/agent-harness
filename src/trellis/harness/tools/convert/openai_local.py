@@ -16,19 +16,23 @@ What the model reads of a call that does not run is the bridge's (the approver's
 hook's); of one whose code failed, what the SDK makes of the failure; of a call that paused
 the run, nothing — the run stops there (:func:`paused_inside`), as a harness tool's pause
 stops it. An edited call runs with the edited arguments. A computer's action that does not
-run is skipped (the SDK tells the model of a computer call by the screenshot after it)."""
+run is skipped — the SDK tells the model of a computer call by the screenshot after it — and
+the model is told why in its next model call's input (:func:`unsaid`). The actions of one
+computer call are one model decision (:func:`computer_started`)."""
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import functools
 import inspect
 import json
 import weakref
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Hashable, Sequence
 from typing import Any, Final
 
-from trellis.contracts import ToolSpec
+from trellis.contracts import ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness.runtime import Runtime, current
 from trellis.harness.tools import bridge
@@ -42,6 +46,12 @@ IDENTITY: Final = frozenset({"id", "call_id", "status", "type"})
 #: an exception into a failed output and goes on), by run: raised again from the run's hooks
 #: as the run's next step begins (:func:`paused_inside`).
 _PAUSED: weakref.WeakKeyDictionary[Runtime, BaseException] = weakref.WeakKeyDictionary()
+#: Per run: the computer calls of its latest model reply not yet carried out, in order; the one
+#: being carried out (:func:`computer_started`); and what the model is to be told of computer
+#: actions that did not run (:func:`unsaid`).
+_COMPUTER_CALLS: weakref.WeakKeyDictionary[Runtime, deque[str]] = weakref.WeakKeyDictionary()
+_COMPUTER_CALL: weakref.WeakKeyDictionary[Runtime, Hashable] = weakref.WeakKeyDictionary()
+_UNSAID: weakref.WeakKeyDictionary[Runtime, list[str]] = weakref.WeakKeyDictionary()
 
 
 def call_args(raw: Any) -> dict[str, Any]:
@@ -88,12 +98,20 @@ async def through(
     run: Callable[[dict[str, Any]], Any],
     *,
     call_id: str | None = None,
+    decision: Hashable | None = None,
     on_refusal: Callable[[str], Any] = str,
 ) -> Any:
     """``run(args)`` — the code that carries out a call of the SDK's tool ``name`` — as the run's
     call: what ``run`` returned (live, as the SDK takes it), the journal's record of it on a
     resume, ``on_refusal`` of what the model reads when the call does not run; what ``run``
-    raised is raised again, for the SDK to deal with as it does. Outside a run, ``run(args)``."""
+    raised is raised again, for the SDK to deal with as it does. Outside a run, ``run(args)``.
+    ``decision``: the model decision the call is part of (``bridge.call``: a computer call, for
+    each of its actions).
+
+    A call whose outcome the run's ``after_tool`` hooks changed (``bridge.hooked``) is theirs:
+    a result is returned as the journal keeps it (what a resume returns), and a failure is
+    raised as the SDK takes a failed call — the error, its class kept, saying the hooks' words
+    (:func:`reworded`): the SDK words what the model reads of it from the error itself."""
     runtime = current()
     if runtime is None:
         return await _awaited(run(args))
@@ -112,11 +130,15 @@ async def through(
 
     spec = runtime.native.get(name) or ToolSpec(name=name)
     try:
-        outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id)
+        outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
     except Exception as error:
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
             _PAUSED[runtime] = error
         raise
+    if bridge.hooked(outcome):  # the run's after_tool hooks have the last word on the call
+        if outcome.ok:
+            return outcome.output  # as the journal keeps it, as a resume replays it
+        raise reworded(raised[-1] if raised else None, str(outcome.output))
     if live:
         return live[-1]
     if raised:
@@ -124,6 +146,22 @@ async def through(
     if outcome.ok:
         return outcome.output  # the journal's: run before a resume
     return on_refusal(str(outcome.output))
+
+
+def reworded(error: Exception | None, said: str) -> Exception:
+    """``error`` saying ``said`` in place of its own message: a copy of it — its class kept,
+    not its cause or traceback, so the words it had are not carried along — or, when it
+    cannot be copied to say exactly that (no error; one whose class words itself), a
+    ``ToolError`` saying it."""
+    if error is not None:
+        try:
+            copied = copy.copy(error)
+            copied.args = (said,)
+        except Exception:  # an error its class cannot rebuild from its arguments
+            copied = None
+        if copied is not None and str(copied) == said:
+            return copied
+    return ToolError(said, source="tools")
 
 
 async def _awaited(value: Any) -> Any:
@@ -281,7 +319,14 @@ def _computer_class() -> type:
             edited = dict(given.get("action") or {})
             return getattr(self._inner, str(edited.pop("type", name)))(**edited)
 
-        return await through(self._tool.name, {"action": action}, run, on_refusal=_skipped)
+        runtime = current()
+        return await through(
+            self._tool.name,
+            {"action": action},
+            run,
+            decision=None if runtime is None else _COMPUTER_CALL.get(runtime),
+            on_refusal=_skipped,
+        )
 
     body.update(
         __init__=__init__,
@@ -292,9 +337,50 @@ def _computer_class() -> type:
     return type("GovernedComputer", (AsyncComputer,), body)
 
 
-def _skipped(_said: str) -> None:
-    """A computer action that may not run: nothing done (the model sees the screen as it is)."""
-    return None
+def _skipped(said: str) -> None:
+    """A computer action that may not run: nothing done — the model sees the screen as it is,
+    and is told why in the input of its next model call (:func:`unsaid`: a computer call's
+    output is a screenshot, with nowhere to say it)."""
+    runtime = current()
+    assert runtime is not None  # a call is refused only inside a run (:func:`through`)
+    _UNSAID.setdefault(runtime, []).append(said)
 
 
-__all__ = ["call_args", "computing", "paused_inside", "run_here", "through"]
+def unsaid(runtime: Runtime) -> list[str]:
+    """What the model is to be told of the computer actions that did not run since its last
+    model call (why each did not: the bridge's words), once: the adapter tells it in its next
+    model call's input (``adapters.openai_agents``)."""
+    return _UNSAID.pop(runtime, [])
+
+
+def computer_replied(runtime: Runtime, items: Sequence[Any]) -> None:
+    """A model reply's computer calls (``items``: its output), in order: the SDK carries them
+    out one after another, each its actions and then a screenshot (:func:`computer_started`)."""
+    from openai.types.responses import ResponseComputerToolCall
+
+    calls = [i.call_id for i in items if isinstance(i, ResponseComputerToolCall)]
+    _COMPUTER_CALLS[runtime] = deque(calls)
+
+
+def computer_started(runtime: Runtime) -> None:
+    """The SDK starts carrying out a computer call (its ``on_tool_start``, before the call's
+    actions): its actions are each a call of the computer tool and one model decision — the
+    computer call's id (``bridge.call``'s ``decision``): the stall rule reads a batch of three
+    ``Down`` presses as one decision, not a model looping, and a person's answer about an
+    action covers the same action again in it. A call carried out with no reply read before it
+    (a resumed run's) is a decision of its own all the same."""
+    pending = _COMPUTER_CALLS.get(runtime)
+    _COMPUTER_CALL[runtime] = ("computer", pending.popleft() if pending else object())
+
+
+__all__ = [
+    "call_args",
+    "computer_replied",
+    "computer_started",
+    "computing",
+    "paused_inside",
+    "reworded",
+    "run_here",
+    "through",
+    "unsaid",
+]

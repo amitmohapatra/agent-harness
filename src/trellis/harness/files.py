@@ -20,6 +20,7 @@ on local disk, until it is deleted.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import mimetypes
@@ -181,6 +182,16 @@ class FileStore:
             return bytes(self.fs.cat_file(path)) if self.fs.isfile(path) else None
 
         return await asyncio.to_thread(cat)
+
+    async def remove(self, folder: str, name: str) -> None:
+        """The file gone (nothing when there is none)."""
+        path = self.path(folder, name)
+
+        def rm() -> None:
+            with contextlib.suppress(FileNotFoundError):  # gone already (removed meanwhile)
+                self.fs.rm_file(path)
+
+        await asyncio.to_thread(rm)
 
     async def size(self, folder: str, name: str) -> int | None:
         """The file's size, ``None`` when there is none."""

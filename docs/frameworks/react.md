@@ -535,7 +535,7 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   its next one: per user, thread and agent, a cancelled turn's too, and that of a turn that
   waits for an approval (the task it started is listed meanwhile, and still is when the turn
   is cancelled there). Two turns that overlap (one waiting for an approval, a worker's still
-  running while another ends) each keep the tasks they started. A graph with a checkpointer
+  running while another ends, two ending at once) each keep the tasks they started. A graph with a checkpointer
   of its own (`create_deep_agent(..., middleware=middleware(), checkpointer=...)`) keeps the
   list in its thread instead, and it lasts as that checkpointer does.
 * **Across servers and restarts** — the list is kept in the process that ran the turn and in
@@ -546,7 +546,11 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   it, and a container loses it with its filesystem. What is kept is Deep Agents' record of
   each task (its ids, the sub-agent's name, a status, three times), at most 256 KiB for a
   conversation, in a folder that is none of the user's files. A store that cannot be read or
-  written is said in the log, and the list stays in the process as before.
+  written is said in the log, and the list stays in the process as before. The store has no
+  conditional write, so no turn writes over another's: each keeps a file of its own in the
+  conversation's folder (what it read and its own state, merged), a turn reads every file
+  there, and the files a turn read are removed once its own file holds them — two servers
+  ending turns of one conversation at the same moment each keep their task, in any order.
 * **Earlier results** — with memory on, a later turn's history holds the earlier calls and
   their results. A start's, an update's and a cancel's are left as they were said (the record
   of what was done: nothing advises starting again); a status and the list are values that

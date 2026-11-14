@@ -23,7 +23,6 @@ import copy
 import dataclasses
 import inspect
 import json
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Final, cast
 
@@ -101,7 +100,10 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     the SDK's to tell, as without the harness (:func:`_told`): the model reads what the tool's
     ``failure_error_function`` makes of it (the SDK's default text when it names none), and
     with ``failure_error_function=None``, or a ``FunctionTool`` whose invoke raises, the run
-    ends with the error. A call past the tool's own ``timeout`` is recorded as timed out
+    ends with the error. The run's ``after_tool`` hooks have the last word on what the model
+    reads (``bridge.hooked``): a failure they reword is told in their words, the SDK's policy
+    deciding whether the run goes on; one they make a result is that result. A call past the
+    tool's own ``timeout`` is recorded as timed out
     (:func:`_own_time_is_up`) and is then the SDK's timeout (its text, or its
     ``ToolTimeoutError``). An agent called as a tool is no different: its failure ends its
     child run as failed, and is then told as its own ``failure_error_function`` says (the SDK's
@@ -123,7 +125,13 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     if helpers is not None and helps:
         ran = _helped(tool, ran, helpers)
 
-    async def invoke(context: ToolContext[Any], arguments: str) -> Any:
+    def invoke(context: ToolContext[Any], arguments: str) -> Awaitable[Any]:
+        # called in the step in which the SDK starts its own clock for the call (its
+        # ``asyncio.wait_for`` around what this returns, for a tool with a ``timeout``): the
+        # call is due then, however late the SDK's task for it begins (:func:`_own_time_is_up`)
+        return invoked(context, arguments, _due(tool))
+
+    async def invoked(context: ToolContext[Any], arguments: str, due: float | None) -> Any:
         args = arguments_of(arguments)
         runtime = current()
         if isinstance(args, str) or runtime is None:
@@ -132,13 +140,12 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         if repeat is not None:
             return results.readable(repeat.output, tool.name)
         raised: list[BaseException] = []
-        began = time.monotonic()
 
         async def run(given: dict[str, Any]) -> Any:
             try:
                 answer = await ran(context, json.dumps(given))
             except asyncio.CancelledError as cut:
-                if not _own_time_is_up(tool, runtime, began):
+                if not _own_time_is_up(runtime, due):
                     raise
                 raised.append(cut)
                 raise PastItsOwnLimit(tool.name) from cut
@@ -161,7 +168,8 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         except WaitsInside as waiting:
             return waiting.answer
         if raised and not outcome.ok:
-            return await _told(original, raised[-1], context, arguments)
+            said = results.readable(outcome.output, tool.name) if bridge.hooked(outcome) else None
+            return await _told(original, raised[-1], context, arguments, said=said)
         return results.readable(outcome.output, tool.name)
 
     setattr(invoke, MADE, True)
@@ -177,25 +185,39 @@ class PastItsOwnLimit(TimeoutError):
     retryable = False
 
 
-def _own_time_is_up(tool: FunctionTool, runtime: Runtime, began: float) -> bool:
-    """Whether a call cut short while it ran was cut by the SDK at the tool's own time limit
-    (``function_tool(timeout=...)``: the SDK's clock for the call started before ``began``,
-    so past the limit since then it has rung) and not with its run (cancelled, out of time)."""
+def _due(tool: FunctionTool) -> float | None:
+    """When the SDK stops waiting for a call of ``tool`` starting now, on the event loop's clock
+    — as the SDK sets it: ``asyncio.wait_for(task, timeout=tool.timeout_seconds)`` in the step
+    that makes the call's coroutine — or ``None`` for a tool with no time limit of its own."""
     limit = tool.timeout_seconds
+    return None if limit is None else asyncio.get_running_loop().time() + limit
+
+
+def _own_time_is_up(runtime: Runtime, due: float | None) -> bool:
+    """Whether a call cut short while it ran was cut by the SDK at the tool's own time limit
+    (``function_tool(timeout=...)``: the SDK cancels the call's task when its ``wait_for``
+    runs out, at ``due`` — :func:`_due`, from the moment the SDK made the call, not from when
+    its task began, which a call beside it holding the loop can make late) and not with its
+    run (cancelled, out of time)."""
     return (
-        limit is not None
+        due is not None
         and runtime.cancelled is None
         and runtime.remaining() != 0
-        and time.monotonic() - began >= limit
+        and asyncio.get_running_loop().time() >= due
     )
 
 
-async def _told(invoker: Any, error: BaseException, context: Any, arguments: str) -> Any:
+async def _told(
+    invoker: Any, error: BaseException, context: Any, arguments: str, *, said: str | None = None
+) -> Any:
     """What the SDK makes of ``error``, which a tool's own function raised (the harness has
     recorded the call as failed): raised as it is when the SDK is to act on it itself — a call
     it cut at the tool's time limit, or a tool whose invoke has no failure policy of the SDK's
     (the run ends) — else given to the tool's own invoke in place of its function, which tells
-    the model what its ``failure_error_function`` says, or raises."""
+    the model what its ``failure_error_function`` says, or raises. ``said``: what the run's
+    ``after_tool`` hooks made the failure say (``bridge.hooked``) — the SDK's policy still
+    decides whether the run goes on (it raises, or it tells the model), and what it tells the
+    model is the hooks' words in place of its own."""
     if not isinstance(error, Exception) or not callable(getattr(invoker, FUNCTION, None)):
         raise error
 
@@ -204,7 +226,8 @@ async def _told(invoker: Any, error: BaseException, context: Any, arguments: str
 
     failing = copy.copy(invoker)
     setattr(failing, FUNCTION, failed)
-    return await failing(context, arguments)
+    told = await failing(context, arguments)
+    return told if said is None else said
 
 
 def held(tool: Any, spec: ToolSpec) -> Any:

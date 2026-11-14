@@ -24,6 +24,7 @@ import dataclasses
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -494,10 +495,12 @@ async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result
 #: Where the file store (``harness.files``) keeps what a conversation carries from turn to
 #: turn (``Runtime.carried``), below its root: a folder that is no tenant's (``files.part``
 #: starts none with a dot), so no listing of a user's files shows it; then the tenant, the
-#: user, the conversation and the agent, and one file. And the most bytes kept there.
+#: user, the conversation and the agent, and in it one file per turn that kept it
+#: (:func:`_kept_name`). And the most bytes one turn keeps there.
 CARRIED_FOLDER: Final = ".carried"
-CARRIED_FILE: Final = "state.json"
 CARRIED_BYTES: Final = 256 * 1024
+#: The suffix of a turn's file in that folder.
+CARRIED_SUFFIX: Final = ".json"
 
 
 def _carried_at(agent: Agent, runtime: Runtime) -> str:
@@ -505,44 +508,101 @@ def _carried_at(agent: Agent, runtime: Runtime) -> str:
     return "/".join([CARRIED_FOLDER, *map(part, scope)])
 
 
+def _kept_name(runtime: Runtime) -> str:
+    """The name of the file a turn keeps what its conversation carries in: new for each time a
+    turn keeps it — when (so files read in that order merge the newer over the older), the run,
+    and a part of its own — so no turn ever writes over a file another turn wrote."""
+    return f"{time.time_ns():020d}-{part(runtime.run_id)}-{uuid.uuid4().hex[:8]}{CARRIED_SUFFIX}"
+
+
 async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
-    """What the file store keeps of the graph state the conversation's last turn ended with
-    (:func:`_keep_carried`), wherever that turn ran: the list a turn on another server, or
-    before a restart, left. None kept: none; one that cannot be read is said in the log and
-    left out — the turn starts with what this process kept."""
+    """What the file store keeps of the graph state the conversation's turns ended with
+    (:func:`_keep_carried`), wherever they ran: the lists turns on other servers, or before a
+    restart, left — merged, the newer over the older. None kept: none; a file that cannot be
+    read is said in the log and left out — the turn starts with what this process kept."""
+    return (await _read_carried(agent, runtime))[0]
+
+
+async def _read_carried(agent: Agent, runtime: Runtime) -> tuple[dict[str, Any], list[str]]:
+    """:func:`_carried`, and the files it merged — and those that hold no state (a write cut
+    off, another program's file): the files a turn that keeps its own over them supersedes. A
+    file that could not be read at all (the store out of reach) is neither."""
+    folder = _carried_at(agent, runtime)
+    files = agent.harness.files
+    merged: dict[str, Any] = {}
+    read: list[str] = []
     try:
-        data = await agent.harness.files.read(_carried_at(agent, runtime), CARRIED_FILE)
-        found = json.loads(data) if data else {}
-        if isinstance(found, dict):
-            return found
-        problem = "it is not a graph state by channel"
+        listed = await files.files(folder)
     except Exception as exc:
-        problem = f"{type(exc).__name__}: {exc}"
+        _not_read(runtime, f"{type(exc).__name__}: {exc}")
+        return merged, read
+    names = sorted(n for where, n, size in listed if where == folder and size is not None)
+    for name in names:
+        try:
+            data = await files.read(folder, name)
+        except Exception as exc:
+            _not_read(runtime, f"{type(exc).__name__}: {exc}")
+            continue
+        if data is None:
+            continue  # merged into another turn's file meanwhile, and removed
+        read.append(name)
+        try:
+            found = json.loads(data)
+        except ValueError as exc:
+            _not_read(runtime, f"{name}: {exc}")
+            continue
+        if not isinstance(found, dict):
+            _not_read(runtime, f"{name}: it is not a graph state by channel")
+            continue
+        merged = merged_state(merged, found)
+    return merged, read
+
+
+def _not_read(runtime: Runtime, problem: str) -> None:
     log.warning("run %s: what the conversation carries was not read: %s", runtime.run_id, problem)
-    return {}
 
 
 async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
     """The graph state the turn ended with, kept in the file store for the conversation's next
-    turn on any server, over what is kept there (``results.merged``: a turn another server
-    ended meanwhile loses nothing) — JSON, at most :data:`CARRIED_BYTES`. A state that cannot
-    be kept there (not JSON, past the bound, the store out of reach) is said in the log: this
-    process keeps it all the same (``Agent.results``)."""
-    kept = await _carried(agent, runtime)
+    turn on any server, merged over what is kept there (``results.merged``) — JSON, at most
+    :data:`CARRIED_BYTES`. A state that cannot be kept there (not JSON, past the bound, the
+    store out of reach) is said in the log: this process keeps it all the same
+    (``Agent.results``).
+
+    The file store has no conditional write (fsspec writes a file whole, with no generation or
+    ``If-Match`` to compare), so no turn writes over another's: each keeps a file of its own
+    (:func:`_kept_name`) holding what it read merged with its own state, and only then removes
+    the files it read — each one's state is in its file now. Two turns ending together on two
+    servers, each reading before the other writes, each keep their file, and the next turn
+    merges both: no task is lost whatever the order of their reads, writes and removals."""
+    folder = _carried_at(agent, runtime)
+    files = agent.harness.files
+    kept, read = await _read_carried(agent, runtime)
     state = merged_state(kept, runtime.carried)
     if state == kept:
-        return
+        return  # what is kept holds this turn's state already
     try:
         data = json.dumps(state).encode()
         if len(data) > CARRIED_BYTES:
             raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
-        folder = _carried_at(agent, runtime)
-        await agent.harness.files.put(folder, CARRIED_FILE, data, source=CARRIED_FOLDER)
+        await files.put(folder, _kept_name(runtime), data, source=CARRIED_FOLDER)
     except Exception as exc:
         problem = f"{type(exc).__name__}: {exc}"
         log.warning(
             "run %s: what the conversation carries was not kept: %s", runtime.run_id, problem
         )
+        return
+    for name in read:  # superseded: what each held is in this turn's file
+        try:
+            await files.remove(folder, name)
+        except Exception as exc:  # left: merged again by the next turn, and removed then
+            log.warning(
+                "run %s: a superseded file of what the conversation carries was not removed: "
+                "%s: %s",
+                runtime.run_id,
+                type(exc).__name__,
+                exc,
+            )
 
 
 async def _worked(

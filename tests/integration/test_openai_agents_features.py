@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import pytest
@@ -45,8 +46,16 @@ from tests.support.arm import declaring
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import Items, ScriptedModel
 from trellis import Budget, Harness, Settings
-from trellis.contracts import InterruptReason, RunEventType, RunOutcome, RunStatus
+from trellis.contracts import (
+    InterruptReason,
+    RunEventType,
+    RunOutcome,
+    RunStatus,
+    ToolOutcome,
+    ToolStatus,
+)
 from trellis.harness import budget
+from trellis.harness.hooks import Hooks
 from trellis.harness.runs import LocalRuns
 from trellis.harness.tools import bridge
 
@@ -188,6 +197,89 @@ async def test_a_failure_the_sdk_tells_the_model_is_recorded_as_a_failed_call(
     assert events[-1].outcome is RunOutcome.SUCCESS and events[-1].data["spent"]["tool_calls"] == 1
 
 
+class Redact(Hooks):
+    """The run's ``after_tool`` hook: a failed call's words withheld (``ok``: made a result)."""
+
+    def __init__(self, *, ok: bool = False) -> None:
+        self.ok = ok
+
+    async def after_tool(self, call: Any, outcome: ToolOutcome) -> ToolOutcome:
+        if outcome.ok:
+            return outcome
+        said: dict[str, Any] = {"output": "lookup failed (details withheld)"}
+        if self.ok:
+            said = {"output": "o1: shipped (from the cache)", "status": ToolStatus.OK}
+        return outcome.model_copy(update=said)
+
+
+@pytest.mark.parametrize("policy", ["default", "custom"])
+async def test_an_after_tool_hook_words_what_the_model_reads_of_a_failed_tool(
+    memory_harness: Harness, memory_service: FakeMemoryService, policy: str
+) -> None:
+    """A tool that raises, its failure reworded by the run's ``after_tool`` hook (a secret
+    withheld): the SDK's failure policy still decides — the run goes on — and what the model
+    reads of the call is the hook's words, not the SDK's text (its default, or the tool's own
+    ``failure_error_function``'s) around the tool's error."""
+
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("db password=hunter2 rejected")
+
+    tool_ = (
+        function_tool(lookup)
+        if policy == "default"
+        else function_tool(lookup, failure_error_function=lambda _c, e: f"custom: {e}")
+    )
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "sorry"])
+    h = declaring(memory_harness, lookup="read")
+    agent = h.wrap(Agent(name="desk", model=model, tools=[tool_]), id="desk", hooks=[Redact()])
+    assert (await agent.run("look o1 up", user="u")).answer == "sorry"
+    assert outputs(model) == ["lookup failed (details withheld)"]
+    await h.writes.drain()
+    assert recorded(memory_service) == [("lookup", "error")]
+
+
+async def test_an_after_tool_hook_that_makes_a_failed_tool_a_result_is_read_as_one(
+    harness: Harness,
+) -> None:
+    """A hook that turns the failed call into a result: the model reads the result — even of
+    a tool whose failure would end the run (``failure_error_function=None``)."""
+
+    @function_tool(failure_error_function=None)
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("the order service is down")
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "shipped"])
+    agent = declaring(harness, lookup="read").wrap(
+        Agent(name="desk", model=model, tools=[lookup]), id="desk", hooks=[Redact(ok=True)]
+    )
+    result = await agent.run("look o1 up", user="u")
+    assert result.status is RunStatus.SUCCESS and result.answer == "shipped"
+    assert outputs(model) == ["o1: shipped (from the cache)"]
+
+
+async def test_a_tool_whose_failure_ends_the_run_still_ends_it_when_a_hook_rewords_it(
+    harness: Harness,
+) -> None:
+    """``failure_error_function=None``: the SDK raises the tool's error and the run ends, a
+    hook's rewording of the failure or not — the SDK's policy decides whether the run goes
+    on; the model is not asked again."""
+
+    @function_tool(failure_error_function=None)
+    def lookup(order: str) -> str:
+        """Look an order up."""
+        raise RuntimeError("the order service is down")
+
+    model = ScriptedModel([("lookup", {"order": "o1"}), "never"])
+    agent = declaring(harness, lookup="read").wrap(
+        Agent(name="desk", model=model, tools=[lookup]), id="desk", hooks=[Redact()]
+    )
+    result = await agent.run("look o1 up", user="u")
+    assert result.status is RunStatus.ERROR and len(model.inputs) == 1
+
+
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
 async def test_a_tool_that_asks_to_raise_ends_the_run_with_its_error(
     memory_harness: Harness, memory_service: FakeMemoryService, streamed: bool
@@ -273,6 +365,53 @@ async def test_a_tools_own_time_limit_is_the_sdks_and_its_call_is_recorded_timed
     assert failed.error.code == "ToolTimeoutError" and len(model.inputs) == 1
     await h.writes.drain()
     assert recorded(memory_service) == [("slow", "timeout"), ("strict", "timeout")]
+
+
+class HeldLoop:
+    """``asyncio`` as the SDK's ``agents.tool`` reads it, where the task the SDK makes for a call
+    of a tool with a time limit of its own begins only after the loop was held past that limit
+    — what a blocking call of the same reply does (a library holding the loop) — though the
+    SDK's clock for the call started as it made the task."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+    @staticmethod
+    def ensure_future(made: Any, **kwargs: Any) -> Any:
+        async def late() -> Any:
+            # the loop held: the call's own limit (0.1 s) passes meanwhile
+            time.sleep(0.3)  # noqa: ASYNC251
+            return await made
+
+        return asyncio.ensure_future(late(), **kwargs)
+
+
+@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
+async def test_a_tools_own_time_limit_is_recorded_as_such_when_its_task_began_late(
+    memory_harness: Harness, memory_service: FakeMemoryService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK starts a call's clock when it makes the call; the call's task may begin later
+    (another call of the reply holding the loop). Cut at its own limit, the call is that tool's
+    call that timed out — on the stream, in the tool records, the run not said to be
+    cancelled — however soon after its task began the SDK stopped waiting."""
+    import agents.tool
+
+    @function_tool(timeout=0.1)
+    async def slow(order: str) -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+    monkeypatch.setattr(agents.tool, "asyncio", HeldLoop())
+    h = declaring(memory_harness, slow="write")
+    model = ScriptedModel([("slow", {"order": "o2"}), "ok"])
+    agent = h.wrap(Agent(name="desk", model=model, tools=[slow]), id="late")
+    events = [e async for e in agent.stream("try", user="u")]
+    assert events[-1].outcome is RunOutcome.SUCCESS
+    assert outputs(model) == ["Tool 'slow' timed out after 0.1 seconds."]
+    [cut] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert cut["status"] == "timeout" and "cancelled" not in cut["output"], cut
+    await h.writes.drain()
+    assert recorded(memory_service) == [("slow", "timeout")]
 
 
 async def test_a_cancelled_run_still_cuts_a_tool_that_has_a_time_limit_of_its_own(
