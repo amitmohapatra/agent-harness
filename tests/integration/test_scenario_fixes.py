@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -416,19 +417,14 @@ async def test_scn4_a_run_store_that_cannot_be_read_is_a_warning(
 ) -> None:
     """The run store failing while memory lacks the latest turn: a warning, and the window as
     memory gave it — the run goes on."""
-    from trellis.harness import conversation
-
-    async def unread(runtime: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("agent-runs is not answering")
-
     async with Harness(config=Settings(), memory=_holding(FakeMemoryService(), kept)) as h:
         agent, _ = _react(h, ["Noted.", "I do not know."], "unread")
         await agent.run("The locker code is 4242.", user="ada", thread="t1")
-        monkeypatch.setattr(conversation, "earlier", unread)
+        monkeypatch.setattr(h.runs, "iterate", Mock(side_effect=RuntimeError("no agent-runs")))
         events = [e async for e in agent.stream("What is it?", user="ada", thread="t1")]
         kept.set()
         warned = [e.data for e in events if e.data.get("code") == "earlier_turns"]
-        assert warned and "agent-runs is not answering" in warned[0]["message"], warned
+        assert warned and "no agent-runs" in warned[0]["message"], warned
         assert events[-1].type is RunEventType.RUN_FINISHED
 
 
@@ -455,23 +451,23 @@ async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.Mo
     circuit opens, refusing calls at once, and opens again after each probe that fails), then
     comes back: the turn made meanwhile is kept once it is back, and once only (the write sent
     again is the same write: the service keeps a message once by its id). Before, the write got
-    3 tries (``WRITE_ATTEMPTS``) with a short backoff and, with no spool (none in a container:
+    3 tries with a short backoff and, with no spool (none in a container:
     ``settings.default_spool``), was given up — "failed and is lost: CircuitOpenError", as seen
     on the real stack for transcripts, tool records and outcomes while memory answered 504s.
-    The outage here lasts until the turn's write was refused more often than a write had
-    tries (the run's own try and the queue's three): an event, no clock."""
+    The outage here lasts until three probes of the open circuit have failed (the five calls
+    that opened it, then one a cool-down): an event, no clock; a write's backoff is far
+    shorter than the circuit's cool-down, as it is with their real values (0.5 s, 30 s)."""
     monkeypatch.setattr(agent_module, "TURN_WRITE_SECONDS", 0.1)
-    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.001)
     service = FakeMemoryService()
     down, refused, outlasted = asyncio.Event(), [0], asyncio.Event()
 
     async def flaky(request: httpx.Request) -> httpx.Response:
         if not down.is_set():
             return service._checked(request)
-        if (request.method, request.url.path) == ("POST", "/v1/messages"):
-            refused[0] += 1
-            if refused[0] > 4:
-                outlasted.set()
+        refused[0] += 1
+        if refused[0] >= 5 + 3:
+            outlasted.set()
         problem = {
             "title": "unavailable",
             "status": 503,
@@ -483,7 +479,7 @@ async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.Mo
         )
 
     client = _memory(flaky)
-    client._transport.breaker.open_seconds = 0.01  # its cool-down (30 s) within the test
+    client._transport.breaker.open_seconds = 0.2  # its cool-down (30 s) within the test
     async with Harness(config=Settings(), memory=client) as h:
         agent, _ = _react(h, ["Hello.", "Noted."], "scn6")
         await agent.run("Hi.", user="ada", thread="t1")
@@ -491,7 +487,7 @@ async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.Mo
         down.set()
         done = await agent.run("The locker code is 4242.", user="ada", thread="t1")
         assert done.status is RunStatus.SUCCESS
-        async with asyncio.timeout(30):  # a bound for the test, never reached when it passes
+        async with asyncio.timeout(10):  # a bound for the test, never reached when it passes
             await outlasted.wait()
         assert h.writes.failed == 0, "the write was given up while memory was down"
         down.clear()

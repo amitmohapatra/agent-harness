@@ -128,7 +128,8 @@ said:
   whose write is still on its way when the next turn starts (memory slow, or down) is taken from
   the run store's record of it — its question and answer — after the window (a framework that
   replays messages: LangGraph's graphs, `ReAct`), matched by message id so that a turn memory
-  holds is never given twice;
+  holds is never given twice — with nothing in the window, the run store's newest turns (at
+  most 10), within the conversation's budget;
 * every harness tool call (not the memory tools, which the service logs itself), and Code
   Mode's nested calls from Bifrost's log — their arguments and outputs as they are
   ([observability.md](observability.md#redaction)), in the order the log has them, each at
@@ -139,7 +140,7 @@ said:
 
 Every write above is queued and the run moves on (`writes.py`); four writers drain the queue.
 
-* A write that fails is tried again — 3 attempts in all, full-jitter backoff from 0.5 s — when
+* A write that fails is tried again — 6 attempts in all, full-jitter backoff from 0.5 s — when
   the failure may pass (the service unavailable, a timeout, a dropped connection); a refusal the
   same request would get again (a `4xx` the SDK marks not retryable) is not repeated.
 * While the memory client's circuit is open (the service down: after five calls in a row
@@ -172,9 +173,10 @@ outlives the process, after its next start; never silently dropped. What is stil
 writes waiting in the queue when the process dies without stopping (killed, out of memory) —
 the queue is in its memory, spool or not; with no spool (a container, where none is found by
 default), also those a clean stop could not deliver in its 10 s — during an outage, every write
-held since it began. A write whose three attempts fail before the circuit opens (the service
-failing this call while it answers others, or the first calls of an outage in a process that
-makes no others) is given up as before: spooled, or lost.
+held since it began. A write whose six attempts fail while the circuit stays closed — the
+service failing this call while it answers others; a service down for every call opens the
+circuit at the fifth failure, before a write runs out — is given up as before: spooled, or
+lost.
 
 ## Documents
 

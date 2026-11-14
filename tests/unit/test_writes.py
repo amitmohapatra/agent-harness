@@ -16,6 +16,7 @@ from trellis.contracts import AgentExecutionContext, RunEvent
 from trellis.harness import writes as module
 from trellis.harness.events import RunEvents
 from trellis.harness.writes import SPOOL_FILE, Writes
+from trellis.memory.breaker import CircuitBreaker
 from trellis.memory.errors import CircuitOpenError, DependencyUnavailableError, ValidationError
 
 
@@ -51,10 +52,12 @@ async def test_writes_run_in_the_background_and_drain_waits_for_them() -> None:
 def test_the_queue_holds_10_000_writes_for_4_writers_and_a_full_one_waits_5_s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """docs/architecture.md: ``MAX_PENDING`` 10 000, ``WRITERS`` 4, ``WRITE_ATTEMPTS`` 3,
+    """docs/architecture.md: ``MAX_PENDING`` 10 000, ``WRITERS`` 4, ``WRITE_ATTEMPTS`` 6 (one
+    more than the five failed calls that open the memory client's circuit: SCN-6),
     ``SUBMIT_WAIT_SECONDS`` 5."""
     monkeypatch.undo()  # the values themselves, not the fast ones
-    assert (module.MAX_PENDING, module.WRITERS, module.WRITE_ATTEMPTS) == (10_000, 4, 3)
+    assert (module.MAX_PENDING, module.WRITERS, module.WRITE_ATTEMPTS) == (10_000, 4, 6)
+    assert CircuitBreaker().threshold == 5
     assert module.SUBMIT_WAIT_SECONDS == 5.0
 
 
@@ -68,7 +71,7 @@ async def test_a_write_that_may_pass_is_tried_again() -> None:
 
     await writes.submit("memory.transcript", flaky)
     await writes.drain()
-    assert len(tries) == 3 and writes.failed == 0  # the third of 3 attempts
+    assert len(tries) == 3 and writes.failed == 0  # the third of its attempts
     await writes.aclose()
 
 
@@ -120,18 +123,24 @@ async def test_a_write_waits_out_an_open_circuit_spending_no_attempt(
     await writes.aclose()
 
 
-async def test_a_write_failing_while_the_circuit_stays_closed_still_spends_its_attempts() -> None:
-    """Failures the circuit does not open for (a service that answers its other calls) spend
-    the write's attempts as before: given up after the third."""
+async def test_the_first_write_of_an_outage_outlasts_the_failures_that_open_the_circuit() -> None:
+    """SCN-6, the first seconds of an outage: the only write in flight fails five times for
+    want of the service — the failed calls that open its client's circuit — and has a try
+    left: refused by the open circuit, it waits and is delivered when the service is back."""
     writes, tries = Writes(), []
+    down: list[Exception] = [
+        *(DependencyUnavailableError("unavailable", retryable=True) for _ in range(5)),
+        circuit_open(0.0),
+    ]
 
     async def write() -> None:
         tries.append(1)
-        raise DependencyUnavailableError("unavailable", retryable=True)
+        if down:
+            raise down.pop(0)
 
     await writes.submit("memory.transcript", write)
     await writes.drain()
-    assert len(tries) == module.WRITE_ATTEMPTS and writes.failed == 1
+    assert len(tries) == 7 and writes.failed == 0
     await writes.aclose()
 
 
@@ -222,7 +231,7 @@ async def test_a_failed_write_is_counted_and_reported_to_the_run() -> None:
 
     await writes.submit("memory.transcript", boom, events=events)
     await writes.drain()
-    assert writes.failed == 1 and len(tries) == 3  # 3 attempts in all
+    assert writes.failed == 1 and len(tries) == 6  # 6 attempts in all
     event: RunEvent = seen[0]
     assert event.data["name"] == "warning"
     assert "memory is down" in event.data["message"]

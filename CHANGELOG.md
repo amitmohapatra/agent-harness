@@ -162,15 +162,19 @@ in `tests/integration/test_scenario_fixes.py`:
   tool records and outcomes were "failed and is lost". While the circuit is open a write now
   spends no attempt: it waits the circuit's cool-down, queued, and is sent when the service is
   back — however long that takes, bounded by the queue (10,000 writes; past it a write is
-  spooled or lost and reported, as a full queue's always was). Still lost: what waits in the
-  queue when the process is killed, and with no spool what a clean stop cannot deliver in
-  10 s ([memory.md](docs/memory.md)).
+  spooled or lost and reported, as a full queue's always was). **A write now has six attempts,
+  not three**: one more than the five failed calls that open the circuit, so the first write
+  of an outage is still trying when it opens. Still lost: what waits in the queue when the
+  process is killed, with no spool what a clean stop cannot deliver in 10 s, and a write that
+  fails six times while the service answers other calls ([memory.md](docs/memory.md)).
 - **The next turn was answered without the turn before when memory took more than 5 s to keep
   it.** Where memory's window comes as messages (LangGraph's graphs, `ReAct`), the
   conversation's latest turns memory does not hold yet are added after it from the run store
   (each one's question and answer), on whichever server the next turn runs; matched by message
-  id, so a turn memory holds is never given twice. A chat message's `run_record` in memory now
-  carries its `message_id`. One listing of the run store per turn of a conversation.
+  id, so a turn memory holds is never given twice; with nothing in memory's window, the run
+  store's newest turns (at most 10, within the conversation's budget). A chat message's
+  `run_record` in memory now carries its `message_id`. One listing of the run store per turn
+  of a conversation.
 - **A call with no framework id had a different id in a later attempt, or another call's.**
   A call a graph's node or a function makes itself was `<run>:<step>`, the step counted per
   attempt: after a resume a checkpointed graph's payment took the id of a lookup made before

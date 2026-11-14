@@ -57,6 +57,7 @@ from tenacity import AsyncRetrying, RetryCallState, retry_if_exception, stop_aft
 from trellis.harness import telemetry
 from trellis.harness.events import RunEvents
 from trellis.harness.telemetry import metrics
+from trellis.memory.breaker import FAILURE_THRESHOLD
 from trellis.memory.errors import CircuitOpenError
 
 log = logging.getLogger("trellis.writes")
@@ -69,8 +70,12 @@ MAX_PENDING: Final = 10_000
 SUBMIT_WAIT_SECONDS: Final = 5.0
 #: How long a shutdown waits for the queue to empty.
 DRAIN_SECONDS: Final = 10.0
-#: Attempts per write, and the backoff ceiling of the first retry (doubled after each).
-WRITE_ATTEMPTS: Final = 3
+#: Attempts per write — one more than the failed calls that open the memory client's circuit,
+#: so a service down for every call opens it before a write runs out (the write then waits,
+#: its attempts whole: :meth:`Writes._attempt`), and a write that does run out met a service
+#: that answered other calls meanwhile — and the backoff ceiling of the first retry (doubled
+#: after each).
+WRITE_ATTEMPTS: Final = FAILURE_THRESHOLD + 1
 WRITE_BACKOFF_SECONDS: Final = 0.5
 #: The spool file, in the spool directory.
 SPOOL_FILE: Final = "trellis-writes.jsonl"
