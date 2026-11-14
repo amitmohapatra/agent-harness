@@ -342,14 +342,19 @@ class Helpers:
         itself, or a helper no longer open. A worker not heard of yet, while a helper
         called ``name`` is open, is waited for (:data:`ATTRIBUTED_SECONDS`: the framework
         said whose it is before the call, and the run reads that as it goes); never heard
-        of, it is the helper called ``name`` started last (:meth:`named`)."""
+        of, it is the helper called ``name`` started last, remembered as that: its next
+        calls do not wait again."""
         if worker not in self._workers and self.named(name) is not None:
             learning = self._learning.setdefault(worker, asyncio.Event())
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(ATTRIBUTED_SECONDS):
                     await learning.wait()
+            if worker not in self._workers:  # never told: the one of that name started last
+                self._learning.pop(worker, None)
+                last = [key for key, helper in self._open.items() if helper.name == name]
+                self._workers[worker] = last[-1] if last else ""
         key = self._workers.get(worker)
-        return self.named(name) if key is None else self._open.get(key)
+        return None if key is None else self._open.get(key)
 
     def begun_again(self) -> dict[str, int] | None:
         """Where the run had read its journal when the first of its open subagents started

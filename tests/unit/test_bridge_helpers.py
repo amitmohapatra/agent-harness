@@ -171,6 +171,37 @@ async def test_a_call_waits_to_learn_whose_it_is(monkeypatch: pytest.MonkeyPatch
     assert await helpers.of("task_8", "another") is None  # nothing of that name is open
 
 
+async def test_a_worker_never_told_of_is_waited_for_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PERF-12: a framework that never says whose a worker is. Its first call waits to learn
+    it; the miss is remembered — the worker is the helper of that name started last — so its
+    fifty calls wait once, not fifty times (each a hook's ``PreToolUse`` and ``PostToolUse``).
+    Told later after all, it is the helper it was told."""
+    from trellis.harness.bridges import helpers as module
+
+    waited: list[float] = []
+    timeout = asyncio.timeout
+
+    def counted(delay: float | None) -> asyncio.Timeout:
+        if delay == module.ATTRIBUTED_SECONDS:
+            waited.append(delay)
+        return timeout(delay)
+
+    monkeypatch.setattr(module, "ATTRIBUTED_SECONDS", 0.001)
+    monkeypatch.setattr(asyncio, "timeout", counted)
+    helpers = Helpers(runtime(LocalRuns()), "claude_agent_sdk")
+    kind, name = Kind.SUBAGENT, "general-purpose"
+    first = await helpers.start("call_1", kind=kind, name=name, task="check o1")
+    second = await helpers.start("call_2", kind=kind, name=name, task="check o2")
+    found = [await helpers.of("task_9", name) for _ in range(50)]
+    assert found == [second] * 50 and len(waited) == 1
+    await helpers.start("call_3", kind=kind, name=name, task="check o3")
+    assert await helpers.of("task_9", name) is second  # the helper it was taken for, still
+    helpers.attribute("task_9", "call_1")
+    assert await helpers.of("task_9", name) is first and len(waited) == 1
+
+
 async def test_a_helper_at_work_in_the_background_ends_as_its_work_did() -> None:
     """A helper the framework runs in the background is not ended by its call's result (its
     launch): it ends when the framework says its work ended — with what it said, as an error
