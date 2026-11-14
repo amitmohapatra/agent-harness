@@ -82,6 +82,22 @@ def memory_answers(
 
 
 @respx.mock
+async def test_agent_runs_is_asked_with_the_key_in_the_header_it_reads(tmp_path: Path) -> None:
+    """agent-runs reads the key from ``X-API-Key`` only (its api.md, "Authentication"); a key
+    sent as a bearer token is refused there, so the check would always fail."""
+    runs = respx.get("http://runs.test/v1/runs/doctor-check").mock(
+        side_effect=lambda request: httpx.Response(
+            404 if request.headers.get("x-api-key") == "trk_secret_5678" else 401
+        )
+    )
+    settings = Settings.from_env({**ENV, "TRELLIS_SPOOL_DIR": str(tmp_path)})
+    async with httpx.AsyncClient() as client:
+        found = await doctor._runs(client, settings)
+    assert found is not None and found.ok, found
+    assert "authorization" not in runs.calls[0].request.headers
+
+
+@respx.mock
 async def test_each_service_is_reached_with_its_key(tmp_path: Path) -> None:
     models = respx.get("http://gw.test/v1/models").mock(return_value=httpx.Response(200, json={}))
     respx.post("http://gw.test/mcp").mock(return_value=httpx.Response(200, json={}))
