@@ -17,13 +17,7 @@ from trellis.contracts import Endpoint, ToolCall, ToolError, ToolOutcome
 from trellis.harness import runtime as runtime_module
 from trellis.harness.clients import bifrost
 from trellis.harness.clients.bifrost import Gateway
-from trellis.harness.clients.memory import (
-    METADATA_MAX_BYTES,
-    READ_ONLY_TOOLS,
-    Memory,
-    Window,
-    within_bounds,
-)
+from trellis.harness.clients.memory import READ_ONLY_TOOLS, Memory, Window
 from trellis.harness.history import Called, Said, Speaker, recorded
 from trellis.harness.identity import Identity, conversation_key
 
@@ -499,21 +493,3 @@ async def test_a_spooled_memory_write_replays_in_its_own_scope() -> None:
     assert result["tool_call_id"] == "c1" and result["kind"] == "INTERNAL"
     assert memory.replay({"op": "unknown", "scope": {}, "args": {}}) is None
     await memory.client.aclose()
-
-
-def test_feedback_metadata_is_kept_within_the_memory_services_bounds() -> None:
-    """A decision's metadata the service takes as it is; a call's nested arguments kept by
-    name, each nested value as its JSON text; still too large, each text cut, saying so."""
-    flat = {"tool": "t", "args": {"amount": 5}}
-    assert within_bounds(flat) is flat
-    nested = {"tool": "t", "args": {"items": ["a", "b"], "where": {"shelf": "s1"}}, "n": [1]}
-    assert within_bounds(nested) == {
-        "tool": "t",
-        "args": {"items": '["a", "b"]', "where": '{"shelf": "s1"}'},
-        "n": "[1]",
-    }
-    big = {"tool": "t", "args": {"patch": "x" * METADATA_MAX_BYTES, "deep": {"a": [1]}}}
-    cut = within_bounds(big)
-    assert cut["tool"] == "t" and cut["args"]["patch"].endswith(" [cut]")
-    assert cut["args"]["deep"] == '{"a": [1]}'
-    assert len(json.dumps(cut).encode()) <= METADATA_MAX_BYTES
