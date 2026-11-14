@@ -594,12 +594,16 @@ async def test_a_large_file_is_read_in_parts_and_a_sandbox_of_another_provider_i
     harness: Harness,
 ) -> None:
     provider = FakeSandboxes()
-    source = sandbox(provider, spec=SandboxSpec(files={"big.txt": "x" * (256 * 1024 + 1)}))
+    files = {"big.txt": "x" * (256 * 1024 + 1), "fits.txt": "y" * (256 * 1024)}
+    source = sandbox(provider, spec=SandboxSpec(files=files))
 
     async def reads(input: str, agent: Runtime) -> Any:
-        return await agent.tools.call("sandbox_read", path="big.txt")
+        return await agent.tools.call("sandbox_read", path=input)
 
-    big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("x", user="u")
+    fits = await arm(harness.wrap(reads, id="fits"), [source.tools()]).run("fits.txt", user="u")
+    assert fits.answer == "y" * (256 * 1024)  # 256 KiB: read at once
+
+    big = await arm(harness.wrap(reads, id="big"), [source.tools()]).run("big.txt", user="u")
     assert big.answer == (
         "sandbox_read failed: big.txt is 262145 bytes, more than the 262144 "
         "read at once: read a part of it with sandbox_exec (head -c, tail -c, sed -n)"
