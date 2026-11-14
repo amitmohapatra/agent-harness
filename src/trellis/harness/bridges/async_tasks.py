@@ -6,15 +6,22 @@ turn, as the task does — kept as a Claude subagent working in the background i
 
 * **its record** — started when the start's result names the task: its input the task's text,
   its metadata the task's id, its server's ``url`` and its ``graph_id`` (never the spec's
-  headers); its id derived from the agent and the task (:func:`run_of`), so whoever learns how
-  the task ended finds it, on another server that shares the run store too;
-* **held** — handed on past the turn's attempt (``Helpers.detached``) and held in the run store
-  from this process (``holding``) while the task runs: a process that dies with it leaves a run
-  the store ends (cut off). Nothing asks the server how the task goes meanwhile;
+  headers); its id derived from the agent and the task (:func:`run_of`), so whoever learns
+  how the task ended finds it, on another server that shares the run store too. A follow-up (``update_async_task``) to a task at work goes on as its
+  run; one to a task that ended runs it again on its server: a run of its own here too, the
+  child of the turn that sent it;
+* **held and read** — handed on past the turn's attempt (``Helpers.detached``) and held in the
+  run store from this process (``holding``) while the task runs: a process that dies with it
+  leaves a run the store ends (cut off). Every :data:`WATCH_SECONDS` this process reads the
+  task (:meth:`AsyncTasks._watch`): ended on its server (Deep Agents' own ``check_async_task``),
+  its run ends and the chat is told how — a turn of the chat's own when it is idle, as a
+  harness task's outcome is (``background.delivered``); its run ended elsewhere (its turn
+  cancelled from another server), the task is cancelled on its server;
 * **its end** — when Deep Agents' own tools say the task ended: a later check or list
   (``check_async_task``, ``list_async_tasks``) reads its final status from its server, or the
-  model cancels it (``cancel_async_task``). Its run ends ``SUCCESS`` with the task's result,
-  ``ERROR`` saying why it failed, or ``CANCELLED``, on the stream of the run that learned it;
+  model cancels it (``cancel_async_task``) — or a read of it, above. Its run ends ``SUCCESS``
+  with the task's result, ``ERROR`` saying why it failed, or ``CANCELLED``, on the stream of the
+  run that learned it;
 * **cancelled with its turn** — as a cancelled run's other children are: the turn's attempt
   cancelled while it runs (``Runtime.cancelled``: :meth:`AsyncTasks.cancelled`), or the turn
   cancelled where it waits for a person (``subagents.cancel_children``:
@@ -25,7 +32,9 @@ turn, as the task does — kept as a Claude subagent working in the background i
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 from collections import OrderedDict
@@ -33,11 +42,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import RunStatus, stable_id
+from trellis.contracts import AgentError, RunStatus, stable_id
 from trellis.harness.bounded import MAXSIZE
-from trellis.harness.bridges.helpers import HELPER, Helper, Kind
+from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
-from trellis.runs import ConflictError
+from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
     from trellis.harness.agent import Agent
@@ -47,7 +56,12 @@ log = logging.getLogger("trellis.harness")
 
 #: Deep Agents' tools that start a task and cancel one (``middleware.ASYNC_TASKS`` has all five).
 START: Final = "start_async_task"
+UPDATE: Final = "update_async_task"
+CHECK: Final = "check_async_task"
 CANCEL: Final = "cancel_async_task"
+#: How often the process holding a task's run reads the task: how it goes on its server (Deep
+#: Agents' own ``check_async_task``) and whether its run was ended elsewhere.
+WATCH_SECONDS: Final = 10.0
 #: The statuses Deep Agents takes for a task that has ended (its ``_TERMINAL_STATUSES``), and
 #: how the task's run ends for each.
 ENDED: Final[Mapping[str, RunStatus]] = {
@@ -66,10 +80,12 @@ CANCELLED_WITH: Final = "the run that started the task was cancelled"
 KEPT: Final = MAXSIZE
 
 
-def run_of(tenant: str, agent_id: str, task_id: str) -> str:
+def run_of(tenant: str, agent_id: str, task_id: str, again: str | None = None) -> str:
     """The id of the run of the task ``task_id`` an agent's run started: the same wherever it
-    is derived (the task's id is its thread's on its server)."""
-    return stable_id(tenant, agent_id, HELPER, Kind.ASYNC_TASK, task_id, prefix="run_")
+    is derived (the task's id is its thread's on its server) — and, ``again``, of a follow-up
+    that ran it again after it ended (its run on the server)."""
+    parts = (task_id,) if again is None else (task_id, again)
+    return stable_id(tenant, agent_id, HELPER, Kind.ASYNC_TASK, *parts, prefix="run_")
 
 
 @dataclass(slots=True)
@@ -81,6 +97,8 @@ class Kept:
     agent: Agent
     tenant: str
     task: dict[str, Any]
+    #: its reads (:meth:`AsyncTasks._watch`)
+    watching: asyncio.Task[None] | None = None
 
 
 class AsyncTasks:
@@ -101,9 +119,15 @@ class AsyncTasks:
         update = done.update if isinstance(done, Command) else None
         found = update.get("async_tasks") if isinstance(update, Mapping) else None
         for task_id, task in (found or {}).items():
-            run_id = run_of(runtime.tenant, runtime.agent_id, task_id)
+            run_id = self._held(task_id) or await _run(runtime, task)
             if tool.name == START:
                 await self._started(runtime, tool, run_id, dict(task), str(args["description"]))
+            elif tool.name == UPDATE and await _ended_or_none(runtime, run_id):
+                # a follow-up runs the ended task again on its server: a run of the turn that
+                # sent it (one at work goes on as its run)
+                again = run_of(runtime.tenant, runtime.agent_id, task_id, task["run_id"])
+                await self._started(runtime, tool, again, dict(task), str(args["message"]))
+                run_id = again
             kept = self._kept.get(run_id)
             if kept is not None:
                 kept.task = dict(task)
@@ -126,16 +150,102 @@ class AsyncTasks:
         )
         helpers.detached(key)
         runtime.agent.harness.holds.hold(run_id, runtime.tenant)
-        self._kept[run_id] = Kept(helper, runtime.agent, runtime.tenant, task)
+        kept = Kept(helper, runtime.agent, runtime.tenant, task)
+        self._kept[run_id] = kept
+        kept.watching = asyncio.get_running_loop().create_task(
+            self._watch(run_id), context=contextvars.Context()
+        )
         while len(self._kept) > KEPT:
             _, oldest = self._kept.popitem(last=False)
-            oldest.agent.harness.holds.let_go(oldest.helper.run_id)
+            self._released(oldest)
+
+    def _held(self, task_id: str) -> str | None:
+        """The run of the task ``task_id`` this process holds, if it holds one."""
+        return next((r for r, k in self._kept.items() if k.task["task_id"] == task_id), None)
+
+    @staticmethod
+    def _released(kept: Kept) -> None:
+        """``kept`` held no more here, and read no more."""
+        kept.agent.harness.holds.let_go(kept.helper.run_id)
+        if kept.watching is not None and kept.watching is not asyncio.current_task():
+            kept.watching.cancel()
+
+    async def _watch(self, run_id: str) -> None:
+        """Every :data:`WATCH_SECONDS` while this process holds ``run_id``: its run ended
+        elsewhere (cancelled with its turn from another server) cancels the task on its server;
+        the task ended on its server ends its run, and the chat is told how
+        (``background.delivered``: a turn of its own when it is idle)."""
+        while (kept := self._kept.get(run_id)) is not None:
+            await asyncio.sleep(WATCH_SECONDS)
+            if self._kept.get(run_id) is not kept:
+                return
+            runs = kept.agent.harness.runs
+            record = await runs.get(run_id, tenant=kept.tenant)
+            if record is None or record.status.final:
+                stopped = record is not None and record.status is RunStatus.CANCELLED
+                await (self.stopped(run_id, CANCELLED_WITH) if stopped else self._let(run_id))
+                return
+            with contextlib.suppress(Exception):  # the server out of reach: read again later
+                await self._read(run_id, kept)
+
+    async def _read(self, run_id: str, kept: Kept) -> None:
+        """How the task goes on its server, as Deep Agents' own check reads it: ended, its run
+        ends and the chat is told."""
+        from trellis.harness import background
+
+        task_id = kept.task["task_id"]
+        done = await _tool(kept.agent.target, CHECK).ainvoke(
+            {"task_id": task_id, "runtime": _tool_runtime(kept.task, CHECK)}
+        )
+        update = getattr(done, "update", None)
+        if not isinstance(update, Mapping):
+            return  # Deep Agents' word of a check that failed: read again later
+        found = update.get("async_tasks", {}).get(task_id)
+        status = ENDED.get(str((found or {}).get("status")))
+        if found is None or status is None:
+            return
+        told = text_of(update["messages"][-1])
+        said = _checked(told)
+        await self._closed(run_id, status, str(said.get("error") or said.get("result") or ""))
+        event = {k: found[k] for k in ("task_id", "agent_name", "status", "run_id")}
+        if "result" in said:
+            event["result"] = said["result"]
+        elif status is not RunStatus.SUCCESS and status is not RunStatus.CANCELLED:
+            event["error"] = background.FAILED
+        record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
+        if record is not None:
+            await background.delivered(kept.agent, record, update=event)
+
+    async def _let(self, run_id: str) -> None:
+        kept = self._kept.pop(run_id, None)
+        if kept is not None:
+            self._released(kept)
+
+    async def _closed(self, run_id: str, status: RunStatus, said: str) -> None:
+        """The task's run held here ended ``status`` outside any attempt (``said``: its result,
+        or why it ended), held and read no more."""
+        kept = self._kept.pop(run_id, None)
+        if kept is None:
+            return
+        self._released(kept)
+        runs, tenant = kept.agent.harness.runs, kept.tenant
+        with contextlib.suppress(ConflictError, LeaseLostError):  # ended meanwhile
+            if status is RunStatus.CANCELLED:
+                await runs.cancel(run_id, reason=said or None, tenant=tenant)
+            elif status is RunStatus.SUCCESS:
+                await runs.finish(run_id, status, output=said or None, tenant=tenant)
+            else:
+                why = said or ENDED_THERE.format(status=status.value.lower())
+                error = AgentError(code=UNFINISHED, message=why)
+                await runs.finish(run_id, status, error=error, tenant=tenant)
 
     async def _ended(self, runtime: Runtime, run_id: str, status: RunStatus, told: str) -> None:
         """The task's run ended as its server says (``told``: the check's result, if it is
         one), on the stream of ``runtime``'s run — one this process holds, or one it finds in
         the run store not ended (held elsewhere, or by nobody now)."""
         kept = self._kept.pop(run_id, None)
+        if kept is not None:
+            self._released(kept)
         helper = kept.helper if kept is not None else await _found(runtime, run_id)
         if helper is None:
             return
@@ -166,25 +276,48 @@ class AsyncTasks:
         if kept is None:
             return
         agent = kept.agent
-        agent.harness.holds.let_go(run_id)
-        from langchain.tools import ToolRuntime
-
+        self._released(kept)
         task_id = kept.task["task_id"]
-        runtime = ToolRuntime(
-            state={"async_tasks": {task_id: kept.task}},
-            context=None,
-            config={},
-            stream_writer=lambda _: None,
-            tool_call_id=f"{CANCEL}:{task_id}",
-            store=None,
+        said = await _tool(agent.target, CANCEL).ainvoke(
+            {"task_id": task_id, "runtime": _tool_runtime(kept.task, CANCEL)}
         )
-        said = await _tool(agent.target, CANCEL).ainvoke({"task_id": task_id, "runtime": runtime})
         if isinstance(said, str):  # Deep Agents' word of a cancel that failed
             log.warning("async task %s not cancelled on its server: %s", task_id, said)
         with contextlib.suppress(ConflictError):  # cancelled already, with its parent
             await agent.harness.runs.cancel(
                 run_id, reason=reason or CANCELLED_WITH, tenant=kept.tenant
             )
+
+
+def _tool_runtime(task: Mapping[str, Any], tool: str) -> Any:
+    """What Deep Agents' task tool ``tool`` is run with outside a graph: the task's record as
+    the state, nothing else of a run."""
+    from langchain.tools import ToolRuntime
+
+    task_id = task["task_id"]
+    return ToolRuntime(
+        state={"async_tasks": {task_id: dict(task)}},
+        context=None,
+        config={},
+        stream_writer=lambda _: None,
+        tool_call_id=f"{tool}:{task_id}",
+        store=None,
+    )
+
+
+async def _run(runtime: Runtime, task: Mapping[str, Any]) -> str:
+    """The run of ``task`` that a process other than this one holds, or nobody: a follow-up's
+    after the task ended (:func:`run_of` ``again``), when one was recorded, else the task's."""
+    first = run_of(runtime.tenant, runtime.agent_id, task["task_id"])
+    again = run_of(runtime.tenant, runtime.agent_id, task["task_id"], task["run_id"])
+    found = await runtime.agent.harness.runs.get(again, tenant=runtime.tenant)
+    return again if found is not None else first
+
+
+async def _ended_or_none(runtime: Runtime, run_id: str) -> bool:
+    """Whether the run ``run_id`` ended, or was never recorded."""
+    found = await runtime.agent.harness.runs.get(run_id, tenant=runtime.tenant)
+    return found is None or found.status.final
 
 
 async def _found(runtime: Runtime, run_id: str) -> Helper | None:

@@ -1735,3 +1735,85 @@ async def test_h_a_start_that_sends_the_conversation_asks_a_person(server: Stand
         assert {name: own[name] for name in TOOLS} == {**RISKS, "start_async_task": "irreversible"}
     finally:
         await harness.aclose()
+
+
+# --------------------------------------------------------------------------- i. the gaps closed
+async def test_i_an_idle_chat_is_told_how_its_task_ended(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task ends while no turn works in the chat: the process that holds its run reads its
+    status (Deep Agents' own ``check_async_task``), ends its run with its result and tells the
+    chat by a turn of its own — the notification, as Deep Agents' pull gives it, which Deep
+    Agents records — that the chat's thread stream delivers (``background.delivered``)."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    model = Model(turns=[START, reports_the_id, says_the_update, "Nothing else."])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    server.release()
+    [task] = await task_runs(harness)
+
+    async def told() -> bool:
+        runs = [r async for r in harness.runs.iterate(agent_id="bg", thread_id=THREAD)]
+        return len(runs) == 2 and all(r.status.final for r in runs)
+
+    async with asyncio.timeout(10):
+        while not await told():  # noqa: ASYNC110 - the keeper's progress
+            await asyncio.sleep(0.05)
+    ended = await harness.runs.get(task.run_id)
+    assert ended is not None and (ended.status, ended.output) == (RunStatus.SUCCESS, RESULT)
+    assert len(model.seen) == 3 and model.seen[2][-1].additional_kwargs["lc_source"] == (
+        "async_subagent"
+    )
+    asked = len(server.calls)
+    later = await say(agent, "anything else?")
+    assert later.answer == "Nothing else."  # told once: Deep Agents recorded it
+    assert len(server.calls) == asked
+
+
+async def test_i_a_tasks_run_cancelled_elsewhere_cancels_the_task_on_its_server(
+    workers: tuple[Harness, Harness], server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn at work on one server is cancelled from another through the run store: its
+    task's run ends there, and the process holding that run cancels the task on its server
+    (Deep Agents' ``cancel_async_task``) — not only the record."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    server.seconds = 60
+    model = Model(turns=[START, "never said"], hold_from=1)
+    here, there = (chat(h, server, model) for h in workers)
+    turn = asyncio.create_task(say(here, "run the optimization"))
+    while not server.runs or len(model.seen) < 1:  # noqa: ASYNC110 - the server's own thread
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
+    [run_id] = here.running
+    await there.cancel(run_id, reason="stopped on another server")
+    async with asyncio.timeout(10):
+        while server.status(server.task_id) != "cancelled":  # noqa: ASYNC110
+            await asyncio.sleep(0.05)
+    [task] = await task_runs(workers[0])
+    assert task.status is RunStatus.CANCELLED
+    turn.cancel()
+    await asyncio.gather(turn, return_exceptions=True)
+
+
+async def test_i_an_update_after_the_task_ended_starts_a_run_of_it(
+    harness: Harness, server: StandIn
+) -> None:
+    """``update_async_task`` after the task ended runs it again on its server (a new run on
+    its thread): that run is a child run of the turn that sent it, held while it runs."""
+    server.seconds = 0.2
+    turns = [START, reports_the_id, calls("check_async_task"), says_what_the_tool_said]
+    model = Model(turns=[*turns, calls("update_async_task", message="Again."), "Sent."])
+    agent = chat(harness, server, model)
+    await say(agent, "run the optimization")
+    await server.finished()
+    await say(agent, "is it done?")
+    [ended] = await task_runs(harness)
+    assert ended.status is RunStatus.SUCCESS
+    server.hold()
+    again = await say(agent, "run it again")
+    assert again.status is RunStatus.SUCCESS, again.error
+    first, second = await task_runs(harness)
+    assert first.run_id == ended.run_id and second.parent_run_id == again.run_id
+    assert second.status is RunStatus.RUNNING and harness.holds.holds(second.run_id)
+    server.release()

@@ -150,7 +150,7 @@ class MemoryStore(BaseStore):
             if held is not None:
                 await self.memory.forget(held.memory_id)
             return rest
-        content = _content(op.namespace, op.key, op.value)
+        content = _content(op.namespace, op.key, dict(op.value))  # a Mapping, langgraph 1.2.22
         now = datetime.now(UTC)
         if held is None:
             ack = await self.memory.remember(content, visibility=VISIBILITY)
