@@ -315,6 +315,8 @@ def test_push_targets_are_public_https_only() -> None:
         "https://10.0.0.1/hook",
         "https://user:pw@example.com/",
         "https://service.internal/",
+        "https://printer.local/",
+        "https://app.localhost/",  # docs/surfaces.md: never a .local/.internal/.localhost name
     ):
         with pytest.raises(TargetRefused):
             validate_url(refused)
