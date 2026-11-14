@@ -774,6 +774,51 @@ inside it is refused (`RewindRefused`), so no write is ever made again behind go
 graph with a checkpointer of its own keeps LangGraph's time travel across runs
 ([langgraph.md](langgraph.md)).
 
+### Handoffs: `langgraph-swarm`
+
+Control passes to another agent, which answers the user — an OpenAI agent's handoff — with
+LangChain's own library for it, `langgraph-swarm` (in the `react` extra), used as it is: its
+`create_handoff_tool` among an agent's tools, its `SwarmState` and its router:
+
+```python
+from langgraph.graph import StateGraph
+from langgraph_swarm import SwarmState, add_active_agent_router, create_handoff_tool
+from trellis.harness.middleware import RunCheckpointer
+
+desk = ReAct("You are the front desk.", model, tools=[create_handoff_tool(agent_name="billing")])
+billing = ReAct("You do refunds.", model, tools=[refund, create_handoff_tool(agent_name="desk")])
+builder = (
+    StateGraph(SwarmState)
+    .add_node("desk", desk, destinations=("billing",))
+    .add_node("billing", billing, destinations=("desk",))
+)
+team = add_active_agent_router(builder, route_to=["desk", "billing"], default_active_agent="desk")
+agent = h.wrap(team.compile(checkpointer=RunCheckpointer()), id="support")
+```
+
+(`create_swarm([...])` builds the same graph from agents that have names of their own:
+`create_agent(..., middleware=middleware(), name="desk")`.) What the harness adds:
+
+* **governed and recorded.** A handoff tool is a hand-over, as Deep Agents' `task` is: the
+  call is the run's tool call (`transfer_to_billing`: its stream, its trajectory, the memory
+  record, a span), it only reads, so it asks nobody unless the catalog says otherwise — and
+  each call the agent handed to then makes is governed on its own (its refund still asks).
+* **whose turn it is.** The hand-over call says who takes over within a turn; the
+  conversation's next turn starts with the agent it was last handed to (langgraph-swarm's
+  `active_agent`, carried from turn to turn for the tenant's, the user's conversation as Deep
+  Agents' task list is — kept in the file store, so on any server) and says so on its stream
+  (the `CUSTOM` event `active_agent`).
+* **memory.** The conversation, its memory and its records are the wrapped agent's
+  (`id="support"`): the agents of the graph share them, as they share langgraph-swarm's
+  `messages`.
+* **a pause resumes in place.** With `RunCheckpointer()` the graph's checkpoints are the
+  run's: after an approval neither the hand-over nor the steps before it are asked of a model
+  again, on any worker.
+
+The agents' own tools are LangChain tools (their tool nodes run them, governed by what each
+declares in its `metadata`, else the catalog); the functions given to an inner `ReAct`'s
+`tools=` are the run's only when the graph wrapped is that `ReAct`.
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).

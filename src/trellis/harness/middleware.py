@@ -55,6 +55,7 @@ import functools
 import itertools
 import logging
 import re
+import sys
 import types
 import weakref
 from collections.abc import (
@@ -133,7 +134,7 @@ from trellis.harness import (
     budget,
     snapshots,
 )
-from trellis.harness.adapters.base import FIT_SHARE
+from trellis.harness.adapters.base import FIT_SHARE, helper
 from trellis.harness.adapters.langgraph import (
     ASKED,
     CONTEXT_MESSAGE_ID,
@@ -1224,14 +1225,25 @@ def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
 
 def spec_of(tool: BaseTool) -> ToolSpec:
     """A framework's own LangChain tool as the harness governs, records and publishes it: its
-    name, description and schema, its risk as it declares it (:func:`side_effects_of`)."""
-    return ToolSpec(
+    name, description and schema, its risk as it declares it (:func:`side_effects_of`) — a
+    hand-over to another agent of the graph a helper's (:func:`_hands_off`)."""
+    spec = ToolSpec(
         name=tool.name,
         description=tool.description or tool.name,
         input_schema=_schema_of(tool),
         side_effects=side_effects_of(tool.metadata),
         **data_of(tool.metadata, name=tool.name),
     )
+    return helper(spec) if _hands_off(tool) else spec
+
+
+def _hands_off(tool: BaseTool) -> bool:
+    """Whether ``tool`` is a langgraph-swarm handoff (``create_handoff_tool``: its own mark in
+    the tool's metadata): the call only passes the conversation to another agent of the graph,
+    whose own calls are governed — a hand-over, as Deep Agents' ``task`` is
+    (``adapters.base.helper``). Only a process that built one has the library loaded."""
+    swarm = sys.modules.get("langgraph_swarm.handoff")
+    return swarm is not None and swarm.METADATA_KEY_HANDOFF_DESTINATION in (tool.metadata or {})
 
 
 def _schema_of(tool: Any) -> dict[str, Any]:

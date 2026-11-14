@@ -144,8 +144,10 @@ PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
 #: none), as a thread of the graph's own would: Deep Agents' list of the background tasks its
 #: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against.
 #: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
-#: in the process and in the file store: ``pipeline``).
-CARRIED: Final = ("async_tasks",)
+#: in the process and in the file store: ``pipeline``). So does the agent a langgraph-swarm
+#: graph last handed the conversation to (:data:`ACTIVE_AGENT`): its next turn is that agent's.
+ACTIVE_AGENT: Final = "active_agent"  # langgraph-swarm's ``SwarmState.active_agent``
+CARRIED: Final = ("async_tasks", ACTIVE_AGENT)
 
 
 class LangGraphAdapter:
@@ -618,6 +620,8 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     started = (
         {**carried, **native_input} if carried and isinstance(native_input, dict) else native_input
     )
+    if carried and ACTIVE_AGENT in carried:  # whose turn it is, on the run's stream
+        runtime.events.custom(ACTIVE_AGENT, agent=carried[ACTIVE_AGENT])
     if not _checkpointed(target):
         return started
     replay = runtime.replay

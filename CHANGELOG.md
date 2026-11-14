@@ -33,6 +33,14 @@ thread forked from an earlier checkpoint inside the run is refused (`RewindRefus
 a run has no governed entry yet
 ([react.md](docs/frameworks/react.md#checkpoint-history-langgraphs-time-travel)).
 
+### Added: handoffs between agents, with `langgraph-swarm`
+
+`langgraph-swarm` (`>=0.1,<0.2`, in the `react` extra) used as it is: a `create_handoff_tool`
+among a `ReAct`'s tools is a governed, recorded hand-over that asks nobody; the agent handed to
+answers, governed as ever; the conversation's next turn is that agent's (`active_agent` carried
+from turn to turn), said on the run's stream; a pause resumes in place
+([react.md](docs/frameworks/react.md#handoffs-langgraph-swarm)).
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

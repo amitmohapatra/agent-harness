@@ -56,6 +56,8 @@ react = [
   "trellis-harness[langgraph]",
   "langchain-openai>=1.6,<1.7",
   "deepagents>=0.7.38,<0.8",
+  # handoffs between agents (``create_handoff_tool``, ``create_swarm``): docs/frameworks/react.md
+  "langgraph-swarm>=0.1,<0.2",
 ]
 openai-agents = ["openai-agents>=0.24,<0.25"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.160,<0.3"]
