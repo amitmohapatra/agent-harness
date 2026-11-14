@@ -245,6 +245,16 @@ async def stored(runs: LocalRuns, status: RunStatus = RunStatus.RUNNING, **more:
     return found
 
 
+async def passed_over(run: Any, tasks: dict[str, Any]) -> bool:
+    """Whether a pull reads nothing of ``tasks``' runs: no outcome told, each record as it
+    was but for when it was last looked at."""
+    updated, told = await background.pulled(run, tasks)
+    as_they_were = {
+        i: {**t, "last_checked_at": updated[i]["last_checked_at"]} for i, t in tasks.items()
+    }
+    return told == [] and updated == as_they_were
+
+
 async def test_the_five_tools_answer_what_they_cannot_do() -> None:
     runs = LocalRuns()
     offered = background.Offered({"research": None}, described={"research": "Research."})
@@ -269,7 +279,7 @@ async def test_the_five_tools_answer_what_they_cannot_do() -> None:
         "list_async_tasks", run, {"task_1": TASK}, {"status_filter": "error"}
     )
     assert listed == (background.NONE, {})
-    assert await background.pulled(run, gone) == ({}, [])
+    assert await passed_over(run, gone)
     await offered.asked(run, {"task_1": {**TASK, "status": "waiting", "run_id": "run_gone"}})
 
 
@@ -369,7 +379,7 @@ async def test_sec_r_1_a_run_of_another_conversation_is_no_tracked_task(whose: s
     listed, changed = await offered.call("list_async_tasks", run, claimed, {})
     assert listed.endswith("status: waiting") and changed == claimed  # as claimed: nothing read
     await offered.asked(run, claimed)  # no question of it: the stand-in run could not be paused
-    assert await background.pulled(run, claimed) == ({}, [])
+    assert await passed_over(run, claimed)
     event = {"task_id": "task_1", "agent_name": "research", "status": "success", "run_id": "run_1"}
     assert await background.recorded(run, event, claimed) == {}
     assert await runs.get("run_1", tenant="t") == theirs  # neither cancelled nor answered
@@ -595,3 +605,91 @@ def test_sec_r_2_a_process_keeps_a_bounded_number_of_attempts_at_work(
     assert not tasks.at_work("run_a")  # given back: nothing began in it
     with tasks.placed("run_c") as free:
         assert free
+
+
+# --------------------------------------------------------------------------- PERF-4: reads
+class Counted(LocalRuns):
+    """A run store that counts its reads of a run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.read: list[str] = []
+
+    async def get(self, run_id: str, *, tenant: str | None = None) -> RunRecord | None:
+        self.read.append(run_id)
+        return await super().get(run_id, tenant=tenant)
+
+
+async def twenty(runs: Counted) -> dict[str, Any]:
+    """Twenty unfinished tasks of the conversation, their runs in ``runs`` (not read since):
+    its task list."""
+    tasks: dict[str, Any] = {}
+    for n in range(20):
+        await stored(runs, run_id=f"run_{n}", thread_id=f"task_{n}")
+        tasks[f"task_{n}"] = {**TASK, "task_id": f"task_{n}", "run_id": f"run_{n}"}
+    runs.read.clear()
+    return tasks
+
+
+async def test_perf_4_a_pull_reads_the_store_once_however_many_tasks_are_unfinished() -> None:
+    """Twenty unfinished tasks at work elsewhere: each pull (one per model call) makes one
+    request of the run store, for the task read longest ago, so twenty pulls read each once —
+    and an outcome is told by the pull that reads it."""
+    runs = Counted()
+    tasks = await twenty(runs)
+    await runs.finish("run_7", RunStatus.SUCCESS, output="done", tenant="t")
+    run, told = runtime(runs), []
+    for _ in range(20):
+        before = len(runs.read)
+        updated, outcomes = await background.pulled(run, tasks)
+        assert len(runs.read) - before == 1
+        tasks, told = {**tasks, **updated}, [*told, *outcomes]
+    assert sorted(runs.read) == sorted(f"run_{n}" for n in range(20))
+    assert [(u["task_id"], u["status"]) for u in told] == [("task_7", "success")]
+    before = len(runs.read)
+    await background.pulled(run, tasks)
+    assert len(runs.read) - before == 1  # nineteen left unfinished: still one
+
+
+async def test_perf_4_a_task_at_work_here_or_ended_here_is_not_read_from_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What this process knows it does not ask the store: a task whose attempt works here is
+    running, and one whose attempt ended here ended as it left its run."""
+    runs = Counted()
+    record = await stored(runs)
+    release = asyncio.Event()
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        await release.wait()
+        await runs.finish("run_1", RunStatus.SUCCESS, output="done", tenant="t")
+
+    async def then(found: RunRecord) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    run = runtime(runs)
+    run.agent.running = {}
+    tasks = run.agent.harness.background
+    tasks.run(run.agent, record, then=then)
+    runs.read.clear()
+    waiting = {"task_1": {**TASK, "status": "waiting"}}
+    updated, told = await background.pulled(run, waiting)  # resumed here: it works again
+    assert (updated["task_1"]["status"], told, runs.read) == ("running", [], [])
+    release.set()
+    await tasks._at_work["run_1"]
+    runs.read.clear()
+    updated, told = await background.pulled(run, {"task_1": TASK})
+    assert updated["task_1"]["status"] == "success" and told[0]["result"] == "done"
+    assert runs.read == []
+
+
+async def test_perf_4_the_list_reads_only_the_unfinished_tasks() -> None:
+    runs = Counted()
+    tasks = await twenty(runs)
+    for n in range(15):  # ended, and told: their records say so
+        tasks[f"task_{n}"]["status"] = "success"
+    offered = background.Offered({"research": None}, described={"research": "Research."})
+    listed, _ = await offered.call("list_async_tasks", runtime(runs), tasks, {})
+    assert listed.startswith("20 tracked task(s):")
+    assert sorted(runs.read) == sorted(f"run_{n}" for n in range(15, 20))

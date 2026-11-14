@@ -64,7 +64,7 @@ from trellis.contracts import (
 )
 from trellis.harness import admission, task_tools
 from trellis.harness.adapters.langgraph import ASKED
-from trellis.harness.bounded import MAXSIZE
+from trellis.harness.bounded import LRU, MAXSIZE
 from trellis.harness.conversation import Mode
 from trellis.harness.frontend import FRONTEND
 from trellis.harness.identity import conversation_key
@@ -328,6 +328,13 @@ class Tasks:
         self._agents: dict[str, Agent] = {}
         #: the runs a place is kept for while their caller starts them (:meth:`placed`)
         self._coming: set[str] = set()
+        #: how the task runs whose attempt ended here ended: their final records
+        self._ended: LRU[str, RunRecord] = LRU()
+
+    def ended(self, run_id: str) -> RunRecord | None:
+        """The final record of the run ``run_id``, when its attempt ended here: what no read
+        of the run store needs to ask again."""
+        return self._ended.get(run_id)
 
     def at_work(self, run_id: str) -> bool:
         return run_id in self._at_work or run_id in self._coming
@@ -399,6 +406,8 @@ class Tasks:
         finally:
             watching.cancel()
         found = None if then is None else await runs.get(record.run_id, tenant=tenant)
+        if found is not None and found.final:
+            self._ended[record.run_id] = found
         if (
             then is not None
             and found is not None
@@ -610,8 +619,11 @@ async def owned(runtime: Runtime, task: Mapping[str, Any]) -> RunRecord | None:
     is read, asked about, sent instructions or cancelled only here: every tool, the questions
     asked, each pull and the turn's last look go through this, and what is not owned is
     answered as a task the conversation does not track."""
-    runs = runtime.agent.harness.runs
-    record = await runs.get(str(task.get("run_id")), tenant=runtime.tenant)
+    harness, run_id = runtime.agent.harness, str(task.get("run_id"))
+    # how it ended here, when it did: no read of the store says more
+    record = harness.background.ended(run_id) or await harness.runs.get(
+        run_id, tenant=runtime.tenant
+    )
     origin = None if record is None else record.metadata.get(BACKGROUND)
     if record is None or not isinstance(origin, Mapping):
         return None
@@ -1098,11 +1110,15 @@ class Offered:
             listed = [t for t in listed if t["status"] == status_filter]
         if not listed:
             return NONE, {}
-        records = await asyncio.gather(*(owned(runtime, t) for t in listed))
-        updated = {
-            t["task_id"]: t if r is None else observed(t, r)
-            for t, r in zip(listed, records, strict=True)
+        # a task that ended is as its record says: only the unfinished are read
+        reading = [t for t in listed if t["status"] in UNFINISHED]
+        records = await asyncio.gather(*(owned(runtime, t) for t in reading))
+        read = {
+            t["task_id"]: observed(t, r)
+            for t, r in zip(reading, records, strict=True)
+            if r is not None
         }
+        updated = {t["task_id"]: read.get(t["task_id"], t) for t in listed}
         entries = [
             f"- task_id: {t['task_id']}  agent: {t['agent_name']}  status: {t['status']}"
             for t in updated.values()
@@ -1127,21 +1143,32 @@ class Offered:
 async def pulled(
     runtime: Runtime, tasks: Mapping[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """The unfinished ``tasks`` read in the run store: their records, updated where their run
-    moved on, and the update (:func:`update_of`) of each new outcome — one the conversation was
-    told already (through a check, the list, an earlier notification) is not told again."""
+    """The unfinished ``tasks`` read: their records, updated where their run moved on, and the
+    update (:func:`update_of`) of each new outcome — one the conversation was told already
+    (through a check, the list, an earlier notification) is not told again. A pull is made at
+    every model call, so it asks the run store at most once, however many tasks there are: a
+    task whose attempt is at work in this process is running, one whose attempt ended here
+    ended as its run did (``Tasks.ended``), and of the rest the one read longest ago is read —
+    each in its turn."""
+    here = runtime.agent.harness.background
     unfinished = [t for t in tasks.values() if t.get("status") in UNFINISHED]
-    records = await asyncio.gather(*(owned(runtime, t) for t in unfinished))
-    updated: dict[str, Any] = {}
+    working = [t for t in unfinished if here.at_work(t["run_id"])]
+    known = [t for t in unfinished if here.ended(t["run_id"]) is not None]
+    rest = [t for t in unfinished if t not in working and t not in known]
+    oldest = sorted(rest, key=lambda t: (t["last_checked_at"], t["task_id"]))[:1]
+    updated: dict[str, Any] = {
+        t["task_id"]: moved(t, run_id=t["run_id"], status="running")
+        for t in working
+        if t["status"] != "running"
+    }
     told: list[dict[str, Any]] = []
-    for task, record in zip(unfinished, records, strict=True):
-        if record is None:
-            continue
-        status = status_of(record)
-        if status == task["status"] and record.run_id == task["run_id"]:
+    for task in [*known, *oldest]:
+        record = await owned(runtime, task)
+        if record is None:  # none of the conversation's: read, and passed over
+            updated[task["task_id"]] = {**task, "last_checked_at": now()}
             continue
         updated[task["task_id"]] = observed(task, record)
-        update = update_of(task, record) if status != task["status"] else None
+        update = update_of(task, record) if status_of(record) != task["status"] else None
         if update is not None:
             told.append(update)
     return updated, told

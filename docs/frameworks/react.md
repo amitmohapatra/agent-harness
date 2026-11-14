@@ -549,7 +549,11 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   is asked through its parent (`payload["subagent"]` names the task's run, `background: true`),
   and the answer resumes the task where the answer reached — on another server sharing the run
   store too.
-* **Check, list, update, cancel** — read the run store from any server. `update_async_task`
+* **Check, list, update, cancel** — read the run store from any server (the list, only the
+  unfinished tasks). The turn's own reads of its tasks cost at most one request of the run
+  store per model call: a task at work, or ended, in the turn's process is known there, and
+  the others — at work on another server, waiting for a person — are read one per model
+  call, in turn, so with several of them an outcome may be told a model call or two later. `update_async_task`
   follows Deep Agents' `update_strategy` (a `SubAgent` dict may carry it): `interrupt`, the
   default, cancels the task's run at work and continues its conversation
   (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`).

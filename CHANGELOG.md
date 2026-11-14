@@ -37,6 +37,13 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
   cancel of a harness task no longer pauses a chat for an approval.
 
+### Performance: background tasks cost one run-store read per model call (PERF-4)
+
+- A turn's pull of its tasks' statuses asks the run store at most once per model call, however
+  many tasks are unfinished: a task at work in the process is known running, one that ended
+  there is known ended, and the others are read one per model call, the one read longest ago
+  first. `list_async_tasks` reads only the unfinished tasks.
+
 ### Security: background tasks are bounded (SEC-R-2)
 
 - A chat has at most as many unfinished background tasks as a run may have children working
