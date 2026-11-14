@@ -557,6 +557,12 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   are reads; a start, an update and a cancel are writes, announced on the stream and not
   asked about (each call the sub-agent makes is governed in its own run). To have a person
   approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Bounds** — a chat has at most as many unfinished tasks as a run may have children working
+  at once (the admission limit of [subagents.md](../subagents.md): 4 at first, less under
+  pressure): a start past it is refused with the reason, and the model is told to wait or
+  cancel one. A task's outcome that reaches an idle chat may start or update a task three
+  times in a row with no message from the user between; the fourth is refused, so a result
+  cannot keep work going by itself. A process keeps at most 1,024 attempts at work.
 * **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
   the agent and the chat thread. The tools, the questions asked through the chat and each
   read act on a task's run only then; a task id from another conversation is answered as one

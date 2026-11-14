@@ -37,6 +37,17 @@ chat's own on its thread stream when it is idle; its questions asked through the
   `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
   cancel of a harness task no longer pauses a chat for an approval.
 
+### Security: background tasks are bounded (SEC-R-2)
+
+- A chat has at most as many unfinished background tasks as a run may have children working
+  at once (the admission limit: 4 at first, 1 to 16, falling under pressure); a start past it
+  is answered "Not started: this chat has N background tasks unfinished…".
+- A task's outcome told by a turn of the chat's own may start or update a task three times in
+  a row with no message from the user between; the fourth is refused (the depth is in the
+  runs' `trellis_background` / `trellis_notified` metadata).
+- A process keeps at most 1,024 background attempts at work; past it a start is refused, an
+  idle chat's outcome waits for the conversation's next turn.
+
 ### Security: a background task belongs to the conversation that started it (SEC-R-1)
 
 - The task tools, the questions asked through a chat, each pull and each recorded

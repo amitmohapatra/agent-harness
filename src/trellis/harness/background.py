@@ -47,7 +47,7 @@ import contextvars
 import html
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -62,8 +62,9 @@ from trellis.contracts import (
     safe_id,
     stable_id,
 )
-from trellis.harness import task_tools
+from trellis.harness import admission, task_tools
 from trellis.harness.adapters.langgraph import ASKED
+from trellis.harness.bounded import MAXSIZE
 from trellis.harness.conversation import Mode
 from trellis.harness.frontend import FRONTEND
 from trellis.harness.identity import conversation_key
@@ -126,6 +127,29 @@ UNFINISHED_CODE: Final = "BackgroundUnfinished"
 #: How often a task at work here looks whether its run ended elsewhere (cancelled on another
 #: replica): its attempt is stopped then.
 WATCH_SECONDS: Final = 10.0
+#: The most attempts at work in one process (:class:`Tasks`): past it a start is refused
+#: (:data:`NO_ROOM`), an idle chat's outcome waits for the conversation's next turn, and an
+#: answer waits to be asked for again.
+AT_WORK: Final = MAXSIZE
+#: How many times in a row a task's outcome, told by a turn of the chat's own (:func:`notify`),
+#: may start or update a task with no message of the user's between: past it the chain ends
+#: (:data:`CHAINED`).
+CHAIN: Final = 3
+#: What a start or an update answers when it is not admitted (:func:`start`): too many
+#: unfinished tasks in the chat, a chain of outcomes past :data:`CHAIN`, no room in the process.
+TOO_MANY: Final = (
+    "Not started: this chat has {count} background tasks unfinished, the most at once "
+    "({limit}). Wait for one to end, or cancel one that is no longer needed, then start it again."
+)
+CHAINED: Final = (
+    "Not started: the results of background tasks have started or updated a task {limit} "
+    "times in a row with no message from the user between. Tell the user what was found; "
+    "their next message can start more."
+)
+NO_ROOM: Final = (
+    "Not started: this server has no room for more background work right now. Do the work "
+    "with the subagent directly, or try again later."
+)
 #: The newest runs of a chat read to tell whether it is idle (:func:`idle`).
 IDLE_RUNS: Final = 5
 
@@ -302,9 +326,28 @@ class Tasks:
     def __init__(self) -> None:
         self._at_work: dict[str, asyncio.Task[None]] = {}
         self._agents: dict[str, Agent] = {}
+        #: the runs a place is kept for while their caller starts them (:meth:`placed`)
+        self._coming: set[str] = set()
 
     def at_work(self, run_id: str) -> bool:
-        return run_id in self._at_work
+        return run_id in self._at_work or run_id in self._coming
+
+    @contextlib.contextmanager
+    def placed(self, run_id: str) -> Iterator[bool]:
+        """A place among the attempts at work here — :data:`AT_WORK` at most — kept for the
+        run ``run_id`` while its caller starts it: whether it has one (its earlier attempt's,
+        or a free one, taken now and given back when the caller is done: an attempt begun
+        meanwhile keeps its own)."""
+        held = self.at_work(run_id)
+        free = held or len(self._at_work) + len(self._coming) < AT_WORK
+        took = free and not held
+        if took:
+            self._coming.add(run_id)
+        try:
+            yield free
+        finally:
+            if took:
+                self._coming.discard(run_id)
 
     def run(
         self,
@@ -403,20 +446,64 @@ class Tasks:
         await asyncio.gather(*self._at_work.values(), return_exceptions=True)
 
 
-async def start(runtime: Runtime, agent: Agent, name: str, description: str) -> dict[str, Any]:
+class Refused(Exception):
+    """A start or an update not admitted: what the model reads instead of its result."""
+
+
+async def start(
+    runtime: Runtime, agent: Agent, name: str, description: str, tasks: Mapping[str, Any]
+) -> dict[str, Any]:
     """A task of ``agent`` (the sub-agent called ``name``) on ``description``, started from
-    ``runtime``'s turn: its run started and at work here; its task record."""
+    ``runtime``'s turn, whose conversation carries ``tasks``: its run started and at work
+    here; its task record. Admitted first (:class:`Refused` otherwise): the turn is not past
+    the chain of outcomes (:func:`_depth`), the process has room (``Tasks.placed``), and the
+    conversation has fewer unfinished tasks than a run may have children working at once
+    (:func:`_counted`)."""
     place = runtime.idempotency_key or new_id("call_")
     # the task's conversation (its id) and its first turn: follow-ups are turns of it too
     thread = stable_id(place, BACKGROUND, name, prefix="task_")
     run_id = stable_id(place, BACKGROUND, name, prefix="run_")
     origin = {"name": name, "agent": runtime.agent_id, "thread": runtime.identity.thread}
+    origin |= {"depth": await _depth(runtime)}
     origin |= {FRONTEND: runtime.frontend.kept()} if runtime.frontend is not None else {}
-    record = await _started(
-        runtime, agent, description, run_id=run_id, thread=thread, origin=origin
-    )
-    _go(runtime.agent, agent, record)
+    with runtime.agent.harness.background.placed(run_id) as free:
+        if not free:
+            raise Refused(NO_ROOM)
+        _counted(runtime, tasks, thread)
+        record = await _started(
+            runtime, agent, description, run_id=run_id, thread=thread, origin=origin
+        )
+        _go(runtime.agent, agent, record)
     return task_of(record, name)
+
+
+async def _depth(runtime: Runtime) -> int:
+    """How many outcomes in a row, with no message of the user's between, led to ``runtime``'s
+    turn: none for a turn a message began; for a turn of the chat's own (:func:`notify`), one
+    more than the turn that started the task it tells of. Past :data:`CHAIN` the turn starts
+    and updates nothing (:class:`Refused`): a result cannot keep work going by itself."""
+    if runtime.notification is None:
+        return 0
+    record = await runtime.agent.harness.runs.get(runtime.run_id, tenant=runtime.tenant)
+    told = {} if record is None else record.metadata.get(NOTIFIED) or {}
+    depth = int(told.get("depth", CHAIN + 1))  # unknown: past the chain
+    if depth > CHAIN:
+        raise Refused(CHAINED.format(limit=CHAIN))
+    return depth
+
+
+def _counted(runtime: Runtime, tasks: Mapping[str, Any], task_id: str) -> None:
+    """The task ``task_id`` counted among the unfinished ones of ``runtime``'s conversation —
+    those its list (``tasks``) says, and those this attempt started since (its calls of one
+    model step do not see each other's) — when they are fewer than a run may have children
+    working at once (``admission``: the limit falls under pressure); else :class:`Refused`."""
+    admission.ADMISSION.admitting()
+    limit = admission.ADMISSION.limit
+    unfinished = {i for i, t in tasks.items() if t.get("status") in UNFINISHED}
+    unfinished |= {i for i in runtime.tasks_started if i not in tasks}
+    if task_id not in unfinished and len(unfinished) >= limit:
+        raise Refused(TOO_MANY.format(count=len(unfinished), limit=limit))
+    runtime.tasks_started.add(task_id)
 
 
 async def follow_up(
@@ -432,19 +519,23 @@ async def follow_up(
     :func:`owned`): a new run of its conversation, which sees what it did so
     far, under the task's id. ``mode`` is what Deep Agents' ``update_strategy`` says of the
     run at work: ``Mode.INTERRUPT`` stops it first (here, as the conversation's line does;
-    elsewhere, by its cancel), ``Mode.QUEUE`` waits for it. The task's record, updated."""
-    origin = dict(latest.metadata[BACKGROUND])
+    elsewhere, by its cancel), ``Mode.QUEUE`` waits for it. The task's record, updated.
+    Admitted as a start is, but for the count (it is no new task): :class:`Refused` otherwise."""
+    origin = {**latest.metadata[BACKGROUND], "depth": await _depth(runtime)}
     place = runtime.idempotency_key or new_id("call_")
     run_id = stable_id(place, BACKGROUND, task["task_id"], prefix="run_")
     tasks = runtime.agent.harness.background
-    if mode is Mode.INTERRUPT and not latest.final and not tasks.at_work(latest.run_id):
-        # at work on another replica, or waiting for a person: stopped there
-        with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
-    record = await _started(
-        runtime, agent, message, run_id=run_id, thread=task["task_id"], origin=origin
-    )
-    _go(runtime.agent, agent, record, mode=mode)
+    with tasks.placed(run_id) as free:
+        if not free:
+            raise Refused(NO_ROOM)
+        if mode is Mode.INTERRUPT and not latest.final and not tasks.at_work(latest.run_id):
+            # at work on another replica, or waiting for a person: stopped there
+            with contextlib.suppress(ConflictError):  # it ended meanwhile
+                await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
+        record = await _started(
+            runtime, agent, message, run_id=run_id, thread=task["task_id"], origin=origin
+        )
+        _go(runtime.agent, agent, record, mode=mode)
     updated = moved(task, run_id=record.run_id, status="running")
     if mode is Mode.QUEUE and not latest.final:
         updated["superseded_run_ids"] = [*task.get("superseded_run_ids", []), task["run_id"]]
@@ -637,29 +728,34 @@ async def notify(
     run_id = stable_id(
         NOTIFIED, update["task_id"], update["run_id"], update["status"], asked, prefix="run_"
     )
-    runs = agent.harness.runs
-    if await runs.get(run_id, tenant=record.tenant_id) is not None:
-        return  # told already
-    started = await agent._start(
-        input_of(update),
-        user=user,
-        thread=thread,
-        tenant=record.tenant_id,
-        run_id=run_id,
-        record_input=True,
-    )
-    # who made it: the run store answers a start of a run that exists with that run, so the
-    # server whose start made it is the one that finds its own name there, and runs it
-    by = agent.harness.holds.name
-    told = {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")}
-    metadata = {**started.metadata, NOTIFIED: {**told, "by": by}}
-    if FRONTEND in origin:  # the chat's front end: a person reads it and answers what it asks
-        metadata[FRONTEND] = origin[FRONTEND]
-    found = await runs.start(started.model_copy(update={"metadata": metadata}))
-    tasks = agent.harness.background
-    ours = (found.metadata.get(NOTIFIED) or {}).get("by") == by
-    if ours and found.status is RunStatus.RUNNING and not tasks.at_work(run_id):
-        tasks.run(agent, found)  # not told meanwhile, here or by another server
+    runs, tasks = agent.harness.runs, agent.harness.background
+    if tasks.at_work(run_id):
+        return  # being told here already
+    with tasks.placed(run_id) as free:
+        # no room here: the conversation's next turn reads the outcome itself
+        if not free or await runs.get(run_id, tenant=record.tenant_id) is not None:
+            return  # or told already
+        started = await agent._start(
+            input_of(update),
+            user=user,
+            thread=thread,
+            tenant=record.tenant_id,
+            run_id=run_id,
+            record_input=True,
+        )
+        # who made it: the run store answers a start of a run that exists with that run, so
+        # the server whose start made it is the one that finds its own name there, and runs it
+        by = agent.harness.holds.name
+        told = {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")}
+        # one outcome further from the user's last message than the turn that started the task
+        depth = int(origin.get("depth", 0)) + 1
+        metadata = {**started.metadata, NOTIFIED: {**told, "by": by, "depth": depth}}
+        if FRONTEND in origin:  # the chat's front end: a person reads and answers what it asks
+            metadata[FRONTEND] = origin[FRONTEND]
+        found = await runs.start(started.model_copy(update={"metadata": metadata}))
+        ours = (found.metadata.get(NOTIFIED) or {}).get("by") == by
+        if ours and found.status is RunStatus.RUNNING:
+            tasks.run(agent, found)  # not told meanwhile by another server
 
 
 async def stale(runtime: Runtime) -> bool:
@@ -798,14 +894,19 @@ async def answered(
         or found.awaiting.interrupt_id != resolution.interrupt_id
     ):
         return
-    journal, resumed = await agent._resumed(found, resolution)
-    if resumed.status is not RunStatus.RUNNING:
-        return  # cancelled by the answer: it ended there
+    tasks = parent.harness.background
+    with tasks.placed(found.run_id) as free:
+        if not free:  # the question stays the task's: the conversation's next turn asks it
+            log.warning("background task %s: no room here to go on with", found.run_id)
+            return
+        journal, resumed = await agent._resumed(found, resolution)
+        if resumed.status is not RunStatus.RUNNING:
+            return  # cancelled by the answer: it ended there
 
-    async def then(ended: RunRecord) -> None:
-        await delivered(parent, ended)
+        async def then(ended: RunRecord) -> None:
+            await delivered(parent, ended)
 
-    parent.harness.background.run(agent, resumed, then=then, journal=journal, resolution=resolution)
+        tasks.run(agent, resumed, then=then, journal=journal, resolution=resolution)
 
 
 # --------------------------------------------------------------------------- the five tools
@@ -864,10 +965,6 @@ NONE: Final = "No async subagent tasks tracked."
 NO_RUN: Final = "Background tasks run inside a harness run: none is under way."
 #: What a tool's work answers: what the model reads, and the task records it changed.
 Answer = tuple[str, dict[str, Any]]
-
-
-class _Untracked(Exception):
-    """A call names a task that is none of the conversation's (:func:`owned`)."""
 
 
 class Offered:
@@ -929,20 +1026,20 @@ class Offered:
             return NO_RUN, {}
         try:
             return await self._work[name](runtime, tasks, args)
-        except _Untracked:
-            return UNTRACKED.format(task_id=str(args["task_id"])), {}
+        except Refused as why:
+            return str(why), {}
 
     async def _task(
         self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
     ) -> tuple[dict[str, Any], RunRecord]:
         """The task a call names and its run of now, when the conversation tracks it and it is
-        its own (:func:`owned`); else :class:`_Untracked`."""
-        task = tasks.get(str(args["task_id"]).strip())
-        if not isinstance(task, Mapping) or task.get("agent_name") not in self.subagents:
-            raise _Untracked
-        record = await owned(runtime, task)
-        if record is None:
-            raise _Untracked
+        its own (:func:`owned`); else :class:`Refused`, as a task it does not track."""
+        task_id = str(args["task_id"])
+        task = tasks.get(task_id.strip())
+        tracked = isinstance(task, Mapping) and task.get("agent_name") in self.subagents
+        record = await owned(runtime, task) if isinstance(task, Mapping) and tracked else None
+        if task is None or record is None:
+            raise Refused(UNTRACKED.format(task_id=task_id))
         return dict(task), record
 
     async def _start(
@@ -952,7 +1049,8 @@ class Offered:
         if name not in self.subagents:
             allowed = ", ".join(f"`{n}`" for n in self.subagents)
             return f"Unknown async subagent type `{name}`. Available types: {allowed}", {}
-        task = await start(runtime, self.agent(runtime, name), name, str(args["description"]))
+        agent = self.agent(runtime, name)
+        task = await start(runtime, agent, name, str(args["description"]), tasks)
         return f"Launched async subagent. task_id: {task['task_id']}", {task["task_id"]: task}
 
     async def _check(

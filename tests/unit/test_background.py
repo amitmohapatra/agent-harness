@@ -20,7 +20,7 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-from trellis.harness import background, pipeline
+from trellis.harness import admission, background, pipeline
 from trellis.harness.a2a.executor import _payload
 from trellis.harness.a2a.translate import value_part
 from trellis.harness.adapters.langgraph import (
@@ -533,3 +533,65 @@ async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
     await first
     assert tasks.at_work("run_1")
     await tasks.aclose()
+
+
+# --------------------------------------------------------------------------- SEC-R-2: admission
+def unfinished(count: int) -> dict[str, Any]:
+    return {f"task_{n}": {**TASK, "task_id": f"task_{n}"} for n in range(count)}
+
+
+def test_sec_r_2_a_chat_has_at_most_the_admission_limit_of_unfinished_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the bound (4 at first), below it and above it; a task that ended makes room, and
+    one the attempt started since its list was read counts too."""
+    monkeypatch.setattr(admission, "ADMISSION", admission.Admission())
+    run = runtime(LocalRuns(), tasks_started=set())
+    background._counted(run, unfinished(3), "task_new")  # below: admitted, and counted from now
+    assert run.tasks_started == {"task_new"}
+    with pytest.raises(background.Refused, match="has 4 background tasks unfinished"):
+        background._counted(run, unfinished(3), "task_other")  # the three, and the one started
+    background._counted(run, unfinished(3), "task_new")  # the same call again: the same task
+    with pytest.raises(background.Refused, match=r"the most at once \(4\)"):
+        background._counted(runtime(LocalRuns(), tasks_started=set()), unfinished(5), "task_new")
+    ended = {**unfinished(4), "task_0": {**TASK, "task_id": "task_0", "status": "success"}}
+    background._counted(runtime(LocalRuns(), tasks_started=set()), ended, "task_new")
+
+
+async def test_sec_r_2_a_turn_past_three_outcomes_in_a_row_starts_nothing() -> None:
+    """A turn a message began is at no depth; a turn of the chat's own at the depth its run
+    says, and refused past 3 — or when its run does not say (fail closed)."""
+    runs = LocalRuns()
+    assert await background._depth(runtime(runs)) == 0
+    told = notification_in(background.input_of({**TASK, "status": "success"}))
+    for depth, admitted in ((1, True), (3, True), (4, False)):
+        own = await stored(
+            runs, run_id=f"run_n{depth}", metadata={"trellis_notified": {"depth": depth}}
+        )
+        run = runtime(runs, notification=told, run_id=own.run_id)
+        if admitted:
+            assert await background._depth(run) == depth
+        else:
+            with pytest.raises(background.Refused, match="3 times in a row"):
+                await background._depth(run)
+    unsaid = await stored(runs, run_id="run_unsaid", metadata={"trellis_notified": {}})
+    with pytest.raises(background.Refused):
+        await background._depth(runtime(runs, notification=told, run_id=unsaid.run_id))
+
+
+def test_sec_r_2_a_process_keeps_a_bounded_number_of_attempts_at_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the bound a new run has no place, one below it has; a place nothing began in is
+    given back, and a run with a place keeps it."""
+    monkeypatch.setattr(background, "AT_WORK", 2)
+    tasks = background.Tasks()
+    with tasks.placed("run_a") as first, tasks.placed("run_b") as second:
+        assert first and second and tasks.at_work("run_a")
+        with tasks.placed("run_c") as third:
+            assert not third and not tasks.at_work("run_c")
+        with tasks.placed("run_a") as again:
+            assert again  # its own place
+    assert not tasks.at_work("run_a")  # given back: nothing began in it
+    with tasks.placed("run_c") as free:
+        assert free
