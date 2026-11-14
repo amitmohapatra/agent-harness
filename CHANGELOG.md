@@ -322,6 +322,9 @@ cancelled after its start (the task is cancelled with it). See
   while the call ran with the ones a team's hook rewrote; a call a team's hook refused was
   still put to a person; and the record kept the result a team's `PostToolUse` hook had
   replaced. The harness's hooks now wait for the team's about the same call.
+- **What Claude Code says beside its replies is on the run's stream**: its rate limit, a
+  retried model call, a compacted context, a model fallback, a session-store miss and a
+  failed reply were dropped; each is a warning with its own code.
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.

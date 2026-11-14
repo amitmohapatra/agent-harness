@@ -329,6 +329,16 @@ AUTO_MEMORY_ENV: Final = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 #: same OS user sends it, and the value that refuses them: every run on a worker is that one
 #: user's, other tenants' among them.
 INBOUND: Final = {"crossSessionInbound": "refuse"}
+#: What Claude Code says on its stream beside the model's replies that explains a slow, a
+#: shortened or a rerouted turn — the system frame's ``subtype`` — and the code of the run's
+#: warning that says it: a model call tried again, the session's context compacted, another
+#: model answering, a step the session store did not take.
+NOTICES: Final = {
+    "api_retry": "model_retry",
+    "compact_boundary": "compaction",
+    "model_fallback": "model_fallback",
+    "mirror_error": "session_store",
+}
 #: The ``ClaudeAgentOptions`` fields the harness owns: framework options cannot set them.
 OWNED: Final[dict[str, str]] = {
     "resume": "the harness resumes the run's own session after a pause",
@@ -626,6 +636,7 @@ class ClaudeAdapter:
                     elif isinstance(message, ResultMessage):
                         # past Claude Code's own recovery: what a run with no answer says
                         runtime.cut_off = message.stop_reason == MAX_TOKENS
+                    _noticed(runtime, message)
                     yield message
         except ResultError:
             # the CLI exits with an error after its error result (the SDK raises it then): at
@@ -992,6 +1003,30 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
         stopped = found.status not in (TASK_COMPLETED, TASK_FAILED)
         said = STOPPED if stopped else said
         await helpers.settled(found.task_id, failed=failed, said=said, final=found.final)
+
+
+def _noticed(runtime: Runtime, message: Any) -> None:
+    """What ``message`` says beside the model's replies, as a warning of the run: Claude's
+    rate limit near or reached (one that is fine says nothing), a frame of
+    :data:`NOTICES` (with what it carries, as Claude Code said it), a reply that failed."""
+    from claude_agent_sdk import AssistantMessage, RateLimitEvent, SystemMessage
+
+    if isinstance(message, RateLimitEvent):
+        info = message.rate_limit_info
+        if info.status != "allowed":
+            said = f"Claude's rate limit ({info.rate_limit_type}): {info.status}"
+            runtime.events.warning("rate_limit", said)
+    elif isinstance(message, SystemMessage) and message.subtype in NOTICES:
+        carried = {
+            key: value
+            for key, value in message.data.items()
+            if key not in ("type", "subtype", "uuid", "session_id")
+            and isinstance(value, str | int | float | bool)
+        }
+        said = f"Claude Code: {message.subtype} {json.dumps(carried, sort_keys=True)}"
+        runtime.events.warning(NOTICES[message.subtype], said)
+    elif isinstance(message, AssistantMessage) and message.error:
+        runtime.events.warning("model_error", f"Claude's reply failed: {message.error}")
 
 
 def _transcript(messages: Sequence[Any]) -> list[Said]:

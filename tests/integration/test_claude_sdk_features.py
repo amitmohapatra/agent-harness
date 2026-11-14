@@ -489,6 +489,48 @@ async def test_the_teams_permission_answer_reaches_claude_code_as_given(
 
 
 @pytest.mark.parametrize("path", PATHS)
+async def test_what_claude_code_says_beside_its_replies_is_on_the_runs_stream(
+    harness: Harness, tmp_path: Path, path: str
+) -> None:
+    """Claude Code says on its stream when it is close to (or at) its rate limit, retries a
+    model call, compacts the session's context, falls back to another model, or could not
+    mirror a step into the session store, and when a reply failed: each is a warning of the
+    run, by its own code —
+    a slow, shortened or rerouted turn says why. A rate limit that is fine says nothing."""
+    limit = {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}}
+    near = {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.9}
+    failed = {"id": "msg_failed", "role": "assistant", "model": "fake", "content": []}
+    frames = [
+        limit,
+        {**limit, "rate_limit_info": near},
+        {"type": "system", "subtype": "api_retry", "attempt": 2, "error": "overloaded"},
+        {"type": "system", "subtype": "compact_boundary", "trigger": "auto"},
+        {"type": "system", "subtype": "model_fallback", "to": "claude-haiku"},
+        {"type": "system", "subtype": "mirror_error", "error": "the store timed out"},
+        {
+            "type": "assistant",
+            "message": failed,
+            "parent_tool_use_id": None,
+            "error": "server_error",
+        },
+    ]
+    script = [*({"frame": frame} for frame in frames), {"text": "done"}]
+    agent = harness.wrap(options(tmp_path, script), id="noticed")
+    events = [e async for e in agent.stream("go", user="u1", thread=conversation(path))]
+    assert events[-1].data["result"] == "done"
+    warned = [
+        (e.data["code"], e.data["message"]) for e in events if e.data.get("name") == "warning"
+    ]
+    codes = ["rate_limit", "model_retry", "compaction", "model_fallback", "session_store"]
+    assert [code for code, _ in warned] == [*codes, "model_error"]
+    said = dict(warned)
+    assert "allowed_warning" in said["rate_limit"] and "five_hour" in said["rate_limit"]
+    assert "overloaded" in said["model_retry"] and "claude-haiku" in said["model_fallback"]
+    assert "the store timed out" in said["session_store"]
+    assert "server_error" in said["model_error"]
+
+
+@pytest.mark.parametrize("path", PATHS)
 async def test_the_teams_hook_answers_before_governance_decides_what_it_left(
     harness: Harness, tmp_path: Path, path: str
 ) -> None:

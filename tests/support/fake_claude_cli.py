@@ -1016,6 +1016,9 @@ class Cli:
         if "stall" in item:  # the model says nothing for a while, then goes on
             self.wait(float(item["stall"]))
             return None, read, True, False, 0
+        if "frame" in item:  # a frame the CLI sends beside the model's replies, as given
+            send({**item["frame"], "session_id": session, "uuid": str(uuid.uuid4())})
+            return None, read, True, False, 0
         if "background" in item or "workflow" in item:
             read, completed, interrupted = self.background(session, step, item)
             return None, read, completed, interrupted, 0
