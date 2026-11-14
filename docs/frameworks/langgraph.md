@@ -315,6 +315,14 @@ the graph's messages and in the run's transcript); any other graph waits as `"qu
   with only the sync `wrap_tool_call` or `wrap_model_call` fails with LangChain's own
   `NotImplementedError` ("... is not available"): give it the async hook
   (`awrap_tool_call`, `awrap_model_call`). The harness does not patch the library to run it.
+* MCP elicitation through LangChain's own MCP adapter is not mapped to the run's question:
+  `langchain.mcp` (langchain 1.5) raises a LangGraph interrupt of type `mcp_elicitation` for
+  a server's question, and it needs `fastmcp`, which trellis-harness does not depend on
+  (`import langchain.mcp.elicitation` fails with `No module named 'fastmcp'` in a tested
+  install; `langchain-mcp-adapters` is not a dependency either). Such an interrupt reaches
+  the run as a graph's own `interrupt(...)`: asked as it is, answered with the raw value. An
+  MCP server given the harness's way (`mcp(...)`) asks through the run's `ask`, one question
+  with the server's schema ([tools.md](../tools.md#a-server-that-asks-mcp-elicitation)).
 * With a `PIIMiddleware`: the run store keeps the run's input as it was given — a retry and
   a resume run the graph from it — so the stored input is not redacted; and a run that fails
   before its graph returns a state records the question as it was asked, not as the
