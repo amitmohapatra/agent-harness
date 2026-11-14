@@ -140,7 +140,7 @@ from trellis.harness.adapters.langgraph import (
     ASKED,
     CONTEXT_MESSAGE_ID,
     TASK_TOOL,
-    carried_of,
+    carried_plain,
     notified,
 )
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
@@ -3441,7 +3441,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             runtime.replay.passed(parent)  # the steps it follows are done: not made again
             # what the run's conversation carries to its next turn, as the graph now holds it
             values = checkpoint["channel_values"]
-            runtime.carried = carried_of(values)
+            runtime.carried = carried_plain(values, runtime.carried or {})
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(

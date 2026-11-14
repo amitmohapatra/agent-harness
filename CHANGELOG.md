@@ -32,6 +32,10 @@ A library's feature works as the library does it; the harness governs, records a
   the run's journal, and a tool's `Command` kept for a replay — is read back in LangGraph's
   strict mode: only LangGraph's and LangChain's own types and the types the graph's state
   declares are made of stored data; anything else stays data and is never imported or called.
+- A Deep Agents graph with no thread of its own (`ReAct`, a graph compiled without a
+  checkpointer or with `RunCheckpointer`) keeps its state files and todos across the turns
+  of a conversation, as it keeps its background tasks: a file one turn wrote is read by the
+  next, one it deleted stays deleted. Bounded as before (256 KiB kept in the file store).
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks

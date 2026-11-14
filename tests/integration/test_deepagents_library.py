@@ -30,6 +30,7 @@ from deepagents.backends import (
 )
 from deepagents.middleware import create_summarization_tool_middleware
 from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool as lc_tool
@@ -42,6 +43,7 @@ from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.middleware import RunCheckpointer
 
 ran: list[str] = []
 
@@ -320,6 +322,46 @@ async def test_a_composite_backends_write_past_the_state_waits_for_its_approval(
     done = await agent.resume(paused.interrupt.interrupt_id, "reject", reviewer="u")
     assert done.status is RunStatus.SUCCESS and not (tmp_path / "final.md").exists()
     assert set((await state_of(memory_harness, graph, "t"))["files"]) == {"/scratch.md"}
+
+
+@pytest.mark.parametrize("kept", ["no thread", "the run"])
+async def test_a_conversations_next_turn_has_the_files_and_todos_of_its_last(
+    harness: Harness, kept: str
+) -> None:
+    """CONV: a Deep Agents graph with no thread of its own (compiled without a checkpointer,
+    or checkpointing into its run) keeps its state files and its todos across the turns of
+    one conversation, as a thread of the graph's own would: a file one turn wrote is read by
+    the next, one a turn deleted stays deleted, and another conversation has none of them."""
+    turns: list[Any] = [
+        [
+            ("write_file", {"file_path": "/notes.md", "content": "tides at six"}),
+            ("write_file", {"file_path": "/draft.md", "content": "a draft"}),
+            ("write_todos", {"todos": [{"content": "check tides", "status": "pending"}]}),
+        ],
+        "noted",
+        [("read_file", {"file_path": "/notes.md"}), ("delete", {"file_path": "/draft.md"})],
+        "read",
+        [("read_file", {"file_path": "/notes.md"}), ("read_file", {"file_path": "/draft.md"})],
+        "again",
+        ("read_file", {"file_path": "/notes.md"}),
+        "elsewhere",
+    ]
+    model = ScriptedChatModel(turns=turns)
+    saver = RunCheckpointer() if kept == "the run" else None
+    graph = create_deep_agent(model=model, middleware=[TodoListMiddleware()], checkpointer=saver)
+    agent = harness.wrap(graph, id="deep")
+
+    def read(n: int) -> list[str]:
+        """What the model's ``n``-th call read of its tools, the latest results last."""
+        return [str(m.content) for m in model.seen[n] if isinstance(m, ToolMessage)]
+
+    for said in ("note it", "read it", "read both"):
+        assert (await agent.run(said, user="u", thread="t")).status is RunStatus.SUCCESS
+    assert "tides at six" in read(3)[-2]  # the second turn read the first turn's file
+    third = read(5)
+    assert "tides at six" in third[-2] and "not found" in third[-1]  # deleted stays deleted
+    assert (await agent.run("read it", user="u", thread="other")).answer == "elsewhere"
+    assert "not found" in read(7)[-1]  # another conversation's files are its own
 
 
 async def test_a_local_shell_backends_execute_runs_the_command_as_a_write_of_the_run(

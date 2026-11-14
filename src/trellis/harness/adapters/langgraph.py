@@ -147,10 +147,12 @@ PATCHES_CALLS: Final = "PatchToolCallsMiddleware.before_agent"
 #: The graph state channels a conversation carries from one turn to the next where the graph
 #: has no thread of its own to hold them (:func:`carries`: its thread is its run, or it has
 #: none), as a thread of the graph's own would: Deep Agents' list of the background tasks its
-#: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against.
+#: async sub-agents run (``AsyncSubAgentState``), which its task tools read a task id against;
+#: its files kept in the graph's state (``StateBackend``: "persists across turns"), and its
+#: todos. Never the conversation itself (``messages``: the memory window's, or the graph's).
 #: A turn starts with what the conversation's last turn ended with (``Runtime.carried``; kept
-#: in the process and in the file store: ``pipeline``).
-CARRIED: Final = ("async_tasks",)
+#: in the process and, up to ``pipeline.CARRIED_BYTES``, in the file store: ``pipeline``).
+CARRIED: Final = ("async_tasks", "files", "todos")
 
 
 class LangGraphAdapter:
@@ -722,17 +724,40 @@ def carries(target: Any) -> bool:
 
 def _ended_with(target: Any, runtime: Any, values: Any) -> None:
     """What the run's conversation carries to its next turn (:data:`CARRIED`), read from the
-    state a graph compiled without a checkpointer ended its turn with (``values``): it has
-    no checkpoint to read it from (``RunCheckpointer.put``)."""
-    if not _checkpointed(target) and isinstance(values, Mapping):
-        runtime.carried = carried_of(values)
+    state the graph ended its turn with (``values``, whole: a checkpoint holds a channel kept
+    as deltas — Deep Agents' ``files`` — only now and then), over what the turn began with
+    (:func:`carried_of`)."""
+    if carries(target) and isinstance(values, Mapping):
+        runtime.carried = carried_of(values, getattr(runtime, "carried", None) or {})
 
 
-def carried_of(values: Mapping[str, Any]) -> dict[str, Any]:
-    """The channels of a graph's state its conversation carries (:data:`CARRIED`): those it
-    holds anything in — Deep Agents sets its list of tasks, empty, on every turn, and a turn
-    that started none carries nothing."""
-    return {name: values[name] for name in CARRIED if values.get(name)}
+def carried_of(values: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
+    """The channels of a graph's state its conversation carries (:data:`CARRIED`), as
+    ``values`` holds them now: those it holds anything in — Deep Agents sets its list of
+    tasks, empty, on every turn, and a turn that started none carries nothing — and those the
+    turn began with (``before``) and emptied, carried empty. An entry of a mapping the turn
+    began with and no longer holds (a file it deleted) is carried as ``None``: what merges
+    the conversation's states (``tools.results.merged``) keeps the entries of both, and Deep
+    Agents' files take ``None`` for a file that is gone."""
+    out: dict[str, Any] = {}
+    for name in CARRIED:
+        now, was = values.get(name), before.get(name)
+        if not now and not was:
+            continue
+        if isinstance(now, Mapping) and isinstance(was, Mapping):
+            gone = {key: None for key, entry in was.items() if entry is not None and key not in now}
+            out[name] = {**now, **gone}
+        else:
+            out[name] = now
+    return out
+
+
+def carried_plain(values: Mapping[str, Any], before: Mapping[str, Any]) -> dict[str, Any]:
+    """``before`` with the carried channels a checkpoint's ``values`` hold whole — a channel
+    kept as deltas is not in every checkpoint, and is read where the turn ends
+    (:func:`_ended_with`)."""
+    whole = {n: values[n] for n in CARRIED if isinstance(values.get(n), dict | list)}
+    return {**before, **carried_of(whole, {n: before[n] for n in whole if n in before})}
 
 
 def checkpointing(target: Any) -> Any:

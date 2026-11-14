@@ -147,6 +147,13 @@ call; one without waits as `"queue"`, said once ([runs.md](../runs.md#a-message-
 * Deep Agents' state tools (`write_todos`, the files on its default backend or on a state
   route of a `CompositeBackend`) are not governed or journaled (above): the graph's
   checkpoint keeps what they did; gate them with `interrupt_on`.
+* A graph with no thread of its own — `ReAct`, a graph compiled without a checkpointer or
+  with `RunCheckpointer()` — keeps its state files and todos from one turn of a conversation
+  to the next (with its background tasks), as a checkpointer of its own would: at most
+  256 KiB of them are kept for other servers; past that a turn elsewhere starts without
+  them (said in the log). The conversation's messages are never carried this way. How this
+  changes multi-turn accuracy with a backend is to be confirmed in the Haiku measurement
+  phase.
 * A sub-agent's harness call that asks pauses the whole run (the interrupt names the call), and
   the approval resumes the sub-agent where it stopped with a checkpointer, or re-runs the run
   from its journal without one — either way the call runs once.
