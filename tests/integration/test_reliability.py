@@ -242,6 +242,24 @@ async def test_openapi_reads_are_retried_and_writes_carry_the_idempotency_key(
     assert "idempotency-key" not in order.calls[0].request.headers  # a read sends none
 
 
+@respx.mock
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
+async def test_an_openapi_read_answered_with_a_status_that_may_pass_is_tried_again(
+    harness: Harness, status: int
+) -> None:
+    """docs/reliability.md: an operation answering 408, 425, 429, 500, 502, 503 or 504 may pass
+    on its own; a read is tried again."""
+    order = respx.get("http://erp.test/orders/o1").mock(
+        side_effect=[httpx.Response(status), httpx.Response(200, json={"id": "o1"})]
+    )
+
+    async def ordering(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("get_order", order_id="o1")
+
+    agent = arm(harness.wrap(ordering, id="ordering"), [openapi(DOCUMENT, call_timeout=5)])
+    assert (await agent.run("x", user="u")).answer == {"id": "o1"} and order.call_count == 2
+
+
 async def test_a_write_of_unknown_effect_is_recorded_so(
     memory_harness: Harness, memory_service: Any
 ) -> None:
