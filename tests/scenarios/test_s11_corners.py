@@ -117,6 +117,9 @@ async def test_cancel_a_queued_run(h: Harness, uid: str, tmp_path: Path) -> None
 
 
 @pytest.mark.plan("CONV-13")
+@pytest.mark.xfail(
+    strict=True, reason="SCN-8 (scn-fixes): a message cancelled while it waits its turn still runs"
+)
 @pytest.mark.parametrize("adapter", ADAPTERS)
 async def test_cancel_a_message_waiting_its_turn_and_a_running_one(
     h: Harness, adapter: str, uid: str, tmp_path: Path

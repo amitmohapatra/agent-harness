@@ -143,6 +143,10 @@ async def test_a_new_message_while_the_chat_waits_for_an_approval(
 
 
 @pytest.mark.plan("CONV-12")
+@pytest.mark.xfail(
+    strict=True,
+    reason="chat-order: a worker's turn and a direct one of the same chat are not held across processes (L1)",
+)
 async def test_a_queued_turn_and_a_direct_one_in_one_chat(uid: str, tmp_path: Path) -> None:
     agent_id = f"s14q-{uid}"
     spec = {

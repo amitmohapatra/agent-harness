@@ -73,11 +73,19 @@ async def test_a_schedule_made_in_chat_fires_into_its_thread(
                 assert sent.status_code == 200, sent.text
                 return decode(sent.text)[-1][1]
 
-            when = {"in_minutes": 1} if how == "ticker" else {"when": "0 9 * * 1"}
-            for thread, tok in ((open_thread, report), (closed_thread, token(f"q{uid[:5]}", 9))):
+            # two schedules unlike each other (alike ones ask the user "update it, or keep both?")
+            asks = (
+                (open_thread, f"{report} send the weekly sales figures", "0 9 * * 1"),
+                (
+                    closed_thread,
+                    f"{token(f'q{uid[:5]}', 9)} check the warehouse stock",
+                    "30 16 * * 5",
+                ),
+            )
+            for thread, task, cron in asks:
+                when = {"in_minutes": 1} if how == "ticker" else {"when": cron}
                 made = await say(
-                    thread,
-                    f"{token(uid, 1)} {command('schedule_task', task=f'{tok} send my report', **when)}",
+                    thread, f"{token(uid, 1)} {command('schedule_task', task=task, **when)}"
                 )
                 assert made.get("outcome") == {"type": "success"}, made
             schedules = await _schedules(h, user, agent_id)
