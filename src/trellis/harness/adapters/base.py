@@ -95,6 +95,9 @@ class NativePause:
     #: the framework's handle of each harness pause raised at once (calls made together may
     #: each ask), by the harness's interrupt id
     ids: dict[str, str] | None = None
+    #: the JSON Schema of the answer the framework takes (LangGraph's
+    #: ``interrupt(response_schema=...)``), which it checks the answer against
+    schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -396,27 +396,33 @@ class Journal(BaseModel):
 
     def approved_in_framework(self, resolution: InterruptResolution) -> None:
         """The calls the open pause — a framework's own approval gate — approved by
-        ``resolution``, filed for governance (:attr:`approved`): every call it holds on an
-        approval, the first with its edited arguments on an edit."""
-        if self.pending is None or resolution.decision not in (
-            InterruptDecision.APPROVE,
-            InterruptDecision.EDIT,
-        ):
+        ``resolution``, filed for governance (:attr:`approved`), so a person answers once for
+        a call whichever gate asks: every call it holds on an approval, the first with its
+        edited arguments on an edit; LangChain's ``HumanInTheLoopMiddleware``'s, each call its
+        decision approves or edits (the decisions the gate is resumed with:
+        ``hitl_response``, the reviewer's own included)."""
+        if self.pending is None:
             return
+        from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - a cycle
+            hitl_approved,
+            is_hitl,
+        )
+
         interrupt = self.pending.interrupt
         payload = interrupt.payload or {}
-        actions = payload.get("action_requests")
-        if isinstance(actions, list) and payload.get("review_configs") is not None:
-            calls = [(a.get("name"), a.get("args") or {}) for a in actions]
+        if is_hitl(payload):  # LangChain's HumanInTheLoopMiddleware: a batch, or one call
+            calls = hitl_approved(payload, resolution)
+        elif resolution.decision not in (InterruptDecision.APPROVE, InterruptDecision.EDIT):
+            return
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
             if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
                 return  # governance's own question: its answer is read where the call asks
             calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
+            edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
+            if isinstance(edited, dict):
+                calls[0] = (calls[0][0], edited)
         else:
             return  # the harness's own question: governance asked it
-        edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
-        if isinstance(edited, dict) and calls:
-            calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:

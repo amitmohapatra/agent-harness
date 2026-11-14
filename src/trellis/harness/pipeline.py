@@ -63,7 +63,15 @@ from trellis.harness.adapters.base import (
     merged,
     query_of,
 )
-from trellis.harness.adapters.langgraph import FOREIGN, HITL, carries, holds, is_hitl
+from trellis.harness.adapters.langgraph import (
+    DECISION_SCHEMA,
+    FOREIGN,
+    HITL,
+    carries,
+    hitl_calls,
+    holds,
+    is_hitl,
+)
 from trellis.harness.asking import Question, RunCancelled
 from trellis.harness.bridges.helpers import held
 from trellis.harness.budget import BUDGET as KEPT_BUDGET
@@ -1145,6 +1153,10 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
     if is_hitl(value):
         return _middleware_approval(runtime, ident, native)
     asked = Question.described(value)  # what ask(...) takes, mapped the one way ask maps it
+    if asked.schema is None and native.schema is not None:
+        # the answer the graph takes (``interrupt(response_schema=...)``): checked on the resume
+        # (``answer_problem``), so one that does not fit is asked again, not run
+        asked = dataclasses.replace(asked, expects=native.schema)
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
@@ -1157,26 +1169,24 @@ def _foreign(runtime: Runtime, native: NativePause) -> Pending:
 
 def _middleware_approval(runtime: Runtime, ident: str, native: NativePause) -> Pending:
     """LangChain's ``HumanInTheLoopMiddleware`` (Deep Agents' ``interrupt_on``) paused on the
-    calls it holds: an approval of the first, the whole request (every call, each one's
-    ``allowed_decisions``) in the payload; the resume answers all of them."""
+    calls it holds — a batch, or one call (``interrupt_mode="per_call"``): an approval of the
+    first, the whole request (every call, each one's ``allowed_decisions``, or the schema of
+    the decision a per-call request takes) in the payload; the resume answers all of them."""
     request = json.loads(json.dumps(native.value, default=str))
-    actions = request["action_requests"]
-    first, more = actions[0], len(actions) - 1
-    question = f"Approve {first['name']}?"
+    if native.schema is not None:
+        request[DECISION_SCHEMA] = native.schema
+    calls = hitl_calls(request)
+    (name, args), more = calls[0], len(calls) - 1
+    question = f"Approve {name}?"
     if more:
         question += f" (and {more} more call{'s' if more > 1 else ''})"
-    args = first.get("args")
     interrupt = Interrupt(
         interrupt_id=ident,
         tenant_id=runtime.tenant,
         run_id=runtime.run_id,
         reason=InterruptReason.APPROVAL,
         question=question,
-        tool_call=ToolCall(
-            tool=first["name"],
-            args=args if isinstance(args, dict) else {},
-            idempotency_key=native.native_id,
-        ),
+        tool_call=ToolCall(tool=name, args=args, idempotency_key=native.native_id),
         payload=request,
     )
     return Pending(key=HITL, interrupt=interrupt, native_id=native.native_id)

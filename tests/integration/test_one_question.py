@@ -60,6 +60,7 @@ from agents import Agent, LocalShellTool, function_tool
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
@@ -505,6 +506,51 @@ async def test_the_librarys_own_gate_is_the_one_question(
         ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
         await ledger(h, memory_service, watch, asked, name, questions=len(amounts), ran=len(ran))
     assert [a for t, a in RAN if t == name] == ran, RAN
+
+
+# The graph's own LangChain tool, gated by the middleware, which governance asks about too: it
+# declares nothing ("undeclared": every call asks), or that it writes. The cases above gate a
+# harness tool; one of the graph's own is governed in its tool node (``governed_call``), where
+# the gate's decision must be read as well. Batched and per call.
+
+
+def own_tool(side: str) -> Any:
+    @lc_tool
+    def wire(amount: int) -> str:
+        """Wire an amount."""
+        RAN.append(("wire", amount))
+        return f"wired {amount}"
+
+    if side != "undeclared":
+        wire.metadata = {"side_effects": side}
+    return wire
+
+
+@pytest.mark.parametrize("mode", ["batched", "per_call"])
+@pytest.mark.parametrize("side", ["undeclared", "write"])
+@pytest.mark.parametrize("flow", ["approve", "reject", "edit", "two-calls"])
+async def test_the_librarys_gate_on_a_tool_of_the_graphs_own_is_the_one_question(
+    memory_service: FakeMemoryService, mode: str, side: str, flow: str
+) -> None:
+    amounts = (5, 6) if flow == "two-calls" else (5,)
+    decision = flow if flow in ("reject", "edit") else "approve"
+    wire = own_tool(side)
+    model = PlannedChatModel(plan=[("wire", {"amount": a}) for a in amounts])
+    gate = HumanInTheLoopMiddleware(interrupt_on={"wire": True}, interrupt_mode=cast(Any, mode))
+    graph = create_agent(model, tools=[wire], middleware=[gate], checkpointer=InMemorySaver())
+    watch, asked = Watch(), Asked()
+
+    def answer(interrupt: Any) -> dict[str, Any]:
+        edited = {"answer": {"amount": 3}} if decision == "edit" else {}
+        return {"decision": decision, **edited}
+
+    async with Harness(config=Settings(), memory=memory_service.client()) as h:
+        agent = h.wrap(graph, id=f"own-{mode}-{side}", hooks=[watch])
+        done = await settled(agent, await agent.run("go", user="ada", thread=THREAD), asked, answer)
+        assert done.status is RunStatus.SUCCESS, done
+        ran = {"approve": list(amounts), "reject": [], "edit": [3]}[decision]
+        await ledger(h, memory_service, watch, asked, "wire", questions=len(amounts), ran=len(ran))
+    assert [a for t, a in RAN if t == "wire"] == ran, RAN
 
 
 # --------------------------------------------------------------------------- inside a sub-agent

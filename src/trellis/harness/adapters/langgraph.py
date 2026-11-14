@@ -239,20 +239,24 @@ class LangGraphAdapter:
         interrupts: list[Any] = []
         try:
             given = await _continued(target, native_input, run)
-            # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the graph's
-            # nodes write to the stream is the run's (:func:`_written`)
-            async for part in self._graph(target, run.runtime).astream(
-                given,
-                self._config(target, run),
-                stream_mode=["values", "custom"],
-                version="v2",
-                **_run_arguments(run.runtime, target),
-            ):
-                if part["type"] == "custom":
-                    _written(run.runtime, part["data"])
-                else:
-                    values = part["data"]
-                    interrupts.extend(part["interrupts"])
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
+            try:
+                # ``ainvoke``, the ``custom`` stream mode beside its ``values``: what the
+                # graph's nodes write to the stream is the run's (:func:`_written`)
+                async for part in graph.astream(
+                    given,
+                    config,
+                    stream_mode=["values", "custom"],
+                    version="v2",
+                    **_run_arguments(run.runtime, target),
+                ):
+                    if part["type"] == "custom":
+                        _written(run.runtime, part["data"])
+                    else:
+                        values = part["data"]
+                        interrupts.extend(part["interrupts"])
+            except Exception as exc:
+                values, interrupts[:] = await _asked_again(graph, config, exc)
             _ended_with(target, run.runtime, values)
             return GraphOutput(value=values, interrupts=tuple(interrupts))
         except BaseException as exc:
@@ -281,29 +285,33 @@ class LangGraphAdapter:
         text = _Text()
         try:
             given = await _continued(target, native_input, run)
-            graph = self._graph(target, run.runtime)
+            graph, config = self._graph(target, run.runtime), self._config(target, run)
             with warnings.catch_warnings():  # the harness's choice: said to no user of it
                 warnings.simplefilter("ignore", LangChainBetaWarning)
                 # returns without awaiting anything: no other task runs under this filter
                 events = await graph.astream_events(
                     given,
-                    self._config(target, run),
+                    config,
                     version="v3",
                     transformers=[_custom_mode()],
                     **_run_arguments(run.runtime, target),
                 )
-            async with events:
-                async for event in events:
-                    method, params = event["method"], event["params"]
-                    root = not params["namespace"]
-                    if method == "messages":
-                        if said := text.of(*params["data"]):
-                            yield said
-                    elif method == "custom" and root:
-                        _written(run.runtime, params["data"])
-                    elif method == "values" and root:
-                        values = params["data"]
-                        interrupts = tuple(params.get("interrupts") or ()) or interrupts
+            try:
+                async with events:
+                    async for event in events:
+                        method, params = event["method"], event["params"]
+                        root = not params["namespace"]
+                        if method == "messages":
+                            if said := text.of(*params["data"]):
+                                yield said
+                        elif method == "custom" and root:
+                            _written(run.runtime, params["data"])
+                        elif method == "values" and root:
+                            values = params["data"]
+                            interrupts = tuple(params.get("interrupts") or ()) or interrupts
+            except Exception as exc:
+                values, held = await _asked_again(graph, config, exc)
+                interrupts = tuple(held)
         except BaseException as exc:
             error = exc
             raise
@@ -342,7 +350,13 @@ class LangGraphAdapter:
             first = (ours or raised)[0]
             # calls made at once may each have asked: the pause names each one's interrupt
             ids = {i.value.get("interrupt_id"): i.id for i in ours}
-            pause = NativePause(value=first.value, native_id=first.id, ids=ids)
+            schema = getattr(first, "response_schema", None)
+            pause = NativePause(
+                value=first.value,
+                native_id=first.id,
+                ids=ids,
+                schema=schema if isinstance(schema, dict) else None,
+            )
         return Extracted(answer=answer, transcript=transcript, pause=pause)  # type: ignore[arg-type]
 
     def resume_input(
@@ -506,6 +520,21 @@ def _custom_mode() -> Any:
             return True
 
     return CustomMode
+
+
+async def _asked_again(graph: Any, config: Any, error: Exception) -> tuple[Any, list[Any]]:
+    """The graph's state and its pauses, still open, after the answer a resume gave a pause
+    was not one its ``response_schema`` takes (``is_invalid_resume``: a check the schema's
+    JSON form, checked first, could not make — a validator of its own): LangGraph saved
+    nothing, so the question is asked again rather than the run failing on it. Any other
+    error is raised as it was."""
+    from langgraph.errors import is_invalid_resume
+
+    if not is_invalid_resume(error):
+        raise error
+    log.warning("an answer was not one the graph's interrupt takes, asked again: %s", error)
+    state = await graph.aget_state(config)
+    return state.values, list(state.interrupts)
 
 
 def _written(runtime: Runtime, value: Any) -> None:
@@ -788,36 +817,70 @@ def _task() -> str | None:
     return task if isinstance(task, str) else None
 
 
+#: The ``type`` of a ``HumanInTheLoopMiddleware(interrupt_mode="per_call")`` request: one
+#: call's approval (``ToolApprovalRequest``), answered with one decision.
+TOOL_APPROVAL: Final = "tool_approval"
+#: The key of an approval's payload holding the JSON Schema of the decision the request takes
+#: (LangGraph's ``Interrupt.response_schema``: a per-call request's allowed decisions, an
+#: edit's arguments as its tool takes them).
+DECISION_SCHEMA: Final = "response_schema"
+
+
 def is_hitl(value: Any) -> bool:
-    """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request (its
-    ``action_requests`` and their ``review_configs``)."""
+    """Whether an interrupt's value is a ``HumanInTheLoopMiddleware`` request: a batch's (its
+    ``action_requests`` and their ``review_configs``) or one call's (``interrupt_mode=
+    "per_call"``: a :data:`TOOL_APPROVAL`)."""
+    if not isinstance(value, dict):
+        return False
+    if value.get("type") == TOOL_APPROVAL:
+        return isinstance(value.get("name"), str) and isinstance(value.get("args"), dict)
     return (
-        isinstance(value, dict)
-        and isinstance(value.get("action_requests"), list)
+        isinstance(value.get("action_requests"), list)
         and bool(value["action_requests"])
         and isinstance(value.get("review_configs"), list)
     )
 
 
+def hitl_calls(request: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """The calls a ``HumanInTheLoopMiddleware`` request holds, each its tool and arguments,
+    in order: a batch's, or the one call of a per-call request."""
+    actions = [request] if request.get("type") == TOOL_APPROVAL else request["action_requests"]
+    return [(str(a.get("name")), dict(a.get("args") or {})) for a in actions]
+
+
 def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> dict[str, Any]:
-    """The ``{"decisions": [...]}`` a ``HumanInTheLoopMiddleware`` pause resumes with — one
-    decision per call it holds, in order — for a harness decision:
+    """What a ``HumanInTheLoopMiddleware`` pause resumes with, for a harness decision: a
+    batch's ``{"decisions": [...]}``, one decision per call it holds, in order — or a per-call
+    request's one decision:
 
     * ``approve`` approves every call;
-    * ``edit`` runs the first call (the one the interrupt shows) with the edited arguments and
-      approves the others;
+    * ``edit`` runs the call with the edited arguments — one call: a batch of several takes
+      one decision for each, given as ``{"decisions": [...]}``;
     * ``reject`` rejects every call, with the reviewer's reason (``answer=``) as the message the
       model reads;
     * ``answer`` responds for every call with the answer (the tool does not run).
 
-    An answer (or edit) that already is ``{"decisions": [...]}`` is sent as it is. A decision a
-    call's ``allowed_decisions`` does not include raises ``ConfigurationError``."""
+    An answer (or edit) that already is what the request takes (``{"decisions": [...]}``, a
+    per-call decision) is sent as it is. A decision a call does not allow (its
+    ``allowed_decisions``, a per-call request's schema of them: :data:`DECISION_SCHEMA`), or an
+    edit of a batch in one set of arguments, raises ``ConfigurationError``: the run stays
+    paused, for an answer it takes."""
     raw = resolution.payload if resolution.decision is InterruptDecision.EDIT else resolution.answer
+    if request.get("type") == TOOL_APPROVAL:
+        given = raw if isinstance(raw, dict) and "type" in raw else None
+        decision = given or _decision(resolution, request)
+        _allowed(request, decision)
+        return decision
     if isinstance(raw, dict) and isinstance(raw.get("decisions"), list):
         return raw
     actions: list[dict[str, Any]] = request["action_requests"]
     configs: list[dict[str, Any]] = request["review_configs"]
-    decisions = [_decision(resolution, action, first=n == 0) for n, action in enumerate(actions)]
+    if resolution.decision is InterruptDecision.EDIT and len(actions) > 1:
+        raise ConfigurationError(
+            f"the approval holds {len(actions)} calls, and an edit's arguments are one call's: "
+            'give one decision for each call, in order, as {"decisions": [...]}'
+        )
+    decisions = [_decision(resolution, action) for action in actions]
     for action, config, decision in zip(actions, configs, decisions, strict=False):
         allowed = config.get("allowed_decisions") or []
         if decision["type"] not in allowed:
@@ -828,12 +891,50 @@ def hitl_response(request: dict[str, Any], resolution: InterruptResolution) -> d
     return {"decisions": decisions}
 
 
-def _decision(resolution: InterruptResolution, action: dict[str, Any], *, first: bool) -> Any:
+def hitl_approved(
+    request: Mapping[str, Any], resolution: InterruptResolution
+) -> list[tuple[str, Any]]:
+    """The calls a ``HumanInTheLoopMiddleware`` request's resume runs as a person decided —
+    each call its decision approves, as the model made it, or edits, as edited
+    (:func:`hitl_response`); a rejected or answered call runs nothing, and a cancel decides
+    none."""
+    if resolution.decision is InterruptDecision.CANCEL:
+        return []
+    sent = hitl_response(dict(request), resolution)
+    decisions = [sent] if request.get("type") == TOOL_APPROVAL else sent["decisions"]
+    approved: list[tuple[str, Any]] = []
+    for (name, args), decision in zip(hitl_calls(request), decisions, strict=False):
+        if decision.get("type") == "approve":
+            approved.append((name, args))
+        elif decision.get("type") == "edit":
+            edited = decision.get("edited_action") or {}
+            approved.append((str(edited.get("name", name)), edited.get("args") or {}))
+    return approved
+
+
+def _allowed(request: Mapping[str, Any], decision: Any) -> None:
+    """A per-call request's decision, checked against the schema of those it takes
+    (:data:`DECISION_SCHEMA`), as LangGraph checks it on the resume: refused here, the run
+    stays paused rather than failing on it."""
+    from jsonschema.exceptions import best_match
+    from jsonschema.validators import validator_for
+
+    schema = request.get(DECISION_SCHEMA)
+    if not isinstance(schema, dict):
+        return
+    error = best_match(validator_for(schema)(schema).iter_errors(decision))
+    if error is not None:
+        raise ConfigurationError(
+            f"{request.get('name')} does not take the decision {decision!r}: {error.message}"
+        )
+
+
+def _decision(resolution: InterruptResolution, action: Mapping[str, Any]) -> Any:
     decision = resolution.decision
     if decision is InterruptDecision.REJECT:
         reason = reason_of(resolution)
         return {"type": "reject", "message": reason} if reason else {"type": "reject"}
-    if decision is InterruptDecision.EDIT and first:
+    if decision is InterruptDecision.EDIT:
         return {
             "type": "edit",
             "edited_action": {"name": action["name"], "args": resolution.payload},

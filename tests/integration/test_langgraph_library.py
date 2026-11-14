@@ -26,12 +26,13 @@ from langgraph.graph import END, START, MessagesState, StateGraph, add_messages
 from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode, ToolRuntime, tools_condition
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import CachePolicy, Command, RetryPolicy, Send, TimeoutPolicy, interrupt
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, field_validator
 
 from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, current, tool
-from trellis.contracts import RunEventType, RunStatus
+from trellis.contracts import ConfigurationError, Interrupt, RunEventType, RunStatus
+from trellis.harness.harness import LOCAL_TENANT
 from trellis.harness.tools.bridge import MAX_REPEATS, STALLED
 
 ran: list[str] = []
@@ -461,6 +462,89 @@ async def test_an_entrypoint_and_its_tasks_run_and_pause_as_a_graph_does(harness
     assert done.status is RunStatus.SUCCESS
     assert ran == ["draft tides"]  # the task's result came from its checkpoint, not a second run
     assert await state_of(harness, workflow, "t") == {"text": "about tides", "verdict": "yes"}
+
+
+# ---------------------------------------------------------------- an interrupt's answer schema
+class Verdict(BaseModel):
+    approved: bool
+    note: str
+
+    @field_validator("note")
+    @classmethod
+    def _said(cls, note: str) -> str:
+        if not note.strip():
+            raise ValueError("a note says something")
+        return note
+
+
+class Reviewed(TypedDict):
+    topic: str
+    verdict: NotRequired[dict[str, Any]]
+
+
+def reviewing() -> Any:
+    def review(state: Reviewed) -> dict[str, Any]:
+        given = interrupt({"question": "Approve the draft?"}, response_schema=Verdict)
+        return {"verdict": given.model_dump()}
+
+    graph = StateGraph(Reviewed)
+    graph.add_node("review", review)
+    graph.add_edge(START, "review")
+    graph.add_edge("review", END)
+    return graph.compile(checkpointer=InMemorySaver())
+
+
+async def test_an_interrupts_response_schema_is_what_the_question_expects(
+    harness: Harness,
+) -> None:
+    """``interrupt(response_schema=...)``: the question says the answer's shape (its JSON
+    Schema, as LangGraph surfaces it), an answer that does not fit it is refused with the run
+    still paused, and one that fits reaches the node as LangGraph validated it."""
+    graph = reviewing()
+    agent = harness.wrap(graph, id="review")
+    paused = await agent.run({"topic": "tides"}, user="u", thread="t")
+    assert paused.interrupt is not None
+    assert paused.interrupt.expects == TypeAdapter(Verdict).json_schema()
+    with pytest.raises(ConfigurationError, match="does not fit"):
+        await agent.resume(paused.interrupt.interrupt_id, "answer", answer="yes", reviewer="u")
+    good = {"approved": True, "note": "ship it"}
+    done = await agent.resume(paused.interrupt.interrupt_id, "answer", answer=good, reviewer="u")
+    assert done.status is RunStatus.SUCCESS
+    assert (await state_of(harness, graph, "t"))["verdict"] == good
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
+async def test_an_answer_its_schemas_own_check_refuses_is_asked_again(
+    harness: Harness, streamed: bool
+) -> None:
+    """An answer that fits the schema's JSON form but not a check of the schema's own (a
+    validator): LangGraph refuses it on the resume and saves nothing, so the question is asked
+    again — the run pauses on it once more — rather than the run failing."""
+    graph = reviewing()
+    agent = harness.wrap(graph, id="review")
+    paused = await agent.run({"topic": "tides"}, user="u", thread="t")
+    assert paused.interrupt is not None
+    blank = {"approved": True, "note": " "}
+    if streamed:  # resumed as a surface resumes it (AG-UI, A2A): streamed
+        record, resolution = await agent._resolution(
+            paused.interrupt.interrupt_id, "answer", blank, "u", tenant=LOCAL_TENANT
+        )
+        events = [
+            e
+            async for e in agent._events(lambda listen: agent._continue(record, resolution, listen))
+        ]
+        again = Interrupt.model_validate(events[-1].data["interrupt"])
+    else:
+        result = await agent.resume(
+            paused.interrupt.interrupt_id, "answer", answer=blank, reviewer="u"
+        )
+        assert result.status is RunStatus.PAUSED
+        again = result.interrupt
+    assert again is not None and again.question == "Approve the draft?"
+    good = {"approved": False, "note": "not yet"}
+    done = await agent.resume(again.interrupt_id, "answer", answer=good, reviewer="u")
+    assert done.status is RunStatus.SUCCESS
+    assert (await state_of(harness, graph, "t"))["verdict"] == good
 
 
 # ------------------------------------------------------------------------ what a graph returns
