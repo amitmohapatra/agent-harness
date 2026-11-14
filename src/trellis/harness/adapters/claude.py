@@ -32,7 +32,9 @@
   same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``. A dynamic
   workflow (its ``Workflow`` tool) is one such child run, in the background: its agents'
   calls are its run's by their kind (``claude_live.WORKFLOW_AGENT``) while it is the one at
-  work, and the run's own, marked with the agent, while several are;
+  work; while several are, a conversation's session gives them a run the workflows share
+  (``claude_live.SHARED``), and a run with no conversation takes them as its own — marked
+  with the agent either way;
 * conversations: a conversation's turn leaves its CLI process running, and the next turn is
   sent into it (``bridges.claude_live``: the SDK's ``ClaudeSDKClient``), so what Claude started
   in the background — a subagent with ``background``, a shell command — goes on between the

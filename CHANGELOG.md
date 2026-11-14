@@ -322,7 +322,10 @@ wrapped agent did not get what the SDK gives:
   person as an undeclared tool, and its agents' calls were taken for the main agent's. A
   workflow is now one child run, kept as a background subagent's and ended as its task
   ends; its agents' calls are its run's by their kind (`workflow-subagent`) while it is the
-  one at work, and the turn's, marked with the agent that made them, while several are.
+  one at work, and, while several are, those of a run the workflows share (`workflows`, a
+  child run of the turn that made them concurrent), which decides them in and between turns
+  — a person's question asked once, an approved call run once — and records them marked
+  with the agent that made them.
 - **Messages to other agents.** `SendMessage` resumed a finished background subagent as a
   new task no child run held, or reached another Claude session: it is disallowed, as the
   schedules are, with the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`;

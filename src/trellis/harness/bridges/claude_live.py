@@ -29,7 +29,7 @@ it (``client.query``) instead of into a new process that resumes the session.
   that follows the answer decides the call from its journal. A dynamic workflow
   (``local_workflow``) is kept so too: its agents name only their kind
   (:data:`WORKFLOW_AGENT`), so their calls are its run's while it is the one workflow at
-  work, and the turn's (as any call no background run decides) while several are.
+  work, and those of a run the workflows share while several are (:data:`SHARED`).
 * **No run.** Any other call made between two turns — the main agent's in a turn the
   session injected, a subagent's with no run — has no run under way: nothing can decide it
   (the run's hooks, governance, a person's approval, its budget) or record it. Such a call is
@@ -144,11 +144,21 @@ GONE_SAID: Final = (
 #: its agents are named in their hooks (``agent_type``; each ``agent_id`` is the agent's own,
 #: named in no frame before its first call). While one works in a session its agents' calls
 #: are its run's by their kind; while several do, an agent first seen then cannot be told
-#: apart, and its call is the session's — the turn being served, as any call no background
-#: run decides (:meth:`LiveSession._working`).
+#: apart, and its calls are those of a run the workflows share (:data:`SHARED`:
+#: :meth:`LiveSession._working`).
 WORKFLOW_TOOL: Final = "Workflow"
 WORKFLOW_TASK: Final = "local_workflow"
 WORKFLOW_AGENT: Final = "workflow-subagent"
+#: The run the workflows at work together in a session share, for the calls of agents no one
+#: of them can claim: a child run of the turn that made them concurrent, kept as a background
+#: subagent's (:class:`Background`) until one workflow at most is left. Its name and task,
+#: and what it answers then.
+SHARED: Final = "workflows"
+SHARED_TASK: Final = (
+    "the calls of agents of Claude Code's dynamic workflows at work together, which none of "
+    "them can be told to have made"
+)
+SHARED_SAID: Final = "{count} call(s) of workflow agents no one workflow could claim: {tools}"
 #: What a background subagent's run answers when its task ended with no word of its own.
 COMPLETED: Final = "The task completed."
 #: Why a background subagent's run whose task failed without saying why ended.
@@ -157,6 +167,13 @@ FAILED: Final = "the background subagent's task failed"
 _NUDGE: Final = object()
 #: What a request relayed to a background run is answered when that run has ended.
 _OVER: Final = object()
+
+
+def _bare(name: str) -> str:
+    """A tool's name as the run's tool set has it: a harness tool's without Claude's prefix."""
+    from trellis.harness.tools.convert.claude import SERVER
+
+    return name.removeprefix(f"mcp__{SERVER}__")
 
 
 def backgrounded(message: Any) -> bool:
@@ -273,9 +290,16 @@ class Background:
     subagent are done in the attempt under way (:meth:`asked`); one the run pauses on waits
     there for the attempt that follows the person's answer."""
 
-    def __init__(self, session: LiveSession, task_id: str, call_id: str, helper: Any) -> None:
-        turn = session.turn
-        assert turn is not None  # the turn that started it is being served
+    def __init__(
+        self,
+        session: LiveSession,
+        task_id: str,
+        call_id: str,
+        helper: Any,
+        turn: Turn | None = None,
+    ) -> None:
+        turn = turn or session.turn
+        assert turn is not None  # the turn that started it (being served, or it just was)
         self.session = session
         #: the SDK's id of the task: the ``agent_id`` of the subagent's hooks and requests
         self.task_id = task_id
@@ -637,6 +661,12 @@ class LiveSession:
         self.background: dict[str, Background] = {}
         #: the workflow's agents (by their own ``agent_id``) whose calls its run decides
         self._workers: dict[str, Background] = {}
+        #: the run the workflows at work together share (:data:`SHARED`), being started or
+        #: kept; the calls it decided, by tool; how many such runs the session started
+        self._sharing: asyncio.Task[Background] | None = None
+        self.shared: Background | None = None
+        self._owned: Counter[str] = Counter()
+        self._shares = 0
         #: the harness tool calls their hook let through, by call: whose each is
         self._calling: dict[str, tuple[str, dict[str, Any], Background]] = {}
         #: why the session was closed (``LiveSessions.forget``)
@@ -723,7 +753,9 @@ class LiveSession:
         tool call is refused (:data:`UNATTENDED`) and any other event passes."""
 
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
-            found = self._working(given.get("agent_id"), given.get("agent_type"))
+            found = await self._working(given.get("agent_id"), given.get("agent_type"))
+            if found is not None and found is self.shared and event == "PreToolUse":
+                self._owned[_bare(str(given.get("tool_name") or ""))] += 1
             if found is not None:
                 answer = await found.asked(
                     lambda at: at.options.hooks[event][matcher].hooks[callback](
@@ -777,19 +809,58 @@ class LiveSession:
         elif event != "PreToolUse" or decided == "deny":
             self._calling.pop(ref, None)
 
-    def _working(self, agent_id: Any, agent_type: Any = None) -> Background | None:
+    async def _working(self, agent_id: Any, agent_type: Any = None) -> Background | None:
         """The background run whose work a call of the CLI's ``agent_id`` is: a subagent's,
         named by its task's id, or a workflow's, whose agents name their kind
-        (:data:`WORKFLOW_AGENT`) in their calls' hooks — the one workflow at work then, the
-        agent remembered for its permission requests and harness tool calls, which name it
-        alone. ``None`` while several workflows work and the agent was never seen while one
-        did: its call is the session's (the turn being served)."""
+        (:data:`WORKFLOW_AGENT`) in their calls' hooks — the one workflow at work then, else
+        the run the workflows at work share (:data:`SHARED`) — the agent remembered for its
+        permission requests and harness tool calls, which name it alone."""
         who = str(agent_id or "")
         found = self.background.get(who) or self._workers.get(who)
-        flows = [b for b in self.background.values() if b.kind is Kind.WORKFLOW]
-        if found is None and agent_type == WORKFLOW_AGENT and len(flows) == 1:
-            found = self._workers[who] = flows[0]
+        if found is not None or agent_type != WORKFLOW_AGENT:
+            return found
+        flows = self._flows()
+        if len(flows) == 1:
+            found = flows[0]
+        elif self._sharing is not None:
+            found = await self._sharing
+        if found is not None:
+            self._workers[who] = found
         return found
+
+    def _flows(self) -> list[Background]:
+        """The dynamic workflows at work in the session (their tasks not ended)."""
+        return [
+            b
+            for b in self.background.values()
+            if b.kind is Kind.WORKFLOW and b is not self.shared and b.ended is None
+        ]
+
+    async def _shared_run(self, turn: Turn) -> Background:
+        """The run the workflows ``turn`` made concurrent share: started as a helper of that
+        turn and handed on to the session, as a background subagent's is (:data:`SHARED`)."""
+        helpers = turn.runtime.helpers
+        assert helpers is not None  # the turn's attempt has its helpers
+        self._shares += 1
+        key = f"{SHARED}:{self._shares}"
+        helper = await helpers.start(key, kind=Kind.WORKFLOW, name=SHARED, task=SHARED_TASK)
+        helpers.detached(key)
+        found = self.shared = Background(self, key, "", helper, turn)
+        self.background[key] = self.sessions.attended[found.run_id] = found
+        return found
+
+    def _unshared(self) -> None:
+        """One workflow at most is left at work: the run they shared ends, saying what it
+        decided, and that workflow's agents' calls are its run's."""
+        shared = self.shared
+        if shared is None or len(self._flows()) > 1:
+            return
+        self._sharing = self.shared = None
+        owned, self._owned = self._owned, Counter()
+        said = SHARED_SAID.format(count=sum(owned.values()), tools=", ".join(sorted(owned)))
+        shared.finished("completed", said)
+        for who in [w for w, b in self._workers.items() if b is shared]:
+            del self._workers[who]
 
     def _forget(self, found: Background) -> None:
         """``found``'s task ended and its run too: it is no longer the session's."""
@@ -805,7 +876,7 @@ class LiveSession:
     async def _can_use_tool(self, name: str, args: dict[str, Any], context: Any) -> Any:
         from claude_agent_sdk import PermissionResultDeny
 
-        found = self._working(getattr(context, "agent_id", None))
+        found = await self._working(getattr(context, "agent_id", None))
         if found is not None:
             answer = await found.asked(lambda at: at.options.can_use_tool(name, args, context))
             if answer is not _OVER:
@@ -931,6 +1002,7 @@ class LiveSession:
                 found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
                 if found.over:  # its run ended first: its task was stopped
                     self._forget(found)
+                self._unshared()
 
     def _launched(self, message: Any) -> None:
         """A subagent the turn being served started in the background (the CLI says which
@@ -944,6 +1016,11 @@ class LiveSession:
         if helper is not None:
             found = Background(self, message.task_id, message.tool_use_id, helper)
             self.background[message.task_id] = self.sessions.attended[found.run_id] = found
+        if turn is not None and len(self._flows()) > 1 and self._sharing is None:
+            # workflows at work together: what none of them can claim is a run they share
+            self._sharing = asyncio.get_running_loop().create_task(
+                self._shared_run(turn), context=contextvars.Context()
+            )
 
     def _of(self, call_id: Any) -> Background | None:
         """The background run of the subagent the ``Agent`` call ``call_id`` started."""
@@ -954,8 +1031,8 @@ class LiveSession:
         (an interrupt would stop every task of the session), and what it asks until it ends
         is refused."""
         self.sessions.attended.pop(found.run_id, None)
-        if found.ended is not None:
-            self._forget(found)
+        if found.ended is not None or found.task_id not in self.working:
+            self._forget(found)  # nothing works for it in Claude Code (the shared run: no task)
         elif not self.closed:
             self._aside_run(self._stop(found.task_id))
 

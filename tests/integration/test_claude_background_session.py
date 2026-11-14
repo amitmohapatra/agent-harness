@@ -54,7 +54,7 @@ from trellis.harness.adapters.claude import (
 )
 from trellis.harness.agent import Agent
 from trellis.harness.bridges import claude_live
-from trellis.harness.bridges.claude_live import UNATTENDED, LiveSession
+from trellis.harness.bridges.claude_live import SHARED, SHARED_SAID, UNATTENDED, LiveSession
 from trellis.harness.bridges.helpers import HELPER
 from trellis.harness.events import RunEvents
 from trellis.harness.governance import Governance
@@ -2420,15 +2420,24 @@ async def test_a_workflow_of_a_run_with_no_conversation_keeps_its_child_run(
     assert made == [("Workflow", run_id), ("Read", child.run_id), ("Grep", child.run_id)]
 
 
-async def test_two_workflows_at_once_both_run_and_their_agents_calls_are_the_sessions_own(
+def runs_of(agent: Agent) -> dict[str, str]:
+    """The background runs of the conversation's session, by what they are: each workflow's by
+    its task's id, the shared one as ``workflows``."""
+    live = live_of(agent)
+    assert live is not None
+    return {found.task_id.partition(":")[0]: found.run_id for found in live.background.values()}
+
+
+async def test_two_workflows_at_once_share_a_run_for_the_calls_no_one_of_them_can_claim(
     harness: Harness, tmp_path: Path
 ) -> None:
     """Two workflows launched in one turn both run, each its own child run. While both work,
-    an agent first seen then cannot be told apart (its hooks name only its kind): its call is
-    the session's — the turn being served decides it once and records it, marked with the
-    agent (``agent_id``, ``agent_type``), and between turns it is refused as any call no run
-    decides. One cancelled leaves the other; once one workflow is left, its agents' calls are
-    its run's again, and each run ends as its own task does."""
+    an agent first seen then cannot be told apart (its hooks name only its kind): its calls
+    are those of a run the two share (``workflows``, a child run of the turn that made them
+    concurrent, held as a background run is), which decides them — in a turn or between two
+    — and records them, marked with the agent. One cancelled leaves the other; once one is
+    left the shared run ends ``SUCCESS`` saying what it owned, and that workflow's agents'
+    calls are its run's again, an agent first seen together included."""
 
     @tool(side_effects="read")
     def whoami() -> str:
@@ -2446,61 +2455,137 @@ async def test_two_workflows_at_once_both_run_and_their_agents_calls_are_the_ses
             refused.append(call.tool)
             return Deny("no searching here")
 
-    scripts = [
-        [WORKFLOW, ANOTHER, {"text": "started both"}],
-        [{"stall": 1.5}, {"text": "done"}],
-        [{"text": "ok"}],
-    ]
+    scripts = [[WORKFLOW, ANOTHER, {"text": "started both"}], [{"stall": 1.5}, {"text": "done"}]]
     agent = arm(harness.wrap(options(tmp_path, scripts), id="flows", hooks=[Guard()]), [whoami])
     first = await agent.run("fan out twice", user="u1", thread="t1")
     assert first.answer == "started both", first.error
-    live = live_of(agent)
-    assert live is not None
-    one, two = (live.background[task] for task in ("w1", "w2"))
-    for found in (one, two):
-        record = await harness.runs.get(found.run_id, tenant="default")
+    await until(lambda: set(runs_of(agent)) == {"w1", "w2", SHARED})
+    found = runs_of(agent)
+    for run_id in found.values():
+        record = await harness.runs.get(run_id, tenant="default")
         assert record is not None and record.status is RunStatus.RUNNING
         assert record.parent_run_id == first.run_id
+    shared = await harness.runs.get(found[SHARED], tenant="default")
+    assert shared is not None and shared.metadata[HELPER]["name"] == SHARED
+    seen, following = await followed(agent, found[SHARED])
+    # between turns: the shared run decides and records
+    mine = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
+    assert mine == {"result": found[SHARED], "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert await calls(tmp_path, grep, "w2") == {
+        "result": "Grep was not run: no searching here",
+        "ok": False,
+    }
+    assert refused == ["Grep"]  # refused once
 
-    asked: dict[str, Any] = {}
-
-    async def during_the_turn() -> None:
+    async def during_the_turn() -> dict[str, Any]:
         await until(lambda: len(served(tmp_path)) == 2)
-        asked["mine"] = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
-        grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
-        asked["grep"] = await calls(tmp_path, grep, "w2")
-        asked["read"] = await calls(tmp_path, {"by": "a1", **READS}, "w1")
+        return await calls(tmp_path, {"by": "a1", **READS}, "w1")
 
     calling = asyncio.create_task(during_the_turn())
     events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
-    await calling
-    turn = events[0].run_id
-    assert asked["mine"] == {"result": turn, "ok": True}  # the turn's run decided it
-    assert asked["grep"] == {"result": "Grep was not run: no searching here", "ok": False}
-    assert refused == ["Grep"]  # refused once
-    assert asked["read"] == {"result": "Read ran", "ok": True}
-    assert results(events) == ["whoami", "Read"]  # recorded on the turn's run
-    # Claude Code's own tool's record says which agent made it (a harness tool's call names
-    # no agent: its MCP request comes with none)
-    made = [e.data.get("made_by") for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert await calling == {"result": "Read ran", "ok": True}
+    assert events[-1].data["result"] == "done" and results(events) == []  # not the turn's
+    await until(lambda: results(seen) == ["whoami", "Read"])
+    made = [e.data.get("made_by") for e in seen if e.type is RunEventType.TOOL_CALL_RESULT]
     assert made == [None, {"agent_id": "a1", "agent_type": "workflow-subagent"}]
-    # between turns no run is served: refused as any call no run decides
-    between = await calls(tmp_path, {"by": "a3", **READS}, "w2")
-    assert between == {"result": UNATTENDED, "ok": False}
 
-    await agent.cancel(two.run_id, reason="not that one")
-    await when(harness, two.run_id, RunStatus.CANCELLED)
+    await agent.cancel(found["w2"], reason="not that one")
+    await when(harness, found["w2"], RunStatus.CANCELLED)
     await until((tmp_path / "tasks" / "w2.stopped").exists)
-    still = await harness.runs.get(one.run_id, tenant="default")
+    ended = await when(harness, found[SHARED], RunStatus.SUCCESS)
+    assert ended.output == SHARED_SAID.format(count=3, tools="Grep, Read, whoami")
+    still = await harness.runs.get(found["w1"], tenant="default")
     assert still is not None and still.status is RunStatus.RUNNING
-
-    seen, following = await followed(agent, one.run_id)
-    mine = await calls(tmp_path, {"by": "a4", "tool": "whoami"}, "w1")  # one left: its run's
-    assert mine == {"result": one.run_id, "ok": True}
+    # one left: its run's, the agent first seen together too
+    mine = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
+    assert mine == {"result": found["w1"], "ok": True}
     (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
-    ended = await when(harness, one.run_id, RunStatus.SUCCESS)
-    assert ended.output == FLOWED and results(seen) == ["whoami"]
+    assert (await when(harness, found["w1"], RunStatus.SUCCESS)).output == FLOWED
     following.cancel()
+
+
+@pytest.mark.parametrize("when_", ["between", "during"])
+@pytest.mark.parametrize("decision", ["approve", "reject", "edit"])
+async def test_a_shared_runs_call_asks_a_person_once_and_runs_as_they_decided(
+    tmp_path: Path, decision: str, when_: str
+) -> None:
+    """A call of the shared run the catalog asks a person about waits in Claude Code (as a
+    background subagent's does), its question reaching the chat once, in the conversation's
+    next turn: approved it runs once, edited it runs once as edited, rejected it never runs
+    — and nothing is asked again."""
+    edited = {"file_path": "notes.txt", "content": "y"}
+    scripts = [
+        [WORKFLOW, ANOTHER, {"text": "started both"}],
+        [{"stall": 1}, {"text": "ok"}],
+        [{"text": "ok"}],
+        [{"text": "ok"}],
+    ]
+    catalog = FakeCatalog({"Write": Rule(risk="write", approve_when="true")})
+    async with with_governance(Harness(config=Settings()), Governance(catalog)) as h:
+        agent = h.wrap(options(tmp_path, scripts, allowed_tools=["Write"]), id="shared-asks")
+        await agent.run("fan out twice", user="u1", thread="t1")
+        await until(lambda: SHARED in runs_of(agent))
+        shared = runs_of(agent)[SHARED]
+        writes = json.dumps({"by": "a1", **WRITES})
+        if when_ == "during":
+            turn = asyncio.create_task(agent.run("how is it going?", user="u1", thread="t1"))
+            await until(lambda: len(served(tmp_path)) == 2)
+            (tmp_path / "tasks" / "w1.call").write_text(writes)
+            await when(h, shared, RunStatus.PAUSED)
+            assert (await turn).answer == "ok"  # the turn under way is not the call's
+        else:
+            (tmp_path / "tasks" / "w1.call").write_text(writes)
+            await when(h, shared, RunStatus.PAUSED)
+        assert built_ins(tmp_path) == []
+        asking = await agent.run("and now?", user="u1", thread="t1")
+        assert asking.status is RunStatus.PAUSED and asking.interrupt is not None
+        named = (asking.interrupt.payload or {})[SUBAGENT]
+        assert named["run_id"] == shared and asking.interrupt.tool_call is not None
+        assert asking.interrupt.tool_call.tool == "Write"
+        answer = edited if decision == "edit" else None
+        done = await agent.resume(
+            asking.interrupt.interrupt_id, decision, reviewer="u1", answer=answer
+        )
+        assert done.status is RunStatus.SUCCESS and done.answer == "ok", done.error
+        await until((tmp_path / "tasks" / "w1.called").exists)
+        called = json.loads((tmp_path / "tasks" / "w1.called").read_text())
+        ran = {"approve": WRITES["args"], "edit": edited, "reject": None}[decision]
+        if ran is None:
+            assert not called["ok"] and built_ins(tmp_path) == []  # never ran
+        else:
+            assert called == {"result": "Write ran", "ok": True}
+            assert built_ins(tmp_path) == [{"tool": "Write", "args": ran}]  # once
+        after = await agent.run("anything else?", user="u1", thread="t1")
+        assert after.status is RunStatus.SUCCESS  # nothing asked again
+        record = await h.runs.get(shared, tenant="default")
+        assert record is not None and record.status is RunStatus.RUNNING
+
+
+@pytest.mark.parametrize("how", ["cancel", "lost"])
+async def test_the_shared_run_ends_with_the_turn_that_made_it_or_its_session(
+    harness: Harness, tmp_path: Path, how: str
+) -> None:
+    """The shared run is a child of the turn that made the workflows concurrent: cancelling
+    that turn cancels it (with the workflows'), and a killed session ends it ``ERROR``."""
+    stall = {"stall": 30 if how == "cancel" else 0}
+    scripts = [[WORKFLOW, ANOTHER, stall, {"text": "started both"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id=f"shared-{how}")
+    if how == "cancel":
+        slow = asyncio.create_task(agent.run("fan out twice", user="u1", thread="t1"))
+        await until(lambda: SHARED in runs_of(agent) if live_of(agent) else False)
+        shared = runs_of(agent)[SHARED]
+        await agent.cancel(turn_running(agent))
+        assert (await slow).status is RunStatus.CANCELLED
+        await when(harness, shared, RunStatus.CANCELLED)
+        return
+    await agent.run("fan out twice", user="u1", thread="t1")
+    await until(lambda: SHARED in runs_of(agent))
+    shared = runs_of(agent)[SHARED]
+    [one] = served(tmp_path)
+    os.kill(one["pid"], signal.SIGKILL)
+    died = await when(harness, shared, RunStatus.ERROR)
+    assert died.error is not None and "session was closed" in died.error.message
 
 
 async def test_two_workflows_of_a_run_with_no_conversation_record_their_agents_calls_marked(

@@ -121,14 +121,21 @@ the user Claude Code would ask:
   first call can reach the harness before anything names that agent. So:
   * while **one workflow** works in the session, its agents' calls are its run's: decided by
     its run's hooks and governance and recorded under it;
-  * while **several** work at once, an agent first seen then cannot be told apart: its call
-    is the session's, as any call no background run decides — the turn being answered
-    decides it (one question for it, as for any call) and records it, its result's event
-    saying which agent made it (`made_by`: `agent_id`, `agent_type`; a harness tool's call
-    names no agent), and between turns it is refused, as such calls are. An agent seen while
-    its workflow was the one at work stays that workflow's. Once one workflow is left, its
-    agents' calls are its run's again. Nothing is refused at launch: Claude Code starts as
-    many workflows as it does.
+  * while **several** work at once, an agent first seen then cannot be told apart. In a
+    conversation's session its calls are those of a run the workflows share, `workflows`: a
+    child run of the turn that made them concurrent, kept as a background subagent's run is
+    (below). It decides and records them, in a turn and between turns; a call that needs a
+    person waits in Claude Code, its question asked once, in the conversation's next turn
+    (as a background subagent's is): approved it runs once, edited it runs once as edited,
+    rejected it never runs. It ends `SUCCESS` once one workflow at most is left, saying how
+    many calls it decided and of which tools, or as a background run ends when its turn is
+    cancelled (`CANCELLED`) or its session is lost (`ERROR`); then the remaining workflow's
+    agents' calls are its run's, an agent first seen together included. In a run with no
+    conversation (its query's own process) such a call is the run's own. Either way the
+    result's event says which agent made it (`made_by`: `agent_id`, `agent_type`; a harness
+    tool's call names no agent). An agent seen while its workflow was the one at work stays
+    that workflow's. Nothing is refused at launch: Claude Code starts as many workflows as
+    it does.
   What the workflows' agents spend is in no reply the stream carries: the process's cost
   grows by it, and it is charged to the turn (below), not to a workflow's run. The tool
   catalog's risk for `Workflow` still decides its launch.

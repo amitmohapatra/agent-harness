@@ -477,11 +477,11 @@ async def test_a_workflow_agents_call_is_the_workflows_run_only_while_one_works(
     request, which names the agent alone — and no background run's while none works (a
     subagent's run is never taken for it)."""
     session, found, store = await background()
-    assert session._working("a1", WORKFLOW_AGENT) is None  # t1 is a subagent's
+    assert await session._working("a1", WORKFLOW_AGENT) is None  # t1 is a subagent's
     found.kind = Kind.WORKFLOW
-    assert session._working("a1", WORKFLOW_AGENT) is found
-    assert session._working("a1") is found  # its permission request: the id alone
+    assert await session._working("a1", WORKFLOW_AGENT) is found
+    assert await session._working("a1") is found  # its permission request: the id alone
     session._forget(found)
-    assert session._working("a1") is None and not session.background
+    assert await session._working("a1") is None and not session.background
     session.background["t1"] = found
     await ended(session, found, store)

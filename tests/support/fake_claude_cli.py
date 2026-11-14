@@ -68,8 +68,9 @@ Background work, as far as the SDK's message types say its shape (``task_started
 ``{"workflow": {"id": "w1", "name": "probe", "script": "..."}}`` is a dynamic workflow's
 ``Workflow`` call: a ``local_workflow`` task with its ``workflow_name`` and no
 ``is_backgrounded``; ``w1.call`` with ``"by": "<agent id>"`` is a call one of its agents
-makes — its hooks name the agent by that id and ``agent_type`` ``workflow-subagent``, and the
-CLI sends none of the agents' messages — and ``w1.done`` its end (no last reply of its own),
+makes, in a thread of its own beside the main turn — its hooks name the agent by that id and
+``agent_type`` ``workflow-subagent``, and the CLI sends none of the agents' messages — and
+``w1.done`` its end (no last reply of its own),
 as the bundled CLI (2.1.283) does them against a scripted model.
 ``{"background": {"id": "t1", "agent": "researcher", "prompt": "..."}}`` is an ``Agent`` call
 with ``run_in_background`` (``"shell": "<command>"`` instead: a ``Bash`` one) that returns at
@@ -99,10 +100,12 @@ import atexit
 import fcntl
 import json
 import os
+import queue
 import re
 import select
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -138,11 +141,21 @@ STEP_TOKENS = (10, 5)
 _SDK = {"orphaned": False}
 
 
+#: One message on stdout at a time (a workflow agent's call is made in a thread of its own).
+_SENDING = threading.Lock()
+#: The answers a workflow agent's thread waits for, by request id: whatever reads stdin (the
+#: main thread, alone) hands them over (:func:`read`).
+_AWAITED: dict[str, queue.Queue[dict[str, Any]]] = {}
+#: Each thread's subagent at work (``agent_id``, ``agent_type``): what its hooks name.
+_LOCAL = threading.local()
+
+
 def send(message: dict[str, Any]) -> None:
     if _SDK["orphaned"]:
         return
-    sys.stdout.write(json.dumps(message) + "\n")
-    sys.stdout.flush()
+    with _SENDING:
+        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.flush()
 
 
 def orphaned(cli: Cli) -> None:
@@ -174,7 +187,12 @@ def read(timeout: float | None = None) -> dict[str, Any] | None:
         _unread.extend(chunk)
     line, _, rest = bytes(_unread).partition(b"\n")
     _unread[:] = rest
-    return json.loads(line)
+    message = json.loads(line)
+    answered = (message.get("response") or {}).get("request_id")
+    if message.get("type") == "control_response" and answered in _AWAITED:
+        _AWAITED.pop(answered).put(message["response"])  # a workflow agent's thread's
+        return read(timeout)
+    return message
 
 
 class Interrupted(Exception):
@@ -231,8 +249,8 @@ class Cli:
         self.hooks: dict[str, Any] = {}
         self.initialized: dict[str, Any] = {}
         #: the subagent working now (its ``agent_id`` and ``agent_type``), as the real CLI
-        #: names it in the hooks of the tool calls it makes
-        self.working: dict[str, str] = {}
+        #: names it in the hooks of the tool calls it makes (each thread's own)
+        self.working = {}
         #: the session this process runs (one for all its turns), once its first turn began
         self.session: str | None = None
         #: whether the last tool call ended without running, or failed (not paused): done
@@ -262,6 +280,14 @@ class Cli:
         #: the session's (the bundled CLI's resumed query reports the cost of the turns
         #: before it too), while ``--max-budget-usd`` caps what this process spends
         self.before = 0
+
+    @property
+    def working(self) -> dict[str, str]:
+        return getattr(_LOCAL, "working", {})
+
+    @working.setter
+    def working(self, who: dict[str, str]) -> None:
+        _LOCAL.working = who
 
     def aside(self, message: dict[str, Any]) -> None:
         """A message that came while another was waited for: a prompt is queued, a control
@@ -336,25 +362,12 @@ class Cli:
                 item = json.loads(call.read_text())
                 call.unlink()
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
-                flow = task["agent"] == WORKFLOW_AGENT  # one of its agents, named by "by"
-                who = str(item.pop("by", "")) if flow else task_id
-                was, self.working = (self.working, {"agent_id": who, "agent_type": task["agent"]})
-                try:
-                    said, ok, _ = self.tool(
-                        self.session,
-                        0,
-                        item,
-                        tool_id=f"{task['tool_id']}_{task['calls']}",
-                        parent=task["tool_id"],
-                        quiet=flow,
-                    )
-                finally:
-                    self.working = was
-                self.steps += 1
-                self.helped += 1
-                (Path(folder) / f"{task_id}.called").write_text(
-                    json.dumps({"result": said, "ok": ok})
-                )
+                if task["agent"] == WORKFLOW_AGENT:  # its agents work beside the main turn
+                    threading.Thread(
+                        target=self.called, args=(task_id, task, item), daemon=True
+                    ).start()
+                else:
+                    self.called(task_id, task, item)
             if task_id not in self.tasks:  # stopped while its call waited
                 continue
             if (Path(folder) / f"{task_id}.stop").exists():
@@ -389,6 +402,30 @@ class Cli:
                     }
                 )
                 self.owed.append(summary)
+
+    def called(self, task_id: str, task: dict[str, str], item: dict[str, Any]) -> None:
+        """A call task ``task_id`` makes (``item``, a JSON step): a subagent's, as its own in
+        its hooks and permission request, or a workflow agent's (named by ``"by"``: its
+        messages not sent); what it was answered written to ``<id>.called``."""
+        assert self.session is not None
+        flow = task["agent"] == WORKFLOW_AGENT
+        who = str(item.pop("by", "")) if flow else task_id
+        was, self.working = (self.working, {"agent_id": who, "agent_type": task["agent"]})
+        try:
+            said, ok, _ = self.tool(
+                self.session,
+                0,
+                item,
+                tool_id=f"{task['tool_id']}_{task['calls']}",
+                parent=task["tool_id"],
+                quiet=flow,
+            )
+        finally:
+            self.working = was
+        self.steps += 1
+        self.helped += 1
+        folder = Path(os.environ["FAKE_CLAUDE_TASKS"])
+        (folder / f"{task_id}.called").write_text(json.dumps({"result": said, "ok": ok}))
 
     def injected(self, summary: str) -> None:
         """The turn the session runs by itself once a background task ended: the "model"'s
@@ -600,6 +637,14 @@ class Cli:
         """Send a control request to the SDK and wait for its answer."""
         self.requests += 1
         request_id = f"cli_{self.requests}"
+        if threading.current_thread() is not threading.main_thread():
+            # a workflow agent's call: the main thread reads stdin and hands the answer over
+            answer: queue.Queue[dict[str, Any]] = _AWAITED.setdefault(request_id, queue.Queue())
+            send({"type": "control_request", "request_id": request_id, "request": request})
+            response = answer.get()
+            if response.get("subtype") == "error":
+                raise RuntimeError(response.get("error"))
+            return response.get("response") or {}
         send({"type": "control_request", "request_id": request_id, "request": request})
         while (message := read()) is not None:
             if message.get("type") == "control_response":
