@@ -12,7 +12,9 @@
   (``middleware.with_question``);
 * transcript: the messages the run added after the question — tool calls and their results
   with the answer — so the conversation memory keeps replays as the framework's would;
-* run: ``ainvoke``/``astream`` with ``version="v2"``, on the LangGraph thread named by the
+* run: ``astream`` with ``version="v2"`` (``agent.run``), or ``astream_events`` with
+  ``version="v3"`` (``agent.stream``: the graph's stream transformers shape what is streamed,
+  and the answer's text is its text content blocks), on the LangGraph thread named by the
   run's thread (or the run id);
 * pause: with a checkpointer, ``trellis.current().ask`` *is* LangGraph's ``interrupt``, and a
   resume is ``Command(resume=...)``; without one the run is re-executed from its input and the
@@ -72,6 +74,7 @@ import asyncio
 import functools
 import json
 import logging
+import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Final
@@ -255,35 +258,47 @@ class LangGraphAdapter:
             await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        from langchain_core.messages import AIMessage
+        """The run streamed as LangGraph streams a graph to its consumers
+        (``astream_events(version="v3")``): every event passes the graph's stream transformers
+        first — ``create_agent``'s ``transformers=``, a middleware's (``PIIMiddleware`` redacts
+        the text on the wire), LangChain's own — and what reaches the run is what they let
+        through. The answer's text is each text content block's text as it arrives (a model's
+        reasoning is not its answer), the rest of a block when it finishes (a transformer may
+        hold the end of a block back until then: :class:`_Text`); the root graph's ``values``
+        are its state and its pauses, and what its nodes write (``custom``) is the run's."""
+        from langchain_core._api import LangChainBetaWarning
         from langgraph.types import GraphOutput
 
         values: Any = None
         interrupts: tuple[Any, ...] = ()
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        text = _Text()
         try:
             given = await _continued(target, native_input, run)
-            async for part in self._graph(target, run.runtime).astream(
-                given,
-                self._config(target, run),
-                stream_mode=["messages", "values", "custom"],
-                version="v2",
-                **_run_arguments(run.runtime, target),
-            ):
-                if part["type"] == "custom":
-                    _written(run.runtime, part["data"])
-                elif part["type"] == "messages":
-                    chunk = part["data"][0]
-                    if (
-                        isinstance(chunk, AIMessage)
-                        and isinstance(chunk.content, str)
-                        and chunk.content
-                    ):
-                        yield chunk.content
-                else:  # "values"
-                    values = part["data"]
-                    interrupts = part["interrupts"] or interrupts
+            graph = self._graph(target, run.runtime)
+            with warnings.catch_warnings():  # the harness's choice: said to no user of it
+                warnings.simplefilter("ignore", LangChainBetaWarning)
+                # returns without awaiting anything: no other task runs under this filter
+                events = await graph.astream_events(
+                    given,
+                    self._config(target, run),
+                    version="v3",
+                    transformers=[_custom_mode()],
+                    **_run_arguments(run.runtime, target),
+                )
+            async with events:
+                async for event in events:
+                    method, params = event["method"], event["params"]
+                    root = not params["namespace"]
+                    if method == "messages":
+                        if said := text.of(*params["data"]):
+                            yield said
+                    elif method == "custom" and root:
+                        _written(run.runtime, params["data"])
+                    elif method == "values" and root:
+                        values = params["data"]
+                        interrupts = tuple(params.get("interrupts") or ()) or interrupts
         except BaseException as exc:
             error = exc
             raise
@@ -428,6 +443,64 @@ class LangGraphAdapter:
         if _checkpointed(target) and not run_scoped(target):  # its checkpoints: the run's
             config["metadata"] = {**options.get("metadata", {}), RUN_METADATA: runtime.run_id}
         return config
+
+
+class _Text:
+    """The answer's text in a graph's ``messages`` events (``astream_events(version="v3")``),
+    after its stream transformers: a model's text content block, delta by delta and then the
+    rest of the block its ``content-block-finish`` holds beyond what its deltas gave (a
+    transformer may keep the tail of a block back until it finishes: ``PIIMiddleware``'s
+    keeps the last characters, a redaction could still reach into them); a message a node
+    returns whole (a model that does not stream, a hook's reply), its text. Reasoning,
+    tool-call and other blocks are not the answer's text."""
+
+    def __init__(self) -> None:
+        #: what each text block (by the model call's run id and the block's index) has given
+        self._given: dict[tuple[str, Any], str] = {}
+
+    def of(self, payload: Any, metadata: Mapping[str, Any] | None) -> str:
+        from langchain_core.messages import AIMessage
+
+        if isinstance(payload, AIMessage):
+            return _text(payload)
+        if not isinstance(payload, dict):
+            return ""
+        key = (str((metadata or {}).get("run_id") or ""), payload.get("index"))
+        kind = payload.get("event")
+        if kind == "content-block-delta":
+            delta = payload.get("delta") or {}
+            said = delta.get("text") if delta.get("type") == "text-delta" else None
+            if not isinstance(said, str):
+                return ""
+            self._given[key] = self._given.get(key, "") + said
+            return said
+        if kind == "content-block-finish":
+            given = self._given.pop(key, "")
+            block = payload.get("content") or {}
+            whole = block.get("text") if block.get("type") == "text" else None
+            if isinstance(whole, str) and whole.startswith(given):
+                return whole[len(given) :]
+        return ""
+
+
+@functools.cache
+def _custom_mode() -> Any:
+    """A stream transformer that asks the graph for its ``custom`` stream mode, and nothing
+    else: ``astream_events(version="v3")`` streams only the modes its transformers ask for,
+    and LangGraph's own ``CustomTransformer`` would take the ``custom`` projection a graph
+    may already register."""
+    from langgraph.stream import StreamTransformer
+
+    class CustomMode(StreamTransformer):
+        required_stream_modes = ("custom",)
+
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            return True
+
+    return CustomMode
 
 
 def _written(runtime: Runtime, value: Any) -> None:

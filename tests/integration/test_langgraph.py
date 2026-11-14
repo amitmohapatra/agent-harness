@@ -13,7 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from tests.support.arm import native_tools
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import MEMORY_TOOLS, FakeMemoryService, pushed
 from trellis import Harness, current, tool
 from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus
@@ -67,6 +67,25 @@ async def test_streaming_carries_text_and_tool_events(harness: Harness) -> None:
         e.data.get("delta", "") for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT
     )
     assert text == "7 units of a"
+
+
+@pytest.mark.parametrize("blocks", [True, False], ids=["content-blocks", "strings"])
+async def test_the_answer_streams_as_its_text_blocks_and_not_the_models_thinking(
+    harness: Harness, blocks: bool
+) -> None:
+    """A model streaming content blocks (ChatAnthropic with tools or thinking, OpenAI's
+    Responses API) streams its answer as plainly as one streaming strings: each text block's
+    text is a text delta as it comes; the thinking it reasons in first is not the answer."""
+    model = StreamingChatModel(
+        turns=[("stock", {"sku": "a"}), "7 units of a"],
+        blocks=blocks,
+        thinking="They want stock." if blocks else "",
+    )
+    agent = harness.wrap(await agent_graph(harness, model), id="stock")
+    events = [e async for e in agent.stream("how many a?", user="u1")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert deltas == ["7 unit", "s of a"]
+    assert events[-1].data["result"] == "7 units of a" and executed == ["stock:a"]
 
 
 async def test_with_a_checkpointer_an_approval_is_a_langgraph_interrupt(harness: Harness) -> None:

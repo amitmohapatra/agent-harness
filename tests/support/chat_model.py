@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, Final
 
 from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
+from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.messages.utils import count_tokens_approximately
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
@@ -170,3 +178,53 @@ def _with_path(turn: Turn, messages: list[BaseMessage]) -> Turn:
         }
 
     return [filled(c) for c in turn] if isinstance(turn, list) else filled(turn)
+
+
+class StreamingChatModel(ScriptedChatModel):
+    """Streams each scripted reply as a provider does, in pieces of ``piece`` characters: as
+    plain string chunks (``blocks=False``), or as Anthropic's content blocks (``blocks=True``:
+    ChatAnthropic streams a list of blocks whenever tools, documents or thinking are in the
+    request, and OpenAI's Responses API does too) — led, with ``thinking``, by a thinking block
+    the model reasons in before it answers."""
+
+    blocks: bool = True
+    thinking: str = ""
+    piece: int = 6
+
+    async def _astream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        message = self._generate(messages, stop, **kwargs).generations[0].message
+        assert isinstance(message, AIMessage)
+        meta = {"model_provider": "anthropic"} if self.blocks else {}
+        for n, c in enumerate(message.tool_calls):  # each call as Anthropic streams a tool_use
+            args = json.dumps(c["args"])
+            started: dict[str, Any] = {"type": "tool_use", "id": c["id"], "name": c["name"]}
+            for block, chunk in (
+                ({**started, "input": {}}, tool_call_chunk(name=c["name"], args="", id=c["id"])),
+                ({"type": "input_json_delta", "partial_json": args}, tool_call_chunk(args=args)),
+            ):
+                chunk["index"] = n
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=[{**block, "index": n}] if self.blocks else "",
+                        response_metadata=meta,
+                        tool_call_chunks=[chunk],
+                    )
+                )
+        if message.tool_calls:
+            return
+        text = message.content if isinstance(message.content, str) else message.text
+        said: list[tuple[str, str]] = [("thinking", self.thinking)] if self.thinking else []
+        said.append(("text", text))
+        for index, (kind, whole) in enumerate(said):
+            for start in range(0, len(whole), self.piece):
+                part = whole[start : start + self.piece]
+                content: Any = [{"type": kind, kind: part, "index": index}] if self.blocks else part
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(content=content, response_metadata=meta)
+                )

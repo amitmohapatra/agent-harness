@@ -45,7 +45,7 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService, pushed
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
@@ -375,6 +375,20 @@ async def test_pii_middleware_redacts_what_the_model_is_sent_and_blocks_as_it_sa
     refused = await memory_harness.wrap(blocking, id="pii-block").run("ada@example.com", user="u")
     assert refused.status is RunStatus.ERROR and refused.error is not None
     assert "email" in refused.error.message.lower()
+
+
+async def test_pii_middleware_redacts_the_streamed_answer_as_it_streams(harness: Harness) -> None:
+    """``PIIMiddleware(apply_to_output=True)`` redacts the model's reply in the state and, by
+    its stream transformer, on the wire: no streamed piece of the answer carries the address,
+    however the model split it, and the pieces make the redacted answer."""
+    model = StreamingChatModel(turns=["write to ada@example.com now"], blocks=False, piece=10)
+    pii = PIIMiddleware("email", strategy="redact", apply_to_output=True)
+    graph = create_agent(model, tools=[], middleware=[pii])
+    events = [e async for e in harness.wrap(graph, id="pii-stream").stream("hi", user="u")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert events[-1].data["result"] == "write to [REDACTED_EMAIL] now"
+    assert "".join(deltas) == "write to [REDACTED_EMAIL] now"
+    assert not any("@" in d or "example" in d for d in deltas)
 
 
 # ------------------------------------------------------------------------ summarization

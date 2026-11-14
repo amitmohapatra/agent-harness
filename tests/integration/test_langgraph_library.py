@@ -25,7 +25,7 @@ from langgraph.prebuilt import InjectedState, InjectedStore, ToolNode, ToolRunti
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import CachePolicy, Command, RetryPolicy, Send, TimeoutPolicy, interrupt
 
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService
 from trellis import Harness, current, tool
 from trellis.contracts import RunEventType, RunStatus
@@ -538,6 +538,34 @@ async def test_what_a_node_writes_to_the_custom_stream_is_a_custom_event_of_the_
     [shown] = [e for e in events if e.type is RunEventType.CUSTOM and e.data["value"] == 42]
     seen = translate(shown)
     assert seen is not None and (seen.name, seen.value) == ("custom", {"value": 42})
+
+
+async def test_the_stream_transformers_a_graph_is_compiled_with_shape_what_the_run_streams(
+    harness: Harness,
+) -> None:
+    """A graph's stream transformers (``create_agent(transformers=...)``, a middleware's, a
+    ``compile(transformers=...)``'s) see every event of a streamed run before the run does, as
+    they see ``astream_events(version="v3")``'s: what one changes or drops is what the run
+    streams."""
+    from langchain.agents import create_agent
+    from langgraph.stream import StreamTransformer
+
+    class Shouting(StreamTransformer):
+        def init(self) -> dict[str, Any]:
+            return {}
+
+        def process(self, event: Any) -> bool:
+            if event["method"] == "messages":
+                payload = event["params"]["data"][0]
+                if isinstance(payload, dict) and payload.get("event") == "content-block-delta":
+                    payload["delta"]["text"] = payload["delta"]["text"].upper()
+            return True
+
+    model = StreamingChatModel(turns=["quiet words"], blocks=False, piece=6)
+    graph = create_agent(model, tools=[], transformers=[Shouting])
+    events = [e async for e in harness.wrap(graph, id="shouts").stream("hi", user="u")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert deltas == ["QUIET ", "WORDS"]
 
 
 async def test_a_run_not_streamed_has_the_custom_writes_among_its_events(harness: Harness) -> None:
