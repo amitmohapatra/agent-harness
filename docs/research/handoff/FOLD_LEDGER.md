@@ -156,3 +156,23 @@ attribution reminder); history not rewritten.
 No version/pin bump made (runs pins trellis-contracts>=0.7.1; CI uses the sibling checkout).
 - 20:22 UTC: agent-contracts#19 MERGED (6d3db4b). agent-runs#36 opened (chat-order-2: placed_at, concurrency_key filter, F-DATE), subscribed.
 - 20:27 UTC: agent-runs#36 MERGED (8923113). Runs main now has placed_at, the concurrency_key filter and F-DATE. Harness chat-order-2 (901eb60) rides stage 2.
+
+## 21:00 UTC — memory-fixes reported done (432a168); PR agent-memory-service#117 opened, subscribed
+Fixed with tests: BUG-M4 (admin key forgets in its tenant), BUG-M1 (extracted user facts ask
+first; migration 0036), BUG-M3 (inventory lists chat statements; migration 0037 GIN index),
+SEC-R-10 at intake (one owner). Gates by the job: ruff, pyright 0 (repo config), OpenAPI drift
+none, 523 + 3533 passed; 1 unit failure is a benchmark test that refuses a `memfix_` DB name.
+After it is on main, remove strict xfails in harness tests/features/test_mem_lifecycle.py:
+`test_forgetting_a_fact_read_from_the_users_words_asks_first`,
+`test_the_users_inventory_lists_what_they_said_in_a_chat`,
+`test_erasing_a_user_leaves_nothing_any_read_returns` (may still fail: it asserts message rows
+have deleted_at set; deleting a thread is a soft delete that leaves its messages → decide:
+fix the test's expectation or delete messages with the thread).
+Owed (memory, next round):
+- Erase leaves a document attached in the deleted thread (still in context and recall) and a
+  profile line learned from the user; there is no route to delete a document.
+- Decisions stored before this version keep raw arguments; old rows with a client-sent
+  `args_hash` are now trusted as the call's hash (low).
+Notes saved to the public repo branch `claude/cool-maxwell-w5avo8-handoff`
+(docs/research/handoff/); the security review is NOT there (public repo), only in
+/var/tmp/cons/review/security.md.
