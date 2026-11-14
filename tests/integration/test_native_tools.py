@@ -499,6 +499,9 @@ async def test_an_agent_tool_of_an_unknown_shape_runs_its_agent_as_it_is(
     async def invoke(context: Any, arguments: str) -> str:
         return "checked"
 
+    def own(_agent: Any, config: Any) -> Any:  # an agent tool's child config: its own
+        return config
+
     odd = FunctionTool(
         name="check",
         description="Check.",
@@ -507,13 +510,15 @@ async def test_an_agent_tool_of_an_unknown_shape_runs_its_agent_as_it_is(
     )
     setattr(odd, AGENT_TOOL, True)
     setattr(odd, AGENT_OF_TOOL, inner)
-    assert _running(odd, inner) is None
-    assert _running(dataclasses.replace(odd), inner) is None
+    assert _running(odd, inner, own) is None
+    assert _running(dataclasses.replace(odd), inner, own) is None
     empty = dataclasses.replace(odd, name="ask")
     setattr(empty, AGENT_OF_TOOL, Agent(name="bare"))  # an agent with no tools: nothing to say
-    governed_agents(Agent(name="desk", tools=[empty]), added=[], agent_id="d")
+    governed_agents(Agent(name="desk", tools=[empty]), added=[], agent_id="d", nested=own)
     with caplog.at_level(logging.WARNING, logger="trellis.harness"):
-        copied = governed_agents(Agent(name="desk", tools=[odd]), added=[], agent_id="d")
+        copied = governed_agents(
+            Agent(name="desk", tools=[odd]), added=[], agent_id="d", nested=own
+        )
     assert [t.name for t in copied.tools] == ["check"]
     assert any("agent called as a tool" in r.getMessage() for r in caplog.records)
 

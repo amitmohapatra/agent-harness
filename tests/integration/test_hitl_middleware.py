@@ -10,6 +10,7 @@ import pytest
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, InterruptOnConfig
+from langchain.agents.middleware.human_in_the_loop import InterruptMode
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -34,12 +35,16 @@ def _reset() -> None:
 
 
 async def mailer(
-    harness: Harness, model: ScriptedChatModel, review: InterruptOnConfig | None = None
+    harness: Harness,
+    model: ScriptedChatModel,
+    review: InterruptOnConfig | None = None,
+    mode: InterruptMode = "batched",
 ) -> Any:
+    gate = HumanInTheLoopMiddleware(interrupt_on={"email": review or True}, interrupt_mode=mode)
     graph = create_agent(
         model,
         tools=await native_tools(harness, email, framework="langgraph"),
-        middleware=[HumanInTheLoopMiddleware(interrupt_on={"email": review or True})],
+        middleware=[gate],
         checkpointer=InMemorySaver(),
     )
     return harness.wrap(graph, id="mailer")
@@ -120,7 +125,6 @@ async def test_an_answer_responds_for_the_tool(harness: Harness) -> None:
     assert message.content == "I'll call her" and message.status == "success"
 
 
-@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_raw_decisions_still_pass_through(harness: Harness) -> None:
     model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
     agent = await mailer(harness, model)
@@ -131,7 +135,6 @@ async def test_raw_decisions_still_pass_through(harness: Harness) -> None:
     assert sent == [{"to": "ada", "body": "hi"}]
 
 
-@pytest.mark.usefixtures("writes_unasked")  # not about the write's approval
 async def test_an_edit_in_the_middlewares_own_words_is_the_middlewares_to_check(
     harness: Harness,
 ) -> None:
@@ -165,9 +168,12 @@ async def test_a_decision_the_tool_does_not_allow_is_refused_before_resuming(
     assert done.status is RunStatus.SUCCESS and sent == [{"to": "ada", "body": "hi"}]
 
 
-async def test_a_batch_of_calls_is_one_approval_and_one_decision_for_all(
+async def test_a_batch_of_calls_is_one_approval_and_one_decision_for_each(
     harness: Harness,
 ) -> None:
+    """A batch of calls is one approval. An edit of one call's arguments does not say what
+    becomes of the others, which LangChain takes a decision for each: it is refused, the run
+    still paused, and one decision for each call goes through as it is given."""
     calls = [("email", {"to": "ada", "body": "hi"}), ("email", {"to": "bob", "body": "hi"})]
     model = ScriptedChatModel(turns=[calls, "sent both"])
     agent = await mailer(harness, model)
@@ -176,11 +182,15 @@ async def test_a_batch_of_calls_is_one_approval_and_one_decision_for_all(
     assert paused.interrupt.question == "Approve email? (and 1 more call)"
     assert paused.interrupt.payload is not None
     assert len(paused.interrupt.payload["action_requests"]) == 2
-    done = await agent.resume(
-        paused.interrupt.interrupt_id, "edit", answer={"to": "cy", "body": "hi"}, reviewer="l"
-    )
+    with pytest.raises(ConfigurationError, match="one decision for each call"):
+        await agent.resume(
+            paused.interrupt.interrupt_id, "edit", answer={"to": "cy", "body": "hi"}, reviewer="l"
+        )
+    edited = {"name": "email", "args": {"to": "cy", "body": "hi"}}
+    each = {"decisions": [{"type": "edit", "edited_action": edited}, {"type": "reject"}]}
+    done = await agent.resume(paused.interrupt.interrupt_id, "edit", answer=each, reviewer="l")
     assert done.status is RunStatus.SUCCESS
-    assert sorted(m["to"] for m in sent) == ["bob", "cy"]  # the first edited, the second approved
+    assert [m["to"] for m in sent] == ["cy"]  # the first edited, the second rejected
 
 
 async def test_a_rejected_batch_rejects_every_call(harness: Harness) -> None:
@@ -215,3 +225,67 @@ async def test_a_deep_agent_interrupt_on_is_answered_with_harness_decisions(
         paused.interrupt.interrupt_id, "edit", answer={"to": "bob", "body": "hi"}, reviewer="l"
     )
     assert done.status is RunStatus.SUCCESS and sent == [{"to": "bob", "body": "hi"}]
+
+
+# ------------------------------------------------------------------------------ per call
+async def test_a_per_call_pause_is_an_approval_of_its_one_call(harness: Harness) -> None:
+    """``interrupt_mode="per_call"`` pauses once a call, as the call starts: an approval of it,
+    the decisions it takes in its payload (the request's ``response_schema``); an approval runs
+    it, and governance does not ask about the write again."""
+    model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
+    agent = await mailer(harness, model, mode="per_call")
+    paused = await agent.run("email ada", user="u1", thread="t1")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    interrupt = paused.interrupt
+    assert interrupt.reason is InterruptReason.APPROVAL and interrupt.question == "Approve email?"
+    assert interrupt.tool_call is not None and interrupt.tool_call.tool == "email"
+    assert interrupt.payload is not None and interrupt.payload["type"] == "tool_approval"
+    assert "response_schema" in interrupt.payload
+    done = await agent.resume(interrupt.interrupt_id, "approve", reviewer="lead")
+    assert done.status is RunStatus.SUCCESS and done.answer == "sent"
+    assert sent == [{"to": "ada", "body": "hi"}]
+
+
+@pytest.mark.parametrize(
+    ("decision", "answer", "expected", "told"),
+    [
+        ("edit", {"to": "bob", "body": "hello"}, [{"to": "bob", "body": "hello"}], None),
+        ("reject", "wrong recipient", [], "wrong recipient"),
+        ("answer", "I'll call her", [], "I'll call her"),
+    ],
+)
+async def test_a_per_call_pause_takes_each_decision(
+    harness: Harness, decision: str, answer: Any, expected: list[Any], told: str | None
+) -> None:
+    model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "done"])
+    agent = await mailer(harness, model, mode="per_call")
+    paused = await agent.run("email ada", user="u1", thread="t1")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, decision, answer=answer, reviewer="l")
+    assert done.status is RunStatus.SUCCESS and sent == expected
+    if told is not None:
+        [message] = tool_messages(model)
+        assert told in str(message.content)
+
+
+async def test_a_per_call_decision_the_tool_does_not_take_is_refused_before_resuming(
+    harness: Harness,
+) -> None:
+    """A decision the per-call request's schema does not take — one its ``allowed_decisions``
+    leaves out, or a raw decision of another shape — is refused, the run still paused, as
+    LangGraph would refuse it on the resume."""
+    model = ScriptedChatModel(turns=[("email", {"to": "ada", "body": "hi"}), "sent"])
+    allowed = InterruptOnConfig(allowed_decisions=["approve", "reject"])
+    agent = await mailer(harness, model, allowed, mode="per_call")
+    paused = await agent.run("email ada", user="u1", thread="t1")
+    assert paused.interrupt is not None
+    with pytest.raises(ConfigurationError, match="does not take the decision"):
+        await agent.resume(
+            paused.interrupt.interrupt_id, "edit", answer={"to": "bob", "body": "x"}, reviewer="l"
+        )
+    with pytest.raises(ConfigurationError, match="does not take the decision"):
+        await agent.resume(
+            paused.interrupt.interrupt_id, "answer", answer={"type": "respond"}, reviewer="l"
+        )
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="l")
+    assert done.status is RunStatus.SUCCESS and sent == [{"to": "ada", "body": "hi"}]

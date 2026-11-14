@@ -55,6 +55,7 @@ import functools
 import itertools
 import logging
 import re
+import time
 import types
 import weakref
 from collections.abc import (
@@ -92,6 +93,7 @@ from langchain_core.messages import (
     AnyMessage,
     BaseMessage,
     HumanMessage,
+    RemoveMessage,
     SystemMessage,
     ToolMessage,
     convert_to_messages,
@@ -100,7 +102,6 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langgraph._internal._constants import CONFIG_KEY_CALL
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     BaseCheckpointSaver,
@@ -112,10 +113,10 @@ from langgraph.checkpoint.base import (
     get_checkpoint_id,
     get_checkpoint_metadata,
 )
+from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
-from langgraph.pregel._retry import _should_retry_on
 from langgraph.types import Command
 
 from trellis.contracts import (
@@ -125,15 +126,25 @@ from trellis.contracts import (
     ToolError,
     ToolOutcome,
     ToolSpec,
+    ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,
+    compat,
     snapshots,
+    task_tools,
 )
 from trellis.harness.adapters.base import FIT_SHARE
-from trellis.harness.adapters.langgraph import CARRIED, CONTEXT_MESSAGE_ID, TASK_TOOL
+from trellis.harness.adapters.langgraph import (
+    ASKED,
+    CONTEXT_MESSAGE_ID,
+    HITL,
+    TASK_TOOL,
+    carried_plain,
+    notified,
+)
 from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
 from trellis.harness.bridges.helpers import Kind
 from trellis.harness.clients.memory import TOOL_SEARCH
@@ -141,7 +152,7 @@ from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
-from trellis.harness.journal import OUTCOME, content_key
+from trellis.harness.journal import call_key, content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
@@ -151,8 +162,6 @@ from trellis.harness.tools import bridge, query, results, stored
 from trellis.harness.tools.base import (
     CUT_SHORT,
     FAILED,
-    FRESHNESS,
-    STATIC,
     UNDECLARED,
     SideEffects,
     Sourced,
@@ -174,6 +183,8 @@ from trellis.harness.tools.results import READ_FILE
 
 log = logging.getLogger("trellis.run")
 
+#: Model calls one run may make (:func:`step_limit`: LangChain's ``ModelCallLimitMiddleware``).
+MAX_STEPS: Final = 12
 #: Consecutive steps in which every call failed (no such tool, arguments that do not fit, an
 #: error or a timeout), one failure among them met again, that stop the run.
 ERROR_STREAK: Final = 3
@@ -247,31 +258,20 @@ OUTSIDE_STATE: Final = "trellis_outside_state"
 FILE_READS: Final = frozenset({"ls", "read_file", "glob", "grep"})
 FILE_WRITES: Final = frozenset({"write_file", "edit_file", "delete"})
 FILE_TOOLS: Final = FILE_READS | FILE_WRITES
-#: The graph state channel Deep Agents keeps its files in: a graph has it when its file tools'
-#: backend keeps files in the graph's state (``StateBackend``, alone or a route of a composite).
-FILES_CHANNEL: Final = "files"
+#: The metadata key holding the backend of a Deep Agents file tool that keeps some paths in
+#: the graph's state and others outside it (a ``CompositeBackend``: a state route beside a
+#: disk, a store or a sandbox — the run's skills beside a sandbox): each call is the graph's
+#: scratch or a governed call of the run by where its path lands (:func:`in_state`).
+ROUTED: Final = "trellis_routed_backend"
 
 
 #: Deep Agents' shell tool, a command in its backend's sandbox: a write, as the harness's own
 #: sandbox tool is (``sandbox().tools()``).
 EXECUTE: Final = "execute"
-#: Deep Agents' tools for the background tasks of its async sub-agents
-#: (``AsyncSubAgentMiddleware``), and what each does: a task started, sent new instructions or
-#: cancelled on the sub-agent's server is a write; its status and the list of tasks are reads.
-ASYNC_TASKS: Final[Mapping[str, SideEffects]] = {
-    "start_async_task": "write",
-    "update_async_task": "write",
-    "cancel_async_task": "write",
-    "check_async_task": "read",
-    "list_async_tasks": "read",
-}
-#: What a write among them says of its result: the record of what was done (the task's id,
-#: that it was sent or stopped), no value that changes — an earlier one is never marked out of
-#: date with the advice to call the tool again, which would start a second task. A status and
-#: the list are values that change: live, as any tool's by default.
-ASYNC_TASK_DONE: Final[Mapping[str, Any]] = {FRESHNESS: STATIC}
 #: Where the code of a tool the framework made lives: Deep Agents', LangChain's agent middleware's.
 FRAMEWORK_CODE: Final = ("deepagents.", "langchain.agents.middleware.")
+#: Where the code of a tool the harness made for a graph lives: its background-task tools.
+HARNESS_CODE: Final = ("trellis.harness.bridges.background_tasks",)
 
 
 def framework_made(tool: Any) -> bool:
@@ -279,8 +279,20 @@ def framework_made(tool: Any) -> bool:
     of the built-ins the harness knows by name — the graph's state tools, Deep Agents' file
     tools and ``execute``. A tool of the agent's own with a built-in's name says what it does
     itself, as any other does."""
+    return _code_of(tool).startswith(FRAMEWORK_CODE)
+
+
+def confined(tool: Any) -> bool:
+    """Whether a write of the graph's own ``tool`` keeps to what the run owns, so it is
+    announced rather than asked (``Tool.confined``): a framework's own tool, under its own
+    permission flow, or one the harness made for the graph (:data:`HARNESS_CODE`: a
+    sub-agent's task, whose own calls are governed in its run) — never a tool of the agent's."""
+    return framework_made(tool) or _code_of(tool).startswith(HARNESS_CODE)
+
+
+def _code_of(tool: Any) -> str:
     code = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
-    return (getattr(code, "__module__", None) or "").startswith(FRAMEWORK_CODE)
+    return getattr(code, "__module__", None) or ""
 
 
 def outside_state(name: str) -> dict[str, Any]:
@@ -289,16 +301,106 @@ def outside_state(name: str) -> dict[str, Any]:
     return {OUTSIDE_STATE: True, "side_effects": "read" if name in FILE_READS else "write"}
 
 
+def files_backend(tool: Any) -> Any | None:
+    """The backend of a Deep Agents file tool, as the ``FilesystemMiddleware`` that made it
+    holds it (the tool's code closes over its middleware); ``None`` when it cannot be read: a
+    tool of another middleware, a release laid out otherwise, or a backend made per call (a
+    factory)."""
+    from deepagents.backends.protocol import BackendProtocol  # noqa: PLC0415 - an extra
+    from deepagents.middleware.filesystem import FilesystemMiddleware  # noqa: PLC0415
+
+    for code in (getattr(tool, "coroutine", None), getattr(tool, "func", None)):
+        for cell in getattr(code, "__closure__", None) or ():
+            try:
+                held = cell.cell_contents
+            except ValueError:  # an empty cell
+                continue
+            if isinstance(held, FilesystemMiddleware):
+                backend = held.backend
+                return backend if isinstance(backend, BackendProtocol) else None
+    return None
+
+
+def _all_state(backend: Any) -> bool:
+    """Whether every file of ``backend`` is kept in the graph's state: a ``StateBackend``, or
+    a composite of nothing else."""
+    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+
+    if isinstance(backend, CompositeBackend):
+        return all(_all_state(b) for b in (backend.default, *backend.routes.values()))
+    return isinstance(backend, StateBackend)
+
+
+def in_state(backend: Any, args: Mapping[str, Any]) -> bool:
+    """Whether a Deep Agents file call with ``args`` only touches the graph's state on
+    ``backend``: its path (``file_path``, else ``path``, else the root, as the tools default)
+    is routed to a state backend as Deep Agents routes it, and no route outside the state lies
+    under it — a listing or a search from a folder reads the routes below it too. A path
+    Deep Agents would refuse, or anything that cannot be decided, is not: the call is then
+    governed (it fails closed)."""
+    from deepagents.backends import CompositeBackend  # noqa: PLC0415 - an extra
+    from deepagents.backends.composite import _route_for_path  # noqa: PLC0415
+    from deepagents.backends.utils import validate_path  # noqa: PLC0415
+
+    given = args.get("file_path") or args.get("path") or "/"
+    try:
+        path = validate_path(given)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(backend, CompositeBackend):
+        return _all_state(backend)
+    under = path if path.endswith("/") else f"{path}/"
+    below = [b for prefix, b in backend.sorted_routes if prefix.startswith(under)]
+    if not all(_all_state(b) for b in below):
+        return False
+    routed, routed_path, _ = _route_for_path(
+        default=backend.default, sorted_routes=backend.sorted_routes, path=path
+    )
+    return in_state(routed, {"path": routed_path})
+
+
+def _file_marks(tool: Any, name: str) -> dict[str, Any]:
+    """What a Deep Agents file tool ``name`` is marked with, by where its backend keeps files
+    (:func:`files_backend`): nothing when all of them are the graph's state (its calls only
+    change the state, which the checkpoint keeps); :func:`outside_state` when none is, or when
+    the backend cannot be read (governed: it fails closed); and with the backend to decide
+    each call by (:data:`ROUTED`) when some are."""
+    backend = files_backend(tool)
+    if backend is not None and _all_state(backend):
+        return {}
+    routed = backend is not None and _routes_some_to_state(backend)
+    return {**outside_state(name), **({ROUTED: backend} if routed else {})}
+
+
+def _routes_some_to_state(backend: Any) -> bool:
+    from deepagents.backends import CompositeBackend, StateBackend  # noqa: PLC0415 - an extra
+
+    if isinstance(backend, CompositeBackend):
+        return any(_routes_some_to_state(b) for b in (backend.default, *backend.routes.values()))
+    return isinstance(backend, StateBackend)
+
+
+def scratch(tool: Any, call: Mapping[str, Any]) -> bool:
+    """Whether ``call`` of a state tool (:data:`STATE_TOOLS`, the framework's) only changes
+    the graph's own state: its tool is not marked :data:`OUTSIDE_STATE`, or — a backend that
+    routes some paths to the state (:data:`ROUTED`) — this call's path is one of them."""
+    marks = tool.metadata or {}
+    if not marks.get(OUTSIDE_STATE):
+        return True
+    backend = marks.get(ROUTED)
+    return backend is not None and in_state(backend, call.get("args") or {})
+
+
 def declare_files(graph: Any) -> None:
     """Deep Agents' file tools of ``graph`` and of its ``task`` sub-agents' graphs, marked
-    :func:`outside_state` in each graph whose files are not its state (no
-    :data:`FILES_CHANNEL`: a disk, a store, a sandbox), so they are governed as any tool — as
-    ``ReAct(backend=)`` marks its own. A graph that keeps its files in its state is left as it
-    is: those calls only change the state, which its checkpoint keeps. Deep Agents'
+    :func:`outside_state` wherever their backend keeps files outside the graph's state (a
+    disk, a store, a sandbox — alone, or a route of a composite beside a state route:
+    :func:`_file_marks`), so those calls are governed as any tool's — as ``ReAct(backend=)``
+    marks its own. A tool whose files are all the graph's state is left as it is: its calls
+    only change the state, which the checkpoint keeps. Deep Agents'
     :data:`EXECUTE` is declared a write, and its async sub-agents' task tools what each does
-    (:data:`ASYNC_TASKS`; a write's result, that it is no value to read again:
-    :data:`ASYNC_TASK_DONE`) — a tool that says so itself keeps its word. Only the framework's
-    own (:func:`framework_made`)."""
+    and what its result is (``task_tools``) — a tool that says so itself keeps its word. Only
+    the framework's own (:func:`framework_made`)."""
     from trellis.harness.adapters.langgraph import (  # noqa: PLC0415 - the adapter's, circular
         TASK_TOOL,
         bound_tools,
@@ -312,7 +414,6 @@ def declare_files(graph: Any) -> None:
         if id(found) in seen:
             continue
         seen.add(id(found))
-        outside = FILES_CHANNEL not in (getattr(found, "channels", None) or {})
         for tool in bound_tools(found):
             name = getattr(tool, "name", None)
             said = tool.metadata or {}
@@ -320,14 +421,13 @@ def declare_files(graph: Any) -> None:
                 pending.extend(subagent_graphs(tool))
             elif not framework_made(tool):
                 continue
-            elif outside and name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
-                tool.metadata = {**said, **outside_state(name)}
+            elif name in FILE_TOOLS and not said.get(OUTSIDE_STATE):
+                tool.metadata = {**said, **_file_marks(tool, name)}
             elif name == EXECUTE and "side_effects" not in said:
                 tool.metadata = {**said, "side_effects": "write"}
-            elif name in ASYNC_TASKS and "side_effects" not in said:
-                done = ASYNC_TASKS[name] == "write" and not data_of(said, strict=False)
-                given = ASYNC_TASK_DONE if done else {}
-                tool.metadata = {**said, **given, "side_effects": ASYNC_TASKS[name]}
+            elif (risk := task_tools.TOOLS.get(str(name))) and "side_effects" not in said:
+                given = {} if data_of(said, strict=False) else task_tools.result_of(str(name))
+                tool.metadata = {**said, **given, "side_effects": risk}
 
 
 #: The metadata key marking a tool of the graph's own machinery, not of the agent's tool set
@@ -427,26 +527,27 @@ async def governed_call(
     The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
     :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
-    (:data:`OUTSIDE_STATE`) is governed. A call repeating an earlier one of its model step
-    (the same tool, the same arguments) does not run — the harness's tools' included — and
-    points the model to the earlier one's result (``bridge.same``)."""
+    (:data:`OUTSIDE_STATE`) is governed. A call of the graph's own tools runs however often
+    its model step makes it, as the library runs it (a write is still made once: its
+    idempotency key); a harness tool's call repeating an earlier one of its step (the same
+    tool, the same arguments) does not run, and points the model to the earlier one's result
+    (``bridge.same``). The message the call ends with is its tool's, as the library made it
+    (:func:`_answered`)."""
     runtime = current()
     call = request.tool_call
     own = request.tool
     if runtime is None or own is None or _GOVERNING.get() == (call["name"], str(call["id"])):
         return await handler(request)
-    state_only = call["name"] in STATE_TOOLS and framework_made(own)
-    if state_only and not (own.metadata or {}).get(OUTSIDE_STATE):
+    if call["name"] in STATE_TOOLS and framework_made(own) and scratch(own, call):
         return _scratch_said(runtime, call["name"], await handler(request))
-    _, step = _step_of(request)
-    first = _repeats(step).get(str(call["id"]))
-    if first is not None:
-        repeat = bridge.same(
-            runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
-        )
-        return _message(repeat, request, kept=_paged(runtime, request))
     if converted.made(own) or call["name"] in runtime.toolbox:
-        # the harness's own: its call goes through the bridge
+        # the harness's own: its call goes through the bridge, a repeat of its step's too
+        first = _repeats(_step_of(request)[1]).get(str(call["id"]))
+        if first is not None:
+            repeat = bridge.same(
+                runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
+            )
+            return _message(repeat, request, kept=_paged(runtime, request))
         return _kept_own(runtime, request, await handler(request))
     produced: list[Any] = []
     raised: list[Exception] = []
@@ -463,6 +564,15 @@ async def governed_call(
             failure = ToolError(text_of(done.content), source="tools")
             reported[:] = [(done, failure)]
             raise failure
+        tasks = getattr(runtime.agent.adapter, "tasks", None)
+        if tasks is not None and call["name"] in task_tools.TOOLS and framework_made(own):
+            # a task started is a child run; one Deep Agents found ended, ends (``async_tasks``)
+            try:
+                await tasks.said(runtime, own, args=args, done=done, told=text_of(_told(done)))
+            except Exception as exc:  # the task's run is a record: the call's result stands
+                log.warning(
+                    "run %s: the run of a task of %s not kept: %s", runtime.run_id, own.name, exc
+                )
         produced.append(done)
         # a content_and_artifact tool's artifact: the sources of its result, when it names any
         cited = citations(getattr(done, "artifact", None))
@@ -478,13 +588,15 @@ async def governed_call(
             raise
 
     spec = runtime.native.get(call["name"]) or spec_of(own)  # as the run's tool set has it
-    # Deep Agents' files: its own. In a tool node, tried again around the graph's handling
-    made = Tool(spec, run, confined=framework_made(own), deferring=_CALLING.get())
+    # Deep Agents' files, a task handed on: the run's own. In a tool node, tried again around
+    # the graph's handling
+    made = Tool(spec, run, confined=confined(own), deferring=_CALLING.get())
     outcome = await bridge.call(made, dict(call["args"]), call_id=str(call["id"]))
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
         return update  # the graph's state update, as the tool made it
-    return _answered(runtime, request, outcome, reported, raised)
+    own_message = await _made(runtime, call, outcome, produced)
+    return _answered(runtime, request, outcome, reported, raised, made=own_message)
 
 
 def _answered(
@@ -493,6 +605,8 @@ def _answered(
     outcome: ToolOutcome,
     reported: Sequence[tuple[ToolMessage, ToolError]],
     raised: Sequence[Exception],
+    *,
+    made: ToolMessage | None = None,
 ) -> ToolMessage:
     """The message a governed call that gave the graph no update ends with: the failed message
     the graph made of the tool's error (``reported``: the tool node's, a wrapper's), as the
@@ -501,11 +615,19 @@ def _answered(
     (:func:`_failed`), for the graph to handle as it does — unless the hooks made the call a
     result: then it is that result. A failure the hooks worded otherwise is raised all the same
     (the graph's retry, its wrappers and its tool node act on it as ever), and the failed
-    message the graph makes of it is the hooks' (``_Calling.said``)."""
+    message the graph makes of it is the hooks' (``_Calling.said``). A result the tool's own
+    message carries more of than its text (``made``: :func:`_made`) is that message, as the
+    library made it, unless the hooks changed it: its content blocks (an image, a file) as
+    they are, and its artifact beside the text, which the harness gives as any result's."""
     calling = _under_way()
     calling.said = None  # this try's: what an earlier one's hooks said is not this one's
     if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
         return reported[0][0]
+    if made is not None and not bridge.hooked(outcome):
+        if runtime not in _PAGED or not isinstance(made.content, str):
+            return made
+        said = _message(outcome, request, kept=_paged(runtime, request)).content
+        return made.model_copy(update={"content": said})
     message = _message(outcome, request, kept=_paged(runtime, request))
     if raised and not outcome.ok:
         if bridge.hooked(outcome):
@@ -519,8 +641,15 @@ def _answered(
 #: The journal's mark, in a call's record, of what a framework's own tool returned in a
 #: message's place (:func:`_kept_update`): a ``Command``, or a list of them and messages.
 UPDATE: Final = "trellis_update"
-#: LangGraph's own serializer, as its checkpointers keep a step's writes.
-_SERDE: Final = JsonPlusSerializer()
+#: LangGraph's own serializer for what a run keeps of its graph — its checkpoint
+#: (:class:`RunCheckpointer`) and what a tool returned in a message's place
+#: (:func:`_kept_update`) — in LangGraph's strict mode: read back, stored data is made only
+#: into the types LangGraph itself lists as safe (its messages, ``Command``, ``Send``,
+#: ``Interrupt``...), and anything else is left as the data it holds, never imported or
+#: called. A run's journal and checkpoint are written by whoever holds a key of the run
+#: store: no trust to construct with. A graph's own state types are added by LangGraph's own
+#: means, per graph (``adapters.langgraph.checkpointing``: ``with_allowlist``).
+STRICT_SERDE: Final = JsonPlusSerializer(allowed_msgpack_modules=None)
 
 
 async def _update(
@@ -536,8 +665,36 @@ async def _update(
         await _kept_update(runtime, call, outcome, produced[-1])
         return produced[-1]
     if outcome.cached and UPDATE in outcome.metadata:
-        return _update_of(outcome.metadata[UPDATE], str(call["id"]))
+        kept = _kept(runtime, outcome, call)
+        return None if isinstance(kept, ToolMessage) else kept  # a message: :func:`_made`
     return None
+
+
+async def _made(
+    runtime: Runtime, call: Mapping[str, Any], outcome: ToolOutcome, produced: Sequence[Any]
+) -> ToolMessage | None:
+    """The tool's own message for a governed call that ended well, where it carries more than
+    the text the run records of it: content blocks (an image, a file: a multimodal result the
+    model reads as such) or an artifact (``response_format="content_and_artifact"``: data the
+    model does not read, which the graph's state keeps) — the message its tool returned now
+    (kept for a replay: :func:`_kept_update`), or, the call replayed from the journal, the one
+    kept; else ``None``: the harness's message of the outcome says all of it."""
+    if not outcome.ok:
+        return None
+    if produced and isinstance(done := produced[-1], ToolMessage):
+        if done.artifact is not None or not isinstance(done.content, str):
+            await _kept_update(runtime, call, outcome, done)  # its text alone is recorded
+        return done
+    if outcome.cached and UPDATE in outcome.metadata:  # a message (:func:`_update`: no other)
+        return _kept(runtime, outcome, call)
+    return None
+
+
+def _kept(runtime: Runtime, outcome: ToolOutcome, call: Mapping[str, Any]) -> Any:
+    """What was kept of a call replayed from the journal (:func:`_update_of`), read back as
+    the run's graph may be: strictly, its own state types allowed."""
+    serde = STRICT_SERDE.with_msgpack_allowlist(state_types(runtime.agent.target))
+    return _update_of(outcome.metadata[UPDATE], str(call["id"]), serde)
 
 
 async def _kept_update(
@@ -550,11 +707,11 @@ async def _kept_update(
     record alone gives the message the model read. Serialized as LangGraph serializes a step's
     writes; an update that cannot be (a value its serializer does not take) is left out, said
     in the log — the call's replay is then its message."""
-    recorded = runtime.replay.journal.calls.get(content_key("call", call["name"], call["args"]))
-    if not recorded or recorded[-1] != outcome.output:
+    recorded = runtime.replay.journal.calls.get(call_key(call["name"], call["args"]))
+    if not recorded or bridge.journal_outcome(call["name"], recorded[-1]).output != outcome.output:
         return  # not journaled as this call's (the paused call made again in other words)
     try:
-        kind, data = _SERDE.dumps_typed(made)
+        kind, data = STRICT_SERDE.dumps_typed(made)
     except Exception as exc:
         log.warning(
             "run %s: what %s returned in a message's place cannot be kept for a replay (%s: %s)",
@@ -565,16 +722,29 @@ async def _kept_update(
         )
         return
     kept = [kind, base64.b64encode(data).decode(), str(call["id"])]
-    record = outcome.model_dump(mode="json", include={"status", "output"})
-    recorded[-1] = {OUTCOME: {**record, "metadata": {UPDATE: kept}}}
+    recorded[-1] = bridge.journal_record(outcome.model_copy(update={"metadata": {UPDATE: kept}}))
     await runtime.progress(now=True)  # saved with the call it is the result of
 
 
-def _update_of(kept: Sequence[str], call_id: str) -> Any:
-    """What :func:`_kept_update` kept, for the call ``call_id`` now: the messages answering
-    the call it was made for answer this one (a model asked again gives its call another id)."""
+def state_types(graph: Any) -> set[tuple[str, ...]]:
+    """The types ``graph``'s own state declares (its schemas' and channels': a Pydantic model,
+    a dataclass, an enum a state key holds), as LangGraph itself lists them for its strict
+    serializer (``build_serde_allowlist``, what a graph compiled under
+    ``LANGGRAPH_STRICT_MSGPACK`` is given): what :data:`STRICT_SERDE` may also make of the
+    run's stored data for this graph."""
+    from langgraph._internal._serde import build_serde_allowlist  # noqa: PLC0415 - LangGraph's own
+
+    schemas: list[type[Any]] = list(getattr(getattr(graph, "builder", None), "schemas", ()))
+    return build_serde_allowlist(schemas=schemas, channels=getattr(graph, "channels", None))
+
+
+def _update_of(kept: Sequence[str], call_id: str, serde: SerializerProtocol) -> Any:
+    """What :func:`_kept_update` kept, read back with ``serde`` (:data:`STRICT_SERDE`, told
+    the graph's own :func:`state_types`), for the call ``call_id`` now: the messages answering
+    the call it was made for answer this one (a model asked again gives its call another
+    id)."""
     kind, data, was = kept
-    made = _SERDE.loads_typed((kind, base64.b64decode(data)))
+    made = serde.loads_typed((kind, base64.b64decode(data)))
 
     def answering(found: Any) -> None:
         for message in found if isinstance(found, list) else ():
@@ -633,9 +803,6 @@ class _Calling:
 
 #: The tool node's call under way (:func:`govern_tool_nodes`), where its tries meet.
 _CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
-#: The calls under way of each model step's tool calls (:func:`_step_key`), however LangGraph
-#: runs them: a ``ToolNode`` gathering them, or ``create_agent`` sending each to its own task.
-_BESIDE: Final[dict[Hashable, set[_Calling]]] = {}
 
 
 def _step_key(state: Any, call_id: str) -> Hashable:
@@ -685,17 +852,20 @@ def _failed(error: Exception, message: ToolMessage) -> NoReturn:
 
 def _message(outcome: ToolOutcome, request: ToolCallRequest, *, kept: bool = False) -> ToolMessage:
     """A harness call's outcome as the tool message the model reads — ``kept``: a large one
-    kept in the run and previewed, ``read_file`` paging it (``tools.results``); a table of
-    many rows read whole is kept too, for ``query_result`` (``results.tabled``) — its table
-    named by what the call asked (:func:`_table`)."""
+    kept in the run and previewed, ``read_file`` paging it (``tools.results``); where the
+    harness runs the loop (:data:`_PAGED`), a table of many rows read whole is kept too, for
+    ``query_result`` (``results.tabled``) — its table named by what the call asked
+    (:func:`_table`). Elsewhere the result's text, as it is."""
     call = request.tool_call
-    table = _table(_step_of(request)[1], call)
+    text = text_of(outcome.output)
+    if kept:
+        content = results.readable(outcome.output, _table(_step_of(request)[1], call))
+    elif current() in _PAGED:
+        content = results.tabled(text, _table(_step_of(request)[1], call))
+    else:
+        content = text
     return ToolMessage(
-        content=(
-            results.readable(outcome.output, table)
-            if kept
-            else results.tabled(text_of(outcome.output), table)
-        ),
+        content=content,
         tool_call_id=str(call["id"]),
         name=call["name"],
         status="error" if outcome.status in FAILED else "success",
@@ -756,7 +926,7 @@ def _earlier(runtime: Runtime, messages: Sequence[AnyMessage]) -> tuple[list[Any
     already stamped (a memory window's replay), or of a tool whose value stays current a while
     (its age is not known here) or for good, is left as it is; and so is the result of a call
     that failed or was stopped before it came back: it returned no value to be out of date."""
-    asked = max((n for n, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
+    asked = max((n for n, m in enumerate(messages) if typed(m)), default=-1)
     called = {
         c["id"]: c["name"]
         for m in messages[:asked]
@@ -1103,13 +1273,14 @@ def govern_tool_nodes() -> None:
     run_one = ToolNode._arun_one
 
     async def called(self: ToolNode, call: Any, input_type: Any, tool_runtime: Any) -> Any:
-        if current() is None:
+        runtime = current()
+        if runtime is None:
             return await run_one(self, call, input_type, tool_runtime)
         calling = _Calling()
         token = _CALLING.set(calling)
         # the calls of one model step, gathered by one tool node or each a task of its own
         step = _step_key(tool_runtime.state, str(call["id"]))
-        beside = _BESIDE.setdefault(step, set())
+        beside = runtime.beside.setdefault(step, set())
         beside.add(calling)
         try:
             while True:
@@ -1126,6 +1297,7 @@ def govern_tool_nodes() -> None:
                     await calling.ended_try()
                     if error is not None:
                         raise error
+                    await _refused_by_graph(runtime, self, call, calling, done)
                     return done
                 calling.tried += 1
         finally:
@@ -1133,11 +1305,38 @@ def govern_tool_nodes() -> None:
             calling.ended.set()
             beside.discard(calling)
             if not beside:
-                _BESIDE.pop(step, None)
+                runtime.beside.pop(step, None)
 
     setattr(governed, _INSTALLED, True)
     ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
     ToolNode._arun_one = called  # type: ignore[method-assign]
+
+
+async def _refused_by_graph(
+    runtime: Runtime, node: ToolNode, call: Mapping[str, Any], calling: _Calling, done: Any
+) -> None:
+    """A call of the graph's own tool that a wrapper of the graph refused in the tool's place
+    — LangChain's ``AutoModeMiddleware`` blocking a call its decision model finds risky, a
+    per-call approval rejected: the tool never ran and the call never reached the harness
+    (``_Calling.entries``), so it would be on no record of the run. It is recorded as the
+    failed call the model reads: on the run's stream, traced and in the memory service
+    (``bridge.observed``; nothing is run, journaled or counted against the budget). A call
+    the wrapper answered well (a cache, an emulator) is the wrapper's answer, not a refusal;
+    the harness's own tools are the bridge's. In a run where a person answered the library's
+    own approval gate (:data:`HITL`), a refusal may be that person's rejection — recorded as
+    their decision, never as a call — so none is recorded as one there."""
+    name = str(call["name"])
+    tool = node.tools_by_name.get(name)
+    refused = isinstance(done, ToolMessage) and done.status == "error" and not calling.entries
+    if not refused or tool is None or converted.made(tool) or name in runtime.toolbox:
+        return
+    if runtime.replay.journal.answers.get(HITL):
+        return
+    outcome = ToolOutcome(tool=name, status=ToolStatus.ERROR, output=text_of(done.content))
+    spec = runtime.native.get(name) or spec_of(tool)
+    await bridge.observed(
+        runtime, spec, dict(call["args"]), outcome, ref=str(call["id"]), started=time.time()
+    )
 
 
 async def _tried(calling: _Calling, beside: Collection[_Calling], running: Awaitable[Any]) -> Any:
@@ -1177,16 +1376,45 @@ async def _again(calling: _Calling, error: Exception | None, config: RunnableCon
     return True
 
 
+#: The prefix of the keys LangGraph gives the config of a node it runs.
+PREGEL_KEYS: Final = "__pregel"
+
+
 def _node_retries(config: RunnableConfig, error: Exception) -> bool:
     """Whether the graph runs the node again on ``error``: a retry policy of its task's (else
     the graph's) that retries it, as LangGraph reads them (its task, from the call it hands the
-    node's config: ``CONFIG_KEY_CALL``)."""
-    call = (config.get("configurable") or {}).get(CONFIG_KEY_CALL)
+    node's config: ``CONFIG_KEY_CALL``). These are LangGraph's internals: where they are not
+    as the harness reads them (:func:`_internals_moved`) it says so — taken for "no policy",
+    the harness would try the call again on top of the graph's own tries. A tool node no
+    graph runs (its config has none of LangGraph's keys) has no node policy."""
+    try:
+        from langgraph._internal._constants import CONFIG_KEY_CALL  # noqa: PLC0415
+        from langgraph.pregel._retry import _should_retry_on  # noqa: PLC0415
+    except ImportError as exc:
+        raise _internals_moved(str(exc)) from exc
+    configurable: Mapping[str, Any] = config.get("configurable") or {}
+    call = configurable.get(CONFIG_KEY_CALL)
+    if call is None and not any(key.startswith(PREGEL_KEYS) for key in configurable):
+        return False
     referred = next(iter(getattr(call, "args", ())), None)  # a weak reference to the task
-    task = referred() if isinstance(referred, weakref.ref) else None
-    graphs = getattr(call, "keywords", None) or {}
-    policies = getattr(task, "retry_policy", None) or graphs.get("retry_policy") or ()
+    task: Any = referred() if isinstance(referred, weakref.ref) else None
+    graphs = getattr(call, "keywords", None)
+    if task is None or not hasattr(task, "retry_policy") or not isinstance(graphs, Mapping):
+        raise _internals_moved(f"the call a node's config holds is {type(call).__name__}")
+    policies = task.retry_policy or graphs.get("retry_policy") or ()
     return any(_should_retry_on(policy, error) for policy in policies)
+
+
+def _internals_moved(found: str) -> ConfigurationError:
+    """The error of a LangGraph whose internals are not where the harness reads whether the
+    graph retries a node itself: named, with the releases the harness is tested with."""
+    low, high = compat.TESTED["langgraph"]
+    return ConfigurationError(
+        "this langgraph does not hand a tool node its task as the harness reads it "
+        f"({found}), so whether the graph tries a failed call again itself cannot be told and "
+        "the harness will not try it again on top: use a langgraph release trellis-harness is "
+        f"tested with (>={low},<{high}: docs/versioning.md)"
+    )
 
 
 #: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
@@ -1195,14 +1423,18 @@ _INSTALLED: Final = "_trellis_governed"
 
 def side_effects_of(metadata: Mapping[str, Any] | None) -> str:
     """A framework tool's risk as it declares it: ``side_effects`` (``read``, ``write``,
-    ``irreversible``), else MCP-style annotations (read as an MCP tool's:
-    ``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves each call
+    ``irreversible``), else MCP-style annotations — ``annotations``, or as ``langchain.mcp``
+    keeps a server's (``mcp.tool.annotations``) — read as an MCP tool's
+    (``tools.mcp.side_effects_of``), else none (``UNDECLARED``: a person approves each call
     until the tool, or the catalog, says what it does)."""
     found = dict(metadata or {})
     declared = found.get("side_effects")
     if declared in get_args(SideEffects):
         return str(declared)
     hints = found.get("annotations")
+    if hints is None:  # ``langchain.mcp``'s place for them: the server's tool, under ``mcp``
+        listed = (found.get("mcp") or {}).get("tool") or {}
+        hints = listed.get("annotations")
     return UNDECLARED if hints is None else annotated(hints)
 
 
@@ -1477,25 +1709,13 @@ async def _narrow(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
-    """A model call offered only the tools the run offers (:func:`_offered`) — and, once the
-    run keeps a large result, the harness's ``read_file`` and ``query_result`` the graph was not
-    built with (:func:`_readers`; their calls answered in its tool node, :func:`govern_tool_nodes`),
-    its tools' large results kept and previewed as ``HarnessTools`` keeps them (:data:`_PAGED`):
-    without them a ``create_agent`` graph built without ``middleware()`` summed rows by hand
-    (the break-and-fix gate, 5 analytics turns) —, the memory context sent with the question
-    (:func:`with_question`), the end of the history marked when a caching middleware marks the
-    request (:func:`history_marked`), and the day it is after the instructions
-    (:func:`_dated`)."""
+    """A model call offered only the tools the run offers (:func:`_offered`), the memory
+    context sent with the question (:func:`with_question`), the end of the history marked when
+    a caching middleware marks the request (:func:`history_marked`), and the day it is after
+    the instructions (:func:`_dated`). Its tools' results are the library's, as they are: the
+    harness keeps and previews large results, and keeps tables for ``query_result``, only
+    where it runs the loop (``HarnessTools``: ``ReAct``, ``middleware()``)."""
     runtime = current()
-    if runtime is not None:
-        _PAGED.add(runtime)
-        present = {_named(t) for t in request.tools}
-        # as schemas: ``create_agent`` refuses a tool object its tool node lacks, and leaves a
-        # schema to the provider (the tool node answers the call: :func:`govern_tool_nodes`)
-        readers = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
-        if readers:
-            request = request.override(tools=[*request.tools, *readers])
-        request = _stubs_tabled(runtime, request)
     asked = history_marked(with_question(_offered(request, runtime)))
     return await handler(_dated(asked, runtime))
 
@@ -1755,11 +1975,7 @@ def _with_task(request: ModelRequest[Any]) -> ModelRequest[Any]:
     # a summary kept in the state (LangChain's) ends what is looked at
     state = list(itertools.takewhile(lambda m: not _summary(m), request.state.get("messages", [])))
     asked = next(
-        (
-            m
-            for m in reversed(state)
-            if isinstance(m, HumanMessage) and STEERED not in m.response_metadata
-        ),
+        (m for m in reversed(state) if typed(m) and STEERED not in m.response_metadata),
         None,
     )
     if asked is None:
@@ -1798,7 +2014,7 @@ def with_question(request: ModelRequest[Any]) -> ModelRequest[Any]:
         (
             n
             for n in range(len(messages) - 1, at, -1)
-            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+            if typed(messages[n]) and messages[n].id in kept
         ),
         None,
     )
@@ -1831,7 +2047,7 @@ def history_marked(request: ModelRequest[Any]) -> ModelRequest[Any]:
         (
             n
             for n in range(len(messages) - 1, 0, -1)
-            if isinstance(messages[n], HumanMessage) and messages[n].id in kept
+            if typed(messages[n]) and messages[n].id in kept
         ),
         None,
     )
@@ -1920,6 +2136,17 @@ def _answer_marked(answer: AnyMessage, marker: Any) -> AnyMessage:
         return answer
     parts[texts[-1]] = {**parts[texts[-1]], "cache_control": marker}
     return answer.model_copy(update={"content": parts})
+
+
+def typed(message: Any) -> bool:
+    """Whether ``message`` is one the user sent: a human message the harness or a framework did
+    not add (``adapters.langgraph.notified``: a background task's update, a summary of earlier
+    turns) — or a run's input marked as its question (``adapters.langgraph.ASKED``: a
+    notification run's). The turn's question is the last such message, never a notification
+    after it."""
+    return isinstance(message, HumanMessage) and (
+        ASKED in message.response_metadata or notified(message) is None
+    )
 
 
 def _summary(message: BaseMessage) -> bool:
@@ -2018,7 +2245,9 @@ def _ai(reply: ModelResponse[Any]) -> AIMessage | None:
 
 
 # --------------------------------------------------------------------------- limits
-def step_limit(max_steps: int, *, scoped: bool = False) -> AgentMiddleware[Any, Any, Any]:
+def step_limit(
+    max_steps: int = MAX_STEPS, *, scoped: bool = False
+) -> AgentMiddleware[Any, Any, Any]:
     """At most ``max_steps`` model calls that may call tools, then one that answers
     (:class:`AnswerAtLimit`). ``scoped``: counted per thread (a ``ReAct`` graph's thread is its run,
     so a resume keeps the count), else per invocation (``middleware()`` in a graph whose thread
@@ -2033,9 +2262,12 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
     ``max_steps`` of them makes one more — the model told the limit is reached
     (``budget.LIMIT``) and offered no tool, as :class:`StallGuard` does on a stall
     (:func:`_answer_now`) — so the run ends with an answer saying what was found and what is
-    left, not LangChain's "Model call limits exceeded" message. LangChain's limit, one call
-    past ``max_steps``, stays the backstop (its ``exit_behavior="end"``). Named as LangChain's
-    (a ``ReAct(middleware=)`` of that name is refused, naming ``max_steps=``)."""
+    left, not LangChain's "Model call limits exceeded" message. A model turn asked for after
+    that answer (a background task's outcome, after a final answer: Deep Agents' async
+    sub-agents, the harness's own tasks) counts as any call, and past the limit it is not made:
+    the run ends with the answer it has, where LangChain's limit, one call past ``max_steps``,
+    would put its message in the answer's place. Named as LangChain's (a ``ReAct(middleware=)``
+    of that name is refused, naming ``max_steps=``)."""
 
     def __init__(self, max_steps: int, *, scoped: bool) -> None:
         self.max_steps = max_steps
@@ -2046,6 +2278,12 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
     @property
     def name(self) -> str:
         return ModelCallLimitMiddleware.__name__
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        if state.get(self.counted, 0) <= self.max_steps:
+            return None
+        return {"jump_to": "end", **_unread(state)}
 
     async def awrap_model_call(
         self,
@@ -2061,6 +2299,28 @@ class AnswerAtLimit(ModelCallLimitMiddleware):
             f"stopped: the step limit ({self.max_steps}) was reached",
             warning="step_limit",
         )
+
+
+def _unread(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The background tasks' outcomes read after the final answer (Deep Agents' async
+    sub-agents' notifications) for a model turn the step limit does not make: not read after
+    all — their notifications leave the turn, and their tasks' records say they still work, so
+    the conversation's next turn reads and tells them again."""
+    messages = state.get("messages") or []
+    answered = max((n for n, m in enumerate(messages) if isinstance(m, AIMessage)), default=-1)
+    told = [
+        m
+        for m in messages[answered + 1 :]
+        if (notified(m) or {}).get("source") == task_tools.SOURCE
+    ]
+    if not told:
+        return {}
+    tasks = state.get("async_tasks") or {}
+    ids = {str(((notified(m) or {}).get("data") or {}).get("task_id")) for m in told}
+    return {
+        "messages": [RemoveMessage(id=str(m.id)) for m in told],
+        "async_tasks": {t: {**tasks[t], "status": "running"} for t in ids if t in tasks},
+    }
 
 
 class StallGuard(AgentMiddleware):
@@ -2196,7 +2456,7 @@ def _turn_back(history: Sequence[AnyMessage]) -> Iterator[AnyMessage]:
     the end, as far as the caller reads."""
     for n in range(len(history) - 1, -1, -1):
         message = history[n]
-        if isinstance(message, HumanMessage):
+        if typed(message):
             return
         yield message
 
@@ -2372,7 +2632,7 @@ class ThisTurnsResults(ClearToolUsesEdit):
 
     def apply(self, messages: list[AnyMessage], *, count_tokens: TokenCounter) -> None:
         start = next(
-            (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+            (i for i in range(len(messages) - 1, -1, -1) if typed(messages[i])),
             0,
         )
         turn = messages[start:]
@@ -2782,7 +3042,7 @@ def _size(request: ModelRequest[Any]) -> int:
 
 def _bare(request: ModelRequest[Any]) -> ModelRequest[Any]:
     """The request with only its instructions and the user's latest message, no tools."""
-    asked = next((m for m in reversed(request.messages) if isinstance(m, HumanMessage)), None)
+    asked = next((m for m in reversed(request.messages) if typed(m)), None)
     return request.override(messages=[asked] if asked is not None else [], tools=[])
 
 
@@ -2817,7 +3077,7 @@ def _narrowed(
     must = set(runtime.used) if runtime is not None else set()
     must |= {*STATE_TOOLS, TOOL_SEARCH, *(SAVING if _saved(request.state) else ())}
     hinted = (runtime.offered or set()) if runtime is not None else set()
-    asked = next((m.text for m in reversed(request.messages) if isinstance(m, HumanMessage)), "")
+    asked = next((m.text for m in reversed(request.messages) if typed(m)), "")
     words = set(_WORD.findall(asked.lower()))
 
     def rank(item: tuple[int, BaseTool | dict[str, Any]]) -> tuple[int, int, int]:
@@ -2926,11 +3186,7 @@ def _asked(request: ModelRequest[Any]) -> int | None:
     said = {id(m) for m in state}
     named = {m.id for m in state if m.id is not None}
     asked = max(
-        (
-            n
-            for n, m in enumerate(messages)
-            if isinstance(m, HumanMessage) and (id(m) in said or m.id in named)
-        ),
+        (n for n, m in enumerate(messages) if typed(m) and (id(m) in said or m.id in named)),
         default=None,
     )
     return None if asked is None or asked <= lead else asked
@@ -2956,7 +3212,7 @@ def _answers(request: ModelRequest[Any], budget: int) -> ModelRequest[Any]:
     over = _size(request) - budget
     gone: set[int] = set()
     for n, message in enumerate(messages[: asked or 0]):
-        if over <= 0 and isinstance(message, HumanMessage):
+        if over <= 0 and typed(message):
             break  # the next turn: its calls and results stay
         if isinstance(message, ToolMessage) or (
             isinstance(message, AIMessage) and message.tool_calls
@@ -3140,7 +3396,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
     each checkpoint as it is kept (``Runtime.carried``)."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(serde=STRICT_SERDE)
         #: outside a run: the threads' latest checkpoints, the least recently used forgotten
         #: past the bound (an in-memory checkpointer; inside a run, the run's journal)
         self._threads: LRU[str, dict[str, Any]] = LRU(THREADS_KEPT)
@@ -3241,7 +3497,7 @@ class RunCheckpointer(BaseCheckpointSaver[int]):
             runtime.replay.passed(parent)  # the steps it follows are done: not made again
             # what the run's conversation carries to its next turn, as the graph now holds it
             values = checkpoint["channel_values"]
-            runtime.carried = {name: values[name] for name in CARRIED if name in values}
+            runtime.carried = carried_plain(values, runtime.carried or {})
         return _config(thread_id, ns, checkpoint["id"])
 
     def _deltas(

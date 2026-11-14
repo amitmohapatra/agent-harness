@@ -53,6 +53,15 @@ class ScriptedModel(Model):
         #: whether the latest call was offered nothing to call (no tool, no handoff)
         self.bare = False
 
+    def outputs(self) -> list[Any]:
+        """The tool outputs in the input of its latest call: what the model read of the calls
+        its replies made, in order."""
+        return [
+            item["output"]
+            for item in self.inputs[-1]
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ]
+
     def _next(self, input: Any, system: str | None) -> list[Any]:
         self.inputs.append(input)
         self.system.append(system)

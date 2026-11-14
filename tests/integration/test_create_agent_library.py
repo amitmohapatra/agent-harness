@@ -18,6 +18,7 @@ import pytest
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
+    AutoModeMiddleware,
     ExtendedModelResponse,
     FilesystemFileSearchMiddleware,
     HostExecutionPolicy,
@@ -38,6 +39,7 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain_core.decisions import BaseDecisionModel, ClassifierResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -45,7 +47,7 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from tests.support.chat_model import ScriptedChatModel
+from tests.support.chat_model import ScriptedChatModel, StreamingChatModel
 from tests.support.memory import FakeMemoryService, pushed
 from trellis import Harness
 from trellis.contracts import RunEventType, RunStatus
@@ -296,6 +298,140 @@ async def test_a_tool_a_middleware_adds_per_call_is_offered_run_and_governed(
     assert done.answer == "aisle 4" and ran == ["shelf a"]
 
 
+# ------------------------------------------------------------------------- tool results
+@lc_tool(response_format="content_and_artifact")
+def report(sku: str) -> tuple[str, dict[str, Any]]:
+    """A stock report: the text the model reads, and the rows it does not."""
+    ran.append(f"report {sku}")
+    return f"report of {sku}", {"rows": [1, 2, 3]}
+
+
+report.metadata = {"side_effects": "read"}
+
+
+@lc_tool
+def picture(sku: str) -> list[dict[str, Any]]:
+    """A photo of a SKU, as content blocks."""
+    ran.append(f"picture {sku}")
+    return [
+        {"type": "text", "text": f"photo of {sku}"},
+        {"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"},
+    ]
+
+
+picture.metadata = {"side_effects": "read"}
+
+
+async def test_a_tools_artifact_and_content_blocks_reach_the_graph_as_the_tool_made_them(
+    harness: Harness,
+) -> None:
+    """A ``content_and_artifact`` tool's message keeps its artifact (data the model does not
+    read, kept in the graph's state), and a tool's content blocks reach the model as blocks —
+    an image it sees, not its JSON as text — as the library gives them; each call is still
+    governed and recorded with the text of its result."""
+    model = ScriptedChatModel(turns=[[("report", {"sku": "a"}), ("picture", {"sku": "a"})], "ok"])
+    graph = create_agent(model, tools=[report, picture])
+    events = [e async for e in harness.wrap(graph, id="results").stream("report a", user="u")]
+    assert sorted(results(events)) == [("picture", "ok"), ("report", "ok")]
+    read = {m.name: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    assert read["report"].content == "report of a"
+    assert read["report"].artifact == {"rows": [1, 2, 3]}
+    assert read["picture"].content == picture.invoke({"sku": "a"})
+    [recorded] = [
+        e.data
+        for e in events
+        if e.type is RunEventType.TOOL_CALL_RESULT and e.data["tool"] == "picture"
+    ]
+    assert "photo of a" in str(recorded)
+
+
+async def test_a_tools_artifact_is_kept_when_its_call_is_replayed_after_a_pause(
+    harness: Harness,
+) -> None:
+    """Without a checkpointer, the run resumed is the graph run again, and a call made before
+    the pause is answered from the journal: its message still carries the artifact the tool
+    made, though the tool does not run again."""
+    model = ScriptedChatModel(
+        turns=[[("report", {"sku": "a"}), ("order", {"sku": "a"})]] * 2 + ["ordered"]
+    )
+    graph = create_agent(model, tools=[report, order])
+    agent = harness.wrap(graph, id="replayed")
+    paused = await agent.run("report and order a", user="u")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and ran == ["report a", "order a"]
+    [kept] = [m for m in model.seen[-1] if isinstance(m, ToolMessage) and m.name == "report"]
+    assert kept.artifact == {"rows": [1, 2, 3]} and kept.content == "report of a"
+
+
+async def test_a_call_made_twice_in_one_step_runs_twice_as_the_library_runs_it(
+    harness: Harness,
+) -> None:
+    """``create_agent`` runs each call its model makes, the same call twice included: so does
+    the run, each governed and recorded, and the model reads each one's own result."""
+    model = ScriptedChatModel(turns=[[("stock", {"sku": "a"}), ("stock", {"sku": "a"})], "7"])
+    graph = create_agent(model, tools=[stock])
+    events = [e async for e in harness.wrap(graph, id="twice").stream("a twice", user="u")]
+    assert ran == ["stock a", "stock a"]
+    assert results(events) == [("stock", "ok"), ("stock", "ok")]
+    read = [m.content for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert read == ["a: 7", "a: 7"]
+
+
+async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Harness) -> None:
+    """Without the harness's middleware the graph runs its own loop, and its tool's result is
+    the library's: a result past the size the harness keeps, and a table, reach the model as the
+    tool returned them, with no tool of the harness's added to read them back."""
+
+    @lc_tool
+    def big(n: int) -> str:
+        """A long text."""
+        return "word " * n
+
+    big.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(turns=[("big", {"n": 20_000}), "read"])
+    graph = create_agent(model, tools=[big])
+    assert (await harness.wrap(graph, id="big").run("x", user="u")).answer == "read"
+    [read] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert read.content == "word " * 20_000
+    assert model.requests[-1]["tools"] == ["big"]
+
+
+# ------------------------------------------------------------------ a decision model's verdict
+class Risky(BaseDecisionModel):
+    """A decision model that finds every call risky, and reports what its request used."""
+
+    model: str = "risk-1"
+
+    @property
+    def _provider(self) -> str:
+        return "scripted"
+
+    def _classify(self, state: Any, questions: Any) -> ClassifierResponse:
+        answers = {key: {"type": "noul", "noul": 0.99} for key in questions}
+        usage = {"input_tokens": 40, "output_tokens": 2, "total_tokens": 42}
+        return ClassifierResponse.model_validate(
+            {"model": self.model, "answers": answers, "usage": usage}
+        )
+
+
+async def test_a_call_auto_mode_blocks_is_recorded_and_its_classifier_is_paid_from_the_budget(
+    harness: Harness,
+) -> None:
+    """``AutoModeMiddleware`` asks a decision model about a call and answers a risky one in
+    the tool's place. The tool does not run; the blocked call is on the run's events as the
+    failed call the model reads, and what the decision model used is the run's spending."""
+    model = ScriptedChatModel(turns=[("order", {"sku": "a"}), "not ordered"])
+    guard = AutoModeMiddleware(tools=["order"], classifier=Risky())
+    graph = create_agent(model, tools=[order], middleware=[guard])
+    events = [e async for e in harness.wrap(graph, id="auto").stream("order a", user="u")]
+    assert events[-1].data["result"] == "not ordered" and ran == []
+    assert results(events) == [("order", "error")]
+    [blocked] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert blocked.status == "error"
+    assert events[-1].data["spent"]["tokens"] == 42
+
+
 # ---------------------------------------------------------------------- the calls' limits
 @pytest.mark.parametrize("how", ["end", "error"])
 async def test_model_call_limit_middleware_ends_the_run_as_it_is_told_to(
@@ -375,6 +511,72 @@ async def test_pii_middleware_redacts_what_the_model_is_sent_and_blocks_as_it_sa
     refused = await memory_harness.wrap(blocking, id="pii-block").run("ada@example.com", user="u")
     assert refused.status is RunStatus.ERROR and refused.error is not None
     assert "email" in refused.error.message.lower()
+
+
+async def test_pii_middleware_checks_the_memory_context_the_harness_adds_to_the_question(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """SEC: ``PIIMiddleware`` checks the user's message before the model call; the memory
+    context the harness sends with that message is checked by the same rule — redacted as the
+    question is, and with ``strategy="block"`` the run ends in error before any model call.
+    A middleware that does not check input leaves the context as it is."""
+    memory_service.context_text = "The user's address is ada@example.com."
+    model = ScriptedChatModel(turns=["noted"])
+    graph = create_agent(model, tools=[], middleware=[PIIMiddleware("email", strategy="redact")])
+    result = await memory_harness.wrap(graph, id="pii").run("where do I live?", user="u")
+    assert result.answer == "noted"
+    sent = "\n".join(text_of(m) for m in model.seen[0])
+    assert "ada@example.com" not in sent and "address is [REDACTED_EMAIL]" in sent
+
+    unread = ScriptedChatModel(turns=[])
+    blocking = create_agent(unread, tools=[], middleware=[PIIMiddleware("email", strategy="block")])
+    refused = await memory_harness.wrap(blocking, id="pii-block").run("where?", user="u")
+    assert refused.status is RunStatus.ERROR and refused.error is not None
+    assert "email" in refused.error.message.lower() and unread.seen == []
+
+    output_only = PIIMiddleware("email", apply_to_input=False, apply_to_output=True)
+    plain = ScriptedChatModel(turns=["noted"])
+    graph = create_agent(plain, tools=[], middleware=[output_only])
+    assert (await memory_harness.wrap(graph, id="pii-out").run("where?", user="u")).answer
+    assert "ada@example.com" in "\n".join(text_of(m) for m in plain.seen[0])
+
+
+async def test_the_question_is_recorded_as_pii_middleware_left_it(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """SEC: the turn the harness records in memory holds the question as the graph kept it —
+    redacted by ``PIIMiddleware`` — not the copy of the input it was given; without the
+    middleware the question is recorded as asked."""
+    graph = create_agent(
+        ScriptedChatModel(turns=["noted"]),
+        tools=[],
+        middleware=[PIIMiddleware("email", strategy="redact")],
+    )
+    await memory_harness.wrap(graph, id="pii").run("write to ada@example.com", user="u")
+    plain = create_agent(ScriptedChatModel(turns=["noted"]), tools=[])
+    await memory_harness.wrap(plain, id="plain").run("write to bob@example.com", user="u")
+    await memory_harness.writes.drain()
+    recorded = [
+        m["content"]
+        for call in memory_service.named("messages")
+        for m in call.body["messages"]
+        if m["role"] == "USER"
+    ]
+    assert recorded == ["write to [REDACTED_EMAIL]", "write to bob@example.com"]
+
+
+async def test_pii_middleware_redacts_the_streamed_answer_as_it_streams(harness: Harness) -> None:
+    """``PIIMiddleware(apply_to_output=True)`` redacts the model's reply in the state and, by
+    its stream transformer, on the wire: no streamed piece of the answer carries the address,
+    however the model split it, and the pieces make the redacted answer."""
+    model = StreamingChatModel(turns=["write to ada@example.com now"], blocks=False, piece=10)
+    pii = PIIMiddleware("email", strategy="redact", apply_to_output=True)
+    graph = create_agent(model, tools=[], middleware=[pii])
+    events = [e async for e in harness.wrap(graph, id="pii-stream").stream("hi", user="u")]
+    deltas = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
+    assert events[-1].data["result"] == "write to [REDACTED_EMAIL] now"
+    assert "".join(deltas) == "write to [REDACTED_EMAIL] now"
+    assert not any("@" in d or "example" in d for d in deltas)
 
 
 # ------------------------------------------------------------------------ summarization

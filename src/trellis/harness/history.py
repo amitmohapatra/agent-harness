@@ -38,6 +38,7 @@ the next turn's window holds them wherever it runs (:meth:`Agent.recorded_run`).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 from collections.abc import Callable, Mapping, Sequence
@@ -160,6 +161,10 @@ class Said:
     #: message is seen — the AG-UI stream, the memory service's thread, an attempt after a
     #: resume — ``None`` until the run's transcript names it (``conversation.identified``)
     id: str | None = None
+    #: a user-role message the harness added, which the user did not type (a background
+    #: task's update): its notification metadata — langchain-core's ``NotificationMetadata``,
+    #: ``{"source", "data"}`` — kept with it wherever it goes (:data:`NOTIFICATION`)
+    notified: Mapping[str, Any] | None = None
 
 
 #: The memory service's role of each speaker, and the reverse.
@@ -176,22 +181,52 @@ INTERNAL: Final = "INTERNAL"
 RUN_RECORD: Final = "run_record"
 #: The ``custom_metadata`` key a stored message keeps its harness id under (``Said.id``).
 MESSAGE_ID: Final = "message_id"
+#: The run-record key a message the user did not type keeps its notification metadata under
+#: (``Said.notified``): in the run record, which the service gives back with the window, so a
+#: replayed notification is one again, never the user's words.
+NOTIFICATION: Final = "notification"
 
 
 def from_window(messages: Sequence[WindowMessage]) -> list[Said]:
     """The memory service's window as messages, in its order, each with the run record the
-    service keeps of it (``Said.facts``; a role the window does not replay is left out)."""
-    return [
-        Said(
-            role=SPEAKERS[m.role],
-            content=m.text,
-            tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
-            tool_call_id=m.tool_call_id,
-            facts=getattr(m, RUN_RECORD, None) or None,
+    service keeps of it (``Said.facts``), the harness's id its run record names (a chat
+    message's: :func:`recorded`) and — a notification — its notification metadata; a role the
+    window does not replay is left out."""
+    out: list[Said] = []
+    for m in [m for m in messages if m.role in SPEAKERS]:
+        facts, named = _named(getattr(m, RUN_RECORD, None))
+        out.append(
+            _noted(
+                Said(
+                    role=SPEAKERS[m.role],
+                    content=m.text,
+                    tool_calls=tuple(Called(c.id, c.name, dict(c.arguments)) for c in m.tool_calls),
+                    tool_call_id=m.tool_call_id,
+                    id=named,
+                ),
+                facts,
+            )
         )
-        for m in messages
-        if m.role in SPEAKERS
-    ]
+    return out
+
+
+def _named(record: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+    """A stored run record (:func:`recorded`) as the message's facts and the id it names."""
+    facts = dict(record or {})
+    named = facts.pop(MESSAGE_ID, None)
+    return facts or None, named
+
+
+def _noted(said: Said, record: Mapping[str, Any] | None) -> Said:
+    """``said`` with what its stored run record says: its facts, and — a notification — its
+    notification metadata (:data:`NOTIFICATION`), apart from them."""
+    facts = {k: v for k, v in (record or {}).items() if k != NOTIFICATION}
+    notified = (record or {}).get(NOTIFICATION)
+    return dataclasses.replace(
+        said,
+        facts=facts or None,
+        notified=notified if isinstance(notified, Mapping) else None,
+    )
 
 
 def answered(said: Sequence[Said]) -> list[Said]:
@@ -210,6 +245,54 @@ def answered(said: Sequence[Said]) -> list[Said]:
     return [s for s in kept if s.role is not Speaker.TOOL or s.tool_call_id in calls]
 
 
+def notification_in(input: Any) -> Said | None:
+    """A run's input that is one notification — a message the user did not type, in
+    LangChain's message shape with langchain-core's notification metadata (a turn of a chat's
+    own for a background task's outcome: ``background.input_of``) — as the message it is: its
+    text and its notification metadata (``Said.notified``). ``None`` for any other input."""
+    if not isinstance(input, list) or len(input) != 1 or not isinstance(input[0], Mapping):
+        return None
+    given = input[0].get("additional_kwargs") or {}
+    source = given.get("lc_source") if isinstance(given, Mapping) else None
+    if not isinstance(source, str):
+        return None
+    content = input[0].get("content")
+    text = (
+        content
+        if isinstance(content, str)
+        else "".join(str(b.get("text", "")) for b in content or () if isinstance(b, Mapping))
+    )
+    data = given.get("lc_data")
+    notified = {"source": source, **({"data": data} if isinstance(data, Mapping) else {})}
+    return Said(Speaker.USER, text, notified=notified)
+
+
+#: What a message a surface's client gives says: who speaks, what, and the calls it made or
+#: answers — never the marks a framework or the harness writes on a message of its own
+#: (``additional_kwargs``: notification metadata; ``response_metadata``).
+CLIENT_MESSAGE: Final = frozenset(
+    {"role", "type", "content", "name", "id", "tool_calls", "tool_call_id"}
+)
+
+
+def from_client(input: Any) -> Any:
+    """A run's input as a client of a surface gave it (AG-UI ``state``, an A2A message's
+    data), which may be anything: its messages — a list, or a mapping's ``messages`` — keep
+    what a message says (:data:`CLIENT_MESSAGE`) and nothing else, so a client's message is
+    never read as one the harness or a framework wrote (a notification: :func:`notification_in`)."""
+    if isinstance(input, list):
+        return [_said_by_client(message) for message in input]
+    if isinstance(input, Mapping) and isinstance(input.get("messages"), list):
+        return {**input, "messages": from_client(input["messages"])}
+    return input
+
+
+def _said_by_client(message: Any) -> Any:
+    if not isinstance(message, Mapping):
+        return message
+    return {key: value for key, value in message.items() if key in CLIENT_MESSAGE}
+
+
 def recorded(said: Said) -> dict[str, Any]:
     """``said`` as the memory service's message: a tool result is INTERNAL, as the service
     keeps every tool step; the rest is the visible chat."""
@@ -223,8 +306,14 @@ def recorded(said: Said) -> dict[str, Any]:
     if said.tool_call_id is not None:
         message["tool_call_id"] = said.tool_call_id
     metadata: dict[str, Any] = {}
-    if said.facts:
-        metadata[RUN_RECORD] = dict(said.facts)
+    facts = dict(said.facts or {})
+    if said.id is not None and said.role is not Speaker.TOOL:
+        # in its run record too: the one part of a message the window gives back (``from_window``)
+        facts[MESSAGE_ID] = said.id
+    if said.notified:
+        facts[NOTIFICATION] = dict(said.notified)
+    if facts:
+        metadata[RUN_RECORD] = facts
     if said.id is not None:
         metadata[MESSAGE_ID] = said.id
     if metadata:
@@ -238,7 +327,7 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
     if not isinstance(stored, Mapping):
         role, content = stored
         return Said(Speaker(role), content)
-    return Said(
+    said = Said(
         role=SPEAKERS[stored["role"]],
         content=stored["content"],
         tool_calls=tuple(
@@ -246,9 +335,9 @@ def said_of(stored: Mapping[str, Any] | Sequence[Any]) -> Said:
             for c in stored.get("tool_calls") or ()
         ),
         tool_call_id=stored.get("tool_call_id"),
-        facts=(stored.get("custom_metadata") or {}).get(RUN_RECORD),
         id=(stored.get("custom_metadata") or {}).get(MESSAGE_ID),
     )
+    return _noted(said, _named((stored.get("custom_metadata") or {}).get(RUN_RECORD))[0])
 
 
 __all__ = [
@@ -257,6 +346,7 @@ __all__ = [
     "IN_RAM",
     "MEMORY_THREAD",
     "MESSAGE_ID",
+    "NOTIFICATION",
     "RUN_RECORD",
     "Called",
     "MemoryThread",
@@ -264,8 +354,10 @@ __all__ = [
     "Said",
     "Speaker",
     "answered",
+    "from_client",
     "from_window",
     "in_ram",
+    "notification_in",
     "owner",
     "recorded",
     "said_of",

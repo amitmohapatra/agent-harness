@@ -86,22 +86,41 @@ class ModelHooks(RunHooks[Any]):
         runtime = current()
         if runtime is not None:  # what the run spent (``budget.py``)
             runtime.model_ended(_step(agent))
-            runtime.repeats = _repeats(response.output)
             from trellis.harness.tools.convert.openai_local import computer_replied  # noqa: PLC0415
 
             computer_replied(runtime, response.output)
             from trellis.harness.adapters.openai_agents import hosted_calls  # noqa: PLC0415
 
             await hosted_calls(runtime, response.output, started=started)
-            usage = response.usage
-            details = getattr(usage, "input_tokens_details", None)
-            budget.account(
-                runtime,
-                model=model,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached=int(getattr(details, "cached_tokens", 0) or 0),
-            )
+            self.replied(runtime, model, response)
+
+    def replied(self, runtime: Any, model: str | None, response: ModelResponse) -> None:
+        """The run's model replied: its usage counted toward the run's budget, its function
+        calls kept for the harness's tools to answer the reply's repeats."""
+        runtime.repeats = _repeats(response.output)
+        counted(runtime, model, response.usage)
+
+
+class ChildModelHooks(ModelHooks):
+    """Around every model call of an agent tool's child run (``Agent.as_tool``): the stall
+    watch and the hosted tool calls, as the run's — its usage is counted by the agent tool's
+    helper (from what the SDK adds to the calling run's), and the repeats the harness's tools
+    answer are the calling reply's."""
+
+    def replied(self, runtime: Any, model: str | None, response: ModelResponse) -> None:
+        """Nothing: counted by its helper."""
+
+
+def counted(runtime: Any, model: str | None, usage: Any) -> None:
+    """A reply's ``usage`` (of ``model``, when named) counted toward the run's budget."""
+    details = getattr(usage, "input_tokens_details", None)
+    budget.account(
+        runtime,
+        model=model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached=int(getattr(details, "cached_tokens", 0) or 0),
+    )
 
 
 def _stopped() -> None:

@@ -112,7 +112,7 @@ from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
 from trellis.harness.history import Called, Said, Speaker
-from trellis.harness.journal import Pending, approvals_read, content_key
+from trellis.harness.journal import Pending, approvals_read, call_key
 from trellis.harness.prompts import CUSTOM_HEADERS, GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge
@@ -198,6 +198,17 @@ OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWa
 #: skill folders reach the model through. The tool hints never narrow it away, as the harness's
 #: own ``list_skills`` and ``load_skill`` stay offered (``skills.told``): a run keeps its skills.
 SKILLS_SLOT: Final = "Skill"
+#: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
+#: too. A dynamic workflow (``Workflow``, alias ``RunWorkflow``) is one background task whose
+#: agents have none of their own: the stream names each only in that task's progress, and an
+#: agent's first tool call can come before any frame names it (the bundled CLI, 2.1.283,
+#: driven against a scripted model), so its calls cannot be told apart from the main agent's.
+#: ``SendMessage`` resumes a finished background subagent as a new task, whose messages carry
+#: the call that first started it, or reaches another Claude session on the machine or in the
+#: cloud. The agent-teams tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS``
+#: (``TeamCreate``, ``TeamDelete``; 2.1.283 has none, its named agents are background
+#: subagents) are left out with them, whatever the team's own environment says.
+UNHELD_AGENTS: Final = ("Workflow", "SendMessage", "TeamCreate", "TeamDelete")
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -480,7 +491,7 @@ class ClaudeAdapter:
             error = exc
             raise
         finally:
-            await helpers.closed(error)
+            await helpers.closed(error, paused=helpers.suspended(error))
 
     async def _attended(
         self, target: Any, run: Invocation, found: Background
@@ -1152,7 +1163,7 @@ class Steps:
 
         if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
             bare = name.removeprefix(f"mcp__{SERVER}__")
-            self.runtime.replay.announced(content_key("call", bare, args), call_id)
+            self.runtime.replay.announced(call_key(bare, args), call_id)
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
@@ -1261,16 +1272,17 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
 
 def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
-    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), and those the tool hints
-    narrow away (Claude's built-ins and MCP tools too, for the whole query; never its skills
-    slot, :data:`SKILLS_SLOT`)."""
+    those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), those that start agents
+    no run holds (:data:`UNHELD_AGENTS`), and those the tool hints narrow away (Claude's
+    built-ins and MCP tools too, for the whole query; never its skills slot,
+    :data:`SKILLS_SLOT`)."""
     given = list(denied or ())
     narrowed = (
         [n for n in runtime.native if n != SKILLS_SLOT and not runtime.offers(n)]
         if runtime.offered is not None
         else []
     )
-    hidden = [n for n in (*OUTLIVES_THE_QUERY, *narrowed) if n not in given]
+    hidden = [n for n in (*OUTLIVES_THE_QUERY, *UNHELD_AGENTS, *narrowed) if n not in given]
     return [*given, *dict.fromkeys(hidden)]
 
 
@@ -1438,7 +1450,7 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
     # the answers it reads are this call's: read again when it is made again after a pause
-    calling = runtime.replay.calling(content_key("call", QUESTION_TOOL, made.args))
+    calling = runtime.replay.calling(call_key(QUESTION_TOOL, made.args))
     async with runtime.limited(None, made=made):
         with calling:
             for asked in made.args.get("questions") or ():

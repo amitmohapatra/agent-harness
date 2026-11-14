@@ -7,6 +7,7 @@ pause inside the code it runs, a call outside a run."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -215,6 +216,51 @@ async def test_an_edited_computer_action_runs_as_edited_a_rejected_one_is_skippe
     assert screen.done == (
         ["double_click 5 6", "screenshot"] if decision == "edit" else ["screenshot"]
     )
+
+
+class Closable(Screen):
+    """A team's computer with more on it than the SDK's interface: a ``close`` of its own and
+    a private helper."""
+
+    def close(self) -> None:
+        self.done.append("close")
+
+    def _wipe(self, path: str = "/") -> None:
+        self.done.append(f"wipe {path}")
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        {"type": "close"},  # the team's own method, not an action of the interface
+        {"type": "_wipe", "path": "/data"},  # a private helper
+        {"type": "double_click", "x": 5},  # an action, its arguments not that action's
+        {"type": "click", "x": 1, "y": 2, "button": "left", "self": 3},
+    ],
+    ids=["own_method", "private_helper", "missing_argument", "unknown_argument"],
+)
+async def test_an_edit_that_is_no_action_of_the_computer_is_refused_and_nothing_is_called(
+    harness: Harness, edited: dict[str, Any]
+) -> None:
+    """SEC-R-8: an approver's edit runs only an action of the SDK's computer interface, with
+    that action's arguments; anything else is refused — nothing of the computer is called —
+    and the model is told the call was not run."""
+    screen = Closable()
+    model = ScriptedModel([*twice(click("c1")), Items(click("c1")), "done"])
+    agent = harness.wrap(
+        Agent(name="ui", model=model, tools=[ComputerTool(computer=screen)]), id="ui-misfit"
+    )
+    paused = await agent.run("click", user="u")
+    assert paused.interrupt is not None
+    then = await agent.resume(
+        paused.interrupt.interrupt_id, "edit", answer={"action": edited}, reviewer="r"
+    )
+    assert screen.done == []  # refused: not the edit, not the click
+    assert then.interrupt is not None and then.interrupt.tool_call is not None
+    assert then.interrupt.tool_call.args == {"action": {"type": "screenshot"}}
+    then = await agent.resume(then.interrupt.interrupt_id, "approve", reviewer="r")
+    assert then.status is RunStatus.SUCCESS and screen.done == ["screenshot"]
+    assert "computer_use_preview was not run" in json.dumps(model.inputs[-1], default=str)
 
 
 # --------------------------------------------------------------------------- the seam itself

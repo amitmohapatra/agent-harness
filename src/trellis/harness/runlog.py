@@ -12,20 +12,22 @@ to whoever listens, as always.
 
 Best-effort: an append agent-runs refuses or cannot take (it already retried) drops those
 events with one warning (logged, counted ``trellis.run_events.undelivered``, and a ``warning``
-event to whoever listens) — the run goes on. A lost lease stops the log. A repeated append is
-safe: agent-runs adds an event once per attempt and sequence.
+event to whoever listens) — the run goes on. A lost lease stops the log, and so does a run that
+no longer runs (cancelled from another process): the attempt is told (``ended``), and one
+cancelled stops. A repeated append is safe: agent-runs adds an event once per attempt and
+sequence.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 from trellis.contracts import RunEvent
 from trellis.harness.telemetry import metrics
-from trellis.runs import LeaseLostError, RunEventEntry
+from trellis.runs import ConflictError, LeaseLostError, RunEventEntry
 
 if TYPE_CHECKING:
     from trellis.harness.events import RunEvents
@@ -65,12 +67,16 @@ class RunLog:
         tenant: str,
         worker_id: str | None,
         events: RunEvents,
+        ended: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.run_id = run_id
         self.tenant = tenant
         self.worker_id = worker_id
         self.events = events
+        #: told when the log refuses the run's events because the run no longer runs (it was
+        #: cancelled from another process, or ended by agent-runs' ticker)
+        self.ended = ended
         self._pending: list[RunEvent] = []
         self._sending: asyncio.Task[None] | None = None
         #: the log takes nothing more: the attempt ended, or the lease was lost
@@ -104,6 +110,12 @@ class RunLog:
             except LeaseLostError:
                 self.closed = True  # another worker has the run: write nothing more
                 self._pending.clear()
+                return
+            except ConflictError:
+                self.closed = True  # the run no longer runs: the log takes nothing more
+                self._pending.clear()
+                if self.ended is not None:
+                    await self.ended()
                 return
             except Exception as exc:
                 self._dropped(len(batch), f"{type(exc).__name__}: {exc}")

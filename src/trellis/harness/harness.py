@@ -31,10 +31,12 @@ from trellis.harness import telemetry
 from trellis.harness.adapters import convert
 from trellis.harness.agent import Agent
 from trellis.harness.asking import answer_of
+from trellis.harness.background import Tasks
 from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import FORGET, TOOL_SEARCH, USERS_OWN, Memory, RunMemory
+from trellis.harness.conversation import INTERRUPTED
 from trellis.harness.credentials import CredentialsHook
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
@@ -48,8 +50,10 @@ from trellis.harness.governance.decision import Action, Decision
 from trellis.harness.holding import Holds
 from trellis.harness.hooks import Hooks
 from trellis.harness.identity import Identity, conversation_key
+from trellis.harness.line import Followers
 from trellis.harness.prompts import Prompts, Rendered, Stored
 from trellis.harness.removed import removed
+from trellis.harness.runlog import event_log
 from trellis.harness.runs import LocalRuns, RunStore
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.schedules import LimitsHook, schedule_tools
@@ -68,7 +72,7 @@ from trellis.memory.errors import (
     ValidationError,
 )
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
-from trellis.runs import RunsClient, RunSummary
+from trellis.runs import RunsClient, RunsError, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
@@ -76,6 +80,9 @@ _Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
+#: The reason a run cancelled from another process ends with here (the store keeps the one
+#: it was cancelled with).
+CANCELLED_ELSEWHERE: Final = "cancelled from another process"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
 #: again; while the service cannot be reached the last answer is kept (asked again after the
 #: retry interval).
@@ -165,11 +172,18 @@ class Harness:
         if builds_memory:
             memory = self._making(MemoryClient(s.memory_url, api_key=s.api_key))
         self.memory = Memory(memory) if memory else None
+        streams: RunsClient | None = None
         if builds_runs:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
+            streams = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
+        #: the event logs followed of runs ahead in a conversation's line (``line``), on a
+        #: client of their own: an open stream never takes a connection a heartbeat needs
+        self.followers = Followers(lambda: event_log(streams or self.runs))
         #: the runs this process executes, held in the run store while they do (``holding``)
-        self.holds = Holds(lambda: self.runs)
+        self.holds = Holds(lambda: self.runs, renewed=self._renewed, lost=self._lost)
+        #: the background tasks at work in this process (``background``): cut off on close
+        self.background = Tasks()
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -444,6 +458,7 @@ class Harness:
             failed.extend(e for e in closed if isinstance(e, BaseException))
 
         await close(*(a.aclose() for a in self.agents.values()))
+        await close(self.background.aclose())
         self.holds.aclose()  # the runs held here: their agents ended them, or left them
         await close(self.writes.aclose())
         await close(telemetry.flush())
@@ -466,6 +481,34 @@ class Harness:
         await self.aclose()
 
     # ------------------------------------------------------------------ who we are
+    async def _lost(self, run_id: str, tenant: str) -> None:
+        """A run held here whose heartbeat or event the run store refused: when it was
+        cancelled there — ``agent.cancel`` on another process — what this process does for it
+        stops: its attempt under way ends ``CANCELLED``, one waiting its turn takes none
+        (``Agent.stop``)."""
+        try:
+            record = await self.runs.get(run_id, tenant=tenant)
+        except RunsError as exc:
+            log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
+            return
+        if record is not None and record.status is RunStatus.CANCELLED:
+            for agent in self.agents.values():
+                agent.stop(run_id, CANCELLED_ELSEWHERE)
+
+    async def _renewed(self, run_id: str, tenant: str) -> None:
+        """A run's hold was renewed: when it holds its conversation's turn here and a newer
+        message of the conversation, sent to another process with ``mode="interrupt"``, asks
+        for it (``Turns.interrupted``), it stops and ends ``CANCELLED`` here — and only then
+        does that message, waiting in the line behind it, take its turn."""
+        for agent in self.agents.values():
+            try:
+                asked = await agent.turns.interrupted(run_id)
+            except RunsError as exc:
+                log.warning("run %s: its conversation's line was not read: %s", run_id, exc)
+                return
+            if asked:
+                agent.stop(run_id, INTERRUPTED)
+
     async def _key_info(self) -> KeyInfo:
         """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then
         every :data:`KEY_TTL_SECONDS`; while the service cannot be reached the last answer

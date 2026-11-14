@@ -8,10 +8,13 @@ Deep Agent's ``task`` is such a tool: what its sub-agent wrote is the update it 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import operator
+from pathlib import Path
 from typing import Annotated, Any, NotRequired
 
+import ormsgpack
 import pytest
 from deepagents import SubAgent, create_deep_agent
 from langchain.agents import AgentState, create_agent
@@ -27,6 +30,7 @@ from pydantic import BaseModel
 from tests.support.chat_model import ScriptedChatModel
 from trellis import Harness, current
 from trellis.contracts import RunEventType, RunStatus
+from trellis.harness.middleware import RunCheckpointer, _update_of
 
 #: These tests are about what a write does once it runs, not whether it asks.
 pytestmark = pytest.mark.usefixtures("writes_unasked")
@@ -384,3 +388,28 @@ async def test_an_update_no_serializer_takes_is_the_graphs_once_and_a_message_wh
     assert done.answer == "paid" and ran == ["keep", "pay 5"]
     assert model.seen[-1][-1].content == "empty"
     answered(model)
+
+
+# ------------------------------------------------------------------- what is read back, SEC-R-6
+def forged(module: str, name: str, argument: str) -> list[str]:
+    """Stored data that names a callable and its argument, as LangGraph's serializer writes a
+    type it is to construct on load."""
+    packed = ormsgpack.packb(ormsgpack.Ext(0, ormsgpack.packb((module, name, argument))))
+    return ["msgpack", base64.b64encode(packed).decode()]
+
+
+@pytest.mark.parametrize("sink", ["update", "checkpoint"])
+def test_stored_data_naming_a_callable_is_read_as_data_and_never_called(
+    tmp_path: Path, sink: str
+) -> None:
+    """SEC: whoever can write a run's journal or checkpoint cannot make the harness import a
+    module and call something on resume. A kept tool update (``trellis_update``) and a
+    checkpoint of the run naming ``os.system`` are read as the data they hold; nothing runs."""
+    made = tmp_path / "made"
+    command = f"touch {made}"
+    kept = forged("os", "system", command)
+    if sink == "update":
+        read = _update_of([*kept, "call_1"], "call_1", RunCheckpointer().serde)
+    else:
+        read = RunCheckpointer()._loaded(kept)
+    assert read == command and not made.exists()

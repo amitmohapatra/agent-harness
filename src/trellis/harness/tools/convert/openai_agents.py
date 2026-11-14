@@ -9,18 +9,18 @@ is not a JSON object is what the model reads back (:func:`arguments_of`), as the
 ``@function_tool`` does it — the call is not run, and the run goes on — rather than an
 exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises).
 
-A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
-preview naming where; ``read_file`` (with them, enabled once the run keeps one) pages it.
-
-A call repeating an earlier one of its model reply (the same tool, the same arguments:
-``Runtime.repeats``) does not run: the model reads that its result is the earlier call's
-(``tools.bridge.same``)."""
+A harness tool's result longer than ``tools.results.MAX_CHARS`` is kept in the run and the
+model reads a preview naming where; ``read_file`` (with them, enabled once the run keeps one)
+pages it. A harness tool's call repeating an earlier one of its model reply (the same tool, the
+same arguments: ``Runtime.repeats``) does not run: the model reads that its result is the
+earlier call's (``tools.bridge.same``). An agent's own ``FunctionTool`` is neither: its result
+is what its function returned, as the SDK hands it on, and each call it is asked runs
+(:func:`governed`)."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import dataclasses
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
@@ -30,13 +30,13 @@ from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.contracts import AgentPaused, ToolOutcome, ToolSpec
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
-from trellis.harness.tools.base import FIX_ARGUMENTS, UNDECLARED, Tool, arguments_of, not_run
+from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
+from trellis.harness.tools.convert.openai_local import Carried, run_here, spec_of, with_fields
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
 __all__ = [
@@ -51,7 +51,7 @@ __all__ = [
 ]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
-#: run through the bridge already): kept by a copy of the tool (``copy.copy``).
+#: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
 MADE: Final = "_trellis_made"
 #: The attribute the SDK marks an agent called as a tool with (``Agent.as_tool``), and the one
 #: holding that agent.
@@ -86,25 +86,18 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
     return made
 
 
-def governed(
-    tool: Any,
-    helpers: Helpers | None = None,
-    *,
-    side_effects: str = UNDECLARED,
-    confined: bool = False,
-) -> Any:
+def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk; the SDK's tool has nowhere to say what it
     does, so without one each call asks), a person when it asks, the journal (a resume does
     not run a call again), its time and its trace — and offered per turn only while the run
-    offers it (the tool hints' narrowing), as a copy (the SDK's own, ``copy.copy``: a tool
-    whose class has an ``__init__`` of its own, such as a sandbox's, stays one): the
-    agent's own tool is not changed. For a tool of the SDK's own (a ``SandboxAgent``'s
-    capabilities'): ``side_effects``, what it does where the run's tool set does not say, and
-    ``confined``, its writes keep to what the run owns (``Tool.confined``: announced, not
-    asked, unless the catalog says more). An agent called as a tool (``Agent.as_tool``)
-    is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
-    else is returned as it is.
+    offers it (the tool hints' narrowing), as a copy: the
+    agent's own tool is not changed. Its result is what its function returned, unchanged — an
+    image or a file the model sees, a typed result the SDK hands its ``tool_use_behavior``,
+    output guardrails and hooks — the record keeping its readable form; a call the journal
+    already answered (a call made before a pause) returns the journal's result. An agent
+    called as a tool (``Agent.as_tool``) is, with ``helpers``, a native helper of the run for
+    each call (:func:`_helped`). Anything else is returned as it is.
 
     What the tool's own function raises is the call's failure — recorded as one — and then
     the SDK's to tell, as without the harness (:func:`_told`): the model reads what the tool's
@@ -123,71 +116,93 @@ def governed(
     has each call go through the bridge where the SDK hands it to the tool's own code
     (``tools.convert.openai_local.run_here``)."""
     if not isinstance(tool, FunctionTool):
-        from trellis.harness.tools.convert.openai_local import run_here
-
         return run_here(tool)
     if getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
-    helps = getattr(tool, AGENT_TOOL, False)
     function = getattr(original, FUNCTION, None)
     ran = cast("Invoke", function) if callable(function) else original
-    if helpers is not None and helps:
+    if helpers is not None and getattr(tool, AGENT_TOOL, False):
         ran = _helped(tool, ran, helpers)
 
     def invoke(context: ToolContext[Any], arguments: str) -> Awaitable[Any]:
         # called in the step in which the SDK starts its own clock for the call (its
         # ``asyncio.wait_for`` around what this returns, for a tool with a ``timeout``): the
         # call is due then, however late the SDK's task for it begins (:func:`_own_time_is_up`)
-        return invoked(context, arguments, _due(tool))
-
-    async def invoked(context: ToolContext[Any], arguments: str, due: float | None) -> Any:
-        args = arguments_of(arguments)
-        runtime = current()
-        if isinstance(args, str) or runtime is None:
-            return await original(context, arguments)
-        repeat = _repeat(context, arguments, args)
-        if repeat is not None:
-            return results.readable(repeat.output, tool.name)
-        raised: list[BaseException] = []
-
-        async def run(given: dict[str, Any]) -> Any:
-            try:
-                answer = await ran(context, json.dumps(given))
-            except asyncio.CancelledError as cut:
-                if not _own_time_is_up(runtime, due):
-                    raise
-                raised.append(cut)
-                raise PastItsOwnLimit(tool.name) from cut
-            except Exception as error:
-                if not is_pause_signal(error):
-                    raised.append(error)
-                raise
-            if waits_inside(context):
-                raise WaitsInside(tool.name, answer)
-            return answer
-
-        # as the run's tool set has it (an agent tool: a helper, read), else as given
-        spec = runtime.native.get(tool.name) or ToolSpec(
-            name=tool.name,
-            description=tool.description or tool.name,
-            input_schema=tool.params_json_schema,
-            side_effects=side_effects,
-        )
-        call = Tool(spec, run, confined=confined)
-        try:
-            outcome = await bridge.call(call, args, call_id=context.tool_call_id)
-        except WaitsInside as waiting:
-            return waiting.answer
-        if raised and not outcome.ok:
-            said = results.readable(outcome.output, tool.name) if bridge.hooked(outcome) else None
-            return await _told(original, raised[-1], context, arguments, said=said)
-        return results.readable(outcome.output, tool.name)
+        return _invoked(tool, original, ran, context, arguments, due=_due(tool))
 
     setattr(invoke, MADE, True)
-    made = copy.copy(tool)
-    made.on_invoke_tool, made.is_enabled = invoke, _narrowed(tool.name, tool.is_enabled)
-    return made
+    return with_fields(
+        tool, on_invoke_tool=invoke, is_enabled=_narrowed(tool.name, tool.is_enabled)
+    )
+
+
+async def _invoked(
+    tool: FunctionTool,
+    original: Invoke,
+    ran: Invoke,
+    context: ToolContext[Any],
+    arguments: str,
+    *,
+    due: float | None,
+) -> Any:
+    """One call of a governed ``FunctionTool`` (:func:`governed`): through the bridge, then
+    handed to the SDK as the tool itself would (:func:`_handed_on`). Arguments that are not a
+    JSON object, and a call outside a run, are the tool's own to deal with (``original``)."""
+    args = arguments_of(arguments)
+    runtime = current()
+    if isinstance(args, str) or runtime is None:
+        return await original(context, arguments)
+
+    async def run(given: dict[str, Any]) -> Any:
+        try:
+            answer = await ran(context, json.dumps(given))
+        except asyncio.CancelledError as cut:
+            if not _own_time_is_up(runtime, due):
+                raise
+            raise PastItsOwnLimit(tool.name) from cut
+        if waits_inside(context):
+            raise WaitsInside(tool.name, answer)
+        return answer
+
+    carried = Carried(run)
+    try:
+        outcome = await bridge.call(
+            Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
+        )
+    except WaitsInside as waiting:
+        return waiting.answer
+    return await _handed_on(carried, outcome, original, context, arguments)
+
+
+async def _handed_on(
+    carried: Carried, outcome: ToolOutcome, original: Invoke, context: Any, arguments: str
+) -> Any:
+    """What the SDK is handed of a governed function tool's call: what the tool returned, as
+    the SDK takes it from the tool itself — an image or a file the model sees, a typed result
+    its ``tool_use_behavior``, guardrails and hooks are handed (the record keeps its readable
+    form); a failure of the tool's own, told as the SDK tells it (:func:`_told`); else what the
+    bridge says (the journal's result of a call made before a pause, the hooks' word,
+    governance's)."""
+    hooked = bridge.hooked(outcome)
+    if carried.raised and not outcome.ok:
+        error = carried.raised[-1]
+        said = text_of(outcome.output) if hooked else None
+        # a call the SDK cut at the tool's own limit: its cancellation, the SDK's to act on
+        cut = error.__cause__ if isinstance(error, PastItsOwnLimit) else None
+        return await _told(original, cut or error, context, arguments, said=said)
+    return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
+
+
+def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
+    """An agent's own ``FunctionTool`` as the run's tool set has it (an agent tool: a helper,
+    read), else undeclared (``openai_local.spec_of``): what the tool says of itself."""
+    return spec_of(
+        runtime,
+        tool.name,
+        description=tool.description or tool.name,
+        input_schema=tool.params_json_schema,
+    )
 
 
 class PastItsOwnLimit(TimeoutError):
@@ -264,7 +279,7 @@ def held(tool: Any, spec: ToolSpec) -> Any:
         return True
 
     setattr(asks, HELD, True)
-    return dataclasses.replace(tool, needs_approval=asks)
+    return with_fields(tool, needs_approval=asks)
 
 
 def waits_inside(context: ToolContext[Any]) -> bool:

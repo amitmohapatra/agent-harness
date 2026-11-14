@@ -144,7 +144,8 @@ class Offered(ScriptedModel):
 async def test_a_failing_tool_tells_the_model_what_its_failure_function_says(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    """A tool that raises: the model reads the SDK's default failure text, or the tool's own
+    """A tool that raises: the model reads the SDK's default failure text — which, from
+    openai-agents 0.23, names no detail of the error (#5112) — or the tool's own
     ``failure_error_function``'s, and the run goes on — each call governed as the run's."""
 
     @function_tool
@@ -164,7 +165,7 @@ async def test_a_failing_tool_tells_the_model_what_its_failure_function_says(
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="r")
     assert done.status is RunStatus.SUCCESS and done.answer == "both failed"
     assert outputs(model) == [
-        "An error occurred while running the tool. Please try again. Error: it broke",
+        "An error occurred while running the tool. Please try again.",
         "custom: it cracked",
     ]
 
@@ -172,8 +173,9 @@ async def test_a_failing_tool_tells_the_model_what_its_failure_function_says(
 async def test_a_failure_the_sdk_tells_the_model_is_recorded_as_a_failed_call(
     memory_harness: Harness, memory_service: FakeMemoryService
 ) -> None:
-    """The model reads the failure as the SDK words it; the call is the run's failed call: on
-    the stream, in the tool records."""
+    """The model reads the failure as the SDK words it — without the error's detail, from
+    openai-agents 0.23 —; the call is the run's failed call, the detail kept where the model
+    does not read it: on the stream, in the tool records."""
 
     @function_tool
     def boom(order: str) -> str:
@@ -191,10 +193,41 @@ async def test_a_failure_the_sdk_tells_the_model_is_recorded_as_a_failed_call(
     assert recorded(memory_service) == [("boom", "error")]
     [result] = [e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
     assert result["status"] == "error" and "it broke" in result["output"]
-    assert outputs(model) == [
-        "An error occurred while running the tool. Please try again. Error: it broke"
-    ]
+    assert outputs(model) == ["An error occurred while running the tool. Please try again."]
     assert events[-1].outcome is RunOutcome.SUCCESS and events[-1].data["spent"]["tool_calls"] == 1
+
+
+async def test_the_run_wide_tool_error_formatter_words_a_governed_tools_failure(
+    memory_harness: Harness, memory_service: FakeMemoryService
+) -> None:
+    """The run's own ``RunConfig.tool_error_formatter`` (openai-agents 0.24: its
+    ``tool_exception`` kind, given the error) words what the model reads of a tool that raised
+    under the SDK's default policy, as without the harness — the call still the run's failed
+    call; a tool with a ``failure_error_function`` of its own keeps its own words."""
+    seen: list[tuple[str, str]] = []
+
+    def formatter(args: Any) -> str | None:
+        seen.append((args.kind, args.tool_name))
+        return f"{args.tool_name} failed: {args.error}" if args.kind == "tool_exception" else None
+
+    @function_tool
+    def boom(order: str) -> str:
+        raise ValueError("it broke")
+
+    @function_tool(failure_error_function=lambda _context, error: f"custom: {error}")
+    def crack(order: str) -> str:
+        raise ValueError("it cracked")
+
+    model = ScriptedModel([("boom", {"order": "o1"}), ("crack", {"order": "o1"}), "both failed"])
+    h = declaring(memory_harness, boom="read", crack="read")
+    agent = h.wrap(Agent(name="desk", model=model, tools=[boom, crack]), id="formatted")
+    config = RunConfig(tool_error_formatter=formatter)
+    result = await agent.run("try both", user="u", framework_options={"run_config": config})
+    assert result.status is RunStatus.SUCCESS and result.answer == "both failed"
+    assert outputs(model) == ["boom failed: it broke", "custom: it cracked"]
+    assert seen == [("tool_exception", "boom")]
+    await h.writes.drain()
+    assert recorded(memory_service) == [("boom", "error"), ("crack", "error")]
 
 
 class Redact(Hooks):
@@ -586,9 +619,9 @@ async def test_the_runs_own_run_hooks_see_the_run_beside_the_harnesss(harness: H
     assert events[-1].data["spent"]["model_calls"] == 3  # counted by the harness's hooks
 
 
-async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_last_answer() -> None:
+async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_turn_limit() -> None:
     """With the run's own ``RunHooks``: a token budget still stops the run, and a run at its
-    turn limit still ends with one last answer, that call seen by the hooks too."""
+    turn limit ends ``PARTIAL`` with the SDK's outcome, no model call past it."""
     seen = Seen()
     model = ScriptedModel(
         [("look", {"order": "o1"}), "never"], usage=Usage(input_tokens=50, output_tokens=10)
@@ -609,8 +642,8 @@ async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_last_ans
             id="limited",
             framework_options={"hooks": seen, "max_turns": 1},
         ).run("where is o1?", user="u")
-    assert limited.status is RunStatus.SUCCESS and limited.answer == "o1 shipped, as far as I got"
-    assert [e for e in seen.events if e[0] == "llm_start"] == [("llm_start", "desk")] * 2
+    assert limited.status is RunStatus.PARTIAL and limited.answer is None
+    assert [e for e in seen.events if e[0] == "llm_start"] == [("llm_start", "desk")]
 
 
 # --------------------------------------------------------------------------- guardrails
@@ -1607,7 +1640,8 @@ async def test_a_sandbox_agents_own_memory_reaches_its_model_and_its_reads_are_t
 ) -> None:
     """A ``SandboxAgent``'s ``Memory`` capability (the SDK's long-term memory, kept in its
     sandbox) works through the harness's copy of the agent: its memory summary is in the
-    model's instructions, and the command reading a memory file is a call of the run."""
+    model's instructions, and the command reading a memory file is a call of the run, its
+    risk the catalog's."""
     from agents import RunConfig
     from agents.sandbox import Manifest, MemoryReadConfig, SandboxAgent, SandboxRunConfig
     from agents.sandbox.capabilities import Compaction, Memory, Shell
@@ -1624,7 +1658,9 @@ async def test_a_sandbox_agents_own_memory_reaches_its_model_and_its_reads_are_t
         capabilities=[Shell(), memory, Compaction()],
     )  # fmt: skip
     box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="remembers", framework_options={"run_config": box})
+    agent = declaring(harness, exec_command="read").wrap(
+        target, id="remembers", framework_options={"run_config": box}
+    )
     events = [e async for e in agent.stream("how long is it?", user="u")]
     assert events[-1].error is None, events[-1].error
     assert "Answer in metric." in str(model.system)  # the SDK's memory read prompt

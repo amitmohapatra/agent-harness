@@ -234,30 +234,53 @@ at once (one customer's account, one repository).
 **Automatic: a second message to a busy conversation waits.** A queued run of a conversation
 (`thread=`) gets `concurrency_key="thread:<conversation>"` unless you name one: a second message
 sent while the first run works is answered after it, never beside it (both would write the same
-thread). The same holds in process: a run of a conversation started with `run`, `stream`,
-`serve_chat` or `serve_a2a` (or resumed) waits while another run of the same agent and
-conversation works in this process, in order. A run with no `thread` is its own conversation.
-A conversation is the tenant's, the user's and the thread's: a thread id is the caller's own
-name for a chat, so another user's thread named alike is another conversation — it never waits
-for this one, and never shares its memory thread, its graph checkpointer thread or its trace
-session. `<conversation>` is that key (`await h.conversation(user=, thread=)`, a digest of the
-three: the same wherever it is made, safe in a URL, 37 characters).
-`LocalRuns` claims the same way agent-runs does. A sub-agent's run and a worker's are not held
-in process (the queue holds a worker's).
+thread). A run of a conversation started with `run`, `stream`, `serve_chat` or `serve_a2a` (or
+resumed) gets the same key and waits while another run of the same agent and conversation works,
+in this process or any other sharing the run store: the conversation's messages are answered
+one at a time, in the order they were sent, whichever replica each reaches. A run with no
+`thread` is its own conversation.
+
+The order is the conversation's line (`trellis.harness.line`): the run store keeps it, and it is
+the one ordering of a conversation's turns, in a process and across them. A conversation's
+messages sent to one process are recorded in the order they were sent; agent-runs creates
+each run of a key in its place, after the key's runs already running or queued, in the order
+the starts commit. A run's place is when it was created, or when its latest answer was recorded
+(a run continued after a pause joins the line then, after the turns that arrived while it
+waited). It takes its turn once no `RUNNING` or `QUEUED` run of its agent and conversation is
+placed before it. A queued run (`start`) holds its place while it waits for a worker, and a
+worker claims it only once no run placed before it runs: a stream of messages cannot keep it
+waiting. A run that pauses for a person, ends, or whose process dies leaves the line: a process
+killed while it holds a turn frees it once its hold lapses (60 s) and agent-runs ends its run
+`holder_lost`; one killed after recording a turn and before holding it, 60 s after the start.
+
+A run waits for the run just ahead of it. One of this process: until it leaves the line here.
+One elsewhere (another replica's, a worker's): by following that run's events in agent-runs
+(its event stream says when the attempt ends or pauses), on a client of its own — one stream a
+run ahead, shared by every run waiting behind it in the process, at most 32 at once. Nothing
+polls: only where that stream cannot be followed (it dropped, or 32 are open) does a run read
+its line again, after a pause that doubles from 0.05 s to 5 s (jittered), and at the latest
+every 30 s. A run cancelled while it waits its turn (`agent.cancel`, from any process) takes
+none: it ends `CANCELLED` without running.
 
 **On failure.** A priority outside -1000..1000 or a key over 200 characters is refused by the
-contract (`ValidationError`). A conversation's runs waiting in process across replicas are not
-held across them: queue them (`start`) for that.
+contract (`ValidationError`). A run waiting for its turn is held like any run this process
+executes: it counts its working time while it waits, and a deadline or time limit ends it there.
+An agent-runs older than this release places runs by their callers' clocks: two messages of one
+conversation started at the same instant on two replicas may then both run. During a rolling
+deploy, a turn started by a harness older than this release has no `concurrency_key`: it is
+not in the line, so a message sent meanwhile to a new replica does not wait for it (and a turn
+paused by an old release, continued on a new one, waits for nobody). Let the turns under way
+end before the last old replica goes.
 
 ## A message to a busy conversation: mode
 
 **What.** `agent.run(..., mode=)` and `agent.stream(..., mode=)` say what a message does when
-another run of its conversation works in this process ([ADR 0005](adr/0005-conversations-across-runs.md)):
+another run of its conversation works, in this process or another ([ADR 0005](adr/0005-conversations-across-runs.md)):
 
 | `mode` | What happens |
 |---|---|
 | `"queue"` (default) | it waits for the working run to end, then runs: what a second message always did |
-| `"interrupt"` | the working run is cancelled (`agent.cancel`, reason `interrupted by a newer message of the conversation`); the message takes the turn and continues the conversation — the cancelled turn's question is in its history |
+| `"interrupt"` | the working run is cancelled (`agent.cancel`, reason `interrupted by a newer message of the conversation`), wherever it works; the message takes the turn and continues the conversation — the cancelled turn's question is in its history |
 | `"steer"` | the message is given to the working run at its framework's next step, and that run's answer is the message's: its run ends `SUCCESS` with that answer, streamed under that answer's message id |
 
 Where `"steer"` reaches the working run:
@@ -268,9 +291,16 @@ Where `"steer"` reaches the working run:
 | OpenAI Agents SDK | yes | `RunConfig.call_model_input_filter` (after the run's own): a user item in each later model call's input |
 | Claude Agent SDK | yes, after a tool call | a `PostToolUse` hook's `additionalContext` (a query that calls no tool takes none) |
 | a function, Kimi (ACP), a graph without the harness's middleware | no (`Adapter.steers`) | none: the message waits as `"queue"`, said once per agent |
+| any run working in another process | no: nothing carries a message to it | none: the message waits as `"queue"`, said once per agent |
 
 A steered message the working run never took (it ended first, or ended without an answer)
-runs as its own turn. **When.** `interrupt` for a chat whose user sends a correction; `steer`
+runs as its own turn. A message sent with `"interrupt"` while the turn is held in another
+process says so in its own run (its metadata names the run it interrupts) and waits in the
+line; the process holding that run reads the line each time it renews the run's hold (every
+20 s), stops the run — its call under way is cancelled — and ends it `CANCELLED`; only then
+does the message take its turn. The two never work side by side, and the message waits at
+most 20 s for the turn it interrupts to stop (a process that died: until its hold lapses). A
+turn a worker runs (`start`) is not interrupted: the message waits its turn. **When.** `interrupt` for a chat whose user sends a correction; `steer`
 for a "also…" while the agent works. **On failure.** `start` takes no `mode`: a queued run waits
 by its `concurrency_key`, and a worker's run is not held in process.
 
@@ -282,7 +312,9 @@ its own (no checkpointer, no OpenAI `session`) and no session continued: each ea
 question and answer (a cancelled one's question), of the same agent, tenant, user and thread,
 the newest 10, oldest first. `ReAct`, a graph and an OpenAI agent get them as their own
 messages, a function as `agent.history`, Claude and Kimi in the context's text. With memory on,
-memory's window keeps the conversation as before ([memory.md](memory.md)).
+memory's window keeps the conversation as before ([memory.md](memory.md)); where that window
+comes as messages and lacks the conversation's latest turns (their writes still on their way),
+those turns come from the run store after it.
 
 A target that takes messages and fits each request to a known window (`ReAct` with
 `context_window=` or a model profile that says it) gets each earlier turn this process ran

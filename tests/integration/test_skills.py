@@ -16,7 +16,7 @@ import pytest
 from deepagents import create_deep_agent
 
 from tests.support.adapters import BUILDERS
-from tests.support.arm import arm
+from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedModel
@@ -215,6 +215,31 @@ async def test_a_deep_agent_of_your_own_takes_a_sandbox_and_skills_in_one_backen
     result = await harness.wrap(graph, id="deep").run("go", user="ada")
     assert result.answer == "both", result.error
     assert "Check every JOIN." in tool_said(model) and provider.commands == ["echo ran"]
+
+
+async def test_a_sandboxs_files_are_governed_beside_the_skills_route(harness: Harness) -> None:
+    """SEC: the documented recipe, a sandbox and the run's skills in one backend. The skills
+    route is read as the graph's own (no call of the run); a file written to the sandbox is a
+    write of the run, governed and recorded, as on the sandbox alone."""
+    provider = FakeSandboxes()
+    model = ScriptedChatModel(
+        turns=[
+            ("read_file", {"file_path": SKILL, "limit": 1000}),
+            ("write_file", {"file_path": "/work/out.md", "content": "made"}),
+            ("execute", {"command": "echo ran"}),
+            "both",
+        ]
+    )
+    src = skills.combine(store_with())
+    graph = create_deep_agent(model=model, **deep_agent(sandbox(provider), src))
+    events = [e async for e in harness.wrap(graph, id="deep").stream("go", user="ada")]
+    assert events[-1].data["result"] == "both"
+    ended = [
+        (e.data["tool"], e.data["status"])
+        for e in events
+        if e.type is RunEventType.TOOL_CALL_RESULT
+    ]
+    assert ended == [("write_file", "ok"), ("execute", "ok")]
     only = create_deep_agent(model=read_skill(), **src.deep_agent())
     assert (await harness.wrap(only, id="deep-skills").run("go", user="ada")).answer
 
@@ -294,7 +319,9 @@ async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: H
         capabilities=[*Capabilities.default(), src.openai()],
     )
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="oai", framework_options={"run_config": config})
+    # the sandbox's own tools are governed as the agent's: their risk said in the catalog
+    governed = declaring(harness, load_skill="read", exec_command="read")
+    agent = governed.wrap(target, id="oai", framework_options={"run_config": config})
     result = await agent.run("review", user="ada")
     assert result.status is RunStatus.SUCCESS, result.error
     assert "Check every JOIN." in str(result.answer) and "No SELECT *." in str(result.answer)
@@ -327,71 +354,13 @@ async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_go
         capabilities=[Shell(), combine(store).openai()],
     )  # fmt: skip
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="oai-gone", framework_options={"run_config": config})
+    governed = declaring(harness, load_skill="read")
+    agent = governed.wrap(target, id="oai-gone", framework_options={"run_config": config})
     events = [e async for e in agent.stream("review", user="ada")]
     assert events[-1].error is None, events[-1].error
     assert "no skill 'nope'" in str(events[-1].data.get("result"))  # the last result it read
     assert any("sql-review" in w and "cannot be read" in w for w in warnings_of(events))
     assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
-
-
-def sandbox_agent(harness: Harness, plan: list[Any], *capabilities: Any, id: str) -> Any:
-    """A ``SandboxAgent`` wrapped with a local sandbox, its model making ``plan``'s calls."""
-    from agents import RunConfig
-    from agents.sandbox import SandboxAgent, SandboxRunConfig
-    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
-
-    target = SandboxAgent(
-        name="box", instructions="Work.", model=PlannedModel(plan), capabilities=list(capabilities)
-    )
-    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    return harness.wrap(target, id=id, framework_options={"run_config": config})
-
-
-async def test_a_sandbox_agents_skill_load_and_the_command_that_reads_it_are_the_runs_calls(
-    harness: Harness,
-) -> None:
-    """The tools a ``SandboxAgent``'s capabilities give the model (the SDK's: ``load_skill``,
-    ``exec_command``) are calls of the run like its own tools': recorded, counted, said; a
-    skill loaded is a read and a command in the sandbox a write (as Deep Agents' ``execute``),
-    so both run without asking."""
-    from agents.sandbox.capabilities import Shell
-
-    src = combine(store_with(files={"rules.md": "No SELECT *."}))
-    plan = [
-        ("load_skill", {"skill_name": "sql-review"}),
-        ("exec_command", {"cmd": "cat .agents/sql-review/rules.md"}),
-    ]
-    agent = sandbox_agent(harness, plan, Shell(), src.openai(), id="oai-calls")
-    events = [e async for e in agent.stream("review", user="ada")]
-    assert events[-1].error is None, events[-1].error
-    assert "No SELECT *." in str(events[-1].data.get("result"))
-    started = [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START]
-    assert started == ["load_skill", "exec_command"]
-    assert events[-1].data["spent"]["tool_calls"] == 2
-
-
-async def test_a_command_in_a_sandbox_agents_sandbox_asks_where_the_catalog_says(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """The catalog's word on a capability's tool governs it: a skill's script the catalog makes
-    ``exec_command`` irreversible for asks a person before it runs, and runs once approved."""
-    from agents.sandbox.capabilities import Shell
-
-    from tests.support.arm import declaring
-
-    made = tmp_path / "made.txt"
-    plan = [("exec_command", {"cmd": f"echo ran > {made}; echo done"})]
-    agent = sandbox_agent(
-        declaring(harness, exec_command="irreversible"), plan, Shell(), id="oai-asks"
-    )
-    paused = await agent.run("go", user="ada")
-    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
-    assert paused.interrupt.tool_call is not None
-    assert paused.interrupt.tool_call.tool == "exec_command" and not made.exists()
-    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="ada")
-    assert done.status is RunStatus.SUCCESS, done.error
-    assert made.read_text() == "ran\n"
 
 
 # --------------------------------------------------------------------------- no skills slot

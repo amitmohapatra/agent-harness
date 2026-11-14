@@ -27,7 +27,7 @@ One place for each thing, decided by who owns it and how often it changes — ne
 | [`h.wrap(...)`](api.md#hwrap) | the agent's author | every run of the agent: `hooks`, `judges`, `budget`, `run_timeout`, `without`, `framework_options`, `version`, `description` | `h.wrap(graph, id="triage", judges=[llm_judge("Polite.")], run_timeout=600)` |
 | [`agent.run(...)`](api.md#agentrun-agentstream-agentstart) (`stream`, `start`, `schedule`) | the caller | this run: `user`, `thread`, `tenant`, `run_timeout`, `deadline`, `budget`, `without`, `framework_options`, `document_ids`; queued: `priority`, `concurrency_key` | `agent.run(q, user="ada", without={"memory"})` |
 | [`h.worker(...)`](api.md#hworker) | the operator | how many runs a worker process takes at once | `h.worker(concurrency=8)` |
-| constants | the harness | thresholds, limits, cache lengths ([below](#what-is-not-a-setting)) | `TOOLS_TTL_SECONDS` |
+| constants | the harness | thresholds, limits, cache lengths ([below](#what-is-not-a-setting)) | `MAX_STEPS` |
 
 When two places could say the same, the narrower wins: a run's over its agent's (`without=` is
 added to, `framework_options=` merged key by key, `run_timeout`/`budget` replaced), code over
@@ -113,7 +113,7 @@ framework:
 | Framework | How its models are routed |
 |---|---|
 | `ReAct(model="name")` | its chat model routes each call as the harness running it says |
-| OpenAI Agents | with Bifrost, an agent's model name (or the SDK's default) through Bifrost's chat completions (`RunConfig.model_provider`), unless the run's own `run_config` names a provider |
+| OpenAI Agents | with Bifrost, a model name the run leaves to the SDK's default provider (or the SDK's default) through Bifrost's `/v1/responses` (`RunConfig.model_provider`); the run's own provider, a `MultiProvider(provider_map=...)` entry and the `litellm/` and `any-llm/` prefixes are kept ([openai-agents.md](frameworks/openai-agents.md)) |
 | Claude Agent SDK | with Bifrost (`Capability.ANTHROPIC_ROUTE`), the CLI through its Anthropic route (`ANTHROPIC_BASE_URL`, the virtual key), its headers in `ANTHROPIC_CUSTOM_HEADERS`, unless the options' own `env` names a base URL |
 | a model object you built (a `ChatOpenAI`, an OpenAI `Model`) | as you built it: with Bifrost set, a call that does not go through it is said once per agent and model |
 
@@ -328,7 +328,7 @@ be asked about (the first ask failed), raises `ConfigurationError` with what wen
 ## What is not a setting
 
 Limits, retries, the tool-hint threshold, lease length and the like are named constants next to
-the code that uses it (`ERROR_STREAK`, `TOOLS_TTL_SECONDS`, `GOVERNANCE_TTL_SECONDS`,
+the code that uses it (`MAX_STEPS`, `TOOLS_TTL_SECONDS`, `GOVERNANCE_TTL_SECONDS`,
 `WRITE_ATTEMPTS`...). The timeouts only the agent's author knows are arguments where the thing
 is defined: a tool call's `@tool(call_timeout=)`, `openapi(call_timeout=)`,
 `a2a(call_timeout=)`; a model call's `ReAct(call_timeout=)` (each model call, not its tools);

@@ -12,7 +12,8 @@ A call that does more than read is marked *started* before it runs (and the jour
 the attempt after a crash knows which call was running when the worker died: it was neither
 finished nor recorded, and whether it took effect is not known (``tools/bridge.py``). A call
 whose outcome is not an output — it timed out, its effect is unknown — is recorded as that
-outcome (:data:`OUTCOME`), so a re-run tells the model the same thing and runs nothing.
+outcome, so a re-run tells the model the same thing and runs nothing: every call's record is
+kept in an envelope (:data:`RECORD`), so an output is never read as one.
 
 The journal is the run's checkpoint (``RunRecord.checkpoint``): the run store keeps it with the
 pause and hands it to whichever worker resumes the run, so a resume on another machine repeats
@@ -65,7 +66,7 @@ import contextlib
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final
 
@@ -90,8 +91,13 @@ if TYPE_CHECKING:
 #: reads at most this many, in one request. Measured on a 50-step run of 1.5 MiB: 16 resumes
 #: in 27 ms (64: 45 ms) for 0.4 MB stored (64: 0.1 MB; a whole journal per save: 23 MB).
 MAX_SEGMENTS: Final = 16
-#: The key a call's recorded outcome is filed under when it is not an output (a timeout, an
-#: unknown effect): ``{OUTCOME: {"status": ..., "output": ..., "metadata": ...}}``.
+#: The key a call's record is filed under, whatever its outcome: ``{RECORD: {"status": ...,
+#: "output": ..., "metadata": ...}}`` (``tools.bridge.journal_record``; read back by its
+#: ``journal_outcome``) — an envelope around every output, so one a tool shapes like a record
+#: is still its output.
+RECORD: Final = "trellis_record"
+#: The key the release before filed an outcome that was not an output under, its outputs kept
+#: bare: read still (a run paused before an upgrade), never written.
 OUTCOME: Final = "trellis_outcome"
 
 
@@ -187,6 +193,14 @@ def content_key(kind: str, *parts: Any) -> str:
     """A stable key for a question or a call: same content, same key, across processes."""
     text = json.dumps([kind, *parts], sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.blake2b(text.encode(), digest_size=12).hexdigest()
+
+
+def call_key(tool: str, args: Any) -> str:
+    """What a tool call is — ``tool`` called with ``args`` — as one key, wherever it is made:
+    the journal files the call's record under it, a pending question names its call by it,
+    and the call's id and idempotency key are the run's id, this key and which time the run
+    makes the call (``tools.bridge``)."""
+    return content_key("call", tool, args)
 
 
 class Made(BaseModel):
@@ -394,29 +408,30 @@ class Journal(BaseModel):
         self.saved(save)
         return save.checkpoint
 
-    def approved_in_framework(self, resolution: InterruptResolution) -> None:
+    def approved_in_framework(
+        self, resolution: InterruptResolution, gated: Sequence[tuple[str, Any]] | None = None
+    ) -> None:
         """The calls the open pause — a framework's own approval gate — approved by
-        ``resolution``, filed for governance (:attr:`approved`): every call it holds on an
-        approval, the first with its edited arguments on an edit."""
-        if self.pending is None or resolution.decision not in (
-            InterruptDecision.APPROVE,
-            InterruptDecision.EDIT,
-        ):
+        ``resolution``, filed for governance (:attr:`approved`), so a person answers once for
+        a call whichever gate asks. ``gated``: the calls a gate of several runs as decided,
+        each as approved or edited (LangChain's ``HumanInTheLoopMiddleware``, read by its
+        adapter); else the one call of the pause's own approval, with its edited arguments on
+        an edit."""
+        if self.pending is None:
             return
         interrupt = self.pending.interrupt
-        payload = interrupt.payload or {}
-        actions = payload.get("action_requests")
-        if isinstance(actions, list) and payload.get("review_configs") is not None:
-            calls = [(a.get("name"), a.get("args") or {}) for a in actions]
+        if gated is not None:
+            calls = list(gated)
+        elif resolution.decision not in (InterruptDecision.APPROVE, InterruptDecision.EDIT):
+            return
         elif self.pending.native_state is not None and interrupt.tool_call is not None:
             if governance_held(self.pending) and resolution.decision is InterruptDecision.APPROVE:
                 return  # governance's own question: its answer is read where the call asks
-            calls = [(interrupt.tool_call.tool, interrupt.tool_call.args)]
+            edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
+            args = edited if isinstance(edited, dict) else interrupt.tool_call.args
+            calls = [(interrupt.tool_call.tool, args)]
         else:
             return  # the harness's own question: governance asked it
-        edited = resolution.payload if resolution.decision is InterruptDecision.EDIT else None
-        if isinstance(edited, dict) and calls:
-            calls[0] = (calls[0][0], edited)
         self.approved += [content_key("approved", name, args) for name, args in calls]
 
     def answered(self, resolution: InterruptResolution) -> None:
@@ -562,7 +577,7 @@ class Replay:
                 self.journal.place = 0  # run again from its input
             self._made = self.journal.place
         at, self._made = self._made, self._made + 1
-        key = content_key("call", tool, args)
+        key = call_key(tool, args)
         paused = next((m for m in self.journal.again if m.at == at and m.tool == tool), None)
         if paused is None or self.occurrence(key) < len(self.journal.calls.get(key, ())):
             return Made(tool=tool, args=args, at=at)

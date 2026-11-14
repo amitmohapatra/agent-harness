@@ -20,6 +20,7 @@ import pytest
 import respx
 from agents import Agent
 
+from tests.support.arm import declaring
 from tests.support.gateway import URL, FakeGateway
 from tests.support.models import ScriptedChat
 from tests.support.openai_model import ScriptedModel
@@ -254,6 +255,8 @@ async def test_a_judge_by_name_through_a_provider_key(monkeypatch: pytest.Monkey
 async def test_an_openai_agent_by_name_goes_through_bifrost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A model name goes through Bifrost on the SDK's default API, the Responses API, which
+    Bifrost serves for every provider it routes (``/v1/responses``)."""
     fake = FakeGateway(turns=["routed"])
     fake.serve_models(monkeypatch)
     settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
@@ -262,12 +265,252 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
         again = await h.wrap(Agent(name="b"), id="default").run("x", user="u")
     assert result.answer == "routed", result.error
     assert again.status.value == "ERROR"  # the script is spent: the second call reached it
-    [first, second] = fake.completions
-    assert json.loads(first.content)["model"] == "openai/gpt-x"  # Bifrost's form
-    assert json.loads(second.content)["model"].startswith("openai/")  # the SDK's default
-    assert first.headers["authorization"] == "Bearer vk"
-    assert first.headers["x-bf-mcp-include-clients"] == ""  # the deny-all MCP scope
-    assert first.headers["x-bf-dim-agent"] == "named"  # whose run, read per request
+    assert fake.completions == []  # not chat completions: the SDK's default
+    [first, second] = fake.responses.requests
+    assert first["model"] == "openai/gpt-x"  # Bifrost's form
+    assert second["model"].startswith("openai/")  # the SDK's default
+    headers = fake.responses.headers[0]
+    assert headers["authorization"] == "Bearer vk"
+    assert headers["x-bf-mcp-include-clients"] == ""  # the deny-all MCP scope
+    assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
+
+
+def behind_bifrost() -> Settings:
+    """The settings of a harness behind a Bifrost gateway."""
+    return Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+
+
+async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A gateway (a version, a provider) that does not serve ``/v1/responses`` for a model
+    answers that once (``404``): the turn is asked on chat completions, as before the
+    Responses route, with the same answer — one fallback, kept for the gateway and the model
+    (never asked on Responses again), said once."""
+    fake = FakeGateway(turns=["routed", "again"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            first = await agent.run("x", user="u")
+            second = await agent.run("x", user="u")
+    assert (first.answer, second.answer) == ("routed", "again"), first.error
+    assert len(fake.refused) == 1 and len(fake.completions) == 2  # one fallback, no storm
+    assert json.loads(fake.completions[0].content)["model"] == "openai/gpt-x"
+    told = "does not serve 'openai/gpt-x' on /v1/responses"
+    assert len([r for r in caplog.records if told in r.getMessage()]) == 1
+
+
+async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a model the gateway serves on chat completions only, what a chat completions request
+    cannot carry is refused, each feature named: at the fallback (before anything is asked on
+    chat completions), and from then on where the agent is wrapped; function tools go on."""
+    from agents import ModelSettings, WebSearchTool
+
+    fake = FakeGateway(turns=["plain", "never asked"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    hosted = Agent(
+        name="searcher",
+        model="gpt-x",
+        tools=[WebSearchTool()],
+        prompt={"id": "pmpt_1"},
+        model_settings=ModelSettings(truncation="auto"),
+    )
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        refused = await h.wrap(hosted, id="hosted").run("x", user="u")  # not known yet: asked
+        assert refused.error is not None and fake.completions == []
+        for feature in ("tool 'web_search'", "a stored prompt", "ModelSettings.truncation"):
+            assert feature in refused.error.message, refused.error.message
+        plain = h.wrap(Agent(name="plain", model="gpt-x"), id="plain")
+        assert (await plain.run("x", user="u")).answer == "plain"  # fell back: now known
+        with pytest.raises(ConfigurationError, match="'searcher': tool 'web_search'"):
+            h.wrap(hosted, id="hosted-again")
+        threaded = await plain.run("x", user="u", framework_options={"conversation_id": "c1"})
+    assert threaded.error is not None
+    assert "conversation_id (a server thread)" in threaded.error.message
+    assert len(fake.completions) == 1  # refused before any model call
+
+
+async def test_a_model_known_to_answer_on_responses_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the answer to a model's first call on a gateway: once the model has
+    answered on Responses — here, a tool call that then ran — a later ``404`` is the run's
+    error, never the turn asked again on another route (no call runs twice)."""
+    from agents import function_tool
+
+    ran: list[str] = []
+
+    @function_tool
+    def ship(order: str) -> str:
+        """Ship an order."""
+        ran.append(order)
+        return f"shipped {order}"
+
+    fake = FakeGateway(turns=[("ship", {"order": "o1"}), "never"], serves_responses=1)
+    fake.serve_models(monkeypatch)
+    harness = declaring(Harness(config=behind_bifrost(), gateway=fake.gateway()), ship="read")
+    async with harness as h:
+        result = await h.wrap(Agent(name="s", model="gpt-x", tools=[ship]), id="s").run(
+            "ship o1", user="u"
+        )
+    assert result.error is not None and ran == ["o1"]
+    assert len(fake.refused) == 1 and fake.completions == []
+
+
+@pytest.mark.parametrize(
+    ("capability", "dropped"),
+    [("Compaction", "its request parameters (context_management)"), ("Filesystem", "its tool")],
+)
+async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capability: str, dropped: str
+) -> None:
+    """A sandbox capability's Responses parameter (``Compaction``) or hosted tool
+    (``Filesystem``'s ``apply_patch``) is made inside the SDK's run: on a model the gateway
+    serves on chat completions only, the run is refused there, before its first model call."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig, capabilities
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    fake = FakeGateway(turns=["plain", "never asked"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    target = SandboxAgent(
+        name="box",
+        model="gpt-x",
+        capabilities=[capabilities.Shell(), getattr(capabilities, capability)()],
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    async with Harness(config=behind_bifrost(), gateway=fake.gateway()) as h:
+        assert (await h.wrap(Agent(name="p", model="gpt-x"), id="p").run("x", user="u")).answer
+        agent = h.wrap(target, id="box", framework_options={"run_config": config})
+        result = await agent.run("x", user="u")
+    assert result.error is not None and len(fake.completions) == 1
+    assert f"the sandbox capability {capability} needs the Responses API" in result.error.message
+    assert dropped in result.error.message
+
+
+async def test_a_sandbox_capability_goes_whole_to_a_model_bifrost_serves_on_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On an OpenAI model the request reaches the provider whole: a sandbox ``Compaction``'s
+    ``context_management`` is in the Responses request Bifrost is sent."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig, capabilities
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    fake = FakeGateway(turns=["compacted"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    target = SandboxAgent(
+        name="box", model="gpt-x", capabilities=[capabilities.Shell(), capabilities.Compaction()]
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        result = await h.wrap(target, id="box", framework_options={"run_config": config}).run(
+            "x", user="u"
+        )
+    assert result.answer == "compacted", result.error
+    [request] = fake.responses.requests
+    assert request["model"] == "openai/gpt-x" and request["context_management"]
+
+
+def test_an_application_on_chat_completions_keeps_the_sdks_own_limits() -> None:
+    """``set_default_openai_api("chat_completions")`` is the application's choice: the harness
+    refuses nothing the SDK would itself refuse or ignore on that API."""
+    from agents import WebSearchTool, set_default_openai_api
+
+    set_default_openai_api("chat_completions")
+    try:
+        h = Harness(
+            config=Settings(llm_gateway="bifrost", llm_base_url=URL),
+            gateway=FakeGateway().gateway(),
+        )
+        h.wrap(Agent(name="s", model="gpt-x", tools=[WebSearchTool()]), id="chat")
+    finally:
+        set_default_openai_api("responses")
+
+
+async def test_a_name_the_runs_multiprovider_gives_its_own_provider_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the names the run leaves to the SDK's default provider go through Bifrost: a
+    ``MultiProvider``'s ``provider_map`` (and its ``litellm/`` and ``any-llm/`` prefixes) keep
+    their providers; a ``RunConfig.model`` object calls its own provider, said once."""
+    from agents import RunConfig
+    from agents.models.interface import ModelProvider
+    from agents.models.multi_provider import MultiProvider, MultiProviderMap
+
+    class Mine(ModelProvider):
+        def get_model(self, model_name: str | None) -> Any:
+            return ScriptedModel([f"mine: {model_name}"])
+
+    providers = MultiProviderMap()
+    providers.add_provider("mine", Mine())
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    config = RunConfig(model_provider=MultiProvider(provider_map=providers))
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        options = {"run_config": config}
+        kept = h.wrap(Agent(name="k", model="mine/m1"), id="kept", framework_options=options)
+        routed = h.wrap(Agent(name="r", model="gpt-x"), id="routed", framework_options=options)
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            own = RunConfig(model=ScriptedModel(["object"]))
+            objected = h.wrap(Agent(name="m"), id="objected", framework_options={"run_config": own})
+            first = await objected.run("x", user="u")
+        mine = await kept.run("x", user="u")
+        gateway = await routed.run("x", user="u")
+    assert mine.answer == "mine: m1" and gateway.answer == "routed"
+    assert first.answer == "object"
+    said = [r for r in caplog.records if "'RunConfig.model' has a model object" in r.getMessage()]
+    assert len(said) == 1
+
+
+async def test_a_sandbox_memorys_models_go_through_bifrost_in_and_after_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandbox ``Memory``'s phase models, named, are asked through Bifrost — in the run
+    (counted toward its budget) and, bound to the run's route, after it (a sandbox the app
+    keeps and closes later) — whatever the agent's own model is."""
+    from agents import ModelSettings, function_tool
+    from agents.models.interface import ModelTracing
+    from agents.sandbox.capabilities.memory import Memory
+    from agents.sandbox.config import MemoryGenerateConfig
+
+    from trellis.harness.adapters.openai_agents import governed_capability
+
+    made: list[Any] = []
+
+    async def ask(model: Any) -> str:
+        reply = await model.get_response(
+            None, "summarise", ModelSettings(), [], None, [], ModelTracing.DISABLED
+        )
+        return str(reply.output[0].content[0].text)
+
+    @function_tool
+    async def summarise() -> str:
+        """Summarise the sandbox's work."""
+        memory = Memory(generate=MemoryGenerateConfig(phase_one_model="gpt-m"))
+        made.append(governed_capability(memory).generate.phase_one_model)
+        return await ask(made[-1])
+
+    fake = FakeGateway(turns=["in the run", "after the run", "streamed"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    model = ScriptedModel([("summarise", {}), "done"])
+    async with declaring(Harness(config=settings, gateway=fake.gateway()), summarise="read") as h:
+        agent = h.wrap(Agent(name="m", model=model, tools=[summarise]), id="mem")
+        events = [e async for e in agent.stream("go", user="u")]
+        assert await ask(made[0]) == "after the run"  # its route kept: no run to read it from
+        streamed = made[0].stream_response(
+            None, "summarise", ModelSettings(), [], None, [], ModelTracing.DISABLED
+        )
+        assert [e.type async for e in streamed][-1] == "response.completed"
+    assert [r["model"] for r in fake.responses.requests] == ["openai/gpt-m"] * 3
+    assert fake.responses.headers[0]["x-bf-dim-agent"] == "mem"
+    assert events[-1].data["spent"]["tokens"] == 15  # the phase's reply, counted in the run
 
 
 async def test_a_run_config_with_its_own_provider_or_a_model_object_is_kept(

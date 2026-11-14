@@ -234,6 +234,9 @@ class Runtime:
     #: the tool calls started on this attempt's stream and not ended there yet, by reference
     #: (``tools.bridge``: each ends once, the attempt's end closing any still under way)
     open_calls: dict[str, str] = field(default_factory=dict)
+    #: the tool node calls under way of each model step of the run, by the step
+    #: (``middleware.govern_tool_nodes``): a call that pauses waits for the others of its step
+    beside: dict[Hashable, set[Any]] = field(default_factory=dict, repr=False)
     #: when each tool call of this attempt returned, by its reference (the framework's call
     #: id): the time the run record says it was fetched (``snapshots.FETCHED``)
     fetched: dict[str, datetime] = field(default_factory=dict)
@@ -261,6 +264,9 @@ class Runtime:
     #: its tool, its arguments as the model wrote them: the earlier call's id, taken once by
     #: the repeat, which does not run (``tools.bridge.same``)
     repeats: dict[tuple[str, str, str], str] = field(default_factory=dict)
+    #: what the attempt keeps of the calls its framework carries out on this machine, made on
+    #: first use by the code that governs them (``tools.convert.openai_local.Local``)
+    local_calls: Any = field(default=None, repr=False)
     #: the worker holding the run's lease, when a worker runs it, and that lease's length
     #: (what a progress checkpoint's heartbeat extends it by)
     worker_id: str | None = None
@@ -309,6 +315,9 @@ class Runtime:
     frontend: Frontend | None = None
     #: the chat schedule that fired this run (``schedules.py``): whether it is delivered
     scheduled: Fired | None = None
+    #: the run is a turn of a chat's own for a background task's outcome
+    #: (``background.notify``): its input, the notification it gives the model
+    notification: Said | None = None
     #: what the person allowed for this conversation in its runs (``conversation.allowed``),
     #: once read in this attempt
     allowed: frozenset[str] | None = field(default=None, repr=False)
@@ -541,6 +550,8 @@ class Runtime:
         attempt with a :class:`ModelTimeout` unless :meth:`model_ended` comes within
         ``seconds`` (else :data:`STALL_SECONDS`). The run's own time left bounds it too: the
         run ends ``TIMEOUT`` when that comes first. A key already watched is watched anew."""
+        if self._elsewhere(self.model_started, key, seconds):
+            return
         self.model_ended(key)
         bound = STALL_SECONDS if seconds is None else seconds
         loop = asyncio.get_running_loop()
@@ -548,9 +559,23 @@ class Runtime:
 
     def model_ended(self, key: str) -> None:
         """The model call ``key`` answered (or failed): its watchdog is off."""
+        if self._elsewhere(self.model_ended, key):
+            return
         found = self._watched.pop(key, None)
         if found is not None:
             found.cancel()
+
+    def _elsewhere(self, then: Callable[..., None], *args: Any) -> bool:
+        """Whether this is called outside the run's event loop — a model called in a graph's
+        sync node, which LangGraph runs in a thread — and ``then(*args)`` was handed to the
+        run's loop to do there."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            assert self.running_in is not None  # a run's runtime runs in its task
+            self.running_in.get_loop().call_soon_threadsafe(then, *args)
+            return True
+        return False
 
     def unwatched(self) -> None:
         """The attempt ended: every watchdog still on is off."""

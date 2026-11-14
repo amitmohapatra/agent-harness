@@ -86,6 +86,7 @@ from trellis.harness.agui.translate import translate
 from trellis.harness.conversation import Mode
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.frontend import FRONTEND_TOOL, Frontend
+from trellis.harness.history import from_client
 from trellis.harness.identity import IDENTITY_HEADER, IdentityRefused, trusted_user
 from trellis.harness.identity import Identity as RunIdentity
 from trellis.harness.result import Result
@@ -235,7 +236,7 @@ class _Surface:
             mode = Mode(body.forwarded.mode)
         except ValueError as exc:
             raise HTTPException(422, f"forwardedProps.mode: {exc}") from exc
-        payload = body.latest_user_text() or body.state
+        payload = body.latest_user_text() or from_client(body.state)
         attached = await self._attached(body, user, tenant)
         try:
             record = await agent._opened(
@@ -451,7 +452,7 @@ class _Surface:
         # window reads it) and runs its end hooks after it — a client that sends the next
         # message, or a resume, once the stream closed finds them done
         ended = False
-        activity = Activity()
+        activity = buffer.activity  # the run's calls, its earlier attempts' here included
 
         def listen(event: RunEvent) -> None:
             nonlocal ended
