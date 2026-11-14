@@ -297,6 +297,44 @@ async def test_a_langchain_model_object_is_said_once_as_not_routed(
     assert len(said) == 1 and "objects" in said[0].getMessage()
 
 
+@pytest.mark.parametrize(
+    "argument", ["openai_api_base", "base_url", "anthropic_api_url", "api_base"]
+)
+def test_a_model_object_pointed_at_bifrost_by_any_client_argument_is_routed(
+    argument: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whichever constructor argument a LangChain chat model names its endpoint with
+    (OpenAI's, Anthropic's, LiteLLM's...), one pointed at Bifrost is not said to bypass it."""
+    from types import SimpleNamespace
+
+    from trellis.harness import accounting
+
+    gateway = SimpleNamespace(has=lambda capability: True, origin="http://bf.test")
+    runtime = SimpleNamespace(agent=SimpleNamespace(harness=SimpleNamespace(model_gateway=gateway)))
+    runtime.agent_id = "pointed"
+    accounting._unrouted.cache_clear()
+    serialized = {
+        "id": ["langchain", "Chat"],
+        "kwargs": {argument: "http://bf.test/v1", "model": "m"},
+    }
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        accounting._routed_or_said(runtime, serialized)
+    assert "calls its provider directly" not in caplog.text
+    elsewhere = {"id": ["langchain", "Chat"], "kwargs": {argument: "http://own.test/v1"}}
+    with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+        accounting._routed_or_said(runtime, elsewhere)
+    assert "calls its provider directly" in caplog.text  # one pointed elsewhere is said
+
+
+def test_a_models_record_names_its_window_and_output_by_any_servers_field() -> None:
+    """Anthropic, Bifrost, OpenRouter, Groq, vLLM, Mistral, LiteLLM: each server's own field."""
+    windows = ("max_input_tokens", "context_length", "context_window", "max_model_len")
+    for field in (*windows, "max_context_length"):
+        assert gateways._limits_said({field: 1000}) == (1000, None), field
+    for field in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+        assert gateways._limits_said({field: 100}) == (None, 100), field
+
+
 def _claude_runtime(gateway: Any) -> Any:
     harness = SimpleNamespace(model_gateway=gateway)
     return SimpleNamespace(agent=SimpleNamespace(harness=harness))
@@ -347,6 +385,9 @@ def test_doctor_says_how_models_are_routed_and_what_is_off(
     assert "off: Code Mode" in out and "off: model names" not in out
     said = doctor.gateway_said(Settings(), {})
     assert said[0] == "route: provider-sdk (provider SDK) at each provider's own endpoint"
+    # every capability but model names is off on provider SDKs, and each is said
+    assert len([line for line in said if line.startswith("off: ")]) == len(Capability) - 1
+    assert set(gateways.CAPABILITIES) == set(Capability)  # a gateway of one's own: each said
     assert said[1] == "provider keys: each provider's own SDK reads its own (none set)"
     assert said[2].endswith("the memory service uses its own settings")
     both = doctor.gateway_said(
