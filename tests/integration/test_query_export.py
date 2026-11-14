@@ -92,6 +92,18 @@ async def test_every_framework_saves_a_querys_whole_result_as_excel(
     assert rows == [("sku", "stock"), *LOW_ROWS]  # every row, exactly: not the 200 shown
 
 
+def test_each_frameworks_tool_that_runs_code_is_known() -> None:
+    """The harness's sandbox, Deep Agents' ``execute``, Claude Code's ``Bash``, OpenAI's code
+    interpreter: a run with any of them writes its files with code."""
+    from types import SimpleNamespace
+
+    from trellis.harness.tools.export import runs_code
+
+    for name in ("sandbox_exec", "execute", "Bash", "code_interpreter"):
+        assert runs_code(SimpleNamespace(toolbox={}, native={name})) == name  # type: ignore[arg-type]
+    assert runs_code(SimpleNamespace(toolbox={}, native=set())) is None  # type: ignore[arg-type]
+
+
 async def test_claude_without_bash_saves_and_with_bash_writes_with_its_code(
     harness: Harness, stored: Path, tmp_path: Path
 ) -> None:
