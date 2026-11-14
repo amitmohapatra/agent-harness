@@ -68,7 +68,7 @@ from trellis.memory.errors import (
     ValidationError,
 )
 from trellis.memory.models import DocumentInfo, Feedback, KeyInfo
-from trellis.runs import RunsClient, RunSummary
+from trellis.runs import RunsClient, RunsError, RunSummary
 
 log = logging.getLogger("trellis.harness")
 
@@ -76,6 +76,9 @@ _Made = TypeVar("_Made", Gateway, MemoryClient, RunsClient)
 
 #: The tenant of a deployment with no memory service (development: nothing to ask).
 LOCAL_TENANT: Final = "default"
+#: The reason a run cancelled from another process ends with here (the store keeps the one
+#: it was cancelled with).
+CANCELLED_ELSEWHERE: Final = "cancelled from another process"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
 #: again; while the service cannot be reached the last answer is kept (asked again after the
 #: retry interval).
@@ -169,7 +172,7 @@ class Harness:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
         #: the runs this process executes, held in the run store while they do (``holding``)
-        self.holds = Holds(lambda: self.runs)
+        self.holds = Holds(lambda: self.runs, lost=self._lost)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -466,6 +469,24 @@ class Harness:
         await self.aclose()
 
     # ------------------------------------------------------------------ who we are
+    async def _lost(self, run_id: str, tenant: str) -> None:
+        """A run held here whose heartbeat or event the run store refused: when it was
+        cancelled — ``agent.cancel`` on another process, a newer message of its conversation
+        sent there with ``mode="interrupt"`` among them — its attempt under way here stops and
+        ends ``CANCELLED``, as one cancelled here does (``agent.cancel``)."""
+        try:
+            record = await self.runs.get(run_id, tenant=tenant)
+        except RunsError as exc:
+            log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
+            return
+        if record is None or record.status is not RunStatus.CANCELLED:
+            return
+        for agent in self.agents.values():
+            runtime = agent.running.get(run_id)
+            if runtime is not None and runtime.cancelled is None and runtime.running_in:
+                runtime.cancelled = CANCELLED_ELSEWHERE
+                runtime.running_in.cancel()
+
     async def _key_info(self) -> KeyInfo:
         """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then
         every :data:`KEY_TTL_SECONDS`; while the service cannot be reached the last answer

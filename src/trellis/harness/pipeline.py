@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import json
 import logging
 import time
@@ -75,6 +76,7 @@ from trellis.harness.conversation import (
     identified,
     question_id,
     steering,
+    steering_elsewhere,
 )
 from trellis.harness.events import DECISION, RunEvents
 from trellis.harness.features import run_without
@@ -83,6 +85,7 @@ from trellis.harness.frontend import Frontend
 from trellis.harness.history import Said, Speaker
 from trellis.harness.identity import Identity
 from trellis.harness.journal import Journal, Pending, Replay, content_key, governance_held
+from trellis.harness.line import Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import RunLog, event_log
 from trellis.harness.runtime import STALLED, Runtime, _call, _current, interrupt_id
@@ -189,11 +192,12 @@ async def attempt(
     (a sub-agent's run: its progress is the parent's, its spans in the parent's trace).
 
     A run of a conversation (its thread) waits while another run of the same conversation and
-    agent works in this process: a second message to a busy conversation is answered after
-    the first, never beside it (queued runs wait the same way in the run store, by their
-    ``concurrency_key``). A sub-agent's run and a worker's do not wait here. ``mode`` says
-    what a run sent while another holds the conversation's turn does instead of waiting
-    (``conversation.Mode``: :func:`_arrived`).
+    agent works, in this process or another: a second message to a busy conversation is
+    answered after the first, never beside it, in the order of the run store's line
+    (``line``; queued runs wait the same way in the run store, by their ``concurrency_key``).
+    A sub-agent's run and a worker's do not wait here. ``mode`` says what a run sent while
+    another holds the conversation's turn does instead of waiting (``conversation.Mode``:
+    :func:`_arrived`, :func:`_elsewhere`).
 
     A run this process executes without a worker's lease — every run but a claimed one — is
     held in the run store while its attempt is under way, waiting its turn included
@@ -240,12 +244,16 @@ async def _turned(
         turn: contextlib.AbstractAsyncContextManager[Any] = contextlib.nullcontext()
     else:
         key = Identity.of(record).conversation
+        line = None if record.concurrency_key is None else Line(agent.harness.runs, record)
         live = agent.turns.live(key)
         if live is not None and mode is not Mode.QUEUE:
             answered = await _arrived(agent, record, input, live, mode=mode, listener=listener)
             if answered is not None:
                 return answered
-        turn = agent.turns.taken(key, record.run_id, steers=agent.adapter.steers(agent.target))
+        elif line is not None and mode is not Mode.QUEUE:
+            await _elsewhere(agent, record, line, mode=mode)
+        steers = agent.adapter.steers(agent.target)
+        turn = agent.turns.taken(key, record.run_id, steers=steers, line=line)
     async with turn as live:
         result = await _attempt(
             agent,
@@ -294,6 +302,21 @@ async def _arrived(
     if not taken or answered is None or answered.status not in conversation.ANSWERED:
         return None  # it ended first, or without an answer: the message takes its own turn
     return await _answered_by(agent, record, answered, listener)
+
+
+async def _elsewhere(agent: Agent, record: RunRecord, line: Line, *, mode: Mode) -> None:
+    """A run sent while no run holds the conversation's turn in this process, in ``mode``: the
+    run holding it — the first in the run store's line, working in another process (or a
+    worker's) — is cancelled for ``INTERRUPT`` (``agent.cancel``: its process stops it); a
+    ``STEER`` cannot reach it, and the run waits its turn, said once."""
+    ahead = await line.ahead()
+    if not ahead:
+        return
+    if mode is Mode.STEER:
+        steering_elsewhere(agent.id)
+        return
+    with contextlib.suppress(ConflictError):  # it ended meanwhile
+        await agent.cancel(ahead[0], reason=INTERRUPTED, tenant=record.tenant_id)
 
 
 async def _answered_by(
@@ -941,8 +964,18 @@ def _emitter(
     store = event_log(agent.harness.runs)
     if store is not None:
         worker = None if job is None else job.worker_id
+        ended = (
+            None
+            if job is not None
+            else functools.partial(agent.harness._lost, identity.run_id, identity.tenant)
+        )
         log_ = RunLog(
-            store, identity.run_id, tenant=identity.tenant, worker_id=worker, events=events
+            store,
+            identity.run_id,
+            tenant=identity.tenant,
+            worker_id=worker,
+            events=events,
+            ended=ended,
         )
         events.record(log_)
     return events

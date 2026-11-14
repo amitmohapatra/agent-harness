@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -568,7 +569,7 @@ class Agent:
         _kept_as_json(framework_options)
         tenant = await self.harness._tenant(tenant)
         conversation = conversation_key(tenant, user, thread) if thread else None
-        concurrency_key = concurrency_key or (conversation and f"thread:{conversation}")
+        concurrency_key = concurrency_key or (conversation and _queued_with(conversation))
         start = await self._start(
             input,
             user=user,
@@ -1463,31 +1464,44 @@ class Agent:
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
-        record keeps their JSON. (Surfaces pass their own ``run_id`` when the protocol names
-        the run, and what its front end gave it, ``app``.)"""
-        start = await self._start(
-            input,
-            user=user,
-            thread=thread,
-            tenant=tenant,
-            run_id=run_id,
-            record_input=True,
-            timeout=timeout,
-            deadline=deadline,
-            budget=budget,
-            without=without,
-            framework_options=framework_options,
-            document_ids=document_ids,
-            parent=parent,
-            app=app,
+        record keeps their JSON. A turn of a conversation (``thread``, not a child run) takes
+        the conversation's ``concurrency_key``, as a queued one does: its place in the
+        conversation's line, which every process reads (``line``). (Surfaces pass their own
+        ``run_id`` when the protocol names the run, and what its front end gave it, ``app``.)"""
+        # the messages of a conversation sent here reach the run store in the order they were
+        # sent, which places each after the one before: their turns' order (``line``)
+        accepting = (
+            self.turns.accepting(f"{tenant}\0{user}\0{thread}")
+            if thread and parent is None
+            else contextlib.nullcontext()
         )
-        live = None
-        if mode is Mode.STEER and parent is None and thread:
-            live = self.turns.live(conversation_key(start.tenant_id, user, thread))
-        if live is not None and live.steers:  # its answer may be this run's (``earlier``)
-            given = {**start.metadata, STEERED_INTO: live.run_id}
-            start = start.model_copy(update={"metadata": given})
-        await admitted(self.harness.runs.start(start), "start")
+        async with accepting:
+            start = await self._start(
+                input,
+                user=user,
+                thread=thread,
+                tenant=tenant,
+                run_id=run_id,
+                record_input=True,
+                timeout=timeout,
+                deadline=deadline,
+                budget=budget,
+                without=without,
+                framework_options=framework_options,
+                document_ids=document_ids,
+                parent=parent,
+                app=app,
+            )
+            conversation = conversation_key(start.tenant_id, user, thread) if thread else None
+            if conversation is not None and parent is None:  # its turn: in the line (``line``)
+                start = start.model_copy(update={"concurrency_key": _queued_with(conversation)})
+            live = None
+            if mode is Mode.STEER and parent is None and conversation is not None:
+                live = self.turns.live(conversation)
+            if live is not None and live.steers:  # its answer may be this run's (``earlier``)
+                given = {**start.metadata, STEERED_INTO: live.run_id}
+                start = start.model_copy(update={"metadata": given})
+            await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
         if not framework_options:
             return record
@@ -1586,6 +1600,11 @@ class Agent:
         if budget is not None:
             metadata[BUDGET] = budget.kept()
         return metadata
+
+
+def _queued_with(conversation: str) -> str:
+    """The ``concurrency_key`` of a conversation's turns: the run store runs one at a time."""
+    return f"thread:{conversation}"
 
 
 class Throttled(HarnessError):

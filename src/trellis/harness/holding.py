@@ -30,7 +30,7 @@ import logging
 import os
 import secrets
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
@@ -73,10 +73,19 @@ class Holds:
     """The runs this harness holds in its run store, each renewed by a task of its own while
     anything holds it. ``runs`` is read at each heartbeat (the harness's store)."""
 
-    def __init__(self, runs: Callable[[], Holding], name: str | None = None) -> None:
+    def __init__(
+        self,
+        runs: Callable[[], Holding],
+        name: str | None = None,
+        *,
+        lost: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> None:
         self._runs = runs
         self.name = name or name_of()
         self._held: dict[str, _Held] = {}
+        #: told of a run whose heartbeat was refused (its id, its tenant): it may have ended
+        #: elsewhere — cancelled from another process — while it works here
+        self._lost = lost
 
     def holds(self, run_id: str) -> bool:
         """Whether this harness holds ``run_id`` now."""
@@ -133,15 +142,16 @@ class Holds:
 
     async def _beating(self, run_id: str, tenant: str) -> None:
         """Heartbeats holding ``run_id``, every third of :data:`HOLD_SECONDS`. A refused one
-        (the run waits for a person, or ended) is tried again at the next; a store that cannot
-        be reached too, said in the log."""
+        (the run waits for a person, or ended — cancelled elsewhere, ``lost`` is told) is tried
+        again at the next; a store that cannot be reached too, said in the log."""
         while True:
             try:
                 await self._runs().heartbeat(
                     run_id, self.name, lease_seconds=HOLD_SECONDS, tenant=tenant
                 )
             except LeaseLostError:
-                pass
+                if self._lost is not None:
+                    await self._lost(run_id, tenant)
             except RunsError as exc:
                 log.warning("run %s not held: %s", run_id, exc)
             await asyncio.sleep(HOLD_SECONDS / 3)
