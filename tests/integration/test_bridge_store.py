@@ -72,7 +72,7 @@ async def test_a_graph_without_a_store_stores_in_the_memory_service(
     agent = memory_harness.wrap(graph_of(remembers), id="prefs")
     result = await agent.run({"topic": "tides"}, user="ada", thread="t1")
     assert result.status is RunStatus.SUCCESS, result.error
-    assert result.answer is None  # a hand-built graph's answer is its state
+    assert result.answer["topic"] == "tides"  # a hand-built graph's answer is its state
     [stored] = [m for m in memory_service.memories.values() if m["current"]]
     assert stored["visibility"] == "USER" and stored["user"] == "ada"
     assert (

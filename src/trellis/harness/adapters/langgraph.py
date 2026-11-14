@@ -267,15 +267,14 @@ class LangGraphAdapter:
             await self.tasks.cancelled(run.runtime)
 
     async def stream(self, target: Any, native_input: Any, run: Invocation) -> AsyncIterator[Any]:
-        """The run streamed as LangGraph streams a graph to its consumers
-        (``astream_events(version="v3")``): every event passes the graph's stream transformers
-        first — ``create_agent``'s ``transformers=``, a middleware's (``PIIMiddleware`` redacts
-        the text on the wire), LangChain's own — and what reaches the run is what they let
-        through. The answer's text is each text content block's text as it arrives (a model's
-        reasoning is not its answer), the rest of a block when it finishes (a transformer may
-        hold the end of a block back until then: :class:`_Text`); the root graph's ``values``
-        are its state and its pauses, and what its nodes write (``custom``) is the run's."""
-        from langchain_core._api import LangChainBetaWarning
+        """The run streamed as LangGraph streams a graph to its consumers. A graph given
+        stream transformers of its own (:func:`transforms`: ``create_agent``'s
+        ``transformers=``, a middleware's — ``PIIMiddleware`` redacts the text on the wire) is
+        streamed through them (:func:`_transformed`), and what reaches the run is what they
+        let through; any other by its stream modes (:func:`_streamed`). The answer's text is
+        each model reply's text as it arrives — a text content block's too, a model's
+        reasoning not (:class:`_Text`); the root graph's ``values`` are its state and its
+        pauses, and what its nodes write (``custom``) is the run's."""
         from langgraph.types import GraphOutput
 
         values: Any = None
@@ -286,32 +285,21 @@ class LangGraphAdapter:
         try:
             given = await _continued(target, native_input, run)
             graph, config = self._graph(target, run.runtime), self._config(target, run)
-            with warnings.catch_warnings():  # the harness's choice: said to no user of it
-                warnings.simplefilter("ignore", LangChainBetaWarning)
-                # returns without awaiting anything: no other task runs under this filter
-                events = await graph.astream_events(
-                    given,
-                    config,
-                    version="v3",
-                    transformers=[_custom_mode()],
-                    **_run_arguments(run.runtime, target),
-                )
+            source = _transformed if transforms(graph) else _streamed
             try:
-                async with events:
-                    async for event in events:
-                        method, params = event["method"], event["params"]
-                        root = not params["namespace"]
-                        if method == "messages":
-                            if said := text.of(*params["data"]):
-                                yield said
-                        elif method == "custom" and root:
-                            _written(run.runtime, params["data"])
-                        elif method == "values" and root:
-                            values = params["data"]
-                            interrupts = tuple(params.get("interrupts") or ()) or interrupts
+                async for kind, data, held in source(
+                    graph, given, config, _run_arguments(run.runtime, target)
+                ):
+                    if kind == "messages":
+                        if said := text.of(*data):
+                            yield said
+                    elif kind == "custom":
+                        _written(run.runtime, data)
+                    else:  # "values"
+                        values, interrupts = data, tuple(held) or interrupts
             except Exception as exc:
-                values, held = await _asked_again(graph, config, exc)
-                interrupts = tuple(held)
+                values, again = await _asked_again(graph, config, exc)
+                interrupts = tuple(again)
         except BaseException as exc:
             error = exc
             raise
@@ -325,11 +313,12 @@ class LangGraphAdapter:
         state = fields_of(output.value)
         answer: Any = output.value
         messages: list[Any] = []
+        if isinstance(state, Mapping) and state.get("structured_response") is not None:
+            answer = state["structured_response"]
+        elif isinstance(state, Mapping) and isinstance(state.get("messages"), list):
+            answer = _answer_text(state["messages"])
         if isinstance(state, Mapping) and isinstance(state.get("messages"), list):
             messages = state["messages"]
-            answer = state.get("structured_response")
-            if answer is None:
-                answer = _answer_text(messages)
         transcript = added(messages) or (
             [Said(Speaker.ASSISTANT, answer)] if isinstance(answer, str) and answer else []
         )
@@ -500,6 +489,53 @@ class _Text:
             if isinstance(whole, str) and whole.startswith(given):
                 return whole[len(given) :]
         return ""
+
+
+#: One event of a graph's stream as the run reads it, whichever way the graph is streamed:
+#: its kind (``messages``, ``custom``, ``values``), its data, and the pauses a ``values`` holds.
+Streamed = tuple[str, Any, Sequence[Any]]
+
+
+def transforms(graph: Any) -> bool:
+    """Whether ``graph`` was given stream transformers of its own — a middleware's, its
+    builder's (``transformers=``) — beside the projections ``create_agent`` gives every graph
+    (tool calls, sub-agents: they add to the stream and change nothing a model said). Those
+    decide what the wire may carry, so the graph is streamed through them."""
+    from langchain.agents.factory import SubagentTransformer, ToolCallTransformer
+
+    given = getattr(graph, "stream_transformers", ())
+    return any(t is not ToolCallTransformer and t is not SubagentTransformer for t in given)
+
+
+async def _streamed(
+    graph: Any, given: Any, config: Any, arguments: Mapping[str, Any]
+) -> AsyncIterator[Streamed]:
+    """A graph's stream by its stream modes (``astream``): each model message as it arrives,
+    the root graph's state and pauses, what its nodes write."""
+    async for part in graph.astream(
+        given, config, stream_mode=["messages", "values", "custom"], version="v2", **arguments
+    ):
+        yield part["type"], part["data"], part.get("interrupts") or ()
+
+
+async def _transformed(
+    graph: Any, given: Any, config: Any, arguments: Mapping[str, Any]
+) -> AsyncIterator[Streamed]:
+    """A graph's stream through its stream transformers (``astream_events(version="v3")``):
+    every event passes them first, and the root graph's are the run's."""
+    from langchain_core._api import LangChainBetaWarning
+
+    with warnings.catch_warnings():  # the harness's choice: said to no user of it
+        warnings.simplefilter("ignore", LangChainBetaWarning)
+        # returns without awaiting anything: no other task runs under this filter
+        events = await graph.astream_events(
+            given, config, version="v3", transformers=[_custom_mode()], **arguments
+        )
+    async with events:
+        async for event in events:
+            method, params = event["method"], event["params"]
+            if method == "messages" or not params["namespace"]:
+                yield method, params["data"], params.get("interrupts") or ()
 
 
 @functools.cache
