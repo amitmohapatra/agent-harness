@@ -35,7 +35,7 @@ import dataclasses
 import functools
 import hashlib
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Sequence, Set
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -191,7 +191,11 @@ def _allowing(entry: ResolutionEntry) -> str | None:
 
 
 async def earlier(
-    runtime: Runtime, *, whole: bool = False, budget: int | None = None
+    runtime: Runtime,
+    *,
+    whole: bool = False,
+    budget: int | None = None,
+    held: Set[str] = frozenset(),
 ) -> list[Said]:
     """The conversation's earlier turns, oldest first, as the run store keeps them: each
     turn's question and answer (a cancelled turn's question alone), of this agent, tenant,
@@ -200,27 +204,36 @@ async def earlier(
     (``Agent.results``) is that transcript — its tool calls and their results too, the
     figures behind its answer — for a follow-up ("why was that?", "redo it with X").
     ``budget``: the tokens they may take (``Agent.conversation_budget``), spent as the memory
-    service spends its window's (:func:`_fitted`). A run with no conversation of its own, or a
-    child run, has none."""
+    service spends its window's (:func:`_fitted`). ``held``: the message ids the caller has
+    of the conversation already (memory's window: ``Agent.caught_up``) — when the newest turn
+    is among them it lacks none, and none is read (the one listing, no run). A run with no
+    conversation of its own, or a child run, has none."""
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
     runs, tenant = runtime.agent.harness.runs, runtime.tenant
-    records = []
-    async for summary in runs.iterate(
-        agent_id=runtime.agent_id,
-        thread_id=thread,
-        tenant=tenant,
-        limit=EARLIER_RUNS,
-        max_pages=1,
+    listed = [
+        summary.run_id
+        async for summary in runs.iterate(
+            agent_id=runtime.agent_id,
+            thread_id=thread,
+            tenant=tenant,
+            limit=EARLIER_RUNS,
+            max_pages=1,
+        )
+        if summary.run_id != runtime.run_id and summary.status in ASKED
+    ]
+    conversation = runtime.conversation
+    if listed and not held.isdisjoint(
+        (question_id(conversation, listed[0]), answer_id(conversation, listed[0]))
     ):
-        if summary.run_id == runtime.run_id or summary.status not in ASKED:
-            continue
-        record = await runs.get(summary.run_id, tenant=tenant)
+        return []  # the newest turn (the listing's first) is one the caller holds
+    records = []
+    for run_id in listed:
+        record = await runs.get(run_id, tenant=tenant)
         if record is not None and record.user_id == runtime.user and not record.parent_run_id:
             records.append(record)
     records.sort(key=lambda r: r.created_at)
-    conversation = runtime.conversation
     kept = runtime.agent.results.turns(conversation) if whole else {}
     turns: list[list[Said]] = []
     previous: Any = None
