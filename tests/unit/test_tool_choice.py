@@ -239,8 +239,7 @@ async def test_the_harness_own_tools_pass_the_check() -> None:
 
     sandboxed = await sandbox().tools().resolve()
     assert lint([*CODE_MODE_TOOLS, *(t.spec for t in sandboxed)]) == []
-    others = [s for s in SPECS if s.name != "update_schedule"]
-    assert lint(others) == []  # the schedule tools: each parameter described
+    assert lint(SPECS) == []  # the schedule tools: each parameter described
 
     def typed(properties: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -284,16 +283,46 @@ async def test_the_harness_own_tools_pass_the_check() -> None:
     assert all(schema.get("description") for schema in choice.values())
 
 
-def test_today_update_schedule_leaves_three_parameters_undescribed() -> None:
-    """Today the harness's own update_schedule fails its own tool set check: task, condition
-    and enabled carry a type and no description (schedule_task describes task and condition).
-    Pinned, not fixed here: it changes what every model is sent with the schedule tools."""
-    from trellis.harness.schedules import SPECS
+def _undescribed(schema: dict[str, Any], at: str = "") -> list[str]:
+    """Each parameter of ``schema`` with no description, nested ones (an array's objects')
+    included, by its path."""
+    found = []
+    for name, field in (schema.get("properties") or {}).items():
+        if not field.get("description"):
+            found.append(f"{at}{name}")
+        items = field.get("items") or {}
+        if items.get("type") == "object":
+            found += _undescribed(items, f"{at}{name}[].")
+    return found
 
-    [update] = [s for s in SPECS if s.name == "update_schedule"]
-    [finding] = lint([update])
-    assert finding.code == "undescribed_parameter"
-    assert "task, condition, enabled" in finding.message
+
+async def test_every_parameter_of_every_tool_the_harness_offers_is_described(tmp_path: Any) -> None:
+    """The harness's own tools - schedules, Code Mode, the sandbox, skills, asking, the kept
+    results' readers, a sub-agent, a remote agent, an MCP server's resources - describe each
+    parameter, so a model knows what to give (the tool set check's ``undescribed_parameter``)."""
+    from trellis.harness import skills, subagents
+    from trellis.harness.a2a import client as a2a_client
+    from trellis.harness.schedules import SPECS
+    from trellis.harness.tools import query, resources
+    from trellis.harness.tools import results as results_module
+    from trellis.harness.tools.ask import ask_user
+
+    specs = [*SPECS, *CODE_MODE_TOOLS]
+    specs += [t.spec for t in await sandbox().tools().resolve()]
+    specs += [t.spec for t in await skills.directory(tmp_path).tools().resolve()]
+    specs += [ask_user().spec]
+    schemas = {spec.name: spec.input_schema or {} for spec in specs}
+    schemas |= {
+        "read_file": results_module.READ_FILE_SCHEMA,
+        "query_result": query.QUERY_RESULT_SCHEMA,
+        "query_result (saving)": query.QUERY_RESULT_SAVING_SCHEMA,
+        "a sub-agent": subagents.INPUT,
+        "a remote agent": a2a_client.SCHEMA,
+        "read_resource": resources.SCHEMA,
+    }
+    missing = {name: found for name, schema in schemas.items() if (found := _undescribed(schema))}
+    assert missing == {}
+    assert len(schemas) >= 20
 
 
 async def test_the_toolbox_logs_what_the_check_found_when_its_tools_change(

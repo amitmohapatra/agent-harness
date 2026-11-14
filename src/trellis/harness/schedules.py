@@ -300,6 +300,8 @@ _IDS: Final = {
 }
 #: ``update_schedule``'s and a choice's ``when``: as ``schedule_task``'s, said once.
 _NEW_WHEN: Final = {"type": "string", "description": "A new 5-field cron."}
+#: ``update_schedule``'s pause and resume.
+_ENABLED: Final = {"type": "boolean", "description": "false pauses it, true resumes it."}
 
 
 def _spec(name: str, description: str, properties: dict[str, Any], required: list[str]) -> ToolSpec:
@@ -370,14 +372,14 @@ SPECS: Final = (
     _spec(
         "update_schedule",
         "Change one of the user's scheduled tasks (an id from list_schedules): its time, task "
-        "or condition; enabled=false pauses it, true resumes it.",
+        "or condition, or pause or resume it.",
         {
             "id": _ID,
             "ids": _IDS,
             "when": _NEW_WHEN,
-            "task": {"type": "string"},
-            "condition": {"type": "string"},
-            "enabled": {"type": "boolean"},
+            "task": _TASK,
+            "condition": _CONDITION,
+            "enabled": _ENABLED,
         },
         ["id"],
     ),

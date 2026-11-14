@@ -394,3 +394,24 @@ async def test_the_share_of_a_turn_no_run_is_served_for_stays_for_the_next_turn(
     assert usage is None and round(share, 6) == 0.001
     assert round(session.billed, 6) == 0.001 and found.unbilled == 0
     await ended(session, found, store)
+
+
+def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> None:
+    """A live session's process keeps what its ``trellis`` server listed in the first turn
+    (``adapters.claude._shape``: each tool's name, description and input schema); a later
+    turn is served by it only if it lists the same. The schedule tools, every parameter
+    described, list alike each turn."""
+    from trellis.harness.schedules import SPECS
+    from trellis.harness.tools.base import Tool
+    from trellis.harness.tools.convert import claude as convert
+
+    async def run(**kwargs: Any) -> Any:
+        return None
+
+    def listed() -> Any:
+        return convert.listing(convert.convert([Tool(spec, run) for spec in SPECS]))
+
+    first = listed()
+    assert first == listed()
+    [update] = [schema for name, _, schema in first if name == "update_schedule"]
+    assert '"enabled": {"description": "false pauses it, true resumes it."' in update
