@@ -262,7 +262,7 @@ async def test_loading_past_its_time_or_waiting_past_a_turn_says_so(
     assert "took too long" in await ask(harness, table(10), "SELECT 1")  # said all the same
     monkeypatch.setattr(query.DuckDB, "load", loads)
     monkeypatch.setattr(query, "WAIT_SECONDS", 0.01)
-    held = [query._RUNNING.acquire() for _ in range(query.CONCURRENT)]
+    held = [query._RUNNING.acquire() for _ in range(4)]  # 4 at once in a process
     try:
         assert "waited" in await ask(harness, table(10), "SELECT 1")
     finally:
