@@ -31,7 +31,14 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   ``turn.ended``; ``"own_turn"`` seconds long; ``"notified": {...builtin step}`` a call it asks
   permission for). A prompt that comes while that turn runs is answered ``end_turn`` at once
   and recorded (``queued``), as Kimi queues it behind its turn;
-* ``{"question": "...", "options": [...]}`` its question to the user (``AskUserQuestion``);
+* ``{"question": "...", "options": [...]}`` its question to the user (``AskUserQuestion``:
+  two options or more, as Kimi's takes), and ``{"questions": [{"question", "header",
+  "options": [{"label", "description"}], "multi_select"}, ...]}`` several in one call: asked in
+  one form of a client that takes forms (``FAKE_ACP_FORMS=0``: it sends none), else the first
+  only, as a permission request — as Kimi does;
+  ``{"review": {"plan": "...", "options": [...]}}`` its plan, presented for review
+  (``ExitPlanMode``) as Kimi asks: an option an approach (two or more; else ``Approve``),
+  ``Revise`` and ``Reject and Exit``;
 * ``{"usage": {...}, "agent": "main"}`` a model request's usage, in its usage log under
   ``KIMI_CODE_HOME`` (Kimi's ``usage.record`` line); ``{"bound": {"agent": "agent-0",
   "profile": "explore"}}`` the profile a sub-agent was started with, in its log (Kimi's
@@ -54,8 +61,9 @@ session's MCP servers and how it began, the prompts, the permission answers).
 ``FAKE_ACP_CONFIG`` (JSON) is what its ``config.toml`` starts every session in, as Kimi's does
 (``default_permission_mode``: ``auto`` or ``yolo``, in which it asks about no call;
 ``default_plan_mode``): in its log (``permission.set_mode``, ``plan_mode.enter``) while ACP
-goes on saying ``default``. ``session/set_mode`` sets both (logged so) —
-``FAKE_ACP_MODE_STUCK=1``: it answers and changes nothing.
+goes on saying ``default``. ``session/set_mode`` sets both (logged so), and fails for the plan
+mode of a session already in it, as Kimi's does — ``FAKE_ACP_MODE_STUCK=1``: it answers and
+changes nothing.
 """
 
 from __future__ import annotations
@@ -79,6 +87,8 @@ from acp.schema import (
     AvailableCommandsUpdate,
     ContentToolCallContent,
     CurrentModeUpdate,
+    ElicitationFormSessionMode,
+    ElicitationSchema,
     EnvVariable,
     ForkSessionResponse,
     Implementation,
@@ -183,15 +193,17 @@ def modes() -> SessionModeState:
     )
 
 
-def asks(session_id: str) -> bool:
-    """Whether the session's permission mode asks before a call (``manual``), by its log."""
+def mode_of(session_id: str) -> tuple[bool, str]:
+    """Whether the session is in plan mode, and its permission mode, by its log."""
     path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
-    mode = "manual"
+    planning, permission = False, "manual"
     for line in path.read_text().splitlines() if path.exists() else ():
         entry = json.loads(line) if line.startswith("{") else {}
         if entry.get("type") == "permission.set_mode":
-            mode = entry["mode"]
-    return mode == "manual"
+            permission = entry["mode"]
+        elif str(entry.get("type")).startswith("plan_mode."):
+            planning = entry["type"] == "plan_mode.enter"
+    return planning, permission
 
 
 def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
@@ -318,6 +330,8 @@ class FakeAgent:
         record("modes", mode_id)
         if os.environ.get("FAKE_ACP_MODE_STUCK") != "1":
             plan, permission = MODES[mode_id]
+            if plan and mode_of(session_id)[0]:  # as Kimi: its permission mode left as it was
+                raise RequestError.internal_error({"why": "Already in plan mode"})
             kind = "plan_mode.enter" if plan else "plan_mode.cancel"
             logged(session_id, "main", {"type": kind, "agentId": "main"})
             line = {"type": "permission.set_mode", "agentId": "main", "mode": permission}
@@ -481,8 +495,10 @@ class FakeAgent:
         if "updates" in step:
             await self.updates(session_id)
             return None
-        if "question" in step:
+        if "question" in step or "questions" in step:
             return await self.question(session_id, step)
+        if "review" in step:
+            return await self.review(session_id, step["review"])
         if "tool" in step:
             args = override if override is not None else step["args"]
             return await self.mcp_call(session_id, step["tool"], args)
@@ -510,7 +526,7 @@ class FakeAgent:
     ) -> str:
         """The client's answer: the option chosen, or ``cancelled`` — its own, in a permission
         mode that asks about nothing."""
-        if not asks(session_id):
+        if mode_of(session_id)[1] != "manual":
             record("permissions", {"title": title, "answer": "unasked"})
             return "approve_once"
         answer = await self.conn.request_permission(
@@ -525,6 +541,36 @@ class FakeAgent:
         chosen = answer.outcome.option_id if answer.outcome.outcome == "selected" else "cancelled"
         record("permissions", {"title": title, "answer": chosen})
         return chosen
+
+    async def unseen(self, session_id: str, agent: str, call_id: str, asked: dict[str, Any]) -> str:
+        """The permission request for a call ACP shows no update of (a sub-agent's, one of
+        Kimi's own turn), as Kimi makes it: in ``agent``'s log first, with what Kimi shows its
+        own user of the call (``interaction.request``, its ``display``: a command whole, a
+        file's path and content); over ACP only the tool's name and a line that cuts a command
+        at 50 characters. The client's answer."""
+        title = f"mcp__trellis__{asked['tool']}" if "tool" in asked else asked["builtin"]
+        args = asked["args"]
+        if title == "Bash":
+            command = args["command"]
+            display = {
+                "kind": "command",
+                "command": command,
+                "cwd": os.getcwd(),
+                "language": "bash",
+            }
+            action = "Running: " + (command if len(command) <= 50 else command[:50] + "…")
+        elif title == "Write":
+            display = {"kind": "file_io", "operation": "write", **args}
+            action = f"Writing {args['path']}"
+        else:
+            display = {"kind": "generic", "summary": title}
+            action = f"Calling {title}"
+        request = {"toolName": title, "action": action, "display": display}
+        line = {"type": "interaction.request", "agentId": agent, "toolCallId": call_id}
+        logged(session_id, agent, {**line, "request": request})
+        return await self.permitted(
+            session_id, f"0:{call_id}", title, f"Requesting approval to {action}"
+        )
 
     async def started(
         self, session_id: str, call_id: str, title: str, args: dict[str, Any]
@@ -552,7 +598,18 @@ class FakeAgent:
     async def decided(
         self, session_id: str, call_id: str, title: str, args: dict[str, Any]
     ) -> None:
+        """Its own call asked about, unless the session's approvals cover it: Kimi keeps a
+        call approved "for this session" (its literal rule: the tool with this command, or
+        this path) and asks about the same one no more, in this process or a later one."""
+        kept = session_dir(session_id) / "approved.json"
+        approved = json.loads(kept.read_text()) if kept.exists() else []
+        rule = f"{title}({args.get('command') or args.get('path') or ''})"
+        if rule in approved:
+            record("permissions", {"title": title, "answer": "approved for this session"})
+            return
         chosen = await self.permitted(session_id, call_id, title, f"Requesting approval to {title}")
+        if chosen == "approve_always":
+            kept.write_text(json.dumps([*approved, rule]))
         if chosen == "cancelled":
             await self.progress(
                 session_id,
@@ -633,12 +690,8 @@ class FakeAgent:
         if "usage" in task:
             logged_usage(session_id, agent, task["usage"])
         if "asks" in task:
-            asked, call_id = task["asks"], f"call_bg_{info['taskId']}"
-            line = {"type": "interaction.request", "agentId": agent, "toolCallId": call_id}
-            logged(session_id, agent, line)
-            title = f"mcp__trellis__{asked['tool']}" if "tool" in asked else asked["builtin"]
-            said = f"Requesting approval to Running: {json.dumps(asked['args'])}"
-            chosen = await self.permitted(session_id, f"0:{call_id}", title, said)
+            asked = task["asks"]
+            chosen = await self.unseen(session_id, agent, f"call_bg_{info['taskId']}", asked)
             record("background", {"task": info["taskId"], "answer": chosen})
             if "tool" in asked and chosen == "approve_once":  # its harness tool's call
                 await asyncio.sleep(task.get("call_after", 0))
@@ -657,11 +710,8 @@ class FakeAgent:
         logged(session_id, "main", {"type": "agent.turn.started"})
         try:
             if "notified" in task:
-                notified, call_id = task["notified"], f"call_own_{info['taskId']}"
-                line = {"type": "interaction.request", "agentId": "main", "toolCallId": call_id}
-                logged(session_id, "main", line)
-                said = f"Requesting approval to {notified['builtin']}"
-                chosen = await self.permitted(session_id, f"0:{call_id}", notified["builtin"], said)
+                call_id = f"call_own_{info['taskId']}"
+                chosen = await self.unseen(session_id, "main", call_id, task["notified"])
                 record("own", {"task": info["taskId"], "answer": chosen})
             await asyncio.sleep(task.get("own_turn", 0))
         finally:
@@ -759,13 +809,7 @@ class FakeAgent:
             await self.progress(session_id, call_id, status="completed", raw_output=launched)
             return launched
         if "asks" in step:  # a call of the sub-agent's own: no update, only its permission
-            asked = step["asks"]
-            chosen = await self.permitted(
-                session_id,
-                "0:call_sub",
-                asked["builtin"],
-                f"Requesting approval to Running: {json.dumps(asked['args'])}",
-            )
+            chosen = await self.unseen(session_id, "agent-0", f"call_sub_{call_id}", step["asks"])
             if chosen == "cancelled":
                 await self.progress(
                     session_id,
@@ -781,19 +825,117 @@ class FakeAgent:
         return step["result"]
 
     async def question(self, session_id: str, step: dict[str, Any]) -> str:
+        """Its questions to the user (Kimi's ``AskUserQuestion``), asked as Kimi asks them: a
+        client that takes forms (``elicitation.form``) is sent every question in one form, a
+        field each; any other the first question only, as a permission request. What the call
+        answers: the answers by question (the one answer, of ``"question"``)."""
+        questions = step.get("questions") or [
+            {"question": step["question"], "options": [{"label": o} for o in step["options"]]}
+        ]
+        call_id = self.call_id()
+        await self.started(session_id, call_id, "AskUserQuestion", {"questions": questions})
+        forms = self.client is not None and self.client.elicitation is not None
+        if forms and os.environ.get("FAKE_ACP_FORMS", "1") == "1":
+            answers = await self.formed(session_id, call_id, questions)
+        else:
+            answers = await self.first(session_id, call_id, questions[0])
+        output = json.dumps({"answers": answers}) if answers else "dismissed"
+        await self.progress(session_id, call_id, status="completed", raw_output=output)
+        if "questions" not in step and answers:
+            return next(iter(answers.values()))
+        return output
+
+    async def formed(
+        self, session_id: str, call_id: str, questions: list[dict[str, Any]]
+    ) -> dict[str, str] | None:
+        """Kimi's form of ``questions`` (``questionRequestToElicitationParams``), and the
+        answers it reads of the client's (``elicitationResponseToQuestionAnswers``)."""
+        properties: dict[str, Any] = {}
+        for n, asked in enumerate(questions):
+            picks = [
+                {"const": o["label"], "title": o["label"], "description": o.get("description")}
+                for o in asked["options"]
+            ]
+            field = {"title": asked.get("header") or asked["question"]}
+            if asked.get("multi_select"):
+                field |= {"type": "array", "minItems": 1, "items": {"anyOf": picks}}
+            else:
+                field |= {"type": "string", "oneOf": picks}
+            properties[f"q{n}"] = field
+        schema = {"type": "object", "properties": properties, "required": list(properties)}
+        answer = await self.conn.create_elicitation(
+            "\n".join(asked["question"] for asked in questions),
+            ElicitationFormSessionMode(
+                session_id=session_id,
+                tool_call_id=call_id,
+                requested_schema=ElicitationSchema.model_validate(schema),
+            ),
+        )
+        record("forms", {"schema": schema, "answer": answer.model_dump(exclude_none=True)})
+        if answer.action == "cancel":
+            raise Stopped("paused")
+        content = getattr(answer, "content", None) or {}
+        answers = {}
+        for n, asked in enumerate(questions):
+            value = content.get(f"q{n}")
+            if value:
+                answers[asked["question"]] = ", ".join(value) if isinstance(value, list) else value
+        return answers or None
+
+    async def first(
+        self, session_id: str, call_id: str, asked: dict[str, Any]
+    ) -> dict[str, str] | None:
+        """Kimi's fallback for a client that takes no form: the first question, its options
+        and ``Skip``, as a permission request."""
+        labels = [o["label"] for o in asked["options"]]
         options = [
             PermissionOption(option_id=f"q0_opt_{n}", name=label, kind="allow_once")
-            for n, label in enumerate(step["options"])
+            for n, label in enumerate(labels)
         ]
         options.append(PermissionOption(option_id="q0_skip", name="Skip", kind="reject_once"))
         chosen = await self.permitted(
-            session_id, "ask-user", "AskUserQuestion", step["question"], options
+            session_id, call_id, "AskUserQuestion", asked["question"], options
         )
         if chosen == "cancelled":
             raise Stopped("paused")
         if chosen == "q0_skip":
-            return "dismissed"
-        return step["options"][int(chosen.rsplit("_", 1)[1])]
+            return None
+        return {asked["question"]: labels[int(chosen.rsplit("_", 1)[1])]}
+
+    async def review(self, session_id: str, plan: dict[str, Any]) -> str:
+        """Its plan presented for review (Kimi's ``ExitPlanMode``): what the call answers."""
+        labels = plan.get("options") or []
+        call_id = self.call_id()
+        args = {"options": [{"label": label} for label in labels]} if labels else {}
+        await self.started(session_id, call_id, "ExitPlanMode", args)
+        approve = [
+            PermissionOption(option_id=f"plan_opt_{n}", name=label, kind="allow_once")
+            for n, label in enumerate(labels)
+        ] or [PermissionOption(option_id="plan_approve", name="Approve", kind="allow_once")]
+        options = [
+            *approve,
+            PermissionOption(option_id="plan_revise", name="Revise", kind="reject_once"),
+            PermissionOption(
+                option_id="plan_reject_and_exit", name="Reject and Exit", kind="reject_once"
+            ),
+        ]
+        said = f"{plan['plan']}\nRequesting approval to Presenting plan and exiting plan mode"
+        chosen = await self.permitted(session_id, call_id, "ExitPlanMode", said, options)
+        if chosen == "cancelled":
+            output = "Plan approval dismissed. Plan mode remains active."
+            await self.progress(session_id, call_id, status="completed", raw_output=output)
+            raise Stopped("paused")
+        if chosen == "plan_revise":
+            output = "User requested revisions. Plan mode remains active."
+        elif chosen == "plan_reject_and_exit":
+            logged(session_id, "main", {"type": "plan_mode.exit", "agentId": "main"})
+            output = "Plan rejected by user. Plan mode deactivated."
+        else:
+            logged(session_id, "main", {"type": "plan_mode.exit", "agentId": "main"})
+            picked = next((o.name for o in options if o.option_id == chosen), "")
+            output = "Exited plan mode. " + (f"Selected approach: {picked}" if labels else "")
+        await self.progress(session_id, call_id, status="completed", raw_output=output)
+        return output
 
 
 if __name__ == "__main__":

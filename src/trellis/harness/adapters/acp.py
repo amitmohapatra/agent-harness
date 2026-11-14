@@ -31,8 +31,10 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   ``governance.shell.read_only`` reads as read-only). A rejection,
   and an edit, end the turn there and the agent is told in a prompt of its own (ACP's answer
   carries no reason and no arguments): why, or to call the tool again with the edited
-  arguments — that call is approved when it comes. The agent's own questions (Kimi's
-  ``AskUserQuestion``) are the run's questions (``Runtime.ask``);
+  arguments — that call is approved when it comes. A request that offers a choice of the
+  agent's own (Kimi's ``AskUserQuestion``, the plan its ``ExitPlanMode`` presents for review)
+  is the agent's question to its user: the run's question (``Runtime.ask``), with every
+  option it offers;
 * records: every call the main agent runs itself is recorded as the run's once it ends
   (``tool_call`` / ``tool_call_update``: ``tools.bridge.observed``); a sub-agent's own calls are
   not shown over ACP — only those it asks permission for, which are governed;
@@ -81,6 +83,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Final, cast
 
 from trellis.contracts import (
@@ -126,6 +129,7 @@ from trellis.harness.bridges.acp_live import (
     dismissed,
     selected,
     shape,
+    unfilled,
 )
 from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.bridges.live import LiveSessions, Turn
@@ -137,6 +141,7 @@ from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
+from trellis.harness.tools.elicit import elicited
 
 log = logging.getLogger("trellis.harness")
 
@@ -157,6 +162,10 @@ GOVERNED_MODES: Final = frozenset({"default", "plan"})
 #: (:data:`KIMI_ASKS`: the one that asks before a call), and its plan mode going on and off.
 PERMISSION_SET: Final = "permission.set_mode"
 KIMI_ASKS: Final = "manual"
+#: ... and the two session modes of Kimi's ACP server that ask (:data:`GOVERNED_MODES`): the
+#: one that plans, and its default.
+KIMI_PLANS: Final = "plan"
+KIMI_DEFAULT: Final = "default"
 PLAN_MODE: Final[Mapping[str, bool]] = {
     "plan_mode.enter": True,
     "plan_mode.cancel": False,
@@ -179,6 +188,8 @@ EDITED: Final = (
     "A reviewer changed the arguments of your call to {tool}, so it was not run. Call {tool} "
     "again now with exactly these arguments: {args}"
 )
+#: What a person is asked when the agent offers options and says nothing with them.
+CHOOSE: Final = "The agent asks you to choose."
 #: Why the person denied the call, after the resumed session is told they did (ACP's answer
 #: carries no reason: the prompt does).
 DENIED_WHY: Final = "Their reason: {why}"
@@ -405,6 +416,19 @@ class UsageLog:
         return ("plan" if planning else "default"), (
             None if permission == KIMI_ASKS else permission
         )
+
+    def asking_in(self, mode: str | None) -> tuple[str, tuple[str, ...]]:
+        """The mode the session is to ask in — ``mode``, else the one it is in — and the
+        modes to set, in order, to get it there. Kimi's ACP server refuses to enter the plan
+        mode of a session already in it, leaving its permission mode as it was: so a session
+        that plans and asks is set nothing (its plan as it is), and one that plans but
+        approves on its own leaves plan mode first — only Kimi's ``config.toml`` starts a
+        session so, its plan not begun."""
+        at, alone = self.mode()
+        wanted = mode or at
+        if at == wanted == KIMI_PLANS:
+            return wanted, (() if alone is None else (KIMI_DEFAULT, KIMI_PLANS))
+        return wanted, (wanted,)
 
     def start(self) -> None:
         for path in self._files():
@@ -777,7 +801,11 @@ class ACPAdapter:
     async def _attempt(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
-        from acp.schema import ClientCapabilities
+        from acp.schema import (
+            ClientCapabilities,
+            ElicitationCapabilities,
+            ElicitationFormCapabilities,
+        )
 
         runtime = run.runtime
         target = given(target, runtime.framework_options)
@@ -800,7 +828,11 @@ class ACPAdapter:
         reads = [str(home.agent_home / "skills")] if home is not None else []
         attempt.shell = Shell(cwd, [*target.reads, *reads, results.PREFIX], env)
         attempt.served = run.native_tools
-        capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
+        # a form of the agent's for its user is answered (Kimi asks every question of an
+        # ``AskUserQuestion`` call in one form; over a permission request, only the first)
+        forms = ElicitationCapabilities(form=ElicitationFormCapabilities())
+        served = boxed.capabilities() if boxed is not None else {}
+        capabilities = ClientCapabilities(elicitation=forms, **served)
         # a session another worker's kept process still holds (a background sub-agent of the
         # run at work there) is forked: the turn goes on here, in a process of its own
         journal = runtime.replay.journal
@@ -877,6 +909,7 @@ class ACPAdapter:
                 env=env,
                 cwd=started.cwd,
                 transport_kwargs={"limit": _buffer_limit()},
+                use_unstable_protocol=True,  # ``elicitation/create``: the agent's forms
             )
 
         def served(relay: ACPSession) -> Any:
@@ -1462,14 +1495,12 @@ class Attempt:
             called = content_key("call", name.removeprefix(HARNESS_PREFIX), args)
             self.runtime.replay.announced(called, tool_call.tool_call_id)
             return chosen(options, "allow_once")
-        if self.profile is not None and name in self.profile.questions:
-            return await self._question(options, tool_call)
+        if _offers_a_choice(options):
+            return await self._question(options, name, tool_call)
         return await self._decided(options, name, tool_call)
 
     async def _decided(self, options: list[Any], name: str, tool_call: Any) -> Any:
         """A call of the agent's own, decided as the run decides a call."""
-        from acp.schema import RequestPermissionResponse
-
         runtime = self.runtime
         known = self.calls.get(tool_call.tool_call_id)
         args = known.args if known is not None else _args(tool_call.raw_input, tool_call.content)
@@ -1480,11 +1511,12 @@ class Attempt:
         runtime.model_ended(STEP)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
         try:
-            decided = await _permitted(spec, args, self.shell, asks_as, tool_call.tool_call_id)
+            request = (tool_call.tool_call_id, options)
+            decided = await _permitted(spec, args, self.shell, asks_as, request)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
-            return RequestPermissionResponse(outcome=dismissed())
+            return dismissed()
         if isinstance(decided, ToolOutcome):
             self._refused(known)
             self.followup = REJECTED.format(tool=name, why=str(decided.output))
@@ -1496,22 +1528,36 @@ class Attempt:
             self.followup = EDITED.format(tool=name, args=json.dumps(decided.args))
             await self._stop()
             return chosen(options, "reject_once")
-        return chosen(options, "allow_once")
+        return _let_through(runtime, name, options)
 
-    async def _question(self, options: list[Any], tool_call: Any) -> Any:
-        """The agent's question to its user (Kimi's ``AskUserQuestion``), asked as the run's: a
-        choice of its options; the answer is the option of that label."""
-        from acp.schema import RequestPermissionResponse
-
-        labels = [o.name for o in options if not o.kind.startswith("reject")]
-        question = _text(tool_call.content) or "The agent asks you to choose."
+    async def _question(self, options: list[Any], name: str, tool_call: Any) -> Any:
+        """The agent's question to its user, asked as the run's (:func:`_asked`); the run
+        paused on it, the agent stops here."""
+        known = self.calls.get(tool_call.tool_call_id)
+        args = known.args if known is not None else {}
         try:
-            answer = await self.runtime.ask(question, options=labels)
+            return await _asked(self.runtime, options, name, args, tool_call)
         except Paused:
             await self._stop()
-            return RequestPermissionResponse(outcome=dismissed())
-        chosen = {o.name: o.option_id for o in options}[answer]  # one of the labels asked
-        return RequestPermissionResponse(outcome=selected(chosen))
+            return dismissed()
+
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``: every question
+        of the call, a field each), asked as the run's question (:func:`_filled`) on behalf of
+        the call it is for; the run paused on it, the agent stops here."""
+        self._handles()
+        known = self.calls.get(mode.tool_call_id)
+        calling = (
+            contextlib.nullcontext()
+            if known is None
+            else self.runtime.asking_within(known.name, known.args)
+        )
+        try:
+            async with calling:
+                return await _filled(self.runtime, message, mode)
+        except Paused:
+            await self._stop()
+            return unfilled()
 
     # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
     async def read_text_file(
@@ -1690,11 +1736,13 @@ class Sandboxed:
         _said_reads(runtime.agent_id)
         runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
 
-    def capabilities(self) -> Any:
-        from acp.schema import ClientCapabilities, FileSystemCapabilities
+    def capabilities(self) -> dict[str, Any]:
+        """What the client serves the agent for a sandboxed run (``ClientCapabilities``'
+        fields): its files and its terminals."""
+        from acp.schema import FileSystemCapabilities
 
         files = FileSystemCapabilities(read_text_file=True, write_text_file=True)
-        return ClientCapabilities(fs=files, terminal=True)
+        return {"fs": files, "terminal": True}
 
     async def box(self, *, changes: bool = False) -> Any:
         """The run's sandbox, its copy of the agent's working directory made the first time
@@ -1790,7 +1838,7 @@ def _said_reads(agent_id: str) -> None:
 
 
 async def _permitted(
-    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str, call_id: str
+    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str, request: Any
 ) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
     (``bridge.permitted``: hooks, governance), and — since the agent asks — a person asked
@@ -1799,10 +1847,30 @@ async def _permitted(
     reads (a read tool, or a shell command ``shell`` reads as read-only: placed from the
     agent's working folder, or the call's own ``cwd``, and reading only what the run may read)
     or when the run changed its arguments (the agent is told to call it again so: that call is
-    the one let through). A pause propagates."""
+    the one let through). ``request``: the agent's permission request — its call's id, and
+    whether it offers to keep an approval for its session (:func:`_keeps`: the person may then
+    allow the tool for the conversation). A pause propagates."""
     reads = spec.side_effects == "read" or shell.read_only(spec.name, args)
     framework = None if reads else asks_as
-    return await bridge.permitted(spec, args, framework=framework, call_id=call_id)
+    call_id, options = request
+    return await bridge.permitted(
+        spec, args, framework=framework, call_id=call_id, kept=_keeps(options)
+    )
+
+
+def _keeps(options: Sequence[Any]) -> bool:
+    """Whether the agent offers to keep an approval of the call for its session (ACP's
+    ``allow_always``: Kimi's "Approve for this session")."""
+    return any(option.kind == "allow_always" for option in options)
+
+
+def _let_through(runtime: Runtime, name: str, options: list[Any]) -> Any:
+    """The answer that lets a call of the tool ``name`` run: the agent's approval for its
+    session where it offers one and the person allowed the tool for the conversation
+    (``bridge.remembered``) — the agent then asks about that call no more, as it would not
+    for its own user — else for this call."""
+    lasting = _keeps(options) and bridge.remembered(runtime, name)
+    return chosen(options, "allow_always" if lasting else "allow_once")
 
 
 def _swarm(call_id: str, args: Mapping[str, Any]) -> list[tuple[str, tuple[str, str], str]]:
@@ -1855,16 +1923,68 @@ class Deciding:
         name = tool_call.title or ""
         if name.startswith(HARNESS_PREFIX):
             return chosen(options, "allow_once")
+        if _offers_a_choice(options):
+            try:
+                return await _asked(self.runtime, options, name, {}, tool_call)
+            except Paused:
+                return WAITS
         args = _args(tool_call.raw_input, tool_call.content)
         spec = _spec(self.runtime, self.profile, name)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
         try:
-            decided = await _permitted(spec, args, self.shell, asks_as, tool_call.tool_call_id)
+            request = (tool_call.tool_call_id, options)
+            decided = await _permitted(spec, args, self.shell, asks_as, request)
         except Paused:
             return WAITS
         if isinstance(decided, ToolOutcome) or decided.args != args:
             return chosen(options, "reject_once")
-        return chosen(options, "allow_once")
+        return _let_through(self.runtime, name, options)
+
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        try:
+            return await _filled(self.runtime, message, mode)
+        except Paused:
+            return WAITS
+
+
+def _offers_a_choice(options: Sequence[Any]) -> bool:
+    """Whether a permission request is the agent's question to its user rather than whether a
+    call may run: it offers options of its own to pick from — a question's answers (Kimi's
+    ``AskUserQuestion``), a plan's approaches and what else to do with it (its
+    ``ExitPlanMode``: ``Revise``, ``Reject and Exit``) — so two of them are of one kind, where
+    a call's request has one way each to allow it once, to allow it from now on and to refuse
+    it."""
+    kinds = [option.kind for option in options]
+    return len(set(kinds)) < len(kinds)
+
+
+async def _asked(
+    runtime: Runtime, options: Sequence[Any], name: str, args: dict[str, Any], tool_call: Any
+) -> Any:
+    """The agent's question to its user (:func:`_offers_a_choice`), asked as the run's: one
+    question, what the agent shows with it (a question's words, a plan) and every option it
+    offers, each by its name; the answer chooses the option of that name. Asked on behalf of
+    the agent's call (``name``, ``args``: ``Runtime.asking_within``), which a session resumed
+    after the pause is told to make again. A pause propagates."""
+    question = _text(tool_call.content) or CHOOSE
+    async with runtime.asking_within(name, args):
+        answer = await runtime.ask(question, options=[option.name for option in options])
+    picked = {option.name: option.option_id for option in options}[answer]  # one it was asked
+    return selected(picked)
+
+
+async def _filled(runtime: Runtime, message: str, mode: Any) -> Any:
+    """A form the agent asks its user to fill (ACP's ``elicitation/create``, its form
+    ``mode``), asked as the run's question the way an MCP server's form is (``tools.elicit``:
+    one field that picks from values a choice, else a form with the agent's schema), and the
+    person's answer as the agent takes it. A pause propagates."""
+    from acp.schema import CreateElicitationResponse
+    from pydantic import TypeAdapter
+
+    schema = mode.requested_schema.model_dump(by_alias=True, exclude_none=True)
+    asking = elicited(SimpleNamespace(message=message, requested_schema=schema))
+    answer = await runtime.ask(asking.question, **asking.asking)
+    return TypeAdapter(CreateElicitationResponse).validate_python(asking.result(answer))
 
 
 def _spec(runtime: Runtime, profile: Profile | None, name: str) -> ToolSpec:

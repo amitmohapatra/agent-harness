@@ -66,7 +66,9 @@ command="kimi", reads=())`:
 | Tower mode: off | Kimi's experimental tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`: `TowerInit`, `TowerSpawn`, `TowerMerge`...) starts each worker in Kimi's `auto` permission mode, which asks about none of its calls, so the harness could govern none of them. Kimi's own switch is set for it, `KIMI_CODE_EXPERIMENTAL_TOWER=0`, which Kimi reads over its `config.toml`'s; turned on in the agent's `env` (Kimi then offers `TowerInit`, `TowerStatus` and `TowerTeardown` even over ACP), it stays off and the run says why (`acp_env` warning, as for `KIMI_DISABLE_CRON=0`). A run's sub-agents work through `Agent` and `AgentSwarm`, whose calls Kimi asks about |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
 | Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result; so is each it goes on with (`Agent(resume=...)`, a swarm's `resume_agent_ids`), named by the type Kimi started it with (its log's `profile.bind`), its task the prompt it goes on with. One it runs in the background (`run_in_background`) is a child run until its task ends ([below](#background-work)). Kimi decides when (the model calls the tool): nothing to configure |
-| Questions | Kimi's `AskUserQuestion` is the run's question (`Runtime.ask`): a durable pause, the answer one of its options |
+| Allowed for the conversation | Kimi offers "Approve for this session" on a call it asks about, so the person is offered the same choices as for a tool the harness runs: allow once, allow for this conversation, deny (an `irreversible` tool: once or deny). "For this conversation" answers Kimi with its session approval and covers the tool's later calls in the conversation: Kimi asks no more about the same command or file (its own session rule), and what it still asks about the tool the harness lets through without asking the person again, in this run and in the conversation's later runs. Calls Kimi's session rule covers are not asked about, so governance sees them only once they ran (they are recorded); a tool every call of which must be decided is given the risk `irreversible` in the catalog, which is never allowed beyond a call |
+| Questions | Kimi's `AskUserQuestion` is the run's question (`Runtime.ask`: a durable pause). The harness tells Kimi it takes forms (ACP's `elicitation/create`), so Kimi sends every question of the call (up to four) in one form: one question to the person, a field for each of Kimi's questions with its options and their descriptions, several picks where Kimi's question takes several. One question alone is a plain choice of its options. Kimi's ACP server has no "Other" answer in words. A client that takes no forms is asked only the first question by Kimi, and the rest are dropped |
+| Plans | Kimi asks its user to review every plan it presents (`ExitPlanMode`): the plan, one option an approach (or `Approve`), `Revise` and `Reject and Exit`. A permission request in which the agent offers a choice of its own is the agent's question to its user: the run pauses on one question that shows the plan and every option, and the person's pick is Kimi's answer. One question a call; the resumed session is told to make the call again and reads the answer |
 | Spending | Kimi's own usage log (`usage.record` lines: every model request of the main agent and of every sub-agent) is read as the turn runs: tokens count toward the budget, and past it the turn is cancelled and the run ends `PARTIAL`. Dollars are not counted yet (a follow-up reads them from the gateway's log): a `max_cost` budget does not see Kimi's spending |
 | Stalls | a model step that sends nothing for `STALL_SECONDS` (a tool's time not counted) ends the run with a `ModelTimeout` |
 | Cancel and time limits | a cancelled run, or one past its `run_timeout`, ends the attempt: a harness tool still under way is cancelled with it (recorded `cancelled` or `timeout`), as an in-process tool is, then the `kimi` process ends (unless work in its background keeps it: [below](#background-work)). Kimi starts in a second or two per attempt, inside the run's time limit |
@@ -133,7 +135,10 @@ of the session to see that it took:
   overrides, since a person's approval is the harness's to ask for.
 * **Plan mode is Kimi's own, kept as the session has it.** `mode="plan"` starts a session in
   plan mode; so does Kimi's `default_plan_mode`. A session that is in plan mode when a run
-  continues it stays in it, and one whose plan was approved stays out of it.
+  continues it stays in it, and one whose plan was approved stays out of it. Kimi refuses to
+  enter the plan mode of a session already in it, so a session that plans and asks is set
+  nothing; one its config starts both planning and approving on its own (`default_plan_mode`
+  with `default_permission_mode`) is set to `default` and then `plan`, before any plan exists.
 * **A session whose log does not confirm the mode gets no prompt**: the run fails saying which
   mode was set and what Kimi's log says (within 5 s of Kimi's answer; Kimi writes its log a
   moment after).
@@ -147,7 +152,14 @@ it starts in; only the `mode=` the target gives is set, on a session the run sta
   asking (its default mode asks about none) is governed by Kimi's own policy, then recorded.
 * **A sub-agent's own calls.** Kimi shows a sub-agent's (and a swarm member's) calls only when it
   asks permission for one — those are governed; the others are not recorded, and the child run
-  holds the sub-agent's task and answer.
+  holds the sub-agent's task and answer. Kimi's request for a sub-agent's call names the tool
+  and one line that cuts a command at 50 characters, with no arguments. The harness decides it
+  with what Kimi shows its own user of the call, read from Kimi's log of the session
+  (`interaction.request`): a `Bash` command whole with the folder it runs in (`command`, `cwd`,
+  `language`), a file's `path` and `content` for `Write`. So a reviewer reads the whole command,
+  a catalog rule's `approve_when` sees it, and a sub-agent's command that only reads asks
+  nobody, as the main agent's. These are Kimi's display fields, not the call's raw arguments:
+  an argument Kimi does not show (a `Bash` `timeout`) is not in them.
 * **Background work and Kimi's own turns.** Nothing of them reaches the client: the harness
   reads Kimi's log ([above](#background-work)).
 

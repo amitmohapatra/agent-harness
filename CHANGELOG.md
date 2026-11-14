@@ -16,6 +16,41 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Changed: "Allow for this conversation" on a call Kimi Code asks about is Kimi's approval for its session
+
+A call Kimi asked about offered approve or reject only, and Kimi's own "Approve for this
+session" was never chosen, so a conversation asked again about each call. The person is now
+offered the choices of a tool the harness runs (allow once, allow for this conversation,
+deny); "for this conversation" answers Kimi with its session approval and covers the tool's
+later calls in the conversation, in this run and its later runs. `bridge.permitted` and
+`bridge.asked` take `kept=` for a framework that can keep an approval for its own session.
+
+### Fixed: a Kimi sub-agent's call is approved with its arguments, and every question Kimi asks reaches the person
+
+- **A sub-agent's call was governed blind.** ACP shows no update of a sub-agent's own call,
+  and Kimi's permission request for it carries the tool's name and one line that cuts a
+  command at 50 characters. The person was asked to approve `{"request": "Requesting approval
+  to Running: <the first 50 characters>"}`, a catalog rule's `approve_when` saw no command, and
+  a read-only command could not be told from a write. The call is now decided with what Kimi
+  shows its own user of it, read from Kimi's log of the session (`interaction.request`): the
+  whole command and the folder it runs in, a written file's path and content.
+- **Questions two to four of an `AskUserQuestion` call were dropped**, with the options'
+  descriptions and the several-picks kind. Kimi sends them all only to a client that takes
+  forms (ACP's `elicitation/create`); the harness now says it does, and the form is the run's
+  question, as an MCP server's form is (`tools/elicit.py`).
+
+### Fixed: a plan Kimi Code presents is reviewed by a person, with every option
+
+Kimi asks its user to review every plan (`ExitPlanMode`): the plan, an option for each
+approach, `Revise` and `Reject and Exit`. The harness treated the request as a read to let
+through and answered with the first option that allows, so a plan was approved by nobody and
+its first approach chosen. A permission request that offers a choice of the agent's own (two
+options of one kind, where a call's request has one way each to allow and to refuse) is now
+the agent's question to its user: the run pauses on one question that shows what the agent
+shows (the plan) and every option it offers, and the person's pick is the answer. Kimi's
+`AskUserQuestion` over a permission request is asked the same way, so its `Skip` is offered
+too. A session Kimi's own `default_plan_mode` starts in plan mode plans as Kimi does.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

@@ -1397,26 +1397,22 @@ async def _answered(runtime: Runtime, args: dict[str, Any]) -> dict[str, Any]:
     description why), another answer in words. The call the resumed session makes again in
     other words is the one the person answered (``Replay.made``): Claude reads its questions
     with their answers."""
-    made = runtime.replay.made(QUESTION_TOOL, args)
     answers: dict[str, str] = {}
     # the answers it reads are this call's: read again when it is made again after a pause
-    calling = runtime.replay.calling(content_key("call", QUESTION_TOOL, made.args))
-    async with runtime.limited(None, made=made):
-        with calling:
-            for asked in made.args.get("questions") or ():
-                options = [o for o in asked.get("options") or () if o.get("label")]
-                best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
-                picked = await ask_question(
-                    asked["question"],
-                    [str(o["label"]) for o in options],
-                    multiple=bool(asked.get("multiSelect")),
-                    recommended=best.get("label"),
-                    why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
-                )
-                answers[asked["question"]] = (
-                    ", ".join(picked) if isinstance(picked, list) else str(picked)
-                )
-    runtime.replay.ended(made)
+    async with runtime.asking_within(QUESTION_TOOL, args) as made:
+        for asked in made.args.get("questions") or ():
+            options = [o for o in asked.get("options") or () if o.get("label")]
+            best = next((o for o in options if str(o["label"]).endswith(RECOMMENDED)), {})
+            picked = await ask_question(
+                asked["question"],
+                [str(o["label"]) for o in options],
+                multiple=bool(asked.get("multiSelect")),
+                recommended=best.get("label"),
+                why=best.get("description") or (RECOMMENDED.strip("()") if best else None),
+            )
+            answers[asked["question"]] = (
+                ", ".join(picked) if isinstance(picked, list) else str(picked)
+            )
     return {**made.args, "answers": answers}
 
 

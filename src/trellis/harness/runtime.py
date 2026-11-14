@@ -535,6 +535,21 @@ class Runtime:
         finally:
             _call.reset(token)
 
+    @contextlib.asynccontextmanager
+    async def asking_within(self, tool: str, args: dict[str, Any]) -> AsyncIterator[Made]:
+        """The code inside asks a person on behalf of a call its framework runs itself
+        (``tool``, ``args``: Claude Code's ``AskUserQuestion``, the plan an ACP agent presents
+        for review): the call as the model made it. A pause in here is that call's
+        (``Pending.inside``): the resumed session is told to make it again, the call it then
+        makes — in other words, perhaps — is the one the person answered (``Replay.made``),
+        and what it reads of the journal is its own (``Replay.calling``). Left without a
+        pause, the call ran to its end."""
+        made = self.replay.made(tool, args)
+        async with self.limited(None, made=made):
+            with self.replay.calling(content_key("call", tool, made.args)):
+                yield made
+        self.replay.ended(made)
+
     # ------------------------------------------------------------------ stalls
     def model_started(self, key: str, seconds: float | None = None) -> None:
         """A model call (``key``: the framework's id of it) began: its watchdog ends the

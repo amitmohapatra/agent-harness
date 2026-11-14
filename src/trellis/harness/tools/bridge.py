@@ -215,6 +215,7 @@ async def permitted(
     *,
     framework: str | None = None,
     call_id: str | None = None,
+    kept: bool = False,
 ) -> ToolCall | ToolOutcome:
     """A call its framework runs itself (Claude Code's built-in tools, through its permission
     callback), decided as a harness call is — the run's ``before_tool`` hooks, then governance,
@@ -226,7 +227,10 @@ async def permitted(
     question, a hook's): one call, one question. The same call made again after it ran for
     the run (:func:`observed`: its framework began that work again — a subagent paused in its
     work, started again) is not let through: its result is what it reads. ``call_id``: the
-    framework's id of the call, whose answers are its own (``Replay.calling``)."""
+    framework's id of the call, whose answers are its own (``Replay.calling``). ``kept``: the
+    framework can keep an approval of the call for its own session (Kimi Code's "Approve for
+    this session"), so the person picks as for a call the harness runs — once, for this
+    conversation, deny — and one allowed for the conversation is (:func:`remembered`)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = content_key("call", spec.name, args)
@@ -244,16 +248,23 @@ async def permitted(
         call, verdict = await _hooked(runtime, call, key)
         if isinstance(verdict, Deny):
             return denied(call, verdict)
-        decision, call, rejected = await _decided(runtime, spec, call, verdict)
+        # a hook's question is asked as a hook's, whatever the framework can keep
+        lasting = kept and verdict is None
+        decision, call, rejected = await _decided(runtime, spec, call, verdict, kept=lasting)
     if rejected is not None:
         return rejected
     if framework is None or decision.asks or call.args != args:
         return call
-    return await asked(spec, args, framework, call_id=call_id)
+    return await asked(spec, args, framework, call_id=call_id, kept=kept)
 
 
 async def asked(
-    spec: ToolSpec, args: dict[str, Any], framework: str, *, call_id: str | None = None
+    spec: ToolSpec,
+    args: dict[str, Any],
+    framework: str,
+    *,
+    call_id: str | None = None,
+    kept: bool = False,
 ) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
@@ -267,8 +278,15 @@ async def asked(
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     why = FRAMEWORK_ASKS.format(framework=framework)
     with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
-        _, call, rejected = await _decided(runtime, spec, call, Ask(why))
+        _, call, rejected = await _decided(runtime, spec, call, Ask(why), kept=kept)
     return call if rejected is None else rejected
+
+
+def remembered(runtime: Runtime, tool: str) -> bool:
+    """Whether ``tool``'s calls were allowed beyond one call in this run (an approval
+    answered "for this conversation"): what a framework that keeps approvals for its own
+    session is answered with the call's (Kimi Code's "Approve for this session")."""
+    return reach(tool, None) in runtime.replay.journal.remembered
 
 
 async def asks_first(spec: ToolSpec, args: dict[str, Any]) -> bool:
@@ -661,6 +679,7 @@ async def _decided(
     tool: Tool | None = None,
     deciding: Hashable | None = None,
     again: bool = False,
+    kept: bool = False,
 ) -> tuple[Decision, ToolCall, ToolOutcome | None]:
     """Governance's decision, as the catalog says now, by name (a graph's tools were built
     before) — asking a person whenever a hook ``asked`` (whose it is, on which screen), and not
@@ -675,7 +694,11 @@ async def _decided(
     of it again (a ``ToolRetryMiddleware`` retrying a failed irreversible call: the same
     decision, the same arguments), so one call is one question; an edited call, or the same
     call of a new model step, is asked about anew. ``again``: a try again of a call decided
-    already, whose decision is not said on the run's stream a second time."""
+    already, whose decision is not said on the run's stream a second time. ``kept``: a call
+    its framework runs whose approval that framework can keep for its session
+    (:func:`permitted`): the person picks from the choices of a risk
+    (``governance.decision.choices``), and what they allow for the conversation covers the
+    tool's later calls in it, as a harness call's does."""
     governance = runtime.agent.harness._governance(runtime.tenant)
     decision = await governance.check(
         spec.name, call.args, side_effects=spec.side_effects, agent_id=runtime.agent_id
@@ -693,11 +716,14 @@ async def _decided(
     # a call answered already in this run keeps its answer: a denial stays the call's (a new
     # call its framework names by another id is asked: ``Replay.answer``)
     answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
+    lasts = ours or kept  # what is allowed for the conversation covers its later runs
+    # a hook's ``Ask`` is your rule in code; the question of a framework that keeps an
+    # approval for its session is its own, and no rule (:func:`asked`)
+    hooked = asked is not None and not kept
     if (
         decision.asks
         and not answered
-        and (why := await _allowed(runtime, decision, ours=ours, hooked=asked is not None))
-        is not None
+        and (why := await _allowed(runtime, decision, ours=lasts, hooked=hooked)) is not None
     ):
         decision = decision.approved(why)
         events.custom(DECISION, tool=spec.name, decision="APPROVE", remembered=True)
@@ -708,9 +734,8 @@ async def _decided(
         decision = decision.approved(f"{spec.name} was approved in the framework's own gate.")
         events.custom(DECISION, tool=spec.name, decision="APPROVE", framework=True)
     if decision.asks:
-        hooked = asked is not None
         resolution = await _answered(
-            runtime, call, decision, ours=ours, hooked=hooked, deciding=deciding
+            runtime, call, decision, ours=ours, kept=kept, hooked=hooked, deciding=deciding
         )
         answer = answer_of(resolution)  # raises RunCancelled on CANCEL
         remembered = runtime.replay.journal.remembered
@@ -758,17 +783,22 @@ async def _answered(
     decision: Decision,
     *,
     ours: bool,
+    kept: bool,
     hooked: bool,
     deciding: Hashable | None,
 ) -> InterruptResolution:
     """A person's answer about a call that asks: asked now (the run's pause; its choices those
-    of a call the harness runs, ``ours``, a hook's question or not, ``hooked``) — or, for a call
-    of a model decision already answered (``deciding``: its framework trying the same call
-    again), that answer."""
+    of a call the harness runs, ``ours``, a hook's question or not, ``hooked``; those of its
+    risk for a call whose framework keeps an approval for its session, ``kept``) — or, for a
+    call of a model decision already answered (``deciding``: its framework trying the same
+    call again), that answer."""
     held = None if deciding is None else (deciding, content_key("approve", call.tool, call.args))
     if held is not None and held in runtime.decided:
         return runtime.decided[held]
-    offered = await _offered(runtime, decision, hooked=hooked) if ours else ()
+    if ours:
+        offered = await _offered(runtime, decision, hooked=hooked)
+    else:
+        offered = choices(decision.risk) if kept else ()
     resolution = await runtime.approve(call, decision, offered)
     if held is not None:
         runtime.decided[held] = resolution

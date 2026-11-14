@@ -130,18 +130,38 @@ async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(
     assert not own & set(KIMI_OUTLIVES_THE_TURN)
 
 
-async def test_kimis_tower_mode_is_off_whatever_the_agents_own_env_says(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+@pytest.mark.parametrize(
+    ("told", "warned"),
+    [
+        (({"KIMI_CODE_EXPERIMENTAL_TOWER": "1"}, ""), ["acp_env"]),
+        (({"KIMI_CODE_EXPERIMENTAL_FLAG": "1"}, ""), []),
+        (({}, "[experimental]\ntower = true\n"), []),
+    ],
+    ids=["its-own-switch", "the-master-switch", "its-config"],
+)
+async def test_kimis_tower_mode_is_off_however_kimi_is_told_to_turn_it_on(
+    harness: Harness,
+    endpoint: PlannedEndpoint,
+    tmp_path: Path,
+    told: tuple[dict[str, str], str],
+    warned: list[str],
 ) -> None:
-    """Kimi's tower mode starts its workers in its ``auto`` permission mode (they ask about
-    nothing: the harness could govern none of their calls). Turned on in the agent's ``env``,
-    Kimi offers its ``Tower*`` tools even over ACP; under the harness its own switch keeps the
-    mode off (Kimi reads its environment's word first), and the run says why."""
-    target = kimi_target(endpoint, tmp_path, env={"KIMI_CODE_EXPERIMENTAL_TOWER": "1"})
+    """L47. Kimi's tower mode starts its workers in its ``auto`` permission mode (they ask
+    about nothing: the harness could govern none of their calls). Turned on — by its own
+    switch in the agent's ``env``, by the switch for every experiment
+    (``KIMI_CODE_EXPERIMENTAL_FLAG``), or in Kimi's ``config.toml`` — Kimi offers its
+    ``Tower*`` tools even over ACP; under the harness its own switch keeps the mode off (Kimi
+    reads that variable before its config and the master switch), and a run whose ``env``
+    asked for it says why."""
+    env, config = told
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    (home / "config.toml").write_text(config)
+    target = kimi_target(endpoint, tmp_path, env=env)
     events = [e async for e in harness.wrap(target, id="kimi-tower").stream("hi", user="u1")]
     assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
     assert not [t for t in endpoint.offered()[0] if t.startswith("Tower")]
-    assert [e.data.get("code") for e in events if e.data.get("name") == "warning"] == ["acp_env"]
+    assert [e.data.get("code") for e in events if e.data.get("name") == "warning"] == warned
 
 
 async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
@@ -154,7 +174,10 @@ async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     assert paused.interrupt.tool_call is not None
     assert paused.interrupt.tool_call.tool == "Bash"
     assert paused.interrupt.tool_call.args == {"command": WRITES}
-    assert paused.interrupt.question == "Approve Bash? Kimi Code asks before it runs this call."
+    assert paused.interrupt.question == (
+        "Approve Bash? Kimi Code asks before it runs this call. "
+        "Allow once, allow for this conversation, or deny."
+    )
     done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert done.answer == "Done. resumed"
@@ -199,6 +222,42 @@ async def test_kimi_still_asks_about_a_command_its_config_allows_and_so_a_person
     assert not (tmp_path / "kimi-work" / "made.txt").exists()
 
 
+async def test_a_command_allowed_for_the_conversation_is_approved_for_kimis_session(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """APR-01 (DECISIONS B4). "Allow for this conversation" on a command Kimi asks about is
+    Kimi's own "Approve for this session" (its log says so), and the tool's next command asks
+    nobody: one question."""
+    endpoint.plan = [
+        ("Bash", {"command": "touch made.txt"}),
+        ("Bash", {"command": "touch too.txt"}),
+    ]
+    agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-keeps")
+    paused = await agent.run("make them", user="u1", thread="chat")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert [o.label for o in paused.interrupt.options if not isinstance(o, str)] == [
+        "Allow once",
+        "Allow for this conversation",
+        "Deny",
+    ]
+    done = await agent.resume(
+        paused.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
+    )
+    assert done.status is RunStatus.SUCCESS, done.error
+    work = tmp_path / "kimi-work"
+    assert (work / "made.txt").exists() and (work / "too.txt").exists()
+    [log] = (tmp_path / "kimi-home").glob("sessions/*/*/agents/main/wire.jsonl")
+    resolved = [
+        json.loads(line) for line in log.read_text().splitlines() if "interaction.resolved" in line
+    ]
+    assert [
+        r["response"].get("scope") for r in resolved if r["response"]["decision"] == "approved"
+    ] == [
+        "session",
+        "session",
+    ]
+
+
 @pytest.mark.parametrize("starts_in", ["auto", "yolo"])
 async def test_a_config_that_approves_on_its_own_does_not_turn_the_approvals_off(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, starts_in: str
@@ -225,6 +284,107 @@ async def test_a_config_that_approves_on_its_own_does_not_turn_the_approvals_off
     done = await agent.resume(again.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     assert (work / "too.txt").exists()
+
+
+def _asks_two(body: dict[str, Any]) -> Any:
+    """A model that asks its user two questions in one call — again when the call was
+    dismissed (the run paused on it) — and then says what it was answered."""
+    results = [result_text(m["content"]) for m in body["messages"] if m.get("role") == "tool"]
+    if not results or "dismissed" in results[-1]:
+        pick = [{"label": "pg", "description": "Postgres"}, {"label": "mysql", "description": ""}]
+        clouds = [{"label": "aws", "description": ""}, {"label": "gcp", "description": ""}]
+        questions = [
+            {"question": "Which db?", "header": "DB", "options": pick},
+            {
+                "question": "Which cloud?",
+                "header": "Cloud",
+                "options": clouds,
+                "multi_select": True,
+            },
+        ]
+        return ("AskUserQuestion", {"questions": questions})
+    return "answered: " + results[-1]
+
+
+async def test_every_question_kimi_asks_in_one_call_reaches_the_person(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """L47. Kimi sends a client that takes forms every question of an ``AskUserQuestion``
+    call (ACP's ``elicitation/create``); a client that does not is asked the first only, and
+    the others are dropped. The harness takes forms: one question to the person holds both,
+    the second taking several picks, and Kimi reads both answers."""
+    async with PlannedEndpoint(turns=_asks_two).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-asks-two")
+        asked = await agent.run("set it up", user="u1")
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+        assert asked.interrupt.question == "Which db?\nWhich cloud?"
+        assert asked.interrupt.expects is not None
+        fields = asked.interrupt.expects["properties"]
+        assert [o["const"] for o in fields["q0"]["oneOf"]] == ["pg", "mysql"]
+        assert fields["q0"]["oneOf"][0]["description"] == "Postgres"
+        assert [o["const"] for o in fields["q1"]["items"]["anyOf"]] == ["aws", "gcp"]
+        picked = {"q0": "mysql", "q1": ["aws", "gcp"]}
+        done = await agent.resume(
+            asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1"
+        )
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer is not None
+        assert '"Which db?":"mysql"' in done.answer
+        assert '"Which cloud?":"aws, gcp"' in done.answer
+
+
+#: The plan file Kimi names in its plan mode's reminder.
+_PLAN_FILE = re.compile(r"(/[^\s\"'`<>]+/plans/[^\s\"'`<>]+\.md)")
+PLAN = "# Plan\n\nOption A: fast.\nOption B: safe.\n"
+
+
+def _plans(body: dict[str, Any]) -> Any:
+    """A model in Kimi's plan mode: it writes the plan file Kimi names, presents the plan with
+    two approaches — again when its review was dismissed (the run paused on it) — and then
+    says what the review answered."""
+    messages = body["messages"]
+    results = [result_text(m["content"]) for m in messages if m.get("role") == "tool"]
+    if not results:
+        said = "\n".join(text_of(m.get("content")) for m in messages)
+        return ("Write", {"path": _PLAN_FILE.findall(said)[-1], "content": PLAN})
+    if len(results) == 1 or "dismissed" in results[-1]:
+        approaches = [{"label": "Fast", "description": "A"}, {"label": "Safe", "description": "B"}]
+        return ("ExitPlanMode", {"options": approaches})
+    return "reviewed: " + results[-1]
+
+
+@pytest.mark.parametrize(
+    ("planning", "picked", "result"),
+    [
+        ("mode", "Safe", "Selected approach: Safe"),
+        ("mode", "Revise", "User requested revisions. Plan mode remains active."),
+        ("config", "Fast", "Selected approach: Fast"),
+    ],
+    ids=["mode-approach", "mode-revise", "config-approach"],
+)
+async def test_a_plan_kimi_presents_is_reviewed_by_a_person_with_every_option(
+    harness: Harness, tmp_path: Path, planning: str, picked: str, result: str
+) -> None:
+    """APR-01, L47 (DECISIONS B3). Kimi asks its user to review every plan (``ExitPlanMode``):
+    the plan, an option an approach, ``Revise`` and ``Reject and Exit``. The run pauses on that
+    one question, and the person's pick is Kimi's answer — in a session the run put in plan
+    mode (``mode="plan"``) and in one Kimi's own ``default_plan_mode`` did."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    if planning == "config":
+        (home / "config.toml").write_text("default_plan_mode = true\n")
+    fields = {"mode": "plan"} if planning == "mode" else {}
+    async with PlannedEndpoint(turns=_plans).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path, **fields), id="kimi-plans")
+        asked = await agent.run("plan it", user="u1")
+        assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+        assert PLAN.strip() in asked.interrupt.question
+        assert asked.interrupt.options == ["Fast", "Safe", "Revise", "Reject and Exit"]
+        done = await agent.resume(
+            asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1"
+        )
+        assert done.status is RunStatus.SUCCESS, done.error
+        assert done.answer is not None and result in done.answer
 
 
 @pytest.mark.parametrize(

@@ -40,11 +40,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
 from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
+from trellis.harness.bounded import LRU
 from trellis.harness.bridges.helpers import ATTRIBUTED_SECONDS
 from trellis.harness.bridges.live import (
     COMPLETED,
@@ -138,24 +139,45 @@ def accounted(runtime: Runtime, record: Mapping[str, Any], model: str | None) ->
 def chosen(options: list[Any], kind: str) -> Any:
     """The answer choosing the first option of ``kind`` (``allow_once``, ``reject_once``);
     the agent's question cancelled when it offers none."""
-    from acp.schema import RequestPermissionResponse
-
     for option in options:
         if option.kind == kind:
-            return RequestPermissionResponse(outcome=selected(option.option_id))
-    return RequestPermissionResponse(outcome=dismissed())
+            return selected(option.option_id)
+    return dismissed()
 
 
 def selected(option_id: str) -> Any:
-    from acp.schema import AllowedOutcome
+    """The answer to a permission request that chooses its option ``option_id``."""
+    from acp.schema import AllowedOutcome, RequestPermissionResponse
 
-    return AllowedOutcome(outcome="selected", option_id=option_id)
+    outcome = AllowedOutcome(outcome="selected", option_id=option_id)
+    return RequestPermissionResponse(outcome=outcome)
 
 
 def dismissed() -> Any:
-    from acp.schema import DeniedOutcome
+    """The answer to a permission request that chooses none of its options (ACP's
+    ``cancelled``): the turn is being stopped."""
+    from acp.schema import DeniedOutcome, RequestPermissionResponse
 
-    return DeniedOutcome(outcome="cancelled")
+    return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+
+
+def _shown(request: Mapping[str, Any]) -> dict[str, Any] | None:
+    """What Kimi shows its own user of the call a permission request is for (the ``display``
+    of its log's ``interaction.request``: a command whole with the folder it runs in, a file's
+    path and content, a URL...), less what kind of display it is; ``None`` when it shows
+    nothing."""
+    display = (request.get("request") or {}).get("display")
+    if not isinstance(display, dict):
+        return None
+    return {key: value for key, value in display.items() if key != "kind"} or None
+
+
+def unfilled() -> Any:
+    """The answer to a form the agent asked its user to fill that nobody fills now (ACP's
+    ``cancel``): the turn is being stopped, or nothing is there to ask."""
+    from acp.schema import CancelElicitationResponse
+
+    return CancelElicitationResponse(action="cancel")
 
 
 async def _logged_in_time(said: Callable[[], Awaitable[bool]]) -> bool:
@@ -266,8 +288,10 @@ class ACPSession(Keeper[Background]):
         self.drain: asyncio.Task[None] | None = None
         #: how many turns of its own Kimi began (for a task's end), as the log says
         self.own_turns = 0
-        #: whose each permission request is (Kimi's ``interaction.request``), by call id
-        self._asked: dict[str, str] = {}
+        #: each permission request as Kimi logs it (``interaction.request``), by call id:
+        #: whose it is, and what Kimi shows its own user of the call (:func:`_shown`) — the
+        #: most recent (``bounded.MAXSIZE``): a request is read here as it is asked
+        self._asked: LRU[str, tuple[str, dict[str, Any] | None]] = LRU()
         #: what each sub-agent said last (Kimi's ``subagent.completed``), by its id
         self._said: dict[str, str] = {}
         #: how each task that ended ended, by id (its call's launch may be read after)
@@ -384,17 +408,17 @@ class ACPSession(Keeper[Background]):
     async def asking(self, mode: str | None, log: Any) -> None:
         """The session put in a mode that asks before a call, before its first prompt:
         ``mode`` on a session the run started; else, for an agent whose log says the mode a
-        session is in (``UsageLog.mode``), that one — its plan mode kept on, a resumed
+        session is in (``UsageLog.asking_in``), that one — its plan mode kept on, a resumed
         session's too — asking, whatever the agent's own configuration started it in (Kimi's
         ``default_permission_mode`` approves on its own behind ACP's ``default``). The log
         must then say so, or the run fails (:data:`UNGOVERNED`): no call is governed in a
         session that asks about none. An agent with no such log keeps the mode it starts in."""
-        wanted = mode if mode is not None and not self.continued else None
-        if wanted is None and log is not None:
-            wanted = log.mode()[0]
-        if wanted is None:
-            return
-        await self.answered(self.conn.set_session_mode(session_id=self.session_id, mode_id=wanted))
+        given = mode if not self.continued else None
+        wanted, steps = (given, (given,) if given else ()) if log is None else log.asking_in(given)
+        for step in steps:
+            await self.answered(
+                self.conn.set_session_mode(session_id=self.session_id, mode_id=step)
+            )
         if log is None:
             return
 
@@ -518,7 +542,7 @@ class ACPSession(Keeper[Background]):
             )
             await self._task_end(str(info.get("taskId")), str(info.get("status")), summary)
         elif kind == "interaction.request":
-            self._asked[str(entry.get("toolCallId"))] = agent
+            self._asked[str(entry.get("toolCallId"))] = (agent, _shown(entry))
         elif kind == "usage.record":
             found = next((b for b in self.background.values() if b.agent_id == agent), None)
             if found is not None and not found.over:
@@ -543,18 +567,20 @@ class ACPSession(Keeper[Background]):
         if self.due:  # Kimi's own turn for it is to come: no prompt meanwhile
             self._settled.clear()
 
-    async def whose(self, call_id: str) -> str | None:
-        """The agent (its id) whose permission request ``call_id`` is, as Kimi's log says
-        (``interaction.request``: its id is the request's less its turn), waited for while it
-        is not written yet (:data:`ATTRIBUTED_SECONDS`); ``None``: no log says."""
+    async def requested(self, call_id: str) -> tuple[str | None, dict[str, Any] | None]:
+        """The permission request ``call_id`` as Kimi's log has it (``interaction.request``:
+        its id is the request's less its turn): the agent (its id) whose it is, and what Kimi
+        shows its own user of the call — waited for while it is not written yet
+        (:data:`ATTRIBUTED_SECONDS`). Neither, when no log says."""
         raw = call_id.partition(":")[2] or call_id
 
         async def asked() -> bool:
             await self.read()
             return raw in self._asked
 
-        await _logged_in_time(asked)
-        return self._asked.get(raw)
+        if self.log is not None:
+            await _logged_in_time(asked)
+        return self._asked.get(raw) or (None, None)
 
     # ------------------------------------------------------------------ the agent's requests
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
@@ -565,32 +591,61 @@ class ACPSession(Keeper[Background]):
     async def request_permission(
         self, options: list[Any], session_id: str, tool_call: Any, **kwargs: Any
     ) -> Any:
-        """A call the agent asks permission for: the main agent's, or a sub-agent's of the
-        turn, decided by the turn being served; a background sub-agent's (whose, its log says)
-        by its run's attempt, turn or no turn. With nothing to decide it — no turn, a
-        background run that ended — it is refused (``live.UNATTENDED``)."""
-        name, turn = tool_call.title or "", self.turn
-        main = turn is not None and tool_call.tool_call_id in turn.options.calls
-        agent = None if main or not self.background else await self.whose(tool_call.tool_call_id)
-        found = next((b for b in self.background.values() if b.agent_id == agent), None)
-        turn = self.turn  # the turn being served once whose it is was read
-        if found is not None:
-            if name.startswith(HARNESS_PREFIX):  # its harness tool's call, made next
-                self._calling.setdefault(name.removeprefix(HARNESS_PREFIX), []).append(found)
-
-            async def decided(at: Turn) -> Any:
-                return await at.options.request_permission(options, session_id, tool_call)
-
-            answer = await found.asked(decided)
-            if answer is not OVER:
-                return answer
-        elif turn is not None:
-            with contextlib.suppress(Left):
-                return await turn.within(
-                    turn.options.request_permission(options, session_id, tool_call)
-                )
+        """A call the agent asks permission for, decided by whoever answers for it
+        (:meth:`_relayed`); with nobody, refused (``live.UNATTENDED``). A call the turn saw no
+        update of (a sub-agent's: ACP shows none, and Kimi's request carries no arguments) is
+        decided with what Kimi shows its own user of it, as its arguments."""
+        name = tool_call.title or ""
+        found, shown = await self._asker(tool_call.tool_call_id)
+        if shown is not None and tool_call.raw_input is None:
+            tool_call = tool_call.model_copy(update={"raw_input": shown})
+        if found is not None and name.startswith(HARNESS_PREFIX):  # its harness tool's call
+            self._calling.setdefault(name.removeprefix(HARNESS_PREFIX), []).append(found)
+        answer = await self._relayed(
+            found, lambda to: to.request_permission(options, session_id, tool_call)
+        )
+        if answer is not OVER:
+            return answer
         self.refused[name] += 1
         return chosen(options, "reject_once")
+
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``), asked by
+        whoever answers for the call it is for (:meth:`_relayed`); with nobody, left
+        unfilled."""
+        found, _ = await self._asker(mode.tool_call_id)
+        answer = await self._relayed(found, lambda to: to.create_elicitation(message, mode))
+        return unfilled() if answer is OVER else answer
+
+    async def _asker(self, call_id: str) -> tuple[Background | None, dict[str, Any] | None]:
+        """Whose request the one for the call ``call_id`` is — a background sub-agent's run,
+        else ``None``: the main agent's, or a sub-agent's of the turn — and what Kimi shows
+        its own user of that call (:meth:`requested`; nothing is read for a call the turn
+        saw: its own)."""
+        turn = self.turn
+        main = turn is not None and call_id in turn.options.calls
+        agent, shown = (None, None) if main else await self.requested(call_id)
+        return next((b for b in self.background.values() if b.agent_id == agent), None), shown
+
+    async def _relayed(
+        self, found: Background | None, asked: Callable[[Any], Coroutine[Any, Any, Any]]
+    ) -> Any:
+        """A request of the agent's (``asked``: made of the ACP client that answers it) to
+        whoever answers for it: a background sub-agent's by its run's attempt
+        (``adapters.acp.Deciding``), turn or no turn; any other by the turn being served
+        (its ``adapters.acp.Attempt``). ``OVER`` with nothing to answer it — no turn, a
+        background run that ended."""
+        turn = self.turn  # the turn being served once whose request it is was read
+        if found is not None:
+
+            async def decided(at: Turn) -> Any:
+                return await asked(at.options)
+
+            return await found.asked(decided)
+        if turn is not None:
+            with contextlib.suppress(Left):
+                return await turn.within(asked(turn.options))
+        return OVER
 
     async def call(self, name: str, args: dict[str, Any]) -> Any:
         """A harness tool's call (the MCP server's): a background sub-agent's (its permission

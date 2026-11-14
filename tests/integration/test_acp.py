@@ -17,7 +17,7 @@ from tests.support.arm import arm
 from tests.support.memory import FakeMemoryService
 from tests.support.sandbox import FakeSandboxes
 from trellis import Deny, Harness, Hooks, Rewrite, current, tool
-from trellis.contracts import ConfigurationError, RunEventType, RunStatus, ToolCall
+from trellis.contracts import ConfigurationError, Option, RunEventType, RunStatus, ToolCall
 from trellis.harness import admission, compat
 from trellis.harness.adapters import acp
 from trellis.harness.adapters.acp import (
@@ -300,7 +300,10 @@ async def test_its_own_tools_are_governed_and_recorded(
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Bash"
     assert asked.interrupt.tool_call.args == {"command": "rm a.txt"}
-    assert asked.interrupt.question == "Approve Bash? Kimi Code asks before it runs this call."
+    assert asked.interrupt.question == (
+        "Approve Bash? Kimi Code asks before it runs this call. "
+        "Allow once, allow for this conversation, or deny."
+    )
     done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: bad pattern"
     assert recorded(tmp_path)["prompts"][-1] == RESUMED_CALL.format(tool="Bash")
@@ -309,6 +312,68 @@ async def test_its_own_tools_are_governed_and_recorded(
         (c.body["tool"], c.body["status"]) for c in memory_service.calls if c.name == "record_tool"
     ]
     assert records == [("Read", "ok"), ("Bash", "ok"), ("Bash", "ok"), ("Grep", "error")]
+
+
+async def test_a_call_allowed_for_the_conversation_is_kimis_approval_for_its_session(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """APR-01 (DECISIONS B4). Kimi offers "Approve for this session" on a call it asks about.
+    The person is offered the harness's own choices for it — allow once, for this
+    conversation, deny — and "for this conversation" answers Kimi with its session approval:
+    the tool's later calls ask nobody, in this run (the harness's word for the rest of it),
+    in Kimi's session (its own rule for the same command) and in the conversation's next
+    run. One question for the chat."""
+    script = [
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "b gone"},
+        {"text": "done: {last}"},
+        {"stop": "end_turn"},
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone again"},
+        {"builtin": "Bash", "args": {"command": "rm c.txt"}, "ask": True, "output": "c gone"},
+        {"text": "then: {last}"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="keeps")
+    asked = await agent.run("tidy up", user="u1", thread="chat")
+    assert asked.interrupt is not None
+    assert asked.interrupt.options == [
+        Option(value="once", label="Allow once"),
+        Option(value="run", label="Allow for this conversation"),
+        Option(value="reject", label="Deny"),
+    ]
+    done = await agent.resume(
+        asked.interrupt.interrupt_id, "approve", reviewer="u1", remember="run"
+    )
+    assert done.status is RunStatus.SUCCESS and done.answer == "done: b gone"
+    later = await agent.run("and again", user="u1", thread="chat")
+    assert later.status is RunStatus.SUCCESS and later.answer == "then: c gone"
+    assert [p["answer"] for p in recorded(tmp_path)["permissions"]] == [
+        "cancelled",  # the run paused on the one question
+        "approve_always",  # its answer, as Kimi takes it
+        "approve_always",  # another command of the tool, in the same run: the harness's word
+        "approved for this session",  # the same command again: Kimi's own rule
+        "approve_once",  # another command in a later run: allowed for the conversation
+    ]
+
+
+async def test_a_call_allowed_once_is_kimis_approval_once(harness: Harness, tmp_path: Path) -> None:
+    """APR-01 (DECISIONS B4). Allowed once, the call is approved once in Kimi: the tool's
+    next call asks again."""
+    script = [
+        {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "a gone"},
+        {"builtin": "Bash", "args": {"command": "rm b.txt"}, "ask": True, "output": "b gone"},
+        {"text": "done: {last}"},
+    ]
+    agent = harness.wrap(fake(tmp_path, script), id="once")
+    asked = await agent.run("tidy up", user="u1", thread="chat")
+    assert asked.interrupt is not None
+    again = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
+    assert again.status is RunStatus.PAUSED and again.interrupt is not None
+    assert again.interrupt.tool_call is not None
+    assert again.interrupt.tool_call.args == {"command": "rm b.txt"}
+    assert [p["answer"] for p in recorded(tmp_path)["permissions"]][:2] == [
+        "cancelled",
+        "approve_once",
+    ]
 
 
 async def test_a_rejected_call_ends_the_turn_and_the_agent_reads_why(
@@ -349,6 +414,8 @@ async def test_an_edited_call_is_made_again_with_its_arguments_and_runs(
 
 
 async def test_its_question_is_the_runs_question(harness: Harness, tmp_path: Path) -> None:
+    """One question, sent as Kimi sends it to a client that takes forms (a form of one field
+    that picks): a choice of its options."""
     script = [
         {"question": "Which colour?", "options": ["red", "blue"]},
         {"text": "picked {last}"},
@@ -356,14 +423,110 @@ async def test_its_question_is_the_runs_question(harness: Harness, tmp_path: Pat
     agent = harness.wrap(fake(tmp_path, script), id="asker")
     asked = await agent.run("paint", user="u1")
     assert asked.interrupt is not None and asked.interrupt.question == "Which colour?"
+    assert asked.interrupt.options == [
+        Option(value="red", label="red"),
+        Option(value="blue", label="blue"),
+    ]
     done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="blue", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "picked blue"
+
+
+QUESTIONS = [
+    {
+        "question": "Which db?",
+        "header": "DB",
+        "options": [{"label": "pg", "description": "Postgres"}, {"label": "mysql"}],
+    },
+    {
+        "question": "Which cloud?",
+        "header": "Cloud",
+        "options": [{"label": "aws"}, {"label": "gcp"}],
+        "multi_select": True,
+    },
+]
+
+
+async def test_every_question_of_a_call_is_asked_in_one_form(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """L47. Kimi asks every question of an ``AskUserQuestion`` call in one form of a client
+    that takes forms (ACP's ``elicitation/create``), and only the first of a client that does
+    not. The harness takes forms: one question to the person, a field a question — its
+    options with their descriptions, several picks where the question takes several — and
+    every answer goes back."""
+    script = [{"questions": QUESTIONS}, {"text": "got {last}"}]
+    agent = harness.wrap(fake(tmp_path, script), id="asks-two")
+    asked = await agent.run("set it up", user="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.question == "Which db?\nWhich cloud?"
+    assert asked.interrupt.expects is not None
+    fields = asked.interrupt.expects["properties"]
+    assert fields["q0"]["title"] == "DB" and fields["q1"]["title"] == "Cloud"
+    assert fields["q0"]["oneOf"][0] == {"const": "pg", "title": "pg", "description": "Postgres"}
+    assert fields["q1"]["type"] == "array"
+    picked = {"q0": "pg", "q1": ["aws", "gcp"]}
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer == 'got {"answers": {"Which db?": "pg", "Which cloud?": "aws, gcp"}}'
+    record = recorded(tmp_path)
+    assert [form["answer"]["action"] for form in record["forms"]] == ["cancel", "accept"]
+    assert "your call to AskUserQuestion" in record["prompts"][-1]
+
+
+async def test_a_question_asked_as_a_permission_request_offers_every_option_of_the_agents(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """An agent that sends no form asks its question as a permission request (Kimi's
+    fallback: the first question, its options and ``Skip``): a request that offers a choice is
+    the agent's question, asked with every option it offers."""
+    script = [{"question": "Which colour?", "options": ["red", "blue"]}, {"text": "picked {last}"}]
+    agent = harness.wrap(fake(tmp_path, script, env={"FAKE_ACP_FORMS": "0"}), id="asker-plain")
+    asked = await agent.run("paint", user="u1")
+    assert asked.interrupt is not None and asked.interrupt.question == "Which colour?"
+    assert asked.interrupt.options == ["red", "blue", "Skip"]
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer="Skip", reviewer="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "picked dismissed"
+
+
+@pytest.mark.parametrize(
+    ("approaches", "picked", "result"),
+    [
+        (["Fast", "Safe"], "Safe", "Selected approach: Safe"),
+        (["Fast", "Safe"], "Revise", "requested revisions"),
+        ([], "Approve", "Exited plan mode."),
+        ([], "Reject and Exit", "Plan rejected by user"),
+    ],
+    ids=["an-approach", "revise", "approve", "reject-and-exit"],
+)
+async def test_a_plan_is_reviewed_by_a_person_who_picks_among_every_option_the_agent_offers(
+    harness: Harness, tmp_path: Path, approaches: list[str], picked: str, result: str
+) -> None:
+    """APR-01, L47 (DECISIONS B3). Kimi presents every plan for review (``ExitPlanMode``): its
+    approaches, ``Revise`` and ``Reject and Exit``. A request that offers a choice is the
+    agent's question to its user: asked once, with the plan and every option, and answered with
+    the one the person picked — never the first approach by nobody's choice."""
+    plan = "# Plan\n\nOption A: fast.\nOption B: safe."
+    script = [{"review": {"plan": plan, "options": approaches}}, {"text": "then: {last}"}]
+    agent = harness.wrap(fake(tmp_path, script, mode="plan"), id="planner")
+    asked = await agent.run("plan it", user="u1")
+    assert asked.status is RunStatus.PAUSED and asked.interrupt is not None
+    assert asked.interrupt.question.startswith(plan)
+    offered = [*(approaches or ["Approve"]), "Revise", "Reject and Exit"]
+    assert asked.interrupt.options == offered and asked.interrupt.tool_call is None
+    assert [p["answer"] for p in recorded(tmp_path)["permissions"]] == ["cancelled"]
+    done = await agent.resume(asked.interrupt.interrupt_id, "answer", answer=picked, reviewer="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert done.answer is not None and result in done.answer
+    record = recorded(tmp_path)
+    assert len(record["permissions"]) == 2  # asked again by the resumed session: no new question
+    assert "your call to ExitPlanMode" in record["prompts"][-1]
+    assert record["modes"] == ["plan"]  # still planning, and asking, when the resume continued it
 
 
 async def test_a_question_answered_with_no_option_it_offers_is_skipped(
     harness: Harness, tmp_path: Path
 ) -> None:
-    script = [{"question": "Which?", "options": ["a"]}, {"text": "{last}"}]
+    script = [{"question": "Which?", "options": ["a", "b"]}, {"text": "{last}"}]
     agent = harness.wrap(fake(tmp_path, script), id="skipper")
     asked = await agent.run("x", user="u1")
     assert asked.interrupt is not None
@@ -372,27 +535,56 @@ async def test_a_question_answered_with_no_option_it_offers_is_skipped(
 
 
 # --------------------------------------------------------------------------- helpers
-async def test_a_sub_agent_is_a_child_run_and_its_calls_are_governed(
+LONG = "rm -rf build && echo this-command-is-longer-than-the-fifty-characters-kimi-shows"
+
+
+async def test_a_sub_agent_is_a_child_run_and_its_calls_are_governed_with_their_arguments(
     harness: Harness, tmp_path: Path
 ) -> None:
+    """APR-01, L47. ACP shows no update of a sub-agent's own call, and Kimi's request for it
+    names the tool and a line that cuts a command at 50 characters. The call is governed with
+    what Kimi shows its own user of it (its log's ``interaction.request``): the person reads
+    the whole command, in the folder Kimi runs it in."""
     script = [
         {
             "agent": {"description": "look", "prompt": "find tea", "subagent_type": "explore"},
-            "asks": {"builtin": "Bash", "args": {"command": "ls"}},
+            "asks": {"builtin": "Bash", "args": {"command": LONG}},
             "result": "agent_id: agent-0\nstatus: completed\n\n[summary]\ntea found",
         },
         {"text": "done"},
     ]
     agent = harness.wrap(fake(tmp_path, script), id="lead")
     asked = await agent.run("find tea", user="u1")
-    # the sub-agent's own Bash call asks: governed, though ACP shows no update of it
     assert asked.interrupt is not None and asked.interrupt.tool_call is not None
     assert asked.interrupt.tool_call.tool == "Bash"
+    assert asked.interrupt.tool_call.args == {
+        "command": LONG,
+        "cwd": str(tmp_path),
+        "language": "bash",
+    }
     done = await agent.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS
     kids = await children(harness, done.run_id)
     assert [c.metadata["native_helper"]["name"] for c in kids] == ["explore"]
     assert {c.status for c in kids} == {RunStatus.SUCCESS}
+
+
+async def test_a_sub_agents_command_that_only_reads_runs_without_asking_a_person(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """APR-01, L47. With the command read whole, a sub-agent's is decided as the main agent's
+    is: one that only reads asks nobody."""
+    script = [
+        {
+            "agent": {"prompt": "look"},
+            "asks": {"builtin": "Bash", "args": {"command": "ls"}},
+            "result": "x",
+        },
+        {"text": "done"},
+    ]
+    done = await harness.wrap(fake(tmp_path, script), id="lead-reads").run("look", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.interrupt is None
+    assert [p["answer"] for p in recorded(tmp_path)["permissions"]] == ["approve_once"]
 
 
 async def test_a_failed_sub_agent_ends_its_child_run_failed(
@@ -654,23 +846,31 @@ async def test_a_session_the_agent_leaves_in_a_mode_that_asks_nothing_fails_the_
 
 
 async def test_a_session_keeps_the_plan_mode_it_is_in(harness: Harness, tmp_path: Path) -> None:
-    """L47. Kimi's own plan mode is the session's: one its config starts in plan mode
-    (``default_plan_mode``) stays in it, set so that it asks; a session the run started in plan
-    mode (``mode="plan"``) is still in it when a resume continues it."""
+    """L47. Kimi's own plan mode is the session's, and Kimi refuses to enter the plan mode a
+    session is in. One its config starts planning (``default_plan_mode``) and approving on its
+    own leaves plan mode to be made to ask, and enters it again; one that plans and asks
+    already — its config's, or the session a resume continues (``mode="plan"`` began it) — is
+    set nothing, its plan as it was."""
     asks = {"builtin": "Bash", "args": {"command": "rm a.txt"}, "ask": True, "output": "gone"}
-    for name in "ab":
+    for name in "abc":
         (tmp_path / name).mkdir()
-    config = json.dumps({"default_plan_mode": True, "default_permission_mode": "auto"})
-    configured = fake(tmp_path / "a", [asks, {"text": "ok"}], env={"FAKE_ACP_CONFIG": config})
-    asked = await harness.wrap(configured, id="configured").run("x", user="u1")
+    config = {"default_plan_mode": True, "default_permission_mode": "auto"}
+    alone = fake(
+        tmp_path / "a", [asks, {"text": "ok"}], env={"FAKE_ACP_CONFIG": json.dumps(config)}
+    )
+    asked = await harness.wrap(alone, id="alone").run("x", user="u1")
     assert asked.status is RunStatus.PAUSED
-    assert recorded(tmp_path / "a")["modes"] == ["plan"]
-    planner = harness.wrap(fake(tmp_path / "b", [asks, {"text": "ok"}], mode="plan"), id="plans")
+    assert recorded(tmp_path / "a")["modes"] == ["default", "plan"]
+    config = {"default_plan_mode": True}
+    planning = fake(tmp_path / "b", [{"text": "ok"}], env={"FAKE_ACP_CONFIG": json.dumps(config)})
+    assert (await harness.wrap(planning, id="planning").run("x", user="u1")).answer == "ok"
+    assert "modes" not in recorded(tmp_path / "b")
+    planner = harness.wrap(fake(tmp_path / "c", [asks, {"text": "ok"}], mode="plan"), id="plans")
     asked = await planner.run("x", user="u1")
     assert asked.interrupt is not None
     done = await planner.resume(asked.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS
-    assert recorded(tmp_path / "b")["modes"] == ["plan", "plan"]
+    assert recorded(tmp_path / "c")["modes"] == ["plan"]
 
 
 async def test_an_agent_the_harness_does_not_know_keeps_the_mode_it_starts_in(
@@ -1225,7 +1425,10 @@ async def test_an_acp_agent_the_harness_has_no_profile_of_has_its_own_calls_aske
     assert second.status is RunStatus.PAUSED and second.interrupt is not None
     assert second.interrupt.tool_call is not None and second.interrupt.tool_call.tool == "Notify"
     assert "has not declared" in first.interrupt.question
-    assert second.interrupt.question == "Approve Notify? The agent asks before it runs this call."
+    assert second.interrupt.question == (
+        "Approve Notify? The agent asks before it runs this call. "
+        "Allow once, allow for this conversation, or deny."
+    )
     done = await agent.resume(second.interrupt.interrupt_id, "approve", reviewer="u1")
     assert done.status is RunStatus.SUCCESS and done.answer == "done: told ops"
     record = recorded(tmp_path)
