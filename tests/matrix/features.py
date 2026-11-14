@@ -1944,12 +1944,16 @@ TIGHT: Final[dict[str, tuple[dict[str, Any], str | None]]] = {
     "deepagents": ({"recursion_limit": 3}, "Recursion limit of 3 reached"),
     # OpenAI Agents answers at its limit (the SDK's own max_turns handler): a warning says so
     "openai_agents": ({"max_turns": 1}, "the turn limit (1) was reached"),
-    # Claude and Kimi answer at their limit too: asked once more, in the same session
+    # Claude ends at its limit with Claude Code's own error_max_turns result: PARTIAL, warned
     "claude": ({"max_turns": 1}, "the turn limit (1) was reached"),
+    # Kimi answers at its limit too: asked once more, in the same session
     "kimi": ({"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "1"}}, "the step limit (1) was reached"),
 }
 #: The adapters whose run answers once more at the framework's limit (a ``step_limit`` warning).
-ANSWER_AT_LIMIT: Final = frozenset({"openai_agents", "claude", "kimi"})
+ANSWER_AT_LIMIT: Final = frozenset({"openai_agents", "kimi"})
+#: The adapters whose run ends ``PARTIAL`` at the framework's limit, asking nothing more (a
+#: ``step_limit`` warning): Claude Code ends the query at ``max_turns`` and leaves it there.
+PARTIAL_AT_LIMIT: Final = frozenset({"claude"})
 ROOMY: Final[dict[str, dict[str, Any]]] = {
     "react": {"recursion_limit": 50},
     "middleware": {"recursion_limit": 50},
@@ -1976,8 +1980,11 @@ async def framework_options(w: World) -> None:
     if said is None:  # stopped at the limit with no answer (Kimi), not failed
         assert o.status is RunStatus.SUCCESS and not o.answer, (o.status, o.answer)
         return
-    if w.adapter in ANSWER_AT_LIMIT:  # one last answer at the limit, its warning on the stream
-        o.succeeded()
+    if w.adapter in ANSWER_AT_LIMIT | PARTIAL_AT_LIMIT:  # its warning on the stream
+        if w.adapter in ANSWER_AT_LIMIT:  # one last answer at the limit
+            o.succeeded()
+        else:
+            assert o.status is RunStatus.PARTIAL, (o.status, o.record.error)
         warned = [c.get("message", "") for c in o.custom(WARNING) if c.get("code") == "step_limit"]
         assert any(said in m for m in warned), o.custom(WARNING)
         return

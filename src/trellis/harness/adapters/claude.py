@@ -322,11 +322,6 @@ OWN_PROCESS: Final = "this query runs in a process of its own"
 #: What a call the harness's ``PreToolUse`` hook could not decide is refused with: the CLI
 #: would let a call whose hook failed through to its own permission check.
 UNDECIDED: Final = "The harness could not decide this call, so it did not run ({why})."
-#: What a tool call in the one last answer at the turn limit is refused with, in a live
-#: session (whose process keeps the tools it started with).
-AT_LIMIT: Final = (
-    "No tool runs now: this turn has reached its limit. Answer with what you found so far."
-)
 #: What a resumed session is told: the run goes on, and the call it paused on is made again.
 RESUMED: Final = (
     "This task was paused (a person was asked, or the process stopped) and goes on now. If "
@@ -448,21 +443,30 @@ class ClaudeAdapter:
         yield Output(messages)
 
     def extract(self, target: Any, output: Any) -> Extracted:
-        from claude_agent_sdk import ResultMessage
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
         transcript = _transcript(output)
         answer: Any = None
+        said: str | None = None  # what Claude said in the turn so far
         for message in output:
+            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+                said = text or said
             # the result of the turn's own prompt: one of a turn the session injected (a
             # finished background task's notification) is not the user's answer
             if isinstance(message, ResultMessage) and _own(message):
-                if message.is_error:
+                if message.subtype == MAX_TURNS:  # what it said before the limit: PARTIAL
+                    answer = said
+                elif message.is_error:
                     raise ClaudeRunError("; ".join(message.errors or []) or message.subtype)
-                answer = (
-                    message.structured_output
-                    if message.structured_output is not None
-                    else message.result
-                )
+                else:
+                    answer = (
+                        message.structured_output
+                        if message.structured_output is not None
+                        else message.result
+                    )
+            if isinstance(message, ResultMessage):
+                said = None
         return Extracted(answer=answer, transcript=transcript)
 
     def resume_input(
@@ -579,50 +583,35 @@ class ClaudeAdapter:
     async def _messages(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
-        """The query's messages (:meth:`_attempted`) — and, when it reached its turn limit
-        (``error_max_turns``: no answer), one last answer instead of that error: its session
-        resumed (Claude's own ``resume``), told the limit is reached for this turn
-        (``budget.TURN_LIMIT``: the session keeps it, and the next turn has its tools again),
-        for one turn with no tool, as a ``ReAct`` run at ``max_steps`` answers. A last query
-        that gives no answer leaves the error."""
+        """The query's messages (:meth:`_attempted`). A query that reached its turn limit
+        ends with Claude Code's own ``error_max_turns`` result, and Claude Code leaves it
+        there: the run ends ``PARTIAL`` with what Claude said before it (``extract``), its
+        limit as the budget it spent (``Runtime.budget_spent``) and a ``step_limit`` warning
+        — no query more (a paid last answer), and a live session and the background work in
+        it go on."""
         from claude_agent_sdk import ResultError, ResultMessage
 
         runtime = run.runtime
-        limited: Any = None
+        limited = False
         try:
             async with aclosing(self._attempted(target, native_input, run)) as messages:
                 async for message in messages:
                     if isinstance(message, ResultMessage) and message.subtype == MAX_TURNS:
-                        limited = message
-                        continue
-                    if isinstance(message, ResultMessage):
+                        limited = True
+                        limit = runtime.framework_options.get("max_turns") or target.max_turns
+                        stopped = f"the turn limit ({limit}) was reached"
+                        log.warning("run %s stopped: %s", runtime.run_id, stopped)
+                        runtime.events.warning("step_limit", f"stopped: {stopped}")
+                        runtime.budget_spent = stopped
+                    elif isinstance(message, ResultMessage):
                         # past Claude Code's own recovery: what a run with no answer says
                         runtime.cut_off = message.stop_reason == MAX_TOKENS
                     yield message
         except ResultError:
             # the CLI exits with an error after its error result (the SDK raises it then): at
             # the turn limit that is the end the result already said
-            if limited is None:
+            if not limited:
                 raise
-        if limited is None:
-            return
-        # the result names the session it ran in (the journal's): resumed for the last answer
-        session = runtime.replay.journal.session
-        limit = int(runtime.framework_options.get("max_turns") or target.max_turns or 0)
-        told = dataclasses.replace(native_input, prompt=budget.TURN_LIMIT.format(limit=limit))
-        last: list[Any] = []
-        async with aclosing(self._query(target, told, run, session, last=True)) as messages:
-            async for message in messages:
-                last.append(message)
-        answered = [m for m in last if isinstance(m, ResultMessage) and not m.is_error]
-        if not answered or not (answered[-1].result or "").strip():
-            yield limited
-            return
-        stopped = f"stopped: the turn limit ({limit}) was reached"
-        log.warning("run %s %s", runtime.run_id, stopped)
-        runtime.events.warning("step_limit", stopped)
-        for message in last:
-            yield message
 
     async def _attempted(
         self, target: Any, native_input: Any, run: Invocation
@@ -664,12 +653,9 @@ class ClaudeAdapter:
         native_input: Any,
         run: Invocation,
         session: str | None,
-        *,
-        last: bool = False,
     ) -> AsyncGenerator[Any, None]:
         """One query (``session``: the one it resumes); the session it runs in kept in the
-        journal as it goes. ``last``: the one last answer at the turn limit — its prompt as
-        given, one turn, no tool (no built-in, no MCP server), no context added again."""
+        journal as it goes."""
         from claude_agent_sdk import AssistantMessage, ResultMessage
 
         runtime = run.runtime
@@ -679,9 +665,8 @@ class ClaudeAdapter:
         plugins, written = await skills.for_run(target.plugins)
         target = dataclasses.replace(target, plugins=plugins) if written else target
         steps = Steps(runtime, self)
-        # a conversation's turn is served by its live session (``bridges.claude_live``) — its
-        # one last answer too, a turn of that session whose tool calls are refused (the live
-        # process and its background work go on); a run with no conversation of its own, a
+        # a conversation's turn is served by its live session (``bridges.claude_live``); a
+        # run with no conversation of its own, a
         # sub-agent's, and options whose parts are a process's alone (a plugin written for
         # the run; an in-process MCP server of the team's, whose tools run in the context of
         # the process's first turn; a budget of the options' own, which the CLI counts for a
@@ -691,15 +676,12 @@ class ClaudeAdapter:
         # run at work there) is forked: the turn goes on here, in a process of its own
         held = session is not None and await self._held_elsewhere(runtime)
         kept = key is not None and not written and not _own_process(target) and not held
-        context = None if last else _dated(native_input.context, run, kept=kept)
-        steps.last = last
+        context = _dated(native_input.context, run, kept=kept)
         options = _options(target, context, run, session, steps, kept=kept)
         options = dataclasses.replace(options, fork_session=options.fork_session or held)
-        if last and not kept:
-            options = dataclasses.replace(options, tools=[], mcp_servers={}, max_turns=1)
         # a first attempt resumes only the conversation's session (``Runtime.continued``):
         # the turn's own prompt; a later one, the run's own session after a pause
-        first = last or session is None or runtime.attempt == 1 or native_input.unsent
+        first = session is None or runtime.attempt == 1 or native_input.unsent
         prompt = native_input.prompt if first else _resumed(native_input, run)
         steps.waiting()
         spending = Spending(runtime, options, self.costs, None if held else session)
@@ -709,8 +691,7 @@ class ClaudeAdapter:
         try:
             if kept:
                 assert key is not None
-                unsent = first and not last  # the last answer's turn: asked already
-                live = await self._live(key, options, run, session, spending, unsent=unsent)
+                live = await self._live(key, options, run, session, spending, unsent=first)
             elif key is not None:
                 await self.live.close(key, OWN_PROCESS)
                 _said(self.live, runtime)
@@ -1188,7 +1169,7 @@ class Steps:
     calls under way, by Claude's id, with when each began (what ``PostToolUse`` records), and
     the subagent each call a subagent makes is the work of (``helped``)."""
 
-    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "last", "runtime")
+    __slots__ = ("adapter", "answered", "calls", "closed", "helped", "runtime")
 
     def __init__(self, runtime: Runtime, adapter: ClaudeAdapter) -> None:
         self.runtime = runtime
@@ -1200,8 +1181,6 @@ class Steps:
         #: the query ended: a call of it that ends later (a live session's process goes on)
         #: watches nothing
         self.closed = False
-        #: the one last answer at the turn limit: its tool calls are refused (:data:`AT_LIMIT`)
-        self.last = False
         #: whose query it is: the MCP tools it is seen calling join its tool set
         self.adapter = adapter
         #: the tool calls under way: their name, arguments and start (``time.time()``)
@@ -1415,8 +1394,6 @@ def _governance(steps: Steps) -> Any:
     from trellis.harness.tools.convert.claude import SERVER, WAITING
 
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
-        if steps.last:  # the one last answer, in a live session that has its tools
-            return _decided("deny", AT_LIMIT)
         try:
             return await decide(given, tool_use_id)
         except Exception as exc:

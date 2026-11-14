@@ -811,36 +811,38 @@ async def test_the_harness_tools_are_loaded_from_the_first_step(
     assert servers["erp"] == erp
 
 
-async def test_at_its_turn_limit_a_query_ends_with_one_last_answer(
-    harness: Harness, tmp_path: Path
+@pytest.mark.parametrize("said", ["Refunding o1 first.", None])
+async def test_at_its_turn_limit_a_query_ends_partial_with_what_claude_said(
+    harness: Harness, tmp_path: Path, said: str | None
 ) -> None:
-    """A query that reaches ``max_turns`` ends ``error_max_turns``, with no answer. As a
-    ``ReAct`` run at ``max_steps`` and an OpenAI Agents run at ``max_turns`` do, the run asks
-    once more: its session resumed (Claude's own ``resume``), told the limit is reached
-    (``budget.LIMIT``), one turn and no tool. Its answer is the run's, said as a
-    ``step_limit`` warning."""
-    from trellis.harness.budget import TURN_LIMIT
+    """A query that reaches ``max_turns`` ends with Claude Code's own ``error_max_turns``
+    result, and Claude Code leaves it there: the run ends ``PARTIAL`` with what Claude said
+    before the limit (nothing: no answer), its error ``BUDGET_EXCEEDED`` naming the limit and
+    a ``step_limit`` warning. No query more is made (no paid last answer), so the call the
+    limit stopped before never runs."""
+    from trellis.harness.budget import BUDGET_EXCEEDED
 
     refunds.clear()
     script = [
+        *([{"text": said}] if said else []),
         {"tool": "refund", "args": {"order": "o1"}},
         {"tool": "refund", "args": {"order": "o2"}},
         {"text": "never"},
     ]
-    target = options(tmp_path, script, max_turns=1)
-    target.env["FAKE_CLAUDE_AT_LIMIT"] = "Refunded o1; o2 is left undone."
+    target = options(tmp_path, script, max_turns=len(script) - 2)
     agent = arm(harness.wrap(target, id="limited"), [tool(refund.fn, side_effects="write")])
     events = [e async for e in agent.stream("refund o1 and o2", user="u1")]
     done = events[-1]
-    assert done.type is RunEventType.RUN_FINISHED and done.error is None
-    said = [e.data["delta"] for e in events if e.type is RunEventType.TEXT_MESSAGE_CONTENT]
-    assert said == ["Refunded o1; o2 is left undone."] and refunds == ["o1"]
+    assert done.type is RunEventType.RUN_FINISHED and done.outcome is RunOutcome.PARTIAL
+    assert done.data["result"] == said and refunds == ["o1"]
     warned = [e.data["message"] for e in events if e.data.get("code") == "step_limit"]
-    assert warned == ["stopped: the turn limit (1) was reached"]
-    last = started_with(tmp_path)  # the last query the CLI was started with
-    # the session keeps it: told it holds for this turn only, a later turn calls tools again
-    assert last["prompt"] == TURN_LIMIT.format(limit=1) and last["resume"] is not None
-    assert last["max_turns"] == "1" and last["builtins"] == "" and last["tools"] == []
+    limit = len(script) - 2
+    assert warned == [f"stopped: the turn limit ({limit}) was reached"]
+    started = (tmp_path / "cli.json.turns").read_text().splitlines()
+    assert len(started) == 1  # the one query: no last answer asked
+    result = await agent.run("refund o1 and o2", user="u1")
+    assert result.status is RunStatus.PARTIAL and result.error is not None
+    assert result.error.code == BUDGET_EXCEEDED and f"turn limit ({limit})" in result.error.message
 
 
 async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost_once(
@@ -849,8 +851,7 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     """A resumed session's result carries the session's cost, what it cost before the
     process that resumed it included (the bundled CLI, driven against a scripted model).
     A query that paused had no result: the attempt that resumes it is charged both. The
-    one last answer at the turn limit resumes a session whose query was charged already:
-    it is charged what the cost grew by."""
+    query that reached its turn limit is charged its steps, and no more."""
     from trellis.harness import budget
 
     costs: list[float | None] = []
@@ -873,20 +874,8 @@ async def test_a_query_resumed_after_a_pause_or_at_its_limit_is_charged_its_cost
     limited = options(tmp_path, [*steps, {"text": "never"}], model="m", max_turns=2)
     limited.env["FAKE_CLAUDE_COST"] = "0.5"
     result = await harness.wrap(limited, id="limited").run("read them", user="u1")
-    assert result.status is RunStatus.SUCCESS
-    assert costs == [1.0, 0.5]  # two steps, then the last answer's one: not 1.0 and 1.5
-
-
-async def test_a_last_query_at_the_limit_that_gives_no_answer_leaves_the_error(
-    harness: Harness, tmp_path: Path
-) -> None:
-    target = options(tmp_path, [{"tool": "refund", "args": {"order": "o3"}}, {"text": "x"}],
-                     max_turns=1)  # fmt: skip
-    target.env["FAKE_CLAUDE_AT_LIMIT"] = ""
-    agent = arm(harness.wrap(target, id="limited-2"), [tool(refund.fn, side_effects="write")])
-    result = await agent.run("refund o3", user="u1")
-    assert result.status is RunStatus.ERROR and result.error is not None
-    assert "maximum number of turns" in result.error.message
+    assert result.status is RunStatus.PARTIAL
+    assert costs == [1.0]  # two steps: no last answer charged
 
 
 async def test_a_query_stopped_by_its_own_budget_keeps_its_error(

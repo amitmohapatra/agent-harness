@@ -146,8 +146,23 @@ def test_a_failed_cli_run_raises_with_its_errors() -> None:
     adapter = ClaudeAdapter()
     with pytest.raises(ClaudeRunError, match="rate limited; retry later"):
         adapter.extract(None, [_result(is_error=True, errors=["rate limited", "retry later"])])
-    with pytest.raises(ClaudeRunError, match="error_max_turns"):
-        adapter.extract(None, [_result(is_error=True, subtype="error_max_turns")])
+    with pytest.raises(ClaudeRunError, match="error_max_budget_usd"):
+        adapter.extract(None, [_result(is_error=True, subtype="error_max_budget_usd")])
+
+
+def test_at_the_turn_limit_the_answer_is_what_claude_said_in_the_turn() -> None:
+    """``error_max_turns`` is no failure: the run ends ``PARTIAL`` with the turn's last text
+    of the main agent (a subagent's is not; an earlier turn's is not)."""
+    earlier = AssistantMessage(content=[TextBlock(text="an injected turn's")], model="m")
+    said = AssistantMessage(content=[TextBlock(text="half done")], model="m")
+    inner = AssistantMessage(
+        content=[TextBlock(text="a subagent's")], model="m", parent_tool_use_id="t1"
+    )
+    limited = _result(is_error=True, subtype="error_max_turns")
+    adapter = ClaudeAdapter()
+    assert adapter.extract(None, [said, inner, limited]).answer == "half done"
+    injected = _result(result="x", origin={"kind": "task-notification"})
+    assert adapter.extract(None, [earlier, injected, limited]).answer is None
 
 
 def test_structured_output_outranks_the_result_text() -> None:

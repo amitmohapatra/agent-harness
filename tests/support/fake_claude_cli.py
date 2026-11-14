@@ -122,10 +122,6 @@ WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
 #: How the harness begins a paused task's resumed prompt (``adapters.claude.RESUMED*``).
 PAUSED_PROMPT = "This task was paused"
-#: How the harness begins the prompt that asks for one last answer at the turn limit
-#: (``budget.TURN_LIMIT``): the "model" answers it with ``FAKE_CLAUDE_AT_LIMIT``, calling no tool
-#: — unless ``FAKE_CLAUDE_AT_LIMIT_CALLS`` is a step it makes first (its answer: that call's result).
-LIMIT_PROMPT = "This turn has reached its limit"
 #: The tool the "model" hands a structured answer to (``--json-schema``): the CLI runs it
 #: without asking, and the turn's result carries what it was given (``structured_output``).
 STRUCTURED = "StructuredOutput"
@@ -788,7 +784,7 @@ class Cli:
             self.heard = prompts(session)
             self.before = spent_before(session) if resumed is not None else 0
         earlier = list(self.heard)
-        if not str(prompt).startswith((PAUSED_PROMPT, LIMIT_PROMPT)):
+        if not str(prompt).startswith(PAUSED_PROMPT):
             self.heard.append(str(prompt))
         context = self.prompt_context(session, prompt)
         self.recorded(session, prompt, context, earlier, first=first)
@@ -808,9 +804,6 @@ class Cli:
             mirror(session, 0, prompt=str(prompt))
         state = json.loads(kept.read_text())
         done, turn = state["done"], state.get("turn", 0)
-        if str(prompt).startswith(LIMIT_PROMPT):  # one last answer, no tool
-            self.at_limit(session, turn, context)
-            return
         if resumed is not None and not str(prompt).startswith(PAUSED_PROMPT):
             done, turn = 0, turn + 1  # the conversation's next turn, in the same session
             kept.write_text(json.dumps({"done": 0, "turn": turn}))
@@ -826,19 +819,6 @@ class Cli:
             send(self.ended(session, "Request interrupted by user"))
         finally:
             self.in_turn = self.stopping = False
-
-    def at_limit(self, session: str, turn: int, context: str) -> None:
-        """The one last answer at the turn limit: ``FAKE_CLAUDE_AT_LIMIT``, no tool — or a
-        "model" that calls ``FAKE_CLAUDE_AT_LIMIT_CALLS`` all the same, then says what it
-        was told."""
-        called = os.environ.get("FAKE_CLAUDE_AT_LIMIT_CALLS")
-        if called:
-            self.played(session, [json.loads(called), {"text": "{last}"}], 0, turn, context)
-            return
-        said = os.environ.get("FAKE_CLAUDE_AT_LIMIT", "What I found before the limit.")
-        self.steps += 1
-        send(assistant(session, [{"type": "text", "text": said}]))
-        send(self.ended(session, last=said, turns=1))
 
     def ended(self, session: str, error: str | None = None, **fields: Any) -> dict[str, Any]:
         """The result of the turn under way: its own steps' usage, the process's cost."""

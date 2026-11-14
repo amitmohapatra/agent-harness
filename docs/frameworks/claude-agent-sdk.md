@@ -194,7 +194,7 @@ the user Claude Code would ask:
 | Sandbox | its own: `ClaudeAgentOptions(sandbox=SandboxSettings(enabled=True, ...))` ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)) |
 | Skills | its own: `ClaudeAgentOptions(**src.claude())` — a local plugin the harness writes with the run's pinned skills before each query (removed after it), `skills="all"`; `ClaudeAgentOptions(skills=[...])` still filters ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks, a built-in tool's in the permission callback ([hooks.md](../hooks.md)); a model call is the CLI's |
-| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it the run answers once more (its session resumed, told the limit is reached, one turn and no tool; in a conversation's live session, a turn of that session whose tool calls are refused), as `ReAct` does at `max_steps` (a `step_limit` warning) |
+| Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (each query's tokens and `total_cost_usd`); its native turn limit is `framework_options={"max_turns": n}`: at it Claude Code ends the query (`error_max_turns`) and the run ends `PARTIAL` with what Claude said so far, no query more (a `step_limit` warning) |
 
 ## Native or ours: skills, prompts, sandbox
 
@@ -215,7 +215,7 @@ the user Claude Code would ask:
 |---|---|
 | Memory push | the context goes with every prompt through Claude Code's own `UserPromptSubmit` hook (`additionalContext`), after the options' own hooks; the options' `system_prompt` is left as you wrote it |
 | Long-term memory, session | the session is kept in the run's journal as the SDK's `SessionStore`, flushed at every step, so a resume on any worker continues it; options with their own `session_store` or `enable_file_checkpointing` keep the session on their machine (said once) |
-| Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn, a resumed attempt and the one last answer at the turn limit are each charged once |
+| Spending | each result's usage (the main agent's tokens), its subagents' replies' usage, and what its `total_cost_usd` grew by count toward the run's budget: a result's cost is its session's running total (the subagents' included, and what the session cost before the process that resumed it), so a turn and a resumed attempt are each charged once |
 | Subagents | each `agents=` subagent Claude runs is a child run (its record names the run, its turns go to memory); its tool calls go through the same `PreToolUse` governance |
 | Memory pull | the memory tools are on the `trellis` server |
 | Records | the transcript (the question and the assistant's text blocks), every harness tool call, the `system` outcome; approvals as `TOOL_CALL` feedback |
@@ -415,11 +415,11 @@ turn the session runs by itself (a finished task's notification) is never a user
   (`Harness.aclose`). Background work that ends with it is said in the conversation's next
   run (`claude_session`), and a background subagent's run ends saying so; a restart loses
   it.
-* The last answer at the turn limit of a turn the session served is asked in the session,
-  as its next turn (the process, its session and its background work go on: Claude Code's
-  process answers the next prompt after its `error_max_turns` result): told the limit is
-  reached, and every tool call it makes refused, since a live process keeps the tools it
-  started with.
+* A turn that reaches its turn limit (`max_turns`) ends with Claude Code's own
+  `error_max_turns` result, and the harness leaves it there, as Claude Code does: the run
+  ends `PARTIAL` with what Claude said before the limit (its error `BUDGET_EXCEEDED` names
+  the limit, a `step_limit` warning says so), no query more is made, and the session and
+  its background work go on — the conversation's next turn has its tools.
 * Not kept: a run with no `thread`, a sub-agent's run, and options with a `ClaudeSkills` plugin, an in-process MCP server of your own
   (`create_sdk_mcp_server`: its tools would run in the context of the process's first turn)
   or a budget of their own (`max_budget_usd`: Claude Code counts it for a process — in one
