@@ -176,3 +176,25 @@ Owed (memory, next round):
 Notes saved to the public repo branch `claude/cool-maxwell-w5avo8-handoff`
 (docs/research/handoff/); the security review is NOT there (public repo), only in
 /var/tmp/cons/review/security.md.
+
+## 21:20 UTC — ROUND 3 started (user: "Except performance or refactor all bug findings and
+## other should be coded and all respective test cases written asap. Nothing should left")
+Shared rules: /var/tmp/cons/review/ROUND3_NOTE.txt (incl. the memory-service lock dir).
+| Job | Branch | Items |
+|---|---|---|
+| fix-round (new) | harness `-fix-round` (from to-main-2) | H-ID, identical writes, SCN-11 RetryPolicy, AutoMode rule, carried state bounds, H-AGUI, C-2, SCN-5, remote chain depth |
+| native-skills (new agent) | harness `-native-skills` | merge to-main-2, finish per-library skills |
+| Claude round 2 (resumed) | harness `-bg-claude-da` | SessionCost, replay rule, hooks between live turns, thinking/server-tool blocks, fairness |
+| rewind (resumed) | harness `-react-parity` | Agent.checkpoints, Agent.rewind, journal ledger |
+| LangChain leftovers (resumed) | harness `-langchain-fixes` | no double model retry, summarization+FitWindow, defer_loading, cache_control, helper, sync middleware, tracing, mcp elicitation |
+| scenarios (resumed) | harness `-scenarios` | BG-08, BG-11, REL ×5, LR-04/05, sleeps→gates, SCN-12 diagnosis, re-runs |
+| memory round 3 (resumed) | memory `-memory-fixes-2` | thread delete takes documents/messages out of reads, derived profile lines follow their source, old feedback rows migration |
+| Kimi (running) | harness `-bg-kimi` | full list to the end, SCN-12 if product |
+| answer formats (resumed) | runs `-answer-formats` | deterministic enforced format set |
+| fold (running) | harness `-to-main-2` | features → chat-order-2 → bg-claude-da → react-parity → scenarios |
+Second fold needed afterwards for every branch above that moved past its folded head.
+Not coded by decision (library limits, documented only): MCP elicitation on Claude SDK
+0.2.182; OpenAI sandbox memory consolidation writes (no SDK seam); `middleware()` beside a
+user's same-named middleware (needs a new argument); swarm per-message attribution
+(needs `ReAct(name=)`); computer use; Redis/Dapr session-backend tests (packages absent).
+Excluded by the user for now: performance job, cleanup refactor.

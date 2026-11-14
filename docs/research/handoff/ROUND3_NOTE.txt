@@ -1,0 +1,38 @@
+ROUND 3 — rules for every coding job (architect, 2026-11-14 21:10 UTC)
+
+The user's instruction: every bug found and every planned item except performance work
+and the cleanup refactor is to be coded now, with its tests. Nothing is left open
+without a written reason. Credit is short: work cheaply, no exploration beyond the item.
+
+1. Standard: /home/user/ARCHITECT_BRIEF.md (read sections 1, 2, 3 again if you have not
+   this hour), /home/user/ARCHITECTURE_DECISIONS.md, /home/user/DECISIONS.md.
+   No public argument / signature / endpoint / schema change unless your task text
+   says it is approved. No new setting. No refactor beyond what the item needs
+   (the cleanup refactor is a separate, later job; do not pre-empt it).
+2. Test first: the test fails on the base for the reason you expect, then passes.
+   Each fix: the failing case, the neighbour that must keep working, the boundary,
+   and the resumed-attempt / second-server case where relevant. Never skip, xfail or
+   loosen a test to pass. Remove a strict xfail when your fix makes it pass.
+3. Commit and push after EVERY item (git push -u origin <your branch>; retry network
+   errors up to 4 times). Never leave work only on this machine.
+   Commit messages end with the two attribution lines your session's reminder gives.
+4. Gates before each push (/var/tmp/cons/review/GATES_NOTE.txt): ruff check +
+   ruff format --check; pyright over the WHOLE repo incl. tests with trellis.contracts /
+   trellis.memory / trellis.runs resolvable (0 errors); scripts/check_docs.py; every test
+   file that calls anything whose signature you changed. Every line and branch you add is
+   reached by a test (CI enforces 100% for trellis.harness).
+   Newest sibling sources: contracts /var/tmp/cons/co2-contracts/src, runs SDK
+   /var/tmp/cons/co2-runs/sdk/python/src (OpenAPI /var/tmp/cons/co2-runs/docs/openapi.json),
+   memory SDK /var/tmp/cons/memfix/sdk/python/src (OpenAPI /var/tmp/cons/memfix/docs/openapi.json).
+5. Machine: ONE pytest process at a time per job; no matrix; no local coverage run; no
+   new virtualenvs, no downloads (disk has under 3 GB free); delete temp dirs after each run.
+   Postgres only on 127.0.0.1:55957 in databases you create and drop; never live57_*;
+   never port 55991; never print /var/tmp/cons/live57/keys.env.
+   MEMORY SERVICE LOCK: a memory-service process uses 3.5 GB. Before you start one:
+   `mkdir /var/tmp/cons/memstack.lockdir` (if it fails, another job holds it: wait and
+   retry every minute, do other items meanwhile). When your service is stopped:
+   `rmdir /var/tmp/cons/memstack.lockdir`. Never remove another job's lock.
+   If a command is denied, stop that path and report it; never work around a denial.
+6. Report in at most 30 lines: pushed head; per item: root cause (file:line), fix
+   (file:line), test names; what a user sees differently; gates; what is NOT done and
+   why (a list the next job can pick up). Verified facts separate from inferences.
