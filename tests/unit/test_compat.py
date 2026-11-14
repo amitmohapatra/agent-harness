@@ -81,7 +81,7 @@ def test_an_untested_framework_is_said_once_at_wrap_time(
     warned = [r.getMessage() for r in caplog.records if "trellis-harness was tested" in r.message]
     assert warned == [
         "openai-agents 0.30.1 is installed, but this trellis-harness was tested with "
-        "openai-agents>=0.22.3,<0.23: use a newer trellis-harness (docs/versioning.md)"
+        "openai-agents>=0.24,<0.25: use a newer trellis-harness (docs/versioning.md)"
     ]
 
 

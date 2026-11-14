@@ -30,6 +30,25 @@ chat's own on its thread stream when it is idle; its questions asked through the
   start of a sub-agent with `mode="fork"` is irreversible.
 - An empty task list is not carried.
 
+### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
+
+Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
+2.8.0, which it requires). What it changes through the harness:
+
+- **A tool's failure no longer tells the model the error.** The SDK's default failure text
+  is a fixed sentence from 0.23 (`An error occurred while running the tool. Please try
+  again.`): a function tool, an MCP server's tool and an agent called as a tool alike, and an
+  SDK tool given arguments that are not JSON (it no longer says they were not). The
+  harness records the call as failed with the error, on the stream and in the tool records,
+  and the child run of an agent tool keeps it in its error, as before; a tool's own
+  `failure_error_function` and the run's `after_tool` hooks still word what the model reads.
+- **The run's own `RunConfig.tool_error_formatter`** (0.24: the `tool_exception` kind, given
+  the error) words a governed tool's failure under the SDK's default policy, as without the
+  harness.
+- **Still no background agents** ([openai-agents.md](docs/frameworks/openai-agents.md#limits)):
+  0.24 has no background run, agent tool or handoff, and never polls a Responses `background`
+  request; `tests/integration/test_background_by_adapter.py` pins what it does.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

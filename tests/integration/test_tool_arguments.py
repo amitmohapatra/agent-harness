@@ -181,8 +181,9 @@ async def test_an_sdk_approval_of_arguments_that_are_not_json_pauses_with_them_a
     assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
     assert paused.interrupt.tool_call is not None
     assert paused.interrupt.tool_call.args == {"arguments": "{order: o9"}
-    # approved, the SDK's own tool tells the model, and the run goes on
+    # approved, the SDK's own tool tells the model — its fixed failure text from
+    # openai-agents 0.23, which no longer says the arguments were not JSON — and the run goes on
     finished = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u1")
     assert finished.status is RunStatus.SUCCESS and finished.answer == "could not send"
     told = next(i for i in model.inputs[-1] if i.get("type") == "function_call_output")
-    assert "valid JSON" in told["output"]
+    assert told["output"] == "An error occurred while running the tool. Please try again."
