@@ -56,6 +56,7 @@ from fastapi import FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from langgraph_sdk._async.runs import RunsClient
 
 from tests.contract.test_runs_wire import RunsService
@@ -92,7 +93,7 @@ TOOLS: Final = (
     "cancel_async_task",
     "list_async_tasks",
 )
-#: What the five tools do, as the harness declares Deep Agents' own (``middleware.ASYNC_TASKS``).
+#: What the five tools do, as the harness declares them (``task_tools.TOOLS``).
 RISKS: Final = {
     "start_async_task": "write",
     "update_async_task": "write",
@@ -442,6 +443,7 @@ async def test_h_a_started_task_is_a_child_run_of_its_turn_held_while_it_runs(
         "kind": "async_task",
         "name": "optimizer",
         "task_id": server.task_id,
+        "thread": THREAD,
         "url": server.url,
         "graph_id": "optimizer",
     }
@@ -657,6 +659,67 @@ async def test_a_another_users_thread_of_the_same_name_has_no_task(
     model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
     mine = await say(agent, "which tasks are there?")
     assert f"task_id: {server.task_id}  agent: optimizer  status: running" in mine.answer
+
+
+def claimed(task_id: str, **more: Any) -> dict[str, Any]:
+    """A task as a run's input claims it for its own conversation: Deep Agents' record."""
+    at = "2026-11-14T00:00:00Z"
+    record = {"task_id": task_id, "agent_name": "optimizer", "thread_id": task_id, "run_id": "r"}
+    times = {"created_at": at, "last_checked_at": at, "last_updated_at": at}
+    return {**record, "status": "running", **times, **more}
+
+
+async def test_sec_r_1_an_input_names_no_task_list_for_its_run(
+    harness: Harness, server: StandIn
+) -> None:
+    """The task list is what the conversation carries, never what a run's input says: bob,
+    naming ada's task as his own in his run's input, is shown none — her server is asked
+    nothing for him, and her task's run goes on as it was."""
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    asked = len(server.calls)
+    model.turns += [("check_async_task", {"task_id": server.task_id}), says_what_the_tool_said]
+    given = {
+        "messages": [{"role": "user", "content": "how is that task?"}],
+        "async_tasks": {server.task_id: claimed(server.task_id)},
+    }
+    other = await agent.run(given, user="bob", thread=THREAD)
+    assert other.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert len(server.calls) == asked
+    assert await harness.runs.get(task.run_id) == task
+
+
+@pytest.mark.parametrize(
+    "whose", [{"user": "bob"}, {"thread": "chat-2"}], ids=["another user", "another chat"]
+)
+async def test_sec_r_1_a_task_tools_word_ends_only_a_run_of_its_conversation(
+    harness: Harness, server: StandIn, whose: dict[str, str]
+) -> None:
+    """What one of Deep Agents' task tools says of a task ends the task's run only in the
+    conversation that started it (its user's, in its chat thread): said in a run of another,
+    ada's run goes on, held as it was."""
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    theirs = SimpleNamespace(
+        **{"tenant": LOCAL_TENANT, "user": USER, "thread": THREAD, **whose},
+        agent_id="bg",
+        agent=agent,
+        helpers=None,
+    )
+    done = Command(
+        update={"async_tasks": {server.task_id: claimed(server.task_id, status="success")}}
+    )
+    check = SimpleNamespace(name="check_async_task")
+    said = json.dumps({"status": "success", "result": "TAKEN"})
+    await agent.adapter.tasks.said(theirs, check, args={}, done=done, told=said)
+    assert await harness.runs.get(task.run_id) == task
+    assert harness.holds.holds(task.run_id)
 
 
 async def test_a_within_one_turn_the_task_is_started_and_checked(
@@ -1723,16 +1786,18 @@ def test_h_a_webhook_is_checked_as_every_url_the_harness_hands_on(server: StandI
 
 
 @pytest.mark.filterwarnings("ignore:The feature `forked subagents` is in beta")
-async def test_h_a_start_that_sends_the_conversation_asks_a_person(server: StandIn) -> None:
-    """With ``mode="fork"`` the server is sent the conversation at launch, which cannot be taken
-    back: ``start_async_task`` is irreversible — a person approves it, unless the catalog says
-    otherwise. The others say what they say for any async sub-agent."""
+async def test_h_a_start_that_sends_the_conversation_says_what_deep_agents_says(
+    server: StandIn,
+) -> None:
+    """With ``mode="fork"`` the server is sent the conversation at launch: the harness keeps
+    Deep Agents' behaviour — a start is a write, announced, not asked about — and a team that
+    wants a person to approve each start gives it that risk in the tool catalog."""
     graph = ReAct("You help.", Model(turns=[]), subagents=[subagent(server, mode="fork")])
     harness = Harness(config=Settings())
     try:
         agent = harness.wrap(graph, id="bg")
         own = {s.name: s.side_effects for s in await agent.adapter.native(agent.target)}
-        assert {name: own[name] for name in TOOLS} == {**RISKS, "start_async_task": "irreversible"}
+        assert {name: own[name] for name in TOOLS} == RISKS
     finally:
         await harness.aclose()
 
@@ -1862,3 +1927,57 @@ async def test_i_a_tasks_run_another_server_ended_is_held_here_no_more(
         while harness.holds.holds(task.run_id):  # noqa: ASYNC110 - the keeper's read
             await asyncio.sleep(0.05)
     server.release()
+
+
+@pytest.mark.parametrize("memory", [False, True])
+async def test_i_an_outcome_read_into_a_turn_the_model_never_got_is_told_at_the_next(
+    harness: Harness, memory_harness: Harness, server: StandIn, memory: bool
+) -> None:
+    """Past ``max_steps``, the model turn Deep Agents asked for after the final answer is not
+    made: the outcome it read is not marked read — its notification leaves the turn and the
+    task's record says it still works — so the next turn's model is told, memory on or off."""
+    server.seconds = 0.2
+    model = Model(turns=[START, "Started.", says_the_update], stall=0.3)
+    agent = chat(memory_harness if memory else harness, server, model, max_steps=1)
+    first = await say(agent, "run the optimization")
+    assert first.answer == "Started." and len(model.seen) == 2
+    model.stall = 0.0
+    second = await say(agent, "anything new?")
+    assert second.answer == f"Done: {RESULT}", second.error
+    assert len([m for m in model.seen[2] if notified(m) is not None]) == 1  # told once
+
+
+async def test_arch_19_a_task_whose_run_is_gone_from_the_store_is_held_no_more(
+    harness: Harness, server: StandIn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run of a task this process holds is no longer in the run store (deleted): the next
+    read ends the holding — the hold let go, the reads over — and raises nothing (ARCH-19)."""
+    monkeypatch.setattr(async_tasks, "WATCH_SECONDS", 0.05)
+    agent = chat(harness, server, Model(turns=[START, reports_the_id]))
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    watching = agent.adapter.tasks._kept[task.run_id].watching
+    read = harness.runs.get
+
+    async def gone(run_id: str, **more: Any) -> RunRecord | None:
+        return None if run_id == task.run_id else await read(run_id, **more)
+
+    monkeypatch.setattr(harness.runs, "get", gone)
+    await asyncio.wait_for(asyncio.gather(watching, return_exceptions=True), 10)
+    assert watching.exception() is None
+    assert not harness.holds.holds(task.run_id) and not agent.adapter.tasks._kept
+    server.release()
+
+
+def test_perf_4_a_task_held_long_is_read_less_and_less_often() -> None:
+    """The reads of a task this process holds back off as it ages, with jitter: 10 s at most
+    at first, then up to every 2 minutes — an hour's holding reads the task at most 70 times
+    (every 10 s: 360), and no two holders stay in step (PERF-4)."""
+    waits: list[float] = []
+    while sum(waits) < 3600:
+        waits.append(async_tasks.wait_before(len(waits)))
+    assert len(waits) <= 70, len(waits)
+    assert waits[0] <= 10 and max(waits) <= 120
+    assert min(waits) >= 5  # never a burst
+    assert len({round(w, 3) for w in waits[-10:]}) > 1  # jitter: not a fixed period

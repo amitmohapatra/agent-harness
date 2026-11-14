@@ -12,9 +12,10 @@ turn, as the task does — kept as a Claude subagent working in the background i
   it again on its server: a run of its own here too, the child of the turn that sent it;
 * **held and read** — handed on past the turn's attempt (``Helpers.detached``) and held in the
   run store from this process (``holding``) while the task runs: a process that dies with it
-  leaves a run the store ends (cut off). Every :data:`WATCH_SECONDS` this process reads the
-  task (:meth:`AsyncTasks._watch`): ended on its server (Deep Agents' own ``check_async_task``),
-  its run ends and the chat is told how — a turn of the chat's own when it is idle, as a
+  leaves a run the store ends (cut off). This process reads the task
+  (:meth:`AsyncTasks._watch`: after :data:`WATCH_SECONDS` at first, then less and less often,
+  :func:`wait_before`): ended on its server (Deep Agents' own ``check_async_task``), its run
+  ends and the chat is told how — a turn of the chat's own when it is idle, as a
   harness task's outcome is (``background.delivered``); its run ended elsewhere (its turn
   cancelled from another server), the task is cancelled on its server;
 * **its end** — when Deep Agents' own tools say the task ended: a later check or list
@@ -37,15 +38,17 @@ import contextlib
 import contextvars
 import json
 import logging
+import random
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import AgentError, RunStatus, stable_id
+from trellis.contracts import AgentError, RunRecord, RunStatus, stable_id
 from trellis.harness.bounded import MAXSIZE
 from trellis.harness.bridges.helpers import HELPER, UNFINISHED, Helper, Kind, text_of
 from trellis.harness.history import Said, Speaker
+from trellis.harness.task_tools import CANCEL, CHECK, START, UPDATE
 from trellis.runs import ConflictError, LeaseLostError
 
 if TYPE_CHECKING:
@@ -54,14 +57,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("trellis.harness")
 
-#: Deep Agents' tools that start a task and cancel one (``middleware.ASYNC_TASKS`` has all five).
-START: Final = "start_async_task"
-UPDATE: Final = "update_async_task"
-CHECK: Final = "check_async_task"
-CANCEL: Final = "cancel_async_task"
-#: How often the process holding a task's run reads the task: how it goes on its server (Deep
-#: Agents' own ``check_async_task``) and whether its run was ended elsewhere.
+#: How long the process holding a task's run waits before it first reads the task — how it
+#: goes on its server (Deep Agents' own ``check_async_task``) and whether its run was ended
+#: elsewhere — and how many times that at most between two reads of a task that has run long
+#: (:func:`wait_before`).
 WATCH_SECONDS: Final = 10.0
+WATCH_SLOWEST: Final = 12
 #: The statuses Deep Agents takes for a task that has ended (its ``_TERMINAL_STATUSES``), and
 #: how the task's run ends for each.
 ENDED: Final[Mapping[str, RunStatus]] = {
@@ -78,6 +79,14 @@ CANCELLED_WITH: Final = "the run that started the task was cancelled"
 #: The most tasks one agent keeps held in this process: past it the oldest is let go, and the
 #: run store ends its run once its hold lapses (cut off), as a process that stopped leaves it.
 KEPT: Final = MAXSIZE
+
+
+def wait_before(reads: int) -> float:
+    """The seconds before a held task's next read, after ``reads`` of them: twice as long
+    each time, from :data:`WATCH_SECONDS` to :data:`WATCH_SLOWEST` times that, less a random
+    part (up to half), so the holders of many tasks do not read in step."""
+    slower = min(2**reads, WATCH_SLOWEST)
+    return WATCH_SECONDS * slower * random.uniform(0.5, 1.0)
 
 
 def run_of(tenant: str, agent_id: str, task_id: str, again: str | None = None) -> str:
@@ -119,21 +128,38 @@ class AsyncTasks:
         update = done.update if isinstance(done, Command) else None
         found = update.get("async_tasks") if isinstance(update, Mapping) else None
         for task_id, task in (found or {}).items():
-            run_id = self._held(task_id) or await _run(runtime, task)
+            run_id = run_of(runtime.tenant, runtime.agent_id, task_id)
             if tool.name == START:
                 await self._started(runtime, tool, run_id, dict(task), str(args["description"]))
-            elif tool.name == UPDATE and await _ended_or_none(runtime, run_id):
+                continue
+            record = await self._recorded(runtime, task)
+            if record is not None and not _owned(runtime, record, task_id):
+                continue  # another conversation's: nothing said here is its run's
+            run_id = run_id if record is None else record.run_id
+            if tool.name == UPDATE and (record is None or record.status.final):
                 # a follow-up runs the ended task again on its server: a run of the turn that
                 # sent it (one at work goes on as its run)
-                again = run_of(runtime.tenant, runtime.agent_id, task_id, task["run_id"])
-                await self._started(runtime, tool, again, dict(task), str(args["message"]))
-                run_id = again
+                run_id = run_of(runtime.tenant, runtime.agent_id, task_id, task["run_id"])
+                await self._started(runtime, tool, run_id, dict(task), str(args["message"]))
+                record = None
             kept = self._kept.get(run_id)
             if kept is not None:
                 kept.task = dict(task)
             status = ENDED.get(str(task.get("status")))
             if status is not None:
-                await self._ended(runtime, run_id, status, told)
+                await self._ended(runtime, run_id, status, told, record)
+
+    async def _recorded(self, runtime: Runtime, task: Mapping[str, Any]) -> RunRecord | None:
+        """The run of ``task`` as the run store has it — the one this process holds, else a
+        follow-up's after the task ended (:func:`run_of` ``again``), when one was recorded,
+        else the task's; ``None``: never recorded."""
+        runs, tenant = runtime.agent.harness.runs, runtime.tenant
+        held = self._held(task["task_id"])
+        if held is not None:
+            return await runs.get(held, tenant=tenant)
+        again = run_of(tenant, runtime.agent_id, task["task_id"], task["run_id"])
+        first = run_of(tenant, runtime.agent_id, task["task_id"])
+        return await runs.get(again, tenant=tenant) or await runs.get(first, tenant=tenant)
 
     async def _started(
         self, runtime: Runtime, tool: Any, run_id: str, task: dict[str, Any], text: str
@@ -142,7 +168,7 @@ class AsyncTasks:
         helpers = runtime.helpers
         assert helpers is not None  # a graph's attempt has its helpers (``adapters.langgraph``)
         spec = _specs(tool).get(task["agent_name"]) or {}
-        about = {"task_id": task["task_id"]}
+        about = {"task_id": task["task_id"], "thread": runtime.thread}
         about.update({k: str(spec[k]) for k in ("url", "graph_id") if spec.get(k)})
         key, name = task["task_id"], task["agent_name"]
         helper = await helpers.start(
@@ -171,17 +197,22 @@ class AsyncTasks:
             kept.watching.cancel()
 
     async def _watch(self, run_id: str) -> None:
-        """Every :data:`WATCH_SECONDS` while this process holds ``run_id``: its run ended
-        elsewhere (cancelled with its turn from another server) cancels the task on its server;
-        the task ended on its server ends its run, and the chat is told how
+        """While this process holds ``run_id``, read less and less often (:func:`wait_before`):
+        its run ended elsewhere (cancelled with its turn from another server) cancels the task
+        on its server; the task ended on its server ends its run, and the chat is told how
         (``background.delivered``: a turn of its own when it is idle)."""
+        reads = 0
         while True:
-            await asyncio.sleep(WATCH_SECONDS)
+            await asyncio.sleep(wait_before(reads))
+            reads += 1
             kept = self._kept.get(run_id)
             if kept is None:
                 return
             record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
-            assert record is not None  # its turn started it
+            if record is None:  # gone from the run store: nothing to hold, or to end
+                del self._kept[run_id]
+                self._released(kept)
+                return
             if record.status is RunStatus.CANCELLED:  # with its turn, on another server
                 await self.stopped(run_id, CANCELLED_WITH)
                 return
@@ -215,8 +246,8 @@ class AsyncTasks:
         elif status is not RunStatus.SUCCESS and status is not RunStatus.CANCELLED:
             event["error"] = background.FAILED
         record = await kept.agent.harness.runs.get(run_id, tenant=kept.tenant)
-        assert record is not None  # its turn started it
-        await background.delivered(kept.agent, record, update=event)
+        if record is not None:
+            await background.delivered(kept.agent, record, update=event)
 
     async def _closed(self, run_id: str, kept: Kept, status: RunStatus, said: str) -> None:
         """The task's run held here (``kept``) ended ``status`` outside any attempt (``said``:
@@ -234,14 +265,16 @@ class AsyncTasks:
                 error = AgentError(code=UNFINISHED, message=why)
                 await runs.finish(run_id, status, error=error, tenant=tenant)
 
-    async def _ended(self, runtime: Runtime, run_id: str, status: RunStatus, told: str) -> None:
+    async def _ended(
+        self, runtime: Runtime, run_id: str, status: RunStatus, told: str, record: RunRecord | None
+    ) -> None:
         """The task's run ended as its server says (``told``: the check's result, if it is
-        one), on the stream of ``runtime``'s run — one this process holds, or one it finds in
-        the run store not ended (held elsewhere, or by nobody now)."""
+        one), on the stream of ``runtime``'s run — one this process holds, or the one the run
+        store has not ended (``record``: held elsewhere, or by nobody now)."""
         kept = self._kept.pop(run_id, None)
         if kept is not None:
             self._released(kept)
-        helper = kept.helper if kept is not None else await _found(runtime, run_id)
+        helper = kept.helper if kept is not None else _unended(record)
         if helper is None:
             return
         helpers = runtime.helpers
@@ -300,30 +333,26 @@ def _tool_runtime(task: Mapping[str, Any], tool: str) -> Any:
     )
 
 
-async def _run(runtime: Runtime, task: Mapping[str, Any]) -> str:
-    """The run of ``task`` that a process other than this one holds, or nobody: a follow-up's
-    after the task ended (:func:`run_of` ``again``), when one was recorded, else the task's."""
-    first = run_of(runtime.tenant, runtime.agent_id, task["task_id"])
-    again = run_of(runtime.tenant, runtime.agent_id, task["task_id"], task["run_id"])
-    found = await runtime.agent.harness.runs.get(again, tenant=runtime.tenant)
-    return again if found is not None else first
+def _owned(runtime: Runtime, record: RunRecord, task_id: str) -> bool:
+    """Whether ``record`` is the run of the task ``task_id`` of ``runtime``'s conversation: a
+    task of its tenant's and its user's that its agent started in its chat thread
+    (``background.of_chat``, as a harness task is owned: ``background.owned``) — its helper
+    record says the thread and the task."""
+    from trellis.harness import background
+
+    helper = record.metadata.get(HELPER) or {}
+    mine = background.of_chat(runtime, record, agent=record.agent_id, thread=helper.get("thread"))
+    return mine and helper.get("task_id") == task_id
 
 
-async def _ended_or_none(runtime: Runtime, run_id: str) -> bool:
-    """Whether the run ``run_id`` ended, or was never recorded."""
-    found = await runtime.agent.harness.runs.get(run_id, tenant=runtime.tenant)
-    return found is None or found.status.final
-
-
-async def _found(runtime: Runtime, run_id: str) -> Helper | None:
-    """The task's run as the run store has it, when it has not ended: a helper to end
-    (``None``: none, or ended already)."""
-    record = await runtime.agent.harness.runs.get(run_id, tenant=runtime.tenant)
+def _unended(record: RunRecord | None) -> Helper | None:
+    """The task's run as the run store has it (``record``), when it has not ended: a helper to
+    end (``None``: none, or ended already)."""
     if record is None or record.status.final:
         return None
     name = str((record.metadata.get(HELPER) or {}).get("name", ""))
     said = [Said(Speaker.USER, str(record.input))]
-    return Helper(run_id, record.parent_run_id or "", name, said, kind=Kind.ASYNC_TASK)
+    return Helper(record.run_id, record.parent_run_id or "", name, said, kind=Kind.ASYNC_TASK)
 
 
 def _checked(told: str) -> dict[str, Any]:

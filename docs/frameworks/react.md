@@ -540,8 +540,10 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
   `max_steps`); when no turn works in the chat, a turn of the chat's own — a run of the agent
   in the chat's thread whose input is the notification — answers it, and the chat's thread
   stream (`GET /agui/threads/{thread}/events`) delivers that turn as it delivers a scheduled
-  run's. An outcome the conversation was told already is not told again: such a turn answers
-  `NO_REPORT` without a model call, and the stream leaves it out.
+  run's. That turn is one run per outcome (its id is the outcome's), run by the server whose
+  start made it: two servers that find the chat idle at once start one turn. An outcome the
+  conversation was told already is not told again: such a turn answers `NO_REPORT` without a
+  model call, and the stream leaves it out.
 * **Its questions** — an approval or a question inside the task pauses its run (`waiting`):
   the chat's next turn, or a turn of its own when it is idle, asks it as a sub-agent's question
   is asked through its parent (`payload["subagent"]` names the task's run, `background: true`),
@@ -550,9 +552,16 @@ chat.serve_chat(app)  # a chat a person reads: the five tools are offered
 * **Check, list, update, cancel** — read the run store from any server. `update_async_task`
   follows Deep Agents' `update_strategy` (a `SubAgent` dict may carry it): `interrupt`, the
   default, cancels the task's run at work and continues its conversation
-  (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`). A start and an
-  update hand work on (reads, as `task` is: each call the sub-agent makes is governed on its
-  own); a cancel stops work, a write a person approves in a chat.
+  (`conversation.Mode.INTERRUPT`); `enqueue` waits for it (`Mode.QUEUE`).
+* **Approvals** — as for a task on a server (below): a check and the list
+  are reads; a start, an update and a cancel are writes, announced on the stream and not
+  asked about (each call the sub-agent makes is governed in its own run). To have a person
+  approve one, give it its risk in the tool catalog ([governance.md](../governance.md)).
+* **Whose task** — a task belongs to the conversation that started it: its tenant, its user,
+  the agent and the chat thread. The tools, the questions asked through the chat and each
+  read act on a task's run only then; a task id from another conversation is answered as one
+  this conversation does not track. A run's input names no task list (`async_tasks` in a
+  mapping input is left out), and a message a chat client gives is never a notification.
 * **With the turn** — a turn that is cancelled cancels the tasks it started (their attempts
   stop); one out of time leaves them working: the turn's clock is not theirs.
 * **Notifications in the conversation** — the turn's question stays the user's message; a
@@ -583,17 +592,19 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   run that started it (Deep Agents' `parent_thread_id`: a `ReAct`'s LangGraph thread is its
   run), nothing of the run's user or chat thread — and, with `mode="fork"`, the conversation at
   launch. A `webhook` is checked as every URL the harness hands on (https, a public host; one
-  refused is a `ConfigurationError` when `ReAct` is built); with a sub-agent that forks,
-  `start_async_task` is irreversible (a person approves each start, unless the catalog says
-  otherwise): what it sends cannot be taken back.
+  refused is a `ConfigurationError` when `ReAct` is built). A start of a sub-agent that forks
+  is a write as any start (Deep Agents asks nobody); to have a person approve it, give
+  `start_async_task` that risk in the tool catalog.
 * **In the chat** — the model starts a task with `start_async_task` and the turn ends at once
   with the task's id; the next messages are answered while it runs. Deep Agents reads the
   task's status itself (0.7.27 on) when a turn starts, before each model call and after a
   final answer (then giving the model another turn, a model call as any: against `max_steps`
-  and the budget; past `max_steps` the run ends with the answer it had): each new outcome is a
+  and the budget; past `max_steps` the run ends with the answer it had, and the outcome read
+  for that turn is not marked read — the next turn is told it, memory on or off): each new outcome is a
   notification after the conversation's messages — a user-role message the user did not type,
   marked with langchain-core's notification metadata, which the harness treats so (below). When
-  no turn works, the server holding the task's run reads it every 10 s: ended, its run ends
+  no turn works, the server holding the task's run reads it — after 10 s at most at first, then
+  less and less often, up to every two minutes, never two servers in step —: ended, its run ends
   and the chat is told by a turn of its own, as a harness task's outcome is
   ([above](#a-task-in-the-background)). `update_async_task` and `cancel_async_task` reach it by
   its id.
@@ -653,9 +664,9 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   nor a checkpointer keeps no state between turns; its list is carried too, read from the
   state each turn ends with — so a turn cancelled or failed after a start leaves that task
   out of the list (with `middleware()` each step is kept, and it is in).
-* **What still does not hold** — when two overlapping turns both change the same task, the
-  record of the turn that ends last is the one kept; a turn cut off by `max_steps` after Deep
-  Agents read an outcome leaves it read (the next turn's history holds it with memory on).
+* **Overlapping turns** — two turns that overlap and both change one task lose neither's
+  update: the conversation's list is merged task by task, the record updated last standing
+  (at the same second, the further status), whichever turn ends last.
 
 ## Where sandbox, skills and hooks go
 

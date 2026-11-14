@@ -19,10 +19,11 @@ a user needs, as the evidence of a finding. What they show:
   carries the list too, read from the state each turn ends with: all three work — but a turn
   cancelled after its start has no end to read it from ("today"). The five tools say what
   they do in every shape.
-* **An OpenAI Agents SDK agent** — the SDK has no background run, no background sub-agent and
-  no ``background`` model setting; what it has is its sandbox's shell (``SandboxAgent`` with
-  ``Shell``): ``exec_command`` returns after ``yield_time_ms`` with the id of a process still
-  running, and ``write_stdin`` reads it later. The process lives in the sandbox session: with a
+* **An OpenAI Agents SDK agent** — the SDK (openai-agents 0.24) has no background run, no
+  background sub-agent and no ``background`` model setting (a Responses ``background`` request
+  given as ``extra_args`` comes back ``queued`` and is never polled); what it has is its
+  sandbox's shell (``SandboxAgent`` with ``Shell``): ``exec_command`` returns after
+  ``yield_time_ms`` with the id of a process still running, and ``write_stdin`` reads it later. The process lives in the sandbox session: with a
   session the app keeps (``SandboxRunConfig(session=)``) all three turns work; with a session
   per run (``SandboxRunConfig(client=)``) the process ends with T1 ("today"). The session is
   the app's, one for every user, and the SDK's shell tools are not governed ("today").
@@ -44,7 +45,8 @@ from typing import Any, Final
 
 import pytest
 from agents import Agent as OpenAIAgent
-from agents import RunConfig
+from agents import ModelSettings, RunConfig
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.sandbox import SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
@@ -83,6 +85,7 @@ from tests.integration.test_react_async_subagent import (
 )
 from tests.support.arm import arm
 from tests.support.openai_model import ScriptedModel
+from tests.support.responses import BackgroundResponses
 from trellis import Harness, Runtime, Settings, current, middleware, tool
 from trellis.contracts import RunEventType, RunOutcome, RunStatus
 from trellis.harness.adapters.acp import KIMI_ENV
@@ -455,6 +458,25 @@ async def test_b_today_the_kept_session_is_every_users_and_its_shell_is_not_gove
     ]
     other = await agent.run("how is that process?", user="bob", thread=THREAD)
     assert RESULT in other.answer
+
+
+async def test_b_today_a_responses_background_request_is_answered_queued_and_never_polled(
+    harness: Harness,
+) -> None:
+    """Today: the SDK passes a Responses ``background`` request on as it is
+    (``ModelSettings.extra_args``) and takes the ``queued`` response that comes back at once,
+    with no output, for the model's whole reply: no retrieve is ever asked, nothing goes on
+    after ``Runner.run`` returns, and the run ends with no answer — no child run, no result in
+    a later turn."""
+    served = BackgroundResponses()
+    model = OpenAIResponsesModel(model="gpt-test", openai_client=served.client())
+    settings = ModelSettings(extra_args={"background": True})
+    agent = harness.wrap(OpenAIAgent(name="desk", model=model, model_settings=settings), id="bg")
+    result = await say(agent, "start the long job")
+    assert result.status is RunStatus.ERROR and result.error is not None
+    assert result.error.code == "NO_ANSWER"
+    assert served.asked == [("POST", "/v1/responses")]  # never a GET of the response
+    assert [r async for r in harness.runs.iterate(parent_run_id=result.run_id)] == []
 
 
 # --------------------------------------------------------------------------- D. a function

@@ -69,6 +69,7 @@ from trellis.harness.adapters.base import (
     context_window,
 )
 from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.conversation import Mode
 from trellis.harness.gateways import routed_chat_model
 from trellis.harness.prompts import Stored
 from trellis.harness.removed import removed
@@ -444,34 +445,42 @@ def ReAct(
         outside=outside,
         helper_only=not native,
         kept=not asked,
-        forks=any(s.get("mode") == "fork" for s in native if "graph_id" in s),
     )
     if tasks is not None:
         tasks.compiled(_compiled(graph))
     return _described(graph, named, window, instructions, [*run, *helpers])
 
 
-def _strategies(subagents: Sequence[Any]) -> dict[str, str]:
+#: What Deep Agents' ``update_strategy`` says a follow-up does with the task's run at work, as
+#: the conversation's modes: ``interrupt`` stops it, ``enqueue`` waits for it.
+UPDATE_STRATEGIES: Final[Mapping[str, Mode]] = {
+    "interrupt": Mode.INTERRUPT,
+    "enqueue": Mode.QUEUE,
+}
+
+
+def _strategies(subagents: Sequence[Any]) -> dict[str, Mode]:
     """Each Deep Agents sub-agent's ``update_strategy`` (Deep Agents' ``AsyncSubAgent`` key,
-    taken by one that runs in the harness too, for its tasks' follow-ups), out of its spec: an
-    ``AsyncSubAgent`` keeps its own, which Deep Agents reads."""
-    found: dict[str, str] = {}
+    taken by one that runs in the harness too, for its tasks' follow-ups:
+    :data:`UPDATE_STRATEGIES`), out of its spec: an ``AsyncSubAgent`` keeps its own, which Deep
+    Agents reads."""
+    found: dict[str, Mode] = {}
     for given in subagents:
         if isinstance(given, dict) and "update_strategy" in given and "graph_id" not in given:
             strategy = given.pop("update_strategy")
-            if strategy not in ("interrupt", "enqueue"):
+            if strategy not in UPDATE_STRATEGIES:
                 raise ConfigurationError(
                     f"{given.get('name')}: update_strategy is 'interrupt' or 'enqueue', "
                     f"not {strategy!r}"
                 )
-            found[str(given["name"])] = strategy
+            found[str(given["name"])] = UPDATE_STRATEGIES[strategy]
     return found
 
 
 def _background(
     native: Sequence[Mapping[str, Any]],
     helpers: Sequence[Any],
-    strategies: Mapping[str, str],
+    strategies: Mapping[str, Mode],
     *,
     max_steps: int,
 ) -> Any:
@@ -691,7 +700,6 @@ def _declared(
     outside: bool,
     helper_only: bool,
     kept: bool = False,
-    forks: bool = False,
 ) -> None:
     """What the harness reads of Deep Agents' tools — the agent's and its sub-agents' — set on
     them: on a ``backend`` outside the graph's state (``outside``) the file tools are governed
@@ -702,10 +710,7 @@ def _declared(
     hands to: the hand-over is a read (``adapters.base.helper`` — each call the helper then
     makes is governed on its own). Left out of the run's set as machinery, it had said
     nothing, and a call of a tool that says nothing asks a person: every task handed to the
-    general-purpose helper paused for an approval of nothing. With an async sub-agent that
-    forks (``mode="fork"``: its server is sent the conversation at launch), a start sends what
-    cannot be taken back: ``start_async_task`` is ``irreversible`` (a person approves, unless
-    the catalog says otherwise)."""
+    general-purpose helper paused for an approval of nothing."""
     from deepagents.middleware.filesystem import supports_execution
 
     from trellis.harness.adapters.base import helper
@@ -715,7 +720,6 @@ def _declared(
         KEPT_BY_RUN,
         MACHINERY,
         READ_FILE,
-        START_ASYNC_TASK,
         framework_made,
         outside_state,
         spec_of,
@@ -735,8 +739,6 @@ def _declared(
             marks = {MACHINERY: True}
         elif kept and tool.name == READ_FILE:
             marks = {KEPT_BY_RUN: True}
-        elif forks and tool.name == START_ASYNC_TASK:
-            marks = {"side_effects": "irreversible"}
         if marks:
             tool.metadata = {**(tool.metadata or {}), **marks}
 

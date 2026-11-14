@@ -58,12 +58,51 @@ A library's feature works as the library does it; the harness governs, records a
   earlier turns); the records it updates are carried with the task list; the extra model turn
   after a final answer counts against `max_steps`, and past it the run keeps its answer
   instead of LangChain's "Model call limits exceeded".
-- A task held by a server is read every 10 s: an idle chat is told how it ended, a task whose
+- A task held by a server is read after 10 s at most, then less and less often (up to every
+  two minutes, with jitter): an idle chat is told how it ended, a task whose
   run was cancelled from another server is cancelled on its server, and a follow-up to a task
   that ended is a run of its own.
-- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`); a
-  start of a sub-agent with `mode="fork"` is irreversible.
+- An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
 - An empty task list is not carried.
+
+### Changed: the five task tools are governed one way, on a server or in the harness
+
+- `start_async_task`, `update_async_task` and `cancel_async_task` are writes wherever the task
+  runs, announced on the run's stream and not asked about; `check_async_task` and
+  `list_async_tasks` are reads. The tool catalog may say more (`task_tools`, one table). A
+  cancel of a harness task no longer pauses a chat for an approval.
+
+### Security: a background task belongs to the conversation that started it (SEC-R-1)
+
+- The task tools, the questions asked through a chat, each pull and each recorded
+  notification act on a task's run only when it is the conversation's: its tenant's and
+  user's, started by its agent in its chat thread, under the task's id
+  (`background.owned`; Deep Agents' tasks on a server: `bridges.async_tasks`). Any other is
+  answered as a task the conversation does not track.
+- A run's input names no task list: `async_tasks` in a mapping input is left out (the
+  conversation's list is the one the harness carries). A message a client of a chat surface
+  gives — AG-UI `state`, an A2A data part — keeps its role, content, name, id and tool calls;
+  `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
+  notification (`history.from_client`).
+
+### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
+
+Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
+2.8.0, which it requires). What it changes through the harness:
+
+- **A tool's failure no longer tells the model the error.** The SDK's default failure text
+  is a fixed sentence from 0.23 (`An error occurred while running the tool. Please try
+  again.`): a function tool, an MCP server's tool and an agent called as a tool alike, and an
+  SDK tool given arguments that are not JSON (it no longer says they were not). The
+  harness records the call as failed with the error, on the stream and in the tool records,
+  and the child run of an agent tool keeps it in its error, as before; a tool's own
+  `failure_error_function` and the run's `after_tool` hooks still word what the model reads.
+- **The run's own `RunConfig.tool_error_formatter`** (0.24: the `tool_exception` kind, given
+  the error) words a governed tool's failure under the SDK's default policy, as without the
+  harness.
+- **Still no background agents** ([openai-agents.md](docs/frameworks/openai-agents.md#limits)):
+  0.24 has no background run, agent tool or handoff, and never polls a Responses `background`
+  request; `tests/integration/test_background_by_adapter.py` pins what it does.
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 

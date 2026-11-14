@@ -44,6 +44,7 @@ from trellis.harness.a2a.translate import (
     value_part,
 )
 from trellis.harness.conversation import Mode
+from trellis.harness.history import from_client
 from trellis.harness.identity import IdentityRefused
 from trellis.runs import ConflictError, NotFoundError
 
@@ -271,7 +272,7 @@ class RunExecutor(AgentExecutor):
 def _payload(message: Message | None) -> Any:
     """What the agent is asked: the message's text, or its data when it carries none."""
     text, data = text_and_data(message)
-    return text or data or ""
+    return text or from_client(data) or ""
 
 
 def _mode(message: Message | None) -> Mode:

@@ -226,9 +226,14 @@ class LangGraphAdapter:
             return {"messages": [*system, {"role": "user", "content": input}]}
         if isinstance(input, list):
             return {"messages": [*system, *input]}
-        if isinstance(input, dict) and isinstance(input.get("messages"), list):
-            return {**input, "messages": [*system, *input["messages"]]}
-        return input
+        if not isinstance(input, dict):
+            return input
+        # what the conversation carries is the harness's to give (:func:`_continued`), never
+        # an input's: whoever starts a run names no task list for it
+        given = {name: value for name, value in input.items() if name not in CARRIED}
+        if isinstance(given.get("messages"), list):
+            given["messages"] = [*system, *given["messages"]]
+        return given
 
     async def invoke(self, target: Any, native_input: Any, run: Invocation) -> Any:
         from langgraph.types import GraphOutput
@@ -764,7 +769,7 @@ async def _continued(target: Any, native_input: Any, run: Invocation) -> Any:
     # a new turn's state starts with what its conversation carries (:data:`CARRIED`)
     carried = getattr(runtime, "carried", None)
     started = (
-        {**carried, **native_input} if carried and isinstance(native_input, dict) else native_input
+        {**native_input, **carried} if carried and isinstance(native_input, dict) else native_input
     )
     if not _checkpointed(target):
         return started

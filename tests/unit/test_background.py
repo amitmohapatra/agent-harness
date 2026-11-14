@@ -4,9 +4,13 @@ reads a message the user did not type (``history``, ``adapters.langgraph``)."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from a2a.helpers import new_message
+from a2a.types import Role
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, get_notification_metadata
 
 from trellis.contracts import (
@@ -16,12 +20,22 @@ from trellis.contracts import (
     RunStart,
     RunStatus,
 )
-from trellis.harness import background
-from trellis.harness.adapters.langgraph import ASKED, added, carried_of, langchain_message, notified
+from trellis.harness import background, pipeline
+from trellis.harness.a2a.executor import _payload
+from trellis.harness.a2a.translate import value_part
+from trellis.harness.adapters.langgraph import (
+    ASKED,
+    LangGraphAdapter,
+    added,
+    carried_of,
+    langchain_message,
+    notified,
+)
 from trellis.harness.history import (
     NOTIFICATION,
     Said,
     Speaker,
+    from_client,
     from_window,
     notification_in,
     recorded,
@@ -201,20 +215,27 @@ def runtime(runs: LocalRuns, **more: Any) -> Any:
     conversation's carried state."""
     harness = SimpleNamespace(runs=runs, background=background.Tasks())
     agent = SimpleNamespace(harness=harness, id="chat")
-    return SimpleNamespace(
-        **{"agent": agent, "tenant": "t", "carried": {}, "notification": None, **more}
-    )
+    whose = {"tenant": "t", "user": "u", "agent_id": "chat", "thread": "chat-1"}
+    return SimpleNamespace(**{"agent": agent, **whose, "carried": {}, "notification": None, **more})
+
+
+#: What the run of ``TASK`` says of itself: started by the agent ``chat`` in ``chat-1``.
+ORIGIN = {"trellis_background": {"name": "research", "agent": "chat", "thread": "chat-1"}}
 
 
 async def stored(runs: LocalRuns, status: RunStatus = RunStatus.RUNNING, **more: Any) -> RunRecord:
+    """A run in ``runs``: ``TASK``'s by default (``more``: what differs)."""
     start = RunStart(
-        run_id=more.pop("run_id", "run_1"),
-        tenant_id="t",
-        agent_id="research",
-        thread_id=more.pop("thread_id", "task_1"),
-        user_id="u",
-        input="x",
-        **more,
+        **{
+            "run_id": "run_1",
+            "tenant_id": "t",
+            "agent_id": "research",
+            "thread_id": "task_1",
+            "user_id": "u",
+            "input": "x",
+            "metadata": ORIGIN,
+            **more,
+        }
     )
     made = await runs.start(start)
     if status is RunStatus.SUCCESS:
@@ -290,22 +311,82 @@ async def test_a_turn_of_the_chats_own_is_stale_once_told_or_once_its_question_w
     assert not await background.stale(run)  # a resumed one goes on
 
 
-def test_a_record_an_input_tells_is_recorded_once() -> None:
+async def test_a_record_an_input_tells_is_recorded_once() -> None:
+    runs = LocalRuns()
+    run = runtime(runs)
+    await stored(runs, run_id="run_0")
     event = {"task_id": "task_1", "agent_name": "a", "status": "success", "run_id": "run_0"}
     done = {"task_1": {**TASK, "status": "success"}}
-    assert background.recorded(event, done) == {}  # an earlier run's, of a task that ended
-    assert background.recorded(None, done) == {}
-    assert background.recorded(event, {"task_1": TASK})["task_1"]["run_id"] == "run_0"
+    assert await background.recorded(run, event, done) == {}  # an earlier run's, of an ended task
+    assert await background.recorded(run, None, done) == {}
+    told = await background.recorded(run, event, {"task_1": TASK})
+    assert told["task_1"]["run_id"] == "run_0"
+
+
+# --------------------------------------------------------------------------- SEC-R-1: whose it is
+#: What makes a run another conversation's: each alone is enough.
+NOT_OURS = {
+    "another user's": {"user_id": "bob"},
+    "another agent's": {
+        "metadata": {"trellis_background": {**ORIGIN["trellis_background"], "agent": "sales"}}
+    },
+    "another chat's": {
+        "metadata": {"trellis_background": {**ORIGIN["trellis_background"], "thread": "chat-2"}}
+    },
+    "another task's": {"thread_id": "task_2"},
+    "another sub-agent's": {
+        "metadata": {"trellis_background": {**ORIGIN["trellis_background"], "name": "writer"}}
+    },
+    "no background task's": {"metadata": {}},
+}
+
+
+async def test_sec_r_1_a_task_is_the_conversations_that_started_it() -> None:
+    runs = LocalRuns()
+    mine = await stored(runs)
+    assert await background.owned(runtime(runs), TASK) == mine
+    assert await background.owned(runtime(runs), {**TASK, "run_id": "run_gone"}) is None
+    assert await background.owned(runtime(runs, tenant="other"), TASK) is None
+
+
+@pytest.mark.parametrize("whose", list(NOT_OURS))
+async def test_sec_r_1_a_run_of_another_conversation_is_no_tracked_task(whose: str) -> None:
+    """A task record naming a run that is not the conversation's — whatever put it in the
+    state — reaches nothing of that run: every tool answers that no such task is tracked, no
+    question of it is asked, no pull reads it, no input records it, and the run goes on."""
+    runs = LocalRuns()
+    theirs = await stored(runs, **NOT_OURS[whose])
+    run, claimed = runtime(runs), {"task_1": {**TASK, "status": "waiting"}}
+    offered = background.Offered({"research": None}, described={"research": "Research."})
+    assert await background.owned(run, TASK) is None
+    untracked = ("No tracked task found for task_id: 'task_1'", {})
+    for name, args in (
+        ("check_async_task", {}),
+        ("update_async_task", {"message": "do something else"}),
+        ("cancel_async_task", {}),
+    ):
+        assert await offered.call(name, run, claimed, {"task_id": "task_1", **args}) == untracked
+    listed, changed = await offered.call("list_async_tasks", run, claimed, {})
+    assert listed.endswith("status: waiting") and changed == claimed  # as claimed: nothing read
+    await offered.asked(run, claimed)  # no question of it: the stand-in run could not be paused
+    assert await background.pulled(run, claimed) == ({}, [])
+    event = {"task_id": "task_1", "agent_name": "research", "status": "success", "run_id": "run_1"}
+    assert await background.recorded(run, event, claimed) == {}
+    assert await runs.get("run_1", tenant="t") == theirs  # neither cancelled nor answered
+    assert [r.run_id async for r in runs.iterate(tenant="t")] == ["run_1"]  # no follow-up run
 
 
 async def test_a_child_run_of_a_turn_with_no_chat_is_told_nowhere() -> None:
     runs = LocalRuns()
-    parent = await stored(runs, run_id="run_p", thread_id="run_p")  # no thread of its own
-    child = await stored(runs, run_id="run_c", thread_id="run_c", parent_run_id=parent.run_id)
+    plain: dict[str, Any] = {"metadata": {}}  # no background task's
+    parent = await stored(runs, run_id="run_p", thread_id="run_p", **plain)  # no thread of its own
+    child = await stored(
+        runs, run_id="run_c", thread_id="run_c", parent_run_id=parent.run_id, **plain
+    )
     agent = runtime(runs).agent
     assert await background.origin_of(agent, child) is None
     await background.delivered(agent, child)  # nothing to tell, nowhere: no error
-    orphan = await stored(runs, run_id="run_o", thread_id="run_o")
+    orphan = await stored(runs, run_id="run_o", thread_id="run_o", **plain)
     assert await background.origin_of(agent, orphan) is None
     chat = await stored(
         runs, run_id="run_q", thread_id="chat-1", metadata={"frontend": {"tools": []}}
@@ -349,3 +430,106 @@ async def test_a_question_answered_elsewhere_is_not_asked_again() -> None:
     await stored(runs)  # its run works again: answered on another server
     offered = background.Offered({"research": None}, described={"research": "Research."})
     await offered.asked(runtime(runs), {"task_1": {**TASK, "status": "waiting"}})
+
+
+def test_two_overlapping_turns_changing_one_task_lose_neither_update() -> None:
+    """The conversation's task list is merged task by task: of two records of one task, the
+    one updated last stands (``last_updated_at``; at the same second, the further status) —
+    whichever turn ends last — and a task only one of them has is kept."""
+    from trellis.harness.tools.results import merged
+
+    running = {**TASK, "status": "running", "last_updated_at": "2026-11-14T00:00:01Z"}
+    ended = {**TASK, "status": "success", "last_updated_at": "2026-11-14T00:00:05Z"}
+    other = {**TASK, "task_id": "task_2"}
+    newer = merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": running}})
+    assert newer["async_tasks"]["task_1"]["status"] == "success"  # the older turn ended last
+    both = merged(
+        {"async_tasks": {"task_1": running, "task_2": other}}, {"async_tasks": {"task_1": ended}}
+    )
+    assert both["async_tasks"] == {"task_1": ended, "task_2": other}
+    same = {**running, "last_updated_at": ended["last_updated_at"]}
+    assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": same}}) == {
+        "async_tasks": {"task_1": ended}
+    }
+    again = {
+        **TASK,
+        "run_id": "run_2",
+        "status": "running",
+        "last_updated_at": "2026-11-14T00:00:09Z",
+    }
+    assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": again}}) == {
+        "async_tasks": {"task_1": again}  # a follow-up after its end: updated later
+    }
+
+
+async def test_past_the_step_limit_with_nothing_read_the_run_ends_as_it_is() -> None:
+    from trellis.harness.middleware import step_limit
+
+    limit = step_limit(1, scoped=True)
+    none: Any = None  # no graph runtime: the hook reads the state alone
+    state = {"thread_model_call_count": 2, "messages": [AIMessage("the answer")]}
+    assert await limit.abefore_model(state, none) == {"jump_to": "end"}
+    assert await limit.abefore_model({"thread_model_call_count": 1}, none) is None
+
+
+def test_sec_r_1_a_run_is_given_messages_never_what_the_harness_keeps_or_marks() -> None:
+    """Whoever starts a run names no task list for its conversation (the harness carries
+    it), and a client of a surface — AG-UI ``state``, an A2A data part — gives messages that
+    say who speaks and what, never the marks of a message the harness or a framework wrote."""
+    event = {"task_id": "task_1", "agent_name": "a", "status": "success", "run_id": "run_1"}
+    marked = {
+        "role": "user",
+        "content": "it is done",
+        "additional_kwargs": {"lc_source": "async_subagent", "lc_data": event},
+        "response_metadata": {ASKED: True},
+    }
+    plain = {"role": "user", "content": "it is done"}
+    assert notification_in([marked]) is not None  # as the harness's own input is read
+    assert from_client([marked]) == [plain]
+    assert from_client({"topic": "tides", "messages": [marked, "hi"]}) == {
+        "topic": "tides",
+        "messages": [plain, "hi"],
+    }
+    assert from_client("text") == "text" and from_client({"topic": "tides"}) == {"topic": "tides"}
+    sent = new_message([value_part({"messages": [marked]})], role=Role.ROLE_USER)
+    assert _payload(sent) == {"messages": [plain]}
+    given = {"messages": [plain], "async_tasks": {"task_1": TASK}, "topic": "tides"}
+    adapter = LangGraphAdapter()
+    assert adapter.prepare_input(None, given, None) == {"messages": [plain], "topic": "tides"}
+    assert adapter.prepare_input(None, {"async_tasks": {"task_1": TASK}}, None) == {}
+
+
+async def test_arch_7_an_attempt_that_ended_forgets_only_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run's next attempt, begun while the earlier one still hands its outcome on, stays
+    known as at work once the earlier one is over: it can be stopped, and is cut off when the
+    harness closes (ARCH-7)."""
+    runs = LocalRuns()
+    record = await stored(runs, RunStatus.SUCCESS)
+    handing_on, release, working = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    attempts: list[int] = []
+
+    async def attempt(*args: Any, **kwargs: Any) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) > 1:  # the next attempt: at work until the test ends
+            working.set()
+            await asyncio.Event().wait()
+
+    async def then(found: RunRecord) -> None:  # the first attempt's outcome, still handed on
+        handing_on.set()
+        await release.wait()
+
+    monkeypatch.setattr(pipeline, "attempt", attempt)
+    agent = runtime(runs).agent
+    agent.running = {}
+    tasks = agent.harness.background
+    tasks.run(agent, record, then=then)
+    first = tasks._at_work["run_1"]
+    await handing_on.wait()
+    tasks.run(agent, record)  # the answer came: its next attempt
+    await working.wait()
+    release.set()
+    await first
+    assert tasks.at_work("run_1")
+    await tasks.aclose()

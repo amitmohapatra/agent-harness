@@ -1,9 +1,9 @@
 """Background tasks with no server to host: a sub-agent's run that goes on after the turn that
 started it replied, while the chat takes new messages, its outcome brought back to the chat —
-the harness's own, for an agent whose framework has none (``ReAct``'s sub-agents:
-``middleware.BackgroundTasks``), in the shape of Deep Agents' async sub-agents, whose tools,
-task record and notification it keeps: the model sees one interface whether a task runs on a
-server (``AsyncSubAgent``) or here.
+the harness's own, for ``ReAct``'s sub-agents (``bridges.background_tasks.BackgroundTasks``),
+in the shape of Deep Agents' async sub-agents, whose tools, task record and notification it
+keeps: the model sees one interface, governed one way (``task_tools``), whether a task runs on
+a server (``AsyncSubAgent``) or here.
 
 * **The task** is a child run of the turn that started it (``Agent._start``, its parent the
   turn: its tenant, user, documents and what it is without), on a conversation of its own (a
@@ -62,6 +62,7 @@ from trellis.contracts import (
     safe_id,
     stable_id,
 )
+from trellis.harness import task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.conversation import Mode
 from trellis.harness.frontend import FRONTEND
@@ -79,10 +80,9 @@ log = logging.getLogger("trellis.harness")
 #: sub-agent's name, and the agent and the chat thread that started it (and that chat's front
 #: end, :data:`~trellis.harness.frontend.FRONTEND`, when it had one).
 BACKGROUND: Final = "trellis_background"
-#: The metadata key of a notification run (:func:`notify`): the ``TaskEvent`` it delivers.
+#: The metadata key of a notification run (:func:`notify`): the ``TaskEvent`` it delivers, and
+#: the server whose start made it (``by``: its holds' name), the one that runs it.
 NOTIFIED: Final = "trellis_notified"
-#: The notification metadata source of a task's update: Deep Agents' (its ``lc_source``).
-SOURCE: Final = "async_subagent"
 #: A task's status by its run's (Deep Agents' words: ``pending`` not started yet, ``waiting``
 #: for a person).
 STATUS: Final[Mapping[RunStatus, str]] = {
@@ -156,12 +156,18 @@ def task_of(record: RunRecord, name: str) -> dict[str, Any]:
 
 
 def observed(task: Mapping[str, Any], record: RunRecord) -> dict[str, Any]:
-    """``task`` as its run ``record`` says it is now (Deep Agents' ``_observed``)."""
-    at, status = now(), status_of(record)
-    changed = status != task["status"] or record.run_id != task["run_id"]
+    """``task`` as its run ``record`` says it is now."""
+    return moved(task, run_id=record.run_id, status=status_of(record))
+
+
+def moved(task: Mapping[str, Any], *, run_id: str, status: str) -> dict[str, Any]:
+    """``task`` read now, on the run ``run_id`` with ``status`` (Deep Agents' ``_observed``):
+    checked now, and updated now when either differs from what its record said."""
+    at = now()
+    changed = status != task["status"] or run_id != task["run_id"]
     return {
         **task,
-        "run_id": record.run_id,
+        "run_id": run_id,
         "status": status,
         "last_checked_at": at,
         "last_updated_at": at if changed else task["last_updated_at"],
@@ -261,7 +267,7 @@ def _interrupts(record: RunRecord) -> list[dict[str, Any]]:
 def notification(update: Mapping[str, Any]) -> Any:
     """A task update as the message the model is given: a LangChain ``HumanMessage`` of its
     :func:`content`, marked with langchain-core's notification metadata — source
-    :data:`SOURCE`, its data the ``TaskEvent`` — as Deep Agents' notification is."""
+    ``task_tools.SOURCE``, its data the ``TaskEvent`` — as Deep Agents' notification is."""
     from langchain_core.messages import (  # noqa: PLC0415 - LangChain, an extra's
         HumanMessage,
         add_notification_metadata,
@@ -269,7 +275,7 @@ def notification(update: Mapping[str, Any]) -> Any:
 
     event = {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")}
     return add_notification_metadata(
-        HumanMessage(content=cast(Any, content(update))), source=SOURCE, data=event
+        HumanMessage(content=cast(Any, content(update))), source=task_tools.SOURCE, data=event
     )
 
 
@@ -321,9 +327,11 @@ class Tasks:
         task.add_done_callback(lambda _: self._done(record.run_id, task))
 
     def _done(self, run_id: str, task: asyncio.Task[None]) -> None:
-        # its run's next attempt starts once this one ended (after the person's answer)
-        self._at_work.pop(run_id, None)
-        self._agents.pop(run_id, None)
+        # the run's next attempt may be at work already (the person answered while this one
+        # still handed its outcome on): only this attempt is forgotten
+        if self._at_work.get(run_id) is task:
+            del self._at_work[run_id]
+            del self._agents[run_id]
 
     async def _work(
         self,
@@ -368,17 +376,16 @@ class Tasks:
                 self.stop(record.run_id, "ended in the run store")
                 return
 
-    def stop(self, run_id: str, reason: str) -> bool:
-        """The attempt of ``run_id`` at work here stopped, as ``Agent.cancel`` stops one (its
-        run is ended in the store already, or ends ``CANCELLED`` with ``reason``); whether
-        one was."""
+    def stop(self, run_id: str, reason: str) -> None:
+        """The attempt of ``run_id`` at work here stopped, when one is, as ``Agent.cancel``
+        stops one (its run is ended in the store already, or ends ``CANCELLED`` with
+        ``reason``)."""
         agent = self._agents.get(run_id)
         runtime = None if agent is None else agent.running.get(run_id)
         if runtime is None or runtime.running_in is None:
-            return False
+            return
         runtime.cancelled = runtime.cancelled or reason
         runtime.running_in.cancel()
-        return True
 
     async def aclose(self) -> None:
         """The harness closes: each task still at work is cut off — its run ended ``ERROR``
@@ -416,32 +423,30 @@ async def follow_up(
     runtime: Runtime,
     agent: Agent,
     task: Mapping[str, Any],
+    latest: RunRecord,
     message: str,
     *,
-    strategy: str,
+    mode: Mode,
 ) -> dict[str, Any]:
-    """``message`` sent to ``task``: a new run of its conversation, which sees what it did so
-    far, under the task's id. ``strategy`` is Deep Agents' ``update_strategy``: ``interrupt``
-    stops the run at work first (here, as ``Mode.INTERRUPT`` does; elsewhere, by its
-    cancel), ``enqueue`` waits for it (``Mode.QUEUE``). The task's record, updated."""
-    runs, tenant = runtime.agent.harness.runs, runtime.tenant
-    latest = await runs.get(task["run_id"], tenant=tenant)
-    origin = dict((latest.metadata if latest is not None else {}).get(BACKGROUND) or {})
+    """``message`` sent to ``task``, whose run of now is ``latest`` (the conversation's:
+    :func:`owned`): a new run of its conversation, which sees what it did so
+    far, under the task's id. ``mode`` is what Deep Agents' ``update_strategy`` says of the
+    run at work: ``Mode.INTERRUPT`` stops it first (here, as the conversation's line does;
+    elsewhere, by its cancel), ``Mode.QUEUE`` waits for it. The task's record, updated."""
+    origin = dict(latest.metadata[BACKGROUND])
     place = runtime.idempotency_key or new_id("call_")
     run_id = stable_id(place, BACKGROUND, task["task_id"], prefix="run_")
-    mode = Mode.INTERRUPT if strategy == "interrupt" else Mode.QUEUE
     tasks = runtime.agent.harness.background
-    elsewhere = latest is not None and not latest.final and not tasks.at_work(latest.run_id)
-    if mode is Mode.INTERRUPT and latest is not None and elsewhere:
+    if mode is Mode.INTERRUPT and not latest.final and not tasks.at_work(latest.run_id):
         # at work on another replica, or waiting for a person: stopped there
         with contextlib.suppress(ConflictError):  # it ended meanwhile
-            await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=tenant)
+            await agent.cancel(latest.run_id, reason=INTERRUPTED, tenant=runtime.tenant)
     record = await _started(
-        runtime, agent, message, run_id=run_id, thread=task["thread_id"], origin=origin
+        runtime, agent, message, run_id=run_id, thread=task["task_id"], origin=origin
     )
     _go(runtime.agent, agent, record, mode=mode)
-    updated = {**observed(task, record), "status": "running", "last_updated_at": now()}
-    if mode is Mode.QUEUE and latest is not None and not latest.final:
+    updated = moved(task, run_id=record.run_id, status="running")
+    if mode is Mode.QUEUE and not latest.final:
         updated["superseded_run_ids"] = [*task.get("superseded_run_ids", []), task["run_id"]]
     return updated
 
@@ -486,15 +491,55 @@ def _go(parent: Agent, agent: Agent, record: RunRecord, *, mode: Mode = Mode.QUE
     parent.harness.background.run(agent, record, then=then, mode=mode)
 
 
-async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any]) -> None:
-    """``task`` cancelled: its latest run, and the earlier ones a queued follow-up left behind
-    it that still work (newest first, so cancelling one does not let the next begin)."""
-    tenant = runtime.tenant
-    for run_id in [task["run_id"], *reversed(task.get("superseded_run_ids", []))]:
+async def stop(runtime: Runtime, agent: Agent, task: Mapping[str, Any], latest: RunRecord) -> None:
+    """``task`` cancelled: its run of now (``latest``), and the earlier ones a queued follow-up
+    left behind it that still work (newest first, so cancelling one does not let the next
+    begin) — each one the conversation's (:func:`owned`)."""
+    earlier = [
+        {**task, "run_id": run_id} for run_id in reversed(task.get("superseded_run_ids", []))
+    ]
+    for record in [latest, *[await owned(runtime, t) for t in earlier]]:
+        if record is None:
+            continue
         with contextlib.suppress(ConflictError):  # it ended already
             await agent.cancel(
-                run_id, reason="cancelled by the agent that started it", tenant=tenant
+                record.run_id,
+                reason="cancelled by the agent that started it",
+                tenant=runtime.tenant,
             )
+
+
+# --------------------------------------------------------------------------- whose it is
+async def owned(runtime: Runtime, task: Mapping[str, Any]) -> RunRecord | None:
+    """The run ``task``'s record names, when it is a task of ``runtime``'s conversation: a
+    background task's run (:data:`BACKGROUND`) of its tenant and user that its agent started
+    in its chat thread (:func:`of_chat`), on the conversation the task's id names, of the
+    sub-agent the record names. ``None``
+    for any other — a record is only what a conversation's state says, and the run it names
+    is read, asked about, sent instructions or cancelled only here: every tool, the questions
+    asked, each pull and the turn's last look go through this, and what is not owned is
+    answered as a task the conversation does not track."""
+    runs = runtime.agent.harness.runs
+    record = await runs.get(str(task.get("run_id")), tenant=runtime.tenant)
+    origin = None if record is None else record.metadata.get(BACKGROUND)
+    if record is None or not isinstance(origin, Mapping):
+        return None
+    mine = of_chat(runtime, record, agent=origin.get("agent"), thread=origin.get("thread"))
+    named = (record.thread_id, origin.get("name")) == (task.get("task_id"), task.get("agent_name"))
+    return record if mine and named else None
+
+
+def of_chat(runtime: Runtime, record: RunRecord, *, agent: Any, thread: Any) -> bool:
+    """Whether ``record`` is a run of ``runtime``'s conversation's making: its tenant's and its
+    user's, started by its agent (``agent``) in its chat thread (``thread``) — as the record
+    says of itself where its kind keeps them (a background task's :data:`BACKGROUND`, a Deep
+    Agents task's helper record: ``bridges.async_tasks``)."""
+    return (
+        record.tenant_id == runtime.tenant
+        and record.user_id == runtime.user
+        and agent == runtime.agent_id
+        and thread == runtime.thread
+    )
 
 
 # --------------------------------------------------------------------------- its outcome
@@ -585,8 +630,9 @@ async def notify(
 ) -> None:
     """A turn of the chat's own that gives its model the task's ``update``: a run of ``agent``
     in the chat ``thread``, its input the notification (:func:`input_of`), started once per outcome
-    (its id is the outcome's: a question the task waits on is one), at work here and delivered
-    by the chat's thread stream."""
+    (its id is the outcome's: a question the task waits on is one) and run only by the server
+    whose start made it — another server telling the same outcome at once finds it made and
+    stops —, at work here and delivered by the chat's thread stream."""
     asked = record.awaiting.interrupt_id if record.awaiting is not None else ""
     run_id = stable_id(
         NOTIFIED, update["task_id"], update["run_id"], update["status"], asked, prefix="run_"
@@ -602,16 +648,18 @@ async def notify(
         run_id=run_id,
         record_input=True,
     )
-    metadata = {
-        **started.metadata,
-        NOTIFIED: {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")},
-    }
+    # who made it: the run store answers a start of a run that exists with that run, so the
+    # server whose start made it is the one that finds its own name there, and runs it
+    by = agent.harness.holds.name
+    told = {k: update[k] for k in ("task_id", "agent_name", "status", "run_id")}
+    metadata = {**started.metadata, NOTIFIED: {**told, "by": by}}
     if FRONTEND in origin:  # the chat's front end: a person reads it and answers what it asks
         metadata[FRONTEND] = origin[FRONTEND]
     found = await runs.start(started.model_copy(update={"metadata": metadata}))
     tasks = agent.harness.background
-    if found.status is RunStatus.RUNNING and not tasks.at_work(run_id):  # told meanwhile
-        tasks.run(agent, found)
+    ours = (found.metadata.get(NOTIFIED) or {}).get("by") == by
+    if ours and found.status is RunStatus.RUNNING and not tasks.at_work(run_id):
+        tasks.run(agent, found)  # not told meanwhile, here or by another server
 
 
 async def stale(runtime: Runtime) -> bool:
@@ -659,13 +707,12 @@ async def left(agent: Agent, runtime: Runtime, result: Any) -> None:
     if runtime.parent is not None or result.status is RunStatus.PAUSED:
         return
     tasks = runtime.carried.get("async_tasks") or {}
-    runs = agent.harness.runs
     for task in tasks.values() if isinstance(tasks, Mapping) else ():
         if task.get("status") not in UNFINISHED:
             continue
-        record = await runs.get(task["run_id"], tenant=runtime.tenant)
-        if record is None or BACKGROUND not in record.metadata:
-            continue  # not the harness's: a task on a server of Deep Agents'
+        record = await owned(runtime, task)
+        if record is None:
+            continue  # not the harness's (a task on a server of Deep Agents'), or not its own
         # a new outcome, or a question the turn did not ask (it asks none once at work)
         if status_of(record) != task["status"] or record.status is RunStatus.PAUSED:
             await delivered(agent, record, ending=runtime.run_id)
@@ -762,17 +809,8 @@ async def answered(
 
 
 # --------------------------------------------------------------------------- the five tools
-# The model-facing tools, adapter-neutral: Deep Agents' async sub-agent tools by name,
-# arguments and words (an adapter gives them its own framework's shape — a LangChain tool,
-# ``bridges.background_tasks``; an OpenAI Agents function tool — around :class:`Offered`).
-#: The tools, by name, as Deep Agents names its own.
-TOOLS: Final = (
-    "start_async_task",
-    "check_async_task",
-    "update_async_task",
-    "cancel_async_task",
-    "list_async_tasks",
-)
+# The model-facing tools: Deep Agents' async sub-agent tools by name (``task_tools``),
+# arguments and words; ``bridges.background_tasks`` gives each a LangChain tool's shape.
 #: What ``start_async_task`` says: when a task in the background is the right call, and what
 #: comes back (the model-facing guidance, here and nowhere else).
 START: Final = (
@@ -824,51 +862,49 @@ UNTRACKED: Final = "No tracked task found for task_id: {task_id!r}"
 NONE: Final = "No async subagent tasks tracked."
 #: What a start answers outside a harness run, where nothing can run the task.
 NO_RUN: Final = "Background tasks run inside a harness run: none is under way."
-#: The tools that hand work on to a sub-agent whose own calls are governed: reads, as the
-#: ``task`` hand-over is (``adapters.base.helper``).
-HANDS_ON: Final = frozenset({"start_async_task", "update_async_task"})
+#: What a tool's work answers: what the model reads, and the task records it changed.
+Answer = tuple[str, dict[str, Any]]
 
 
-#: What each tool does: a start and an update hand work on (:data:`HANDS_ON`), a cancel stops
-#: work (a write), a check and the list read.
-SIDE_EFFECTS: Final[Mapping[str, str]] = {
-    name: "read"
-    if name in HANDS_ON or name in ("check_async_task", "list_async_tasks")
-    else "write"
-    for name in TOOLS
-}
-#: The tools whose result is the record of what was done — the task's id, that it was sent new
-#: instructions or stopped — no value to read again.
-DONE: Final = frozenset({"start_async_task", "update_async_task", "cancel_async_task"})
+class _Untracked(Exception):
+    """A call names a task that is none of the conversation's (:func:`owned`)."""
 
 
 class Offered:
     """The five tools' work for ``subagents`` — each by its name: a wrapped agent, or a target
     the parent's framework runs itself (a Deep Agents sub-agent's compiled graph: its agent is
-    :func:`agent_for`'s; ``None`` until :meth:`found`) — adapter-neutral: a call takes the run,
-    the task list the conversation carries (``Runtime.carried``'s ``async_tasks``, a graph's
-    state) and the call's arguments, and returns what the model reads and the task records it
-    changed. ``described`` lists each sub-agent with what it is for; ``strategies``, each one's
-    Deep Agents ``update_strategy`` (``interrupt`` by default)."""
+    :func:`agent_for`'s; ``None`` until :meth:`found`). A call takes the run, the task list its
+    conversation carries (the graph's state) and the call's arguments, and answers what the
+    model reads and the task records it changed. ``described`` lists each sub-agent with what
+    it is for; ``strategies``, what a follow-up to each one's task does with the run at work
+    (Deep Agents' ``update_strategy``: ``Mode.INTERRUPT`` by default, or ``Mode.QUEUE``)."""
 
     def __init__(
         self,
         subagents: Mapping[str, Any],
         *,
         described: Mapping[str, str],
-        strategies: Mapping[str, str] | None = None,
+        strategies: Mapping[str, Mode] | None = None,
     ) -> None:
         self.subagents: dict[str, Any] = dict(subagents)
-        self.strategies = {name: (strategies or {}).get(name, "interrupt") for name in subagents}
+        self.strategies = {name: (strategies or {}).get(name, Mode.INTERRUPT) for name in subagents}
         available = "\n".join(f"- {name}: {what}" for name, what in described.items())
-        queued = ", ".join(f"`{n}`" for n, s in self.strategies.items() if s == "enqueue")
+        queued = ", ".join(f"`{n}`" for n, m in self.strategies.items() if m is Mode.QUEUE)
         #: each tool's description, by name
         self.descriptions = {
-            "start_async_task": START.format(available_agents=available),
-            "check_async_task": CHECK,
-            "update_async_task": UPDATE + (QUEUED.format(names=queued) if queued else ""),
-            "cancel_async_task": CANCEL,
-            "list_async_tasks": LIST,
+            task_tools.START: START.format(available_agents=available),
+            task_tools.CHECK: CHECK,
+            task_tools.UPDATE: UPDATE + (QUEUED.format(names=queued) if queued else ""),
+            task_tools.CANCEL: CANCEL,
+            task_tools.LIST: LIST,
+        }
+        #: each tool's work, by name
+        self._work: Mapping[str, Callable[..., Awaitable[Answer]]] = {
+            task_tools.START: self._start,
+            task_tools.CHECK: self._check,
+            task_tools.UPDATE: self._update,
+            task_tools.CANCEL: self._cancel,
+            task_tools.LIST: self._list,
         }
 
     def found(self, targets: Mapping[str, Any]) -> None:
@@ -886,50 +922,59 @@ class Offered:
 
     async def call(
         self, name: str, runtime: Runtime | None, tasks: Mapping[str, Any], args: Mapping[str, Any]
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> Answer:
         """The tool ``name`` called with ``args`` in ``runtime``'s run, whose conversation
         carries ``tasks``: what the model reads, and the task records the call changed."""
         if runtime is None:
             return NO_RUN, {}
-        if name == "start_async_task":
-            return await self._start(runtime, str(args["subagent_type"]), str(args["description"]))
-        if name == "list_async_tasks":
-            return await self._list(runtime, tasks, args.get("status_filter"))
-        task_id = str(args["task_id"])
-        found = tasks.get(task_id.strip())
-        if not isinstance(found, Mapping) or found.get("agent_name") not in self.subagents:
-            return UNTRACKED.format(task_id=task_id), {}
-        task = dict(found)
-        if name == "update_async_task":
-            return await self._update(runtime, task, str(args["message"]))
-        own = self._check if name == "check_async_task" else self._cancel
-        return await own(runtime, task)
+        try:
+            return await self._work[name](runtime, tasks, args)
+        except _Untracked:
+            return UNTRACKED.format(task_id=str(args["task_id"])), {}
+
+    async def _task(
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], RunRecord]:
+        """The task a call names and its run of now, when the conversation tracks it and it is
+        its own (:func:`owned`); else :class:`_Untracked`."""
+        task = tasks.get(str(args["task_id"]).strip())
+        if not isinstance(task, Mapping) or task.get("agent_name") not in self.subagents:
+            raise _Untracked
+        record = await owned(runtime, task)
+        if record is None:
+            raise _Untracked
+        return dict(task), record
 
     async def _start(
-        self, runtime: Runtime, name: str, description: str
-    ) -> tuple[str, dict[str, Any]]:
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> Answer:
+        name = str(args["subagent_type"])
         if name not in self.subagents:
             allowed = ", ".join(f"`{n}`" for n in self.subagents)
             return f"Unknown async subagent type `{name}`. Available types: {allowed}", {}
-        task = await start(runtime, self.agent(runtime, name), name, description)
+        task = await start(runtime, self.agent(runtime, name), name, str(args["description"]))
         return f"Launched async subagent. task_id: {task['task_id']}", {task["task_id"]: task}
 
-    async def _check(self, runtime: Runtime, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        record = await runtime.agent.harness.runs.get(task["run_id"], tenant=runtime.tenant)
-        if record is None:
-            return UNTRACKED.format(task_id=task["task_id"]), {}
-        said = json.dumps(result_of(task, record))
-        return said, {task["task_id"]: observed(task, record)}
+    async def _check(
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> Answer:
+        task, record = await self._task(runtime, tasks, args)
+        return json.dumps(result_of(task, record)), {task["task_id"]: observed(task, record)}
 
     async def _update(
-        self, runtime: Runtime, task: dict[str, Any], message: str
-    ) -> tuple[str, dict[str, Any]]:
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> Answer:
+        task, record = await self._task(runtime, tasks, args)
         name, task_id = task["agent_name"], task["task_id"]
-        strategy = self.strategies[name]
         updated = await follow_up(
-            runtime, self.agent(runtime, name), task, message, strategy=strategy
+            runtime,
+            self.agent(runtime, name),
+            task,
+            record,
+            str(args["message"]),
+            mode=self.strategies[name],
         )
-        queued = "superseded_run_ids" in updated and strategy == "enqueue"
+        queued = updated.get("superseded_run_ids") != task.get("superseded_run_ids")
         said = (
             "Queued follow-up to async subagent without interrupting its current run. "
             f"task_id: {task_id}"
@@ -938,24 +983,24 @@ class Offered:
         )
         return said, {task_id: updated}
 
-    async def _cancel(self, runtime: Runtime, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        await stop(runtime, self.agent(runtime, task["agent_name"]), task)
-        at = now()
-        cancelled = {**task, "status": "cancelled", "last_checked_at": at, "last_updated_at": at}
+    async def _cancel(
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> Answer:
+        task, record = await self._task(runtime, tasks, args)
+        await stop(runtime, self.agent(runtime, task["agent_name"]), task, record)
+        cancelled = moved(task, run_id=task["run_id"], status="cancelled")
         return f"Cancelled async subagent task: {task['task_id']}", {task["task_id"]: cancelled}
 
     async def _list(
-        self, runtime: Runtime, tasks: Mapping[str, Any], status_filter: Any
-    ) -> tuple[str, dict[str, Any]]:
+        self, runtime: Runtime, tasks: Mapping[str, Any], args: Mapping[str, Any]
+    ) -> Answer:
+        status_filter = args.get("status_filter")
         listed = [dict(t) for t in tasks.values()]
         if status_filter and status_filter != "all":
             listed = [t for t in listed if t["status"] == status_filter]
         if not listed:
             return NONE, {}
-        runs = runtime.agent.harness.runs
-        records = await asyncio.gather(
-            *(runs.get(t["run_id"], tenant=runtime.tenant) for t in listed)
-        )
+        records = await asyncio.gather(*(owned(runtime, t) for t in listed))
         updated = {
             t["task_id"]: t if r is None else observed(t, r)
             for t, r in zip(listed, records, strict=True)
@@ -969,11 +1014,10 @@ class Offered:
     async def asked(self, runtime: Runtime, tasks: Mapping[str, Any]) -> None:
         """The questions ``tasks`` wait on asked in ``runtime``'s turn (:func:`ask`), each
         answer handed on to its task (:func:`answered`)."""
-        runs = runtime.agent.harness.runs
         for task in tasks.values():
             if task.get("status") != "waiting" or task.get("agent_name") not in self.subagents:
                 continue
-            record = await runs.get(task["run_id"], tenant=runtime.tenant)
+            record = await owned(runtime, task)
             if record is None:
                 continue
             resolution = await ask(runtime, record)
@@ -989,10 +1033,7 @@ async def pulled(
     moved on, and the update (:func:`update_of`) of each new outcome — one the conversation was
     told already (through a check, the list, an earlier notification) is not told again."""
     unfinished = [t for t in tasks.values() if t.get("status") in UNFINISHED]
-    runs = runtime.agent.harness.runs
-    records = await asyncio.gather(
-        *(runs.get(t["run_id"], tenant=runtime.tenant) for t in unfinished)
-    )
+    records = await asyncio.gather(*(owned(runtime, t) for t in unfinished))
     updated: dict[str, Any] = {}
     told: list[dict[str, Any]] = []
     for task, record in zip(unfinished, records, strict=True):
@@ -1008,24 +1049,17 @@ async def pulled(
     return updated, told
 
 
-def recorded(event: Any, tasks: Mapping[str, Any]) -> dict[str, Any]:
+async def recorded(runtime: Runtime, event: Any, tasks: Mapping[str, Any]) -> dict[str, Any]:
     """The outcome a run's input tells (``event``, its ``TaskEvent``: a turn of the chat's own,
     :func:`notify`) recorded in its task's record, so no read tells it again (Deep Agents'
-    ``_record_notification``)."""
+    ``_record_notification``) — when the run it names is the task's, in ``runtime``'s
+    conversation (:func:`owned`): an input is what whoever started the run wrote."""
     task = tasks.get(str(event.get("task_id"))) if isinstance(event, Mapping) else None
     if not isinstance(event, Mapping) or not isinstance(task, Mapping):
         return {}
     if event.get("run_id") != task["run_id"] and task["status"] not in UNFINISHED:
         return {}
-    at = now()
-    status, run_id = str(event["status"]), str(event.get("run_id") or task["run_id"])
-    changed = status != task["status"] or run_id != task["run_id"]
-    return {
-        task["task_id"]: {
-            **task,
-            "run_id": run_id,
-            "status": status,
-            "last_checked_at": at,
-            "last_updated_at": at if changed else task["last_updated_at"],
-        }
-    }
+    run_id = str(event.get("run_id") or task["run_id"])
+    if await owned(runtime, {**task, "run_id": run_id}) is None:
+        return {}
+    return {task["task_id"]: moved(task, run_id=run_id, status=str(event["status"]))}
