@@ -773,17 +773,24 @@ def _worded(error: BaseException) -> str | None:
 FAILURE_FUNCTION: Final = "_get_failure_error_function"
 
 
+def _wraps_failure_function(server: type) -> None:
+    """Refuse an SDK whose ``MCPServer`` no longer has :data:`FAILURE_FUNCTION`: the governed
+    server's override of it would never be called, and a pause inside an MCP call would become
+    an error text the model reads instead of stopping the run."""
+    if not hasattr(server, FAILURE_FUNCTION):
+        raise ConfigurationError(
+            f"this OpenAI Agents SDK's MCPServer no longer has {FAILURE_FUNCTION}, which the "
+            "harness wraps so a pause inside an MCP call stops the run: use a tested SDK "
+            "release (docs/versioning.md)"
+        )
+
+
 @functools.cache
 def _governed_server() -> type:
     from agents.mcp import MCPServer
     from mcp.types import CallToolResult, TextContent
 
-    if not hasattr(MCPServer, FAILURE_FUNCTION):
-        raise ConfigurationError(
-            f"this OpenAI Agents SDK's MCPServer no longer has {FAILURE_FUNCTION}, which the "
-            "harness wraps so a pause inside an MCP call stops the run instead of becoming an "
-            "error text: use a tested SDK release (docs/versioning.md)"
-        )
+    _wraps_failure_function(MCPServer)
 
     class Governed(MCPServer, GovernedServer):  # type: ignore[misc]
         def __init__(self, inner: Any) -> None:  # the SDK's own state is the inner server's

@@ -397,3 +397,16 @@ async def test_a_failed_call_a_hook_makes_a_result_is_read_as_one(harness: Harne
     result = await agent.run("find o1", user="u")
     assert result.status is RunStatus.SUCCESS and result.answer == "it is open"
     assert results(model) == ["o1: open"]
+
+
+def test_an_sdk_whose_mcp_server_lost_its_failure_function_is_refused() -> None:
+    """The governed server wraps a private method of the SDK's ``MCPServer``: an SDK release
+    without it is refused loudly, not run with a pause that becomes an error text."""
+    from trellis.contracts import ConfigurationError
+    from trellis.harness.adapters.openai_agents import _wraps_failure_function
+
+    class Renamed:
+        pass
+
+    with pytest.raises(ConfigurationError, match="no longer has _get_failure_error_function"):
+        _wraps_failure_function(Renamed)

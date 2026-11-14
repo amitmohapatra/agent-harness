@@ -120,59 +120,78 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     if getattr(tool.on_invoke_tool, MADE, False):
         return tool
     original = tool.on_invoke_tool
-    helps = getattr(tool, AGENT_TOOL, False)
     function = getattr(original, FUNCTION, None)
     ran = cast("Invoke", function) if callable(function) else original
-    if helpers is not None and helps:
+    if helpers is not None and getattr(tool, AGENT_TOOL, False):
         ran = _helped(tool, ran, helpers)
 
     def invoke(context: ToolContext[Any], arguments: str) -> Awaitable[Any]:
         # called in the step in which the SDK starts its own clock for the call (its
         # ``asyncio.wait_for`` around what this returns, for a tool with a ``timeout``): the
         # call is due then, however late the SDK's task for it begins (:func:`_own_time_is_up`)
-        return invoked(context, arguments, _due(tool))
-
-    async def invoked(context: ToolContext[Any], arguments: str, due: float | None) -> Any:
-        args = arguments_of(arguments)
-        runtime = current()
-        if isinstance(args, str) or runtime is None:
-            return await original(context, arguments)
-
-        async def run(given: dict[str, Any]) -> Any:
-            try:
-                answer = await ran(context, json.dumps(given))
-            except asyncio.CancelledError as cut:
-                if not _own_time_is_up(runtime, due):
-                    raise
-                raise PastItsOwnLimit(tool.name) from cut
-            if waits_inside(context):
-                raise WaitsInside(tool.name, answer)
-            return answer
-
-        carried = Carried(run)
-        try:
-            outcome = await bridge.call(
-                Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
-            )
-        except WaitsInside as waiting:
-            return waiting.answer
-        hooked = bridge.hooked(outcome)
-        if carried.raised and not outcome.ok:
-            error = carried.raised[-1]
-            said = text_of(outcome.output) if hooked else None
-            # a call the SDK cut at the tool's own limit: its cancellation, the SDK's to act on
-            cut = error.__cause__ if isinstance(error, PastItsOwnLimit) else None
-            return await _told(original, cut or error, context, arguments, said=said)
-        # what the tool returned, as the SDK takes it from the tool itself: an image or a file
-        # the model sees, a typed result its tool_use_behavior, guardrails and hooks are
-        # handed — the record keeps its readable form; else (the journal's result of a call
-        # made before a pause, the hooks' word, governance's) what the bridge says
-        return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
+        return _invoked(tool, original, ran, context, arguments, due=_due(tool))
 
     setattr(invoke, MADE, True)
     return with_fields(
         tool, on_invoke_tool=invoke, is_enabled=_narrowed(tool.name, tool.is_enabled)
     )
+
+
+async def _invoked(
+    tool: FunctionTool,
+    original: Invoke,
+    ran: Invoke,
+    context: ToolContext[Any],
+    arguments: str,
+    *,
+    due: float | None,
+) -> Any:
+    """One call of a governed ``FunctionTool`` (:func:`governed`): through the bridge, then
+    handed to the SDK as the tool itself would (:func:`_handed_on`). Arguments that are not a
+    JSON object, and a call outside a run, are the tool's own to deal with (``original``)."""
+    args = arguments_of(arguments)
+    runtime = current()
+    if isinstance(args, str) or runtime is None:
+        return await original(context, arguments)
+
+    async def run(given: dict[str, Any]) -> Any:
+        try:
+            answer = await ran(context, json.dumps(given))
+        except asyncio.CancelledError as cut:
+            if not _own_time_is_up(runtime, due):
+                raise
+            raise PastItsOwnLimit(tool.name) from cut
+        if waits_inside(context):
+            raise WaitsInside(tool.name, answer)
+        return answer
+
+    carried = Carried(run)
+    try:
+        outcome = await bridge.call(
+            Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
+        )
+    except WaitsInside as waiting:
+        return waiting.answer
+    return await _handed_on(carried, outcome, original, context, arguments)
+
+
+async def _handed_on(
+    carried: Carried, outcome: ToolOutcome, original: Invoke, context: Any, arguments: str
+) -> Any:
+    """What the SDK is handed of a governed function tool's call: what the tool returned, as
+    the SDK takes it from the tool itself — an image or a file the model sees, a typed result
+    its ``tool_use_behavior``, guardrails and hooks are handed (the record keeps its readable
+    form); a failure of the tool's own, told as the SDK tells it (:func:`_told`); else what the
+    bridge says (the journal's result of a call made before a pause, the hooks' word,
+    governance's)."""
+    hooked = bridge.hooked(outcome)
+    if carried.raised and not outcome.ok:
+        error = carried.raised[-1]
+        said = text_of(outcome.output) if hooked else None
+        # a call the SDK cut at the tool's own limit: its cancellation, the SDK's to act on
+        cut = error.__cause__ if isinstance(error, PastItsOwnLimit) else None
+        return await _told(original, cut or error, context, arguments, said=said)
+    return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
 
 
 def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:

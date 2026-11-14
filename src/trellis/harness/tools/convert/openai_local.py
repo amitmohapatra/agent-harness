@@ -27,10 +27,9 @@ import dataclasses
 import functools
 import inspect
 import json
-import weakref
 from collections import deque
 from collections.abc import Callable, Collection, Hashable, Sequence
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from trellis.contracts import ToolError, ToolSpec
 from trellis.contracts.errors import is_pause_signal
@@ -42,16 +41,29 @@ from trellis.harness.tools.base import Tool, not_run
 #: person is shown and what governance decides on (the call's id is the bridge's own).
 IDENTITY: Final = frozenset({"id", "call_id", "status", "type"})
 
-#: A pause raised inside a call whose code the SDK runs within a ``try`` of its own (it turns
-#: an exception into a failed output and goes on), by run: raised again from the run's hooks
-#: as the run's next step begins (:func:`paused_inside`).
-_PAUSED: weakref.WeakKeyDictionary[Runtime, BaseException] = weakref.WeakKeyDictionary()
-#: Per run: the computer calls of its latest model reply not yet carried out, in order; the one
-#: being carried out (:func:`computer_started`); and what the model is to be told of computer
-#: actions that did not run (:func:`unsaid`).
-_COMPUTER_CALLS: weakref.WeakKeyDictionary[Runtime, deque[str]] = weakref.WeakKeyDictionary()
-_COMPUTER_CALL: weakref.WeakKeyDictionary[Runtime, Hashable] = weakref.WeakKeyDictionary()
-_UNSAID: weakref.WeakKeyDictionary[Runtime, list[str]] = weakref.WeakKeyDictionary()
+
+@dataclasses.dataclass(slots=True)
+class Local:
+    """What one attempt keeps of the calls the SDK carries out on this machine: on its
+    ``Runtime`` (``Runtime.local_calls``, :func:`_local`), gone with it."""
+
+    #: a pause raised inside a call whose code the SDK runs within a ``try`` of its own (it
+    #: turns an exception into a failed output and goes on): raised again from the run's hooks
+    #: as the run's next step begins (:func:`paused_inside`)
+    paused: BaseException | None = None
+    #: the computer calls of the latest model reply not yet carried out, in order
+    computer_calls: deque[str] = dataclasses.field(default_factory=deque)
+    #: the computer call being carried out (:func:`computer_started`): one model decision
+    computer_call: Hashable | None = None
+    #: what the model is to be told of computer actions that did not run (:func:`unsaid`)
+    unsaid: list[str] = dataclasses.field(default_factory=list)
+
+
+def _local(runtime: Runtime) -> Local:
+    """The attempt's :class:`Local`, made on its first use."""
+    if runtime.local_calls is None:
+        runtime.local_calls = Local()
+    return cast("Local", runtime.local_calls)
 
 
 def call_args(raw: Any) -> dict[str, Any]:
@@ -73,7 +85,11 @@ def _plain(value: Any) -> Any:
 def paused_inside(runtime: Runtime | None) -> BaseException | None:
     """The pause a call of a tool the SDK runs here raised inside the SDK's own ``try`` (once):
     the run's hooks raise it, so the run stops there."""
-    return _PAUSED.pop(runtime, None) if runtime is not None else None
+    if runtime is None:
+        return None
+    local = _local(runtime)
+    paused, local.paused = local.paused, None
+    return paused
 
 
 def run_here(tool: Any) -> Any:
@@ -167,7 +183,7 @@ async def through(
         outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
     except Exception as error:
         if is_pause_signal(error):  # the SDK may swallow it: its hooks stop the run
-            _PAUSED[runtime] = error
+            _local(runtime).paused = error
         raise
     if bridge.hooked(outcome):  # the run's after_tool hooks have the last word on the call
         if outcome.ok:
@@ -359,7 +375,7 @@ def _computer_class() -> type:
                 self._tool.name,
                 {"action": action},
                 run,
-                decision=None if runtime is None else _COMPUTER_CALL.get(runtime),
+                decision=None if runtime is None else _local(runtime).computer_call,
                 on_refusal=_skipped,
             )
         except NotAnAction as refused:  # recorded as failed; nothing of the computer called
@@ -402,14 +418,16 @@ def _skipped(said: str) -> None:
     output is a screenshot, with nowhere to say it)."""
     runtime = current()
     assert runtime is not None  # a call is refused only inside a run (:func:`through`)
-    _UNSAID.setdefault(runtime, []).append(said)
+    _local(runtime).unsaid.append(said)
 
 
 def unsaid(runtime: Runtime) -> list[str]:
     """What the model is to be told of the computer actions that did not run since its last
     model call (why each did not: the bridge's words), once: the adapter tells it in its next
     model call's input (``adapters.openai_agents``)."""
-    return _UNSAID.pop(runtime, [])
+    local = _local(runtime)
+    said, local.unsaid = local.unsaid, []
+    return said
 
 
 def computer_replied(runtime: Runtime, items: Sequence[Any]) -> None:
@@ -418,7 +436,7 @@ def computer_replied(runtime: Runtime, items: Sequence[Any]) -> None:
     from openai.types.responses import ResponseComputerToolCall
 
     calls = [i.call_id for i in items if isinstance(i, ResponseComputerToolCall)]
-    _COMPUTER_CALLS[runtime] = deque(calls)
+    _local(runtime).computer_calls = deque(calls)
 
 
 def computer_started(runtime: Runtime) -> None:
@@ -428,8 +446,9 @@ def computer_started(runtime: Runtime) -> None:
     ``Down`` presses as one decision, not a model looping, and a person's answer about an
     action covers the same action again in it. A call carried out with no reply read before it
     (a resumed run's) is a decision of its own all the same."""
-    pending = _COMPUTER_CALLS.get(runtime)
-    _COMPUTER_CALL[runtime] = ("computer", pending.popleft() if pending else object())
+    local = _local(runtime)
+    pending = local.computer_calls
+    local.computer_call = ("computer", pending.popleft() if pending else object())
 
 
 __all__ = [
