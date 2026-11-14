@@ -5,6 +5,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a conversation's Kimi Code process stays between its turns while work in its background goes on
+
+Kimi's background work (`Agent` with `run_in_background`, a `Bash` command run in the
+background) died with the attempt: the `kimi acp` process ended when the turn did, and a
+background sub-agent's child run ended `SUCCESS` with its launch text. A conversation's
+process is now kept while a task is at work or Kimi's own turn for one that ended is under
+way (`bridges/acp_live.py`, on the machinery Claude's live session uses: `bridges/live.py`).
+A background sub-agent's child run stays `RUNNING` until Kimi's log says its task ended,
+then ends `SUCCESS` or `ERROR` with its result; its calls are governed in its own run; what
+it asks a person is asked in the conversation's next turn. A process that crashes, idles
+past the limit or is held by another worker ends its runs saying so
+([docs/frameworks/kimi.md](docs/frameworks/kimi.md#background-work)). A sub-agent Kimi goes
+on with (`Agent(resume=...)`) is a child run named by the type it was started with.
+
 ### Fixed: Kimi Code's own configuration cannot turn the approvals off
 
 Kimi's `config.toml` can start every session approving on its own (`default_permission_mode =
