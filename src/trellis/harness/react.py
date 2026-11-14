@@ -379,6 +379,8 @@ def ReAct(
     if sourced is not None:  # the skills a route of the backend, read by Deep Agents' own
         fed = sourced.deep_agent(files_backend)
         graph_backend, skills = fed["backend"], fed["skills"]
+    if skills:  # as Deep Agents gives the general-purpose helper it adds itself
+        general["skills"] = skills
     # a Deep Agents capability asked for: Deep Agents' tools from the first step (files
     # outside the graph's state — a disk, a store, a sandbox — governed) and its summarization
     # of the older turns, unless the window is known to have no room for them

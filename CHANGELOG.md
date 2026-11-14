@@ -15,6 +15,18 @@ shape) given to the conversation's model at its next model call or turn, or by a
 chat's own on its thread stream when it is idle; its questions asked through the chat
 (`trellis.harness.background`, `bridges.background_tasks`; [react.md](docs/frameworks/react.md#a-task-in-the-background)).
 
+### Fixed: each library's own skills, through the harness
+
+- `ReAct(skills=src)`: its general-purpose helper (Deep Agents' `task`) is told the run's skills
+  and reads them through the same `/skills/` route, as Deep Agents gives the helper it adds
+  itself. Before, the helper had no skills.
+- Claude: the tool hints never narrow Claude Code's `Skill` tool away, so the run's skills (its
+  plugin) and your own skill folders stay usable on a narrowed run. A `Skill` call is a call of
+  the run: recorded, a read unless the catalog says more, then asked before it runs.
+- Kimi: a run given skills works in a home of its own, which now links what Kimi keeps in your
+  home for every session beside its `config.toml` and login: your `AGENTS.md`, your plugins, and
+  your own skills (beside the run's; a name the run has a skill of is the run's).
+
 ### Fixed: LangChain, LangGraph and Deep Agents features through the harness
 
 A library's feature works as the library does it; the harness governs, records and counts it.

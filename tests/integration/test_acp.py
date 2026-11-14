@@ -1009,6 +1009,31 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     assert started != str(usual) and gone  # the run's, removed with it
 
 
+async def test_kimis_skills_folder_holds_each_tenants_and_users_own_skills(
+    memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """SEC: the skills folder of a Kimi run's home holds the skills of its tenant and user."""
+    from tests.support.skills import SkillStore, kept_apart
+    from trellis import Settings
+    from trellis.skills import combine
+
+    memory_service.tenant = None  # a platform key: each run names its tenant
+    harness = Harness(config=Settings(), memory=memory_service.client())
+
+    async def seen(store: SkillStore, tenant: str, user: str) -> str:
+        folder = tmp_path / f"{tenant}-{user}"
+        await asyncio.to_thread(folder.mkdir)
+        target = fake(folder, [{"skills": True}, {"text": "ok"}], **combine(store).kimi())
+        result = await harness.wrap(target, id=f"k-{tenant}-{user}").run(
+            "go", user=user, tenant=tenant
+        )
+        assert result.status is RunStatus.SUCCESS, result.error
+        return recorded(folder)["skills"][0]["files"]["sql-review/SKILL.md"]
+
+    await kept_apart(seen)
+    await harness.aclose()
+
+
 # --------------------------------------------------------------------------- the rest of ACP
 async def test_every_other_update_and_an_extension_pass_through_a_turn(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
