@@ -321,6 +321,8 @@ async def test_a_file_that_is_no_table_or_too_large_says_so(
     await files.put("t/u/c_1/r0", "b.csv", b"\xff\xfe", source="sandbox_exec")
     said = await stored.read("/files/r0/b.csv")
     assert said.startswith("Error: /files/r0/b.csv is no table: UnicodeDecodeError"), said
+    monkeypatch.setattr(stored, "MAX_BYTES", 2)  # exactly its size: read
+    assert "UnicodeDecodeError" in await stored.read("/files/r0/b.csv")
     monkeypatch.setattr(stored, "MAX_BYTES", 1)
     said = await stored.read("/files/r0/b.csv")
     assert said == "Error: /files/r0/b.csv is 2 bytes, more than 1 read here", said
