@@ -46,6 +46,7 @@ async def test_a_sandbox_is_a_hardened_container_named_after_its_run_with_its_fi
     assert container.state == "running" and container.labels == REF.labels
     assert container.config["Image"] == DEFAULT_IMAGE
     assert (container.config["Entrypoint"], container.config["WorkingDir"]) == (IDLE, WORKDIR)
+    assert IDLE == ["sh", "-c", "while :; do sleep 3600; done"]  # idle until deleted
     assert container.config["HostConfig"] == {
         "NetworkMode": "none",
         "Init": True,
