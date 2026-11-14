@@ -202,24 +202,69 @@ async def test_a_command_that_only_reads_runs_without_asking_a_person(
         assert done.answer is not None and done.answer.startswith("Done. 1")
 
 
-async def test_kimi_still_asks_about_a_command_its_config_allows_and_so_a_person_is_asked(
-    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+@pytest.mark.parametrize(
+    "rules",
+    [
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(touch *)"\n',
+        '[[permission.allow]]\ntool = "Bash"\nmatch = "touch *"\n',
+    ],
+    ids=["a-rule", "an-allow-entry"],
+)
+async def test_a_rule_of_kimis_own_config_that_allows_a_call_stops_the_run_before_it(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, rules: str
 ) -> None:
-    """Kimi Code 2.1.1 reads ``[permission]`` rules in its ``config.toml`` but, over ACP, its
-    agent never loads them into the rules its policy checks: a command a team's rule allows is
-    still asked about, so the harness asks a person. Pinned: a Kimi that applies them passes
-    the team's allowlist through, and this fails."""
+    """APR-01. Since Kimi Code 2.6 the ``[permission]`` rules of its ``config.toml`` apply
+    over ACP: a call an ``allow`` rule covers runs without Kimi asking, and ACP gives a client
+    no way to be asked first. The harness governs only what Kimi asks about, so a run whose
+    Kimi holds such a rule gets no prompt: it fails naming the rule, and nothing ran."""
     home = tmp_path / "kimi-home"
     home.mkdir(parents=True)
-    (home / "config.toml").write_text(
-        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(touch *)"\n'
-    )
+    (home / "config.toml").write_text(rules)
     endpoint.plan = [("Bash", {"command": "touch made.txt"})]
-    paused = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed").run(
+    done = await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-allowed").run(
         "make it", user="u1"
     )
-    assert paused.status is RunStatus.PAUSED
-    assert not (tmp_path / "kimi-work" / "made.txt").exists()
+    assert done.status is RunStatus.ERROR and done.error is not None
+    assert "Bash(touch *)" in done.error.message and "config.toml" in done.error.message
+    assert not endpoint.requests and not (tmp_path / "kimi-work" / "made.txt").exists()
+
+
+async def test_a_write_inside_a_git_working_tree_is_kimis_own_to_approve(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """L47. Kimi approves ``Write`` and ``Edit`` inside a git working tree itself (its
+    ``git-cwd-write-approve`` policy: no setting turns it off, and ACP has no hook before a
+    call), so the file is written with nobody asked and the call is recorded after; the same
+    write outside a git tree asks. Pinned: a Kimi that asks here pauses the first run."""
+    work = tmp_path / "kimi-work"
+    endpoint.plan = [("Write", {"path": "new.txt", "content": "hi"})]
+    target = kimi_target(endpoint, tmp_path)
+    made = await asyncio.create_subprocess_exec("git", "init", "-q", str(work))
+    assert await made.wait() == 0
+    inside = await harness.wrap(target, id="kimi-git").run("write it", user="u1")
+    assert inside.status is RunStatus.SUCCESS and (work / "new.txt").read_text() == "hi"
+    outside = await harness.wrap(kimi_target(endpoint, tmp_path / "plain"), id="kimi-plain").run(
+        "write it", user="u1"
+    )
+    assert outside.status is RunStatus.PAUSED and outside.interrupt is not None
+    assert outside.interrupt.tool_call is not None and outside.interrupt.tool_call.tool == "Write"
+
+
+async def test_kimis_schedule_tools_leave_the_models_list_when_kimis_config_disables_them(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's scheduling is off under the harness (``KIMI_DISABLE_CRON``), but Kimi still
+    lists ``CronCreate``, ``CronList`` and ``CronDelete`` to its model: no environment switch
+    and nothing in ACP takes a built-in off. Kimi's own ``[tools] disabled`` does."""
+    home = tmp_path / "kimi-home"
+    home.mkdir(parents=True)
+    await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron-listed").run("hi", user="u1")
+    assert {"CronCreate", "CronList", "CronDelete"} <= set(endpoint.offered()[0])
+    (home / "config.toml").write_text(
+        '[tools]\ndisabled = ["CronCreate", "CronList", "CronDelete"]\n'
+    )
+    await harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-cron-hidden").run("hi", user="u1")
+    assert not [name for name in endpoint.offered()[-1] if name.startswith("Cron")]
 
 
 async def test_a_command_allowed_for_the_conversation_is_approved_for_kimis_session(
@@ -480,7 +525,9 @@ async def test_kimis_usage_log_is_the_contract_the_budget_reads(
     assert records, "Kimi logs a usage.record per model request"
     for record in records:
         assert record["type"] == "usage.record" and record["agentId"] == "main"
-        assert set(record["usage"]) >= {
+        # the counts the adapter reads; Kimi 2.6.2 leaves a cache count out when it is none
+        assert {"inputOther", "output"} <= set(record["usage"])
+        assert set(record["usage"]) <= {
             "inputOther",
             "output",
             "inputCacheRead",
@@ -547,64 +594,62 @@ def _swarm_turns(body: dict[str, Any]) -> Any:
     return result_text(results[-1]["content"])
 
 
-async def test_a_swarm_kimi_starts_runs_unchanged_each_member_a_child_run(
+#: What Kimi answers an ``AgentSwarm`` call outside its swarm mode.
+SWARM_OFF = "Swarm mode is off, so AgentSwarm did not run and no subagents were started."
+
+
+async def test_a_swarm_is_refused_by_kimi_over_acp_and_its_members_runs_end_saying_so(
     harness: Harness, tmp_path: Path
 ) -> None:
+    """Since Kimi Code 2.3.2 ``AgentSwarm`` runs only in Kimi's swarm mode, which only its user
+    turns on in its own terminal (``/swarm``): no ACP client can. Kimi still offers the tool;
+    called, it starts nobody and says so. The run goes on with Kimi's answer, and the child run
+    opened for each member ends ``ERROR`` with Kimi's words — none left ``RUNNING``."""
     async with PlannedEndpoint(turns=_swarm_turns).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-swarm")
         done = await agent.run("review both", user="u1")
+        assert "AgentSwarm" in endpoint.offered()[0]
     assert done.status is RunStatus.SUCCESS, done.error
-    assert 'item="a.ts" outcome="completed">reviewed a.ts' in str(done.answer)
+    assert str(done.answer).startswith(SWARM_OFF)
     found = [s async for s in harness.runs.iterate(parent_run_id=done.run_id)]
     kids = [await harness.runs.get(s.run_id) for s in found]
     assert sorted((k.input, k.status) for k in kids if k is not None) == [
-        ("Review a.ts", RunStatus.SUCCESS),
-        ("Review b.ts", RunStatus.SUCCESS),
+        ("Review a.ts", RunStatus.ERROR),
+        ("Review b.ts", RunStatus.ERROR),
     ]
+    assert all(k.error is not None and k.error.message.startswith(SWARM_OFF) for k in kids if k)
 
 
 def _resuming_turns(body: dict[str, Any]) -> Any:
-    """A swarm of two ``explore`` members; then the main agent goes on with the first in a
-    swarm of its resumed member alone (``resume_agent_ids``), then with the second through
-    ``Agent(resume=...)``; then it answers."""
+    """The main agent runs an ``explore`` sub-agent, goes on with it (``Agent(resume=...)``,
+    its id in the first call's answer), then answers."""
     messages = body["messages"]
     tools = {t["function"]["name"] for t in body.get("tools") or ()}
     users = [text_of(m.get("content")) for m in messages if m.get("role") == "user"]
-    if "AgentSwarm" not in tools:  # a member, by the last thing it was told (not a reminder)
+    if "Agent" not in tools:  # the sub-agent, by the last thing it was told (not a reminder)
         last = [u for u in users if not u.startswith("<system-reminder>")][-1]
-        return {"continue a": "went on", "carry on b": "carried on"}.get(last) or (
-            f"reviewed {re.search(r'Review (\S+)', last)[1]}"  # type: ignore[index]
-        )
+        return "went on" if "continue a" in last else "reviewed a.ts"
     results = [result_text(m["content"]) for m in messages if m.get("role") == "tool"]
     if not results:
-        swarm = {
-            "description": "review",
-            "prompt_template": "Review {{item}}",
-            "items": ["a.ts", "b.ts"],
-            "subagent_type": "explore",
-        }
-        return ("AgentSwarm", swarm)
-    ids = dict(re.findall(r'agent_id="([^"]+)" item="([^"]+)"', results[0]))
-    by_item = {item: agent for agent, item in ids.items()}
+        first = {"description": "review", "prompt": "Review a.ts", "subagent_type": "explore"}
+        return ("Agent", first)
     if len(results) == 1:
-        again = {"description": "again", "resume_agent_ids": {by_item["a.ts"]: "continue a"}}
-        return ("AgentSwarm", again)
-    if len(results) == 2:
-        more = {"description": "more", "prompt": "carry on b", "resume": by_item["b.ts"]}
-        return ("Agent", more)
+        ran = re.search(r"^agent_id: (\S+)$", results[0], re.MULTILINE)
+        assert ran is not None, results[0]
+        return ("Agent", {"description": "more", "prompt": "continue a", "resume": ran[1]})
     return "done"
 
 
-async def test_resumed_members_and_agents_kimi_goes_on_with_are_child_runs_by_name(
+async def test_a_sub_agent_kimi_goes_on_with_is_a_child_run_by_the_name_it_was_started_with(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Kimi goes on with sub-agents it ran: a swarm's ``resume_agent_ids`` and
-    ``Agent(resume=...)``. Each is a child run of its own, named as Kimi started it (its
-    ``explore`` type, which a resumed agent keeps — not ``coder``, the name of none), its task
-    the prompt it goes on with, ended with what it said."""
+    """Kimi goes on with a sub-agent it ran (``Agent(resume=...)``): a child run of its own,
+    named as Kimi started it (its ``explore`` type, which a resumed agent keeps — not
+    ``coder``, the name of none), its task the prompt it goes on with, ended with what it
+    said."""
     async with PlannedEndpoint(turns=_resuming_turns).serving() as endpoint:
         agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-resumes")
-        done = await agent.run("review both, then go on", user="u1")
+        done = await agent.run("review, then go on", user="u1")
     assert done.status is RunStatus.SUCCESS, done.error
     found = [s async for s in harness.runs.iterate(parent_run_id=done.run_id)]
     kids = [await harness.runs.get(s.run_id) for s in found]
@@ -613,12 +658,10 @@ async def test_resumed_members_and_agents_kimi_goes_on_with_are_child_runs_by_na
     )
     assert named == [
         ("Review a.ts", "explore", RunStatus.SUCCESS),
-        ("Review b.ts", "explore", RunStatus.SUCCESS),
-        ("carry on b", "explore", RunStatus.SUCCESS),
         ("continue a", "explore", RunStatus.SUCCESS),
     ]
     outputs = {k.input: str(k.output) for k in kids if k is not None}
-    assert outputs["continue a"] == "went on" and "carried on" in outputs["carry on b"]
+    assert "went on" in outputs["continue a"]
 
 
 def _subagent_turns(body: dict[str, Any]) -> Any:

@@ -27,7 +27,7 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   ``"call_after"`` seconds later), ``"calls"`` (a harness tool's call it asks nothing for),
   then it ends (``"result"``, or ``"fails": "why"``) in the main
   agent's log (``task.started``, ``subagent.completed``, ``task.terminated``) — and then Kimi
-  runs a turn of its own for the task's end (``agent.turn.started`` with no prompt's id, then
+  runs a turn of its own for the task's end (``turn.prompt`` whose origin is the task, then
   ``turn.ended``; ``"own_turn"`` seconds long; ``"notified": {...builtin step}`` a call it asks
   permission for). A prompt that comes while that turn runs is answered ``end_turn`` at once
   and recorded (``queued``), as Kimi queues it behind its turn;
@@ -55,7 +55,7 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
 ``FAKE_ACP_RECORD`` names a file it writes what it was started and asked with to (its
 environment's ``KIMI_*`` and ``HOME``, its working directory, the client's capabilities, each
 session's MCP servers and how it began, the prompts, the permission answers).
-``FAKE_ACP_VERSION`` is the version it reports (``2.1.1``); ``FAKE_ACP_RESUME=0`` offers no
+``FAKE_ACP_VERSION`` is the version it reports (``2.6.2``); ``FAKE_ACP_RESUME=0`` offers no
 ``session/resume`` (only ``session/load``, which replays the session's text) and no
 ``session/fork`` (which copies a session into a new one, as Kimi's does).
 ``FAKE_ACP_CONFIG`` (JSON) is what its ``config.toml`` starts every session in, as Kimi's does
@@ -113,7 +113,7 @@ from acp.schema import (
 
 SCRIPT: list[dict[str, Any]] = json.loads(os.environ.get("FAKE_ACP_SCRIPT", "[]"))
 RECORD = os.environ.get("FAKE_ACP_RECORD")
-VERSION = os.environ.get("FAKE_ACP_VERSION", "2.1.1")
+VERSION = os.environ.get("FAKE_ACP_VERSION", "2.6.2")
 HOME = Path(os.environ.get("KIMI_CODE_HOME") or Path.home() / ".kimi-code")
 CANONICAL = [
     PermissionOption(option_id="approve_once", name="Approve once", kind="allow_once"),
@@ -349,7 +349,7 @@ class FakeAgent:
         self.limit: int | None = None
         reason = "failed"
         self.turns += 1
-        logged(session_id, "main", {"type": "agent.turn.started", "queueItemId": f"p{self.turns}"})
+        logged(session_id, "main", {"type": "turn.prompt", "origin": {"kind": "user"}})
         try:
             answered = await self._prompt(prompt, session_id)
             stopped = answered.stop_reason == "cancelled"
@@ -638,7 +638,7 @@ class FakeAgent:
             await asyncio.sleep(step["wait"])
         output = step.get("output", f"{name} ran")
         if "background" in step:  # a command run in the background: launched
-            output = self.launch(session_id, "process", step["background"])
+            output = self.launch(session_id, "process", step["background"], call_id)
         if self.client is not None and self.client.terminal and name == "Bash":
             output = await self.terminal(session_id, call_id, args["command"], step)
         if self.client is not None and self.client.fs.write_text_file and name == "Write":
@@ -664,12 +664,14 @@ class FakeAgent:
         await self.progress(session_id, call_id, status="completed", raw_output=output)
         return output
 
-    def launch(self, session_id: str, kind: str, task: dict[str, Any]) -> str:
-        """A task started in the background (``kind``: an ``agent``, a ``process``), as Kimi
-        logs it, at work on its own: what its call answers (Kimi's words)."""
+    def launch(self, session_id: str, kind: str, task: dict[str, Any], call_id: str) -> str:
+        """A task the call ``call_id`` started in the background (``kind``: an ``agent``, a
+        ``process``), as Kimi logs it (its call by its id less its turn), at work on its own:
+        what its call answers (Kimi's words)."""
         number = len(self.tasks)
         task_id, agent = f"{kind[:5]}-{PROCESS}{number}", f"agent-{PROCESS}{number}"
         info = {"taskId": task_id, "kind": kind, "status": "running", "detached": True}
+        info["parentToolCallId"] = call_id.partition(":")[2]
         if kind == "agent":
             info["agentId"] = agent
         logged(session_id, "main", {"type": "task.started", "agentId": "main", "info": info})
@@ -707,7 +709,7 @@ class FakeAgent:
         ended = {**info, "status": status, "stopReason": task.get("fails")}
         logged(session_id, "main", {"type": "task.terminated", "agentId": "main", "info": ended})
         self.busy = True  # Kimi's own turn for the task's end: the client sees none of it
-        logged(session_id, "main", {"type": "agent.turn.started"})
+        logged(session_id, "main", {"type": "turn.prompt", "origin": {"kind": "task"}})
         try:
             if "notified" in task:
                 call_id = f"call_own_{info['taskId']}"
@@ -803,10 +805,10 @@ class FakeAgent:
             session_id, call_id, status="in_progress", title="Launching agent", raw_input=args
         )
         if "background" in step:  # launched: the call answers at once, the task works on
-            launched = self.launch(session_id, "agent", step["background"])
-            if step["background"].get("first"):  # it ends before its call's answer is read
+            # launched: Kimi sends no update of the call's result, which only its model reads
+            launched = self.launch(session_id, "agent", step["background"], call_id)
+            if step["background"].get("first"):  # it ends before its launch is read
                 await asyncio.wait(self.tasks)
-            await self.progress(session_id, call_id, status="completed", raw_output=launched)
             return launched
         if "asks" in step:  # a call of the sub-agent's own: no update, only its permission
             chosen = await self.unseen(session_id, "agent-0", f"call_sub_{call_id}", step["asks"])

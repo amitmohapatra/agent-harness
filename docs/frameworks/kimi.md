@@ -3,7 +3,7 @@
 The target is `kimi(...)`: Kimi Code's own agent (`kimi acp`), which the harness drives over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), the open protocol editors use to
 drive coding agents. Kimi keeps everything it does on its own: its tools, its sub-agents and
-swarms, plan mode, compaction (its goal mode is the exception:
+plan mode, compaction (its goal mode and its swarms are the exceptions:
 [below](#goal-mode-not-supported)). The harness adds memory, governance, durable runs,
 records, budgets and its tools.
 
@@ -18,11 +18,11 @@ surface is `kimi acp`, ACP over stdio. The harness speaks it through the officia
 
 ```bash
 pip install 'trellis-harness[kimi]'            # the ACP SDK and the MCP SDK
-npm install -g @moonshot-ai/kimi-code@2.1.1    # the kimi program (Node 22.19 or later)
+npm install -g @moonshot-ai/kimi-code@2.6.2    # the kimi program (Node 22.19 or later)
 ```
 
 The `kimi` program is checked when a run starts: a version outside the tested range
-(`>=2.1.1,<2.2`, [versioning.md](../versioning.md)) fails the run, saying which version answered
+(`>=2.6.2,<2.7`, [versioning.md](../versioning.md)) fails the run, saying which version answered
 and how to install the tested one. Kimi's protocol surface (its tool names, its permission
 requests, its usage log) is what the adapter reads, and nothing else pins it.
 
@@ -62,11 +62,12 @@ command="kimi", reads=())`:
 |---|---|
 | Memory push | the context goes before the prompt, in the same `session/prompt` (ACP has no system message: Kimi keeps its own system prompt), marked off from the question as `ReAct`'s is (`<memory_context>`, `history.ASKED_WITH`) |
 | Harness tools | one more MCP server, `trellis` (`mcp__trellis__<tool>`), served for the `kimi` process on `127.0.0.1` with a bearer token of its own, each call made in the run being served, handed to Kimi in `session/new` beside its own servers; the tool hints narrow what it lists for the run, from 30 tools of the run's own (Kimi's built-ins are not counted); `read_file` pages a large result |
-| Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked (once: a call governance asks about too, such as a tool of Kimi's own MCP servers that declares nothing, is one question), unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`), reading only what the run may read: its folder (or the folder the call names, Bash's `cwd`), `reads`, the run's skills, where a kept result is read; with the environment Kimi is given (`env`: its `PATH`, `PYTHONPATH`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Kimi Code 2.1.1 reads `[permission]` rules in its `config.toml` but does not apply them over ACP (pinned by `test_kimi.py`): it still asks, and a person is asked |
-| Schedules: off | Kimi runs for an attempt — kept only while work in its background goes on ([below](#background-work)) — and ends after it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them, as ACP has no way to take a built-in off. A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
+| Kimi's own tools | Kimi asks before the calls its own policy asks about (`Bash`, and `Write`, `Edit` outside a git working tree, in its default mode; its reads it runs). Each is decided as a harness call is — the run's `before_tool` hooks, governance by its risk and the catalog's rules — and then, as Kimi asked, a person is asked (once: a call governance asks about too, such as a tool of Kimi's own MCP servers that declares nothing, is one question), unless it only reads: a read tool, or a `Bash` command the harness reads as read-only (`ls`, `cat`, `wc`, `which`, Python that opens files to read: `governance/shell.py`), reading only what the run may read: its folder (or the folder the call names, Bash's `cwd`), `reads`, the run's skills, where a kept result is read; with the environment Kimi is given (`env`: its `PATH`, `PYTHONPATH`). `Read`, `Glob`, `Grep`, `FetchURL` read; `Write`, `Edit` and `Bash` write; the catalog overrides — a team that wants every shell command approved gives `Bash` the risk `irreversible` (or an `approve_when`) there. Two things in Kimi's own policy decide a call without asking, and ACP gives a client no way to be asked first. **A write inside a git working tree**: Kimi approves `Write` and `Edit` there itself (its `git-cwd-write-approve` policy, with no setting to turn it off), so those run on Kimi's approval and are recorded after; outside a git tree it asks. **An `allow` rule in Kimi's configuration** (`[permission]` in its `config.toml`, or a project's `.kimi-code/local.toml`; applied over ACP since Kimi Code 2.6): the harness does not start a run whose Kimi holds one — it fails before the first prompt, naming the rules — since the catalog's rules are what decide under the harness (Kimi's `ask` and `deny` rules only make it stricter, and stay) |
+| Schedules: off | Kimi runs for an attempt — kept only while work in its background goes on ([below](#background-work)) — and ends after it, so a scheduled prompt (`CronCreate`) would never fire: Kimi's own switch is set for it, `KIMI_DISABLE_CRON=1` (the agent's own `env` cannot turn it back on), so a call says `Cron scheduling is disabled` and the model can tell the user, where Kimi scheduled it and answered as if it would run. `CronCreate`, `CronList` and `CronDelete` are not of the run's tool set (no hint offers them); Kimi still lists them to its model (ACP has no way to take a built-in off, and Kimi has no environment switch for it); to take them off the list, put `disabled = ["CronCreate", "CronList", "CronDelete"]` under `[tools]` in Kimi's `config.toml` (pinned by `test_kimi.py`). A recurring task is the harness's `agent.schedule(...)` ([runs.md](../runs.md)) |
 | Tower mode: off | Kimi's experimental tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`: `TowerInit`, `TowerSpawn`, `TowerMerge`...) starts each worker in Kimi's `auto` permission mode, which asks about none of its calls, so the harness could govern none of them. Kimi's own switch is set for it, `KIMI_CODE_EXPERIMENTAL_TOWER=0`, which Kimi reads over its `config.toml`'s; turned on in the agent's `env` (Kimi then offers `TowerInit`, `TowerStatus` and `TowerTeardown` even over ACP), it stays off and the run says why (`acp_env` warning, as for `KIMI_DISABLE_CRON=0`). A run's sub-agents work through `Agent` and `AgentSwarm`, whose calls Kimi asks about |
 | Records | every call the main agent ran itself, with its result or error and its duration (from its `tool_call` updates); the harness's tools are recorded by the bridge |
-| Sub-agents and swarms | each sub-agent Kimi starts (`Agent`: coder, explore, plan) and each member of a swarm (`AgentSwarm`, up to 128) is a child run of the run, from the call to its result; so is each it goes on with (`Agent(resume=...)`, a swarm's `resume_agent_ids`), named by the type Kimi started it with (its log's `profile.bind`), its task the prompt it goes on with. One it runs in the background (`run_in_background`) is a child run until its task ends ([below](#background-work)). Kimi decides when (the model calls the tool): nothing to configure |
+| Sub-agents | each sub-agent Kimi starts (`Agent`: coder, explore, plan) is a child run of the run, from the call to its result; so is each it goes on with (`Agent(resume=...)`), named by the type Kimi started it with (its log's `profile.bind`), its task the prompt it goes on with. One it runs in the background (`run_in_background`) is a child run until its task ends ([below](#background-work)). Kimi decides when (the model calls the tool): nothing to configure |
+| Swarms: not over ACP | since Kimi Code 2.3.2 `AgentSwarm` runs only in Kimi's swarm mode, which only its user turns on, in its own terminal (`/swarm`). Kimi's ACP server has no mode, option or command for it, so no ACP client can. Kimi still offers the tool; called, it starts nobody and answers `Swarm mode is off...`. The run goes on with that answer; the child run opened for each member ends `ERROR` with Kimi's words. Several sub-agents at once are several `Agent` calls in one step, which Kimi runs together |
 | Allowed for the conversation | Kimi offers "Approve for this session" on a call it asks about, so the person is offered the same choices as for a tool the harness runs: allow once, allow for this conversation, deny (an `irreversible` tool: once or deny). "For this conversation" answers Kimi with its session approval and covers the tool's later calls in the conversation: Kimi asks no more about the same command or file (its own session rule), and what it still asks about the tool the harness lets through without asking the person again, in this run and in the conversation's later runs. Calls Kimi's session rule covers are not asked about, so governance sees them only once they ran (they are recorded); a tool every call of which must be decided is given the risk `irreversible` in the catalog, which is never allowed beyond a call |
 | Questions | Kimi's `AskUserQuestion` is the run's question (`Runtime.ask`: a durable pause). The harness tells Kimi it takes forms (ACP's `elicitation/create`), so Kimi sends every question of the call (up to four) in one form: one question to the person, a field for each of Kimi's questions with its options and their descriptions, several picks where Kimi's question takes several. One question alone is a plain choice of its options. Kimi's ACP server has no "Other" answer in words. A client that takes no forms is asked only the first question by Kimi, and the rest are dropped |
 | Plans | Kimi asks its user to review every plan it presents (`ExitPlanMode`): the plan, one option an approach (or `Approve`), `Revise` and `Reject and Exit`. A permission request in which the agent offers a choice of its own is the agent's question to its user: the run pauses on one question that shows the plan and every option, and the person's pick is Kimi's answer. One question a call; the resumed session is told to make the call again and reads the answer |
@@ -102,7 +103,7 @@ Kimi's own tools run again.
 * **Sandbox:** `kimi(sandbox=sandbox())` gives Kimi ACP's file and terminal capabilities, served
   by the run's sandbox (made at its first use, kept across attempts, snapshotted while the run
   waits, deleted at its end — [sandbox.md](../sandbox.md)): Kimi's `Bash` runs there, its
-  `Write` and `Edit` write there. **Its reads are not isolated:** Kimi Code 2.1.1 reads and
+  `Write` and `Edit` write there. **Its reads are not isolated:** Kimi Code reads and
   searches the host's files itself (`Read` looks a file up on the host first; `Glob` and `Grep`
   never ask the client), and ACP cannot turn those tools off. What the harness can do it does: a
   sandboxed Kimi gets a home and a working directory of the run's own, both empty, and an
@@ -151,7 +152,7 @@ it starts in; only the `mode=` the target gives is set, on a session the run sta
 
 * **Calls Kimi does not ask about.** ACP has no hook before a tool runs: a read Kimi runs without
   asking (its default mode asks about none) is governed by Kimi's own policy, then recorded.
-* **A sub-agent's own calls.** Kimi shows a sub-agent's (and a swarm member's) calls only when it
+* **A sub-agent's own calls.** Kimi shows a sub-agent's calls only when it
   asks permission for one — those are governed; the others are not recorded, and the child run
   holds the sub-agent's task and answer. Kimi's request for a sub-agent's call names the tool
   and one line that cuts a command at 50 characters, with no arguments. The harness decides it
@@ -194,7 +195,7 @@ that ends with nothing at work ends it, as ever.
   anything after a prompt's answer never reach the client. The harness reads Kimi's log of the
   session instead — the `agents/<id>/wire.jsonl` it reads usage from: each task's start and end
   (`task.started`, `task.terminated`, a sub-agent's last word in `subagent.completed`), the main
-  agent's turns (`agent.turn.started`, one with no prompt's `queueItemId` being Kimi's own,
+  agent's turns (`turn.prompt`, one whose `origin` is not the `user` being Kimi's own,
   `turn.ended`), whose a permission request is (`interaction.request`: ACP's names no agent),
   and each sub-agent's usage.
 * **A background sub-agent keeps its child run.** The child run its `Agent` call started stays
@@ -252,11 +253,9 @@ once ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   in `env`), `kimi` gets `KIMI_MODEL_PROVIDER_TYPE=openai`, Bifrost's URL, the virtual key, and
   the deny-all MCP scope, the run's dimensions and its `traceparent` as
   `KIMI_CODE_CUSTOM_HEADERS` lines beside your own. Elsewhere, said once in the log.
-* **Swarms.** Kimi's `AgentSwarm` runs its members concurrently, at most
-  `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` at once: the harness's adaptive limit of child runs
-  as the attempt starts ([runs.md](../runs.md#child-runs-at-once-and-the-task-tree)), unless you
-  set it in `env` (or this process's environment has it). Each member is on the run's task tree
-  (`helper_started`, `helper_finished`).
+* **Swarms.** Not over ACP ([above](#what-is-automatic)). `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` is still
+  set to the harness's adaptive limit of child runs unless your `env` names it, for a Kimi
+  whose swarm mode is on.
 * **Framework options.** `framework_options=` takes `ACPAgent` fields: `env` and `mcp_servers`
   are added to the agent's, `cwd`, `mode` and `model` replace them. Kimi's own step limit is
   `{"env": {"KIMI_LOOP_MAX_STEPS_PER_TURN": "30"}}`: at it Kimi ends the turn without an answer

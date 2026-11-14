@@ -20,8 +20,8 @@ session (``bridges.claude_live``) is ``bridges.live``'s: its relays, its backgro
   harness reads of them is Kimi's log of the session (``adapters.acp.UsageLog``: the
   ``agents/<id>/wire.jsonl`` its usage is read from), as it is written (:meth:`ACPSession.read`):
   a task's start and end (``task.started``, ``task.terminated``; a sub-agent's last word,
-  ``subagent.completed``), the main agent's turns (``agent.turn.started`` — one with no prompt's
-  ``queueItemId`` is Kimi's own — and ``turn.ended``), whose a permission request is
+  ``subagent.completed``), the main agent's turns (``turn.prompt`` — one whose ``origin`` is
+  not the ``user`` is Kimi's own — and ``turn.ended``), whose a permission request is
   (``interaction.request``: ACP's names no agent) and what each sub-agent spends.
 * **One prompt at a time.** A prompt sent while Kimi runs a turn of its own is queued behind
   it: Kimi answers ``end_turn`` at once and runs it later, unseen. So a prompt waits until the
@@ -296,6 +296,10 @@ class ACPSession(Keeper[Background]):
         self._said: dict[str, str] = {}
         #: how each task that ended ended, by id (its call's launch may be read after)
         self._ended: dict[str, tuple[str, str]] = {}
+        #: the sub-agents the log says were launched in the background, by the raw id of the
+        #: ``Agent`` call each is the task of: its task's id and its own, until the turn
+        #: takes them (:meth:`launches`)
+        self._launches: dict[str, tuple[str, str]] = {}
         #: the harness tool calls of background sub-agents, by tool: whose each is
         self._calling: dict[str, list[Background]] = {}
         self._stack = contextlib.AsyncExitStack()
@@ -470,15 +474,25 @@ class ACPSession(Keeper[Background]):
         return self.injected or self.own_turns > own
 
     # ------------------------------------------------------------------ the background
-    async def launched(self, call_id: str, task_id: str, agent_id: str) -> None:
-        """An ``Agent`` call that ran its sub-agent in the background answered with its task
-        (``task_id``) and its sub-agent (``agent_id``): its child run — open since the call
-        started — is kept past the turn by this session (:class:`Background`) when it is a
-        conversation's; else it is the attempt's, ended by its task's end, or cut off with the
-        attempt (``Helpers.settled``, ``Helpers.closed``)."""
+    async def launches(self, calls: Mapping[str, Any]) -> list[str]:
+        """The turn's calls (``calls``, by id) whose sub-agent Kimi launched in the background,
+        as its log says (``task.started``, with the call it is the task of): ACP tells no end
+        of such an ``Agent`` call (Kimi 2.6.2 sends no update of its result). Each one's child
+        run is the task's from here (:meth:`_launched`); their ids."""
+        await self.read()
+        found = [c for c in calls if (c.partition(":")[2] or c) in self._launches]
+        for call_id in found:
+            await self._launched(call_id, *self._launches.pop(call_id.partition(":")[2] or call_id))
+        return found
+
+    async def _launched(self, call_id: str, task_id: str, agent_id: str) -> None:
+        """The ``Agent`` call ``call_id`` runs its sub-agent (``agent_id``) in the background,
+        as the task ``task_id``: its child run — open since the call started — is kept past
+        the turn by this session (:class:`Background`) when it is a conversation's; else it is
+        the attempt's, ended by its task's end, or cut off with the attempt
+        (``Helpers.settled``, ``Helpers.closed``)."""
         assert self.turn is not None  # the call is the turn's
         helpers = self.turn.runtime.helpers
-        await self.read()  # its end, when it came first
         helper = helpers.detached(call_id) if self.keeps else None
         if helper is None:
             helpers.attribute(task_id, call_id, background=True)
@@ -534,6 +548,9 @@ class ACPSession(Keeper[Background]):
         info = entry.get("info") or {}
         if kind == "task.started" and info.get("detached"):
             self.working[str(info.get("taskId"))] = str(info.get("description") or "task")
+            if info.get("agentId"):  # a sub-agent's: the ``Agent`` call it is the task of
+                launch = (str(info.get("taskId")), str(info.get("agentId")))
+                self._launches[str(info.get("parentToolCallId"))] = launch
         elif kind == "subagent.completed":
             self._said[str(entry.get("subagentId"))] = str(entry.get("resultSummary") or "")
         elif kind == "task.terminated":
@@ -551,10 +568,11 @@ class ACPSession(Keeper[Background]):
             self._turned(kind, entry)
 
     def _turned(self, kind: Any, entry: Mapping[str, Any]) -> None:
-        """A turn of the main agent began or ended: one of Kimi's own (no prompt's
-        ``queueItemId``) is under way until it ends; once one ended the session takes a prompt
-        (a task that ended meanwhile was told in it: a turn takes what came while it ran)."""
-        if kind == "agent.turn.started" and not entry.get("queueItemId"):
+        """A turn of the main agent began or ended: one of Kimi's own (its ``turn.prompt``
+        comes from a task's notification, not from the ``user``) is under way until it ends;
+        once one ended the session takes a prompt (a task that ended meanwhile was told in it:
+        a turn takes what came while it ran)."""
+        if kind == "turn.prompt" and (entry.get("origin") or {}).get("kind") != "user":
             self.injected, self.due = True, False
             self.own_turns += 1
             self._settled.clear()
@@ -625,6 +643,10 @@ class ACPSession(Keeper[Background]):
         turn = self.turn
         main = turn is not None and call_id in turn.options.calls
         agent, shown = (None, None) if main else await self.requested(call_id)
+        if agent is not None and turn is not None:
+            # a sub-agent just launched may ask before the turn took its launch: taken now
+            with contextlib.suppress(Left):
+                await turn.within(turn.options.launched())
         return next((b for b in self.background.values() if b.agent_id == agent), None), shown
 
     async def _relayed(

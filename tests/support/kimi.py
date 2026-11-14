@@ -48,7 +48,7 @@ from trellis.harness.tools.bridge import STALLED, TURN_STALLED
 KIMI_BIN: Final = shutil.which("kimi")
 needs_kimi = pytest.mark.skipif(
     KIMI_BIN is None and not os.environ.get("CI"),
-    reason="the kimi program is not installed (npm install -g @moonshot-ai/kimi-code@2.1.1)",
+    reason="the kimi program is not installed (npm install -g @moonshot-ai/kimi-code@2.6.2)",
 )
 #: The tokens every reply reports, as Kimi's usage log keeps them.
 REPLY_USAGE: Final = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}

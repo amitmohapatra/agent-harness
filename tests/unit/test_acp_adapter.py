@@ -3,6 +3,7 @@ the version check, and how it reads a call's arguments and output."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -64,11 +65,42 @@ def test_options_add_to_env_and_servers_and_replace_the_rest() -> None:
         ACPAdapter().check_options({"mode": "auto"})
 
 
+def test_the_allow_rules_of_kimis_own_configuration_are_found_wherever_kimi_reads_them(
+    tmp_path: Path,
+) -> None:
+    """Kimi reads ``allow`` rules from its ``config.toml`` (``[[permission.rules]]`` with the
+    decision, ``[[permission.allow]]`` entries: a pattern, or a tool with what it matches) and
+    from a project's ``.kimi-code/local.toml``, at the working folder or above it. Its ``ask``
+    and ``deny`` rules let nothing run unasked."""
+    home, work = tmp_path / "home", tmp_path / "repo" / "pkg"
+    home.mkdir()
+    work.mkdir(parents=True)
+    env = {"KIMI_CODE_HOME": str(home)}
+    assert acp.kimi_allows(env, str(work)) == []
+    (home / "config.toml").write_text(
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Bash(ls *)"\n'
+        '[[permission.rules]]\ndecision = "ask"\npattern = "Write"\n'
+        '[[permission.rules]]\ndecision = "deny"\npattern = "Bash(rm *)"\n'
+        '[[permission.allow]]\ntool = "Bash"\nmatch = "git status"\n'
+        '[[permission.allow]]\ntool = "Edit"\n'
+    )
+    assert acp.kimi_allows(env, str(work)) == ["Bash(ls *)", "Bash(git status)", "Edit"]
+    local = tmp_path / "repo" / ".kimi-code"
+    local.mkdir()
+    (local / "local.toml").write_text(
+        '[[permission.rules]]\ndecision = "allow"\npattern = "Write"\n'
+    )
+    assert acp.kimi_allows(env, str(work))[-1] == "Write"
+    (home / "config.toml").write_text("not = toml =")  # Kimi itself refuses to start on it
+    assert acp.kimi_allows(env, str(work)) == ["Write"]
+
+
 def test_a_version_outside_the_range_is_refused_saying_how_to_install() -> None:
-    compat.require_binary("kimi-code", "2.1.1", command="kimi")
-    compat.require_binary("kimi-code", "2.1.9", command="kimi")
-    with pytest.raises(ConfigurationError, match=r"kimi-code 2\.2\.0 answers at 'kimi'"):
-        compat.require_binary("kimi-code", "2.2.0", command="kimi")
+    compat.require_binary("kimi-code", "2.6.2", command="kimi")
+    compat.require_binary("kimi-code", "2.6.9", command="kimi")
+    for outside in ("2.1.1", "2.6.1", "2.7.0"):  # below the tested range, and past it
+        with pytest.raises(ConfigurationError, match=f"kimi-code {outside} answers at 'kimi'"):
+            compat.require_binary("kimi-code", outside, command="kimi")
     with pytest.raises(ConfigurationError, match="reports no version"):
         compat.require_binary("kimi-code", "", command="kimi")
 

@@ -80,6 +80,7 @@ import shlex
 import shutil
 import tempfile
 import time
+import tomllib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,9 +203,6 @@ SWARM_MEMBER: Final = re.compile(r"<subagent(?P<attrs>[^>]*)>(?P<text>.*?)</suba
 SWARM_ATTR: Final = re.compile(r'(\w+)="([^"]*)"')
 #: The sub-agent Kimi starts when an ``Agent`` call names none (and resumes none).
 KIMI_SUBAGENT: Final = "coder"
-#: What an ``Agent`` call that runs its sub-agent in the background (Kimi's
-#: ``run_in_background``) answers at once: its task's id, and its sub-agent's.
-LAUNCHED: Final = re.compile(r"^task_id: (?P<task>\S+)$.*?^agent_id: (?P<agent>\S+)$", re.M | re.S)
 
 
 # --------------------------------------------------------------------------- Kimi Code
@@ -323,6 +321,10 @@ class Profile:
     #: on the run when the agent's own ``env`` asks otherwise (``env_why``)
     env: Mapping[str, str] = field(default_factory=dict)
     env_why: Mapping[str, str] = field(default_factory=dict)
+    #: the rules of the agent's own configuration that let it run a call without asking, for
+    #: an environment and a working folder: a run of an agent that holds any is not started
+    #: (:data:`UNASKED`)
+    allows: Callable[[Mapping[str, str], str], list[str]] | None = None
     label: str = THE_AGENT
 
 
@@ -488,6 +490,38 @@ def _kimi_usage(env: Mapping[str, str], session_id: str) -> UsageLog:
     return UsageLog(Path(home).expanduser(), session_id)
 
 
+def kimi_allows(env: Mapping[str, str], cwd: str) -> list[str]:
+    """The rules of Kimi's own configuration that let it run a call without asking, by their
+    pattern: the ``allow`` rules of its ``config.toml`` (``[permission]``: a ``rules`` entry
+    with that decision, an ``allow`` entry — a pattern, or a tool with what it matches) and of
+    a project's ``.kimi-code/local.toml``, in ``cwd`` or a folder above it (Kimi reads its
+    project's: every one above is looked at, which misses none). Since Kimi Code 2.6 they
+    apply over ACP. A file that is not TOML holds none: Kimi itself refuses to start on it."""
+    home = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
+    above = [Path(cwd), *Path(cwd).parents]
+    found: list[str] = []
+    for path in (home / "config.toml", *(folder / ".kimi-code" / "local.toml" for folder in above)):
+        try:
+            permission = tomllib.loads(path.read_text()).get("permission")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        section = permission if isinstance(permission, dict) else {}
+        rules = [r for r in section.get("rules") or () if r.get("decision") == "allow"]
+        for rule in (*rules, *(section.get("allow") or ())):
+            tool, matches = rule.get("tool"), rule.get("match") or rule.get("pattern")
+            found.append(f"{tool}({matches})" if tool and matches else str(tool or matches))
+    return found
+
+
+#: Why a run of an agent whose own configuration lets it run calls without asking got no
+#: prompt.
+UNASKED: Final = (
+    "{agent}'s own configuration lets it run calls without asking ({rules}: allow rules in "
+    "its config.toml, or in a .kimi-code/local.toml of the project), and the harness governs "
+    "only the calls the agent asks about. No prompt was sent. Remove those rules: under the "
+    "harness the tool catalog's rules decide what runs without a person"
+)
+
 KIMI: Final = Profile(
     name="kimi-code",
     builtins=KIMI_BUILTINS,
@@ -500,6 +534,7 @@ KIMI: Final = Profile(
     swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
     env=KIMI_ENV,
     env_why=KIMI_ENV_WHY,
+    allows=kimi_allows,
     label=KIMI_CODE,
 )
 
@@ -845,6 +880,10 @@ class ACPAdapter:
             if home is not None:
                 stack.push_async_callback(home.closed)
                 await home.skills()
+            if profile is not None and profile.allows is not None:
+                unasked = ", ".join(profile.allows(env, cwd))
+                if unasked:  # fails closed: nothing the agent would run unasked is run
+                    raise ACPRunError(UNASKED.format(agent=profile.label, rules=unasked))
             started = Started(target, env, cwd, capabilities, attempt.shell, fork=held)
             key = runtime.conversation if keeps else None
             session, attempt.resumed = await self._session(key, started, run)
@@ -1238,6 +1277,7 @@ class Attempt:
                 except TimeoutError:
                     self._died()
                     await self._spent()
+                    await self.launched()
                     continue
                 self._died()
                 if isinstance(item, _Ended):
@@ -1265,12 +1305,23 @@ class Attempt:
         if stop == END_TURN and not seen and await session.queued(own):
             raise ACPRunError(QUEUED)
         await self._settled()
+        await self.launched()
         if ended.error is not None:
             raise await session.failed(ended.error)
         self._answered_usage(ended.answer)
         # past the agent's own retries: what a run with no answer says
         self.runtime.cut_off = stop == MAX_TOKENS
         return ended.answer
+
+    async def launched(self) -> None:
+        """The turn's ``Agent`` calls whose sub-agent the agent launched in the background
+        (``ACPSession.launches``: its log says, ACP sends no end of such a call) are over for
+        the turn: the model is waited on again once none of its calls runs."""
+        assert self.session is not None  # bound before its turns
+        for call_id in await self.session.launches(self.calls):
+            self.calls[call_id].running = False
+            if not any(call.running for call in self.calls.values()):
+                self.runtime.model_started(STEP)
 
     def _died(self) -> None:
         """What ended a harness call that was not an error (the worker dying), raised in the
@@ -1401,6 +1452,10 @@ class Attempt:
             resumed = args.get("resume")
             name = self._named(str(resumed)) if resumed else self._named(None, args)
             await helpers.start(call_id, kind=Kind.SUBAGENT, name=name, task=task)
+            if args.get("run_in_background"):
+                # its call returns at once and ACP tells no end of it: its end is its task's
+                # (the log's: ``ACPSession.launches``), else it is cut off with the attempt
+                helpers.attribute(call_id, call_id, background=True)
         elif call.name in profile.swarms:
             for key, (kind, which), task in _swarm(call_id, args):
                 name = self._named(which if kind == "resume" else None, args)
@@ -1421,12 +1476,8 @@ class Attempt:
             return
         assert helpers is not None
         if call.name in profile.helpers:
-            launched = LAUNCHED.search(text) if call.args.get("run_in_background") else None
             if failed:
                 await helpers.end(call_id, error=text or SUBAGENT_FAILED)
-            elif launched is not None:  # its answer is its launch: its task works on
-                assert self.session is not None  # bound before its turns
-                await self.session.launched(call_id, launched["task"], launched["agent"])
             else:
                 await helpers.end(call_id, output=text)
         elif call.name in profile.swarms:
@@ -1718,7 +1769,7 @@ class Sandboxed:
     ``Bash``) — so its commands and writes happen in the sandbox (``SandboxSource.opened``: the
     run's own, kept across attempts, deleted at the run's end).
 
-    Its reads are not isolated: Kimi Code 2.1.1 reads and searches the host's files itself
+    Its reads are not isolated: Kimi Code reads and searches the host's files itself
     (``Read`` looks a file up on the host first; ``Glob`` and ``Grep`` never ask the client).
     What the harness can do it does: the agent's process gets a home and a working directory of
     the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's own

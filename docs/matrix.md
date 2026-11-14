@@ -213,10 +213,11 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 ### What the Kimi Code (ACP) column does not show
 
 - ACP shows no hook before a tool runs: a call Kimi does not ask permission for (its reads, in its default mode) runs under Kimi's own policy, and is recorded after.
-- A sub-agent's (and a swarm member's) own calls are not shown over ACP, only those it asks permission for, which are governed; its child run holds its task and answer.
+- A sub-agent's own calls are not shown over ACP, only those it asks permission for, which are governed; its child run holds its task and answer.
 - Spending: tokens from Kimi's usage log (every agent's), toward the budget; dollars only with the follow-up that reads the gateway's log (a `max_cost` budget does not see them yet).
 - Sandbox (F73 runs the harness's sandbox tools; `kimi(sandbox=sandbox())` is Kimi's own): its commands and writes run in the sandbox, its reads (`Read`, `Glob`, `Grep`) read the host: reads are not isolated.
-- Swarms run their members concurrently, as Kimi does (`KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY` in `env` caps it).
+- Swarms: since Kimi Code 2.3.2 `AgentSwarm` runs only in Kimi's swarm mode, which no ACP client can turn on; called, it starts nobody and says so.
+- A write inside a git working tree (`Write`, `Edit`) is approved by Kimi itself and recorded after; a run whose Kimi configuration holds an `allow` rule is not started.
 - Background work (`run_in_background`) keeps a conversation's `kimi` process between turns, its sub-agent's child run open until Kimi's log says the task ended; ACP shows none of it (tests/integration/test_acp_background.py, test_kimi.py).
 - Tower mode (`KIMI_CODE_EXPERIMENTAL_TOWER`) is off: its workers ask about none of their calls.
 

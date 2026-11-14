@@ -177,19 +177,26 @@ async def test_a_command_run_in_the_background_keeps_the_process_until_it_ends(
 
 
 # --------------------------------------------------------------------------- what it asks
+@pytest.mark.parametrize(
+    ("after", "meanwhile"),
+    [(0.3, []), (0, [{"stall": 0.4}])],
+    ids=["after-the-turn", "while-the-turn-still-runs"],
+)
 async def test_a_background_sub_agents_call_is_governed_in_its_own_run(
-    tmp_path: Path,
+    tmp_path: Path, after: float, meanwhile: list[dict[str, Any]]
 ) -> None:
-    """The sub-agent's call Kimi asks permission for comes after the turn ended: it is decided
-    in the sub-agent's own run — here governance asks a person, so that run pauses; the
-    conversation's next turn asks the person (as a sub-agent's question is asked through its
-    parent), and the answer lets the call run; the task ends, its run with it; then the turn's
-    own prompt is sent."""
+    """BG-10. The sub-agent's call Kimi asks permission for is decided in the sub-agent's own
+    run, whether it comes after the turn ended or while the turn that launched it still runs
+    (before that turn took the launch from Kimi's log: the request takes it) — here governance
+    asks a person, so that run pauses; the conversation's next turn asks the person (as a
+    sub-agent's question is asked through its parent), and the answer lets the call run; the
+    task ends, its run with it; then the turn's own prompt is sent."""
     catalog = FakeCatalog({"Bash": Rule(risk="irreversible")})
     async with with_governance(Harness(), Governance(catalog)) as harness:
         ask = {"builtin": "Bash", "args": {"command": "rm -rf build"}}
         script = [
-            {"agent": LOOK, "background": {"after": 0.3, "asks": ask, "result": "cleaned"}},
+            {"agent": LOOK, "background": {"after": after, "asks": ask, "result": "cleaned"}},
+            *meanwhile,
             {"text": "started it"},
             END,
             {"text": "and now?"},

@@ -16,6 +16,31 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Changed: Kimi Code 2.6.2 (was 2.1.1)
+
+The tested range of `kimi` is now `>=2.6.2,<2.7` (`compat.BINARIES`); 2.1.x is refused.
+What changed in Kimi between the two, and what the harness does with each:
+
+- **Swarms do not run over ACP.** Since 2.3.2 `AgentSwarm` runs only in Kimi's swarm mode,
+  which only its user turns on in its own terminal; Kimi's ACP server has no mode, option or
+  command for it. Kimi still offers the tool and answers a call with `Swarm mode is off...`:
+  the run goes on, and the child run opened for each member ends `ERROR` with Kimi's words.
+- **Kimi's `allow` rules apply.** Since 2.6 the `[permission]` rules of Kimi's `config.toml`
+  (and a project's `.kimi-code/local.toml`) apply over ACP: a call an `allow` rule covers
+  runs without Kimi asking, and ACP gives a client no way to be asked first. A run whose
+  Kimi holds such a rule is not started: it fails before the first prompt, naming the rules.
+- **A background sub-agent's launch is read from Kimi's log.** 2.6.2 sends no update of the
+  result of an `Agent` call that launched its sub-agent in the background, so its child run
+  stayed `RUNNING` for ever. The launch is now Kimi's log's `task.started`, with the call it
+  is the task of; a sub-agent that asks permission before the turn took its launch is still
+  decided in its own run.
+- **Kimi's own turns** are read from its log's `turn.prompt` (2.6.2 writes no
+  `agent.turn.started`), and a usage record's cache counts may be absent.
+- **Unchanged, pinned by tests on 2.6.2:** plans are reviewed by a person, every question
+  reaches the person, `Write`/`Edit` inside a git working tree are approved by Kimi itself,
+  the schedule tools are refused when called (Kimi's `[tools] disabled` takes them off the
+  model's list), tower mode stays off.
+
 ### Changed: "Allow for this conversation" on a call Kimi Code asks about is Kimi's approval for its session
 
 A call Kimi asked about offered approve or reject only, and Kimi's own "Approve for this
