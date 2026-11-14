@@ -3,7 +3,8 @@
 The target is `kimi(...)`: Kimi Code's own agent (`kimi acp`), which the harness drives over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), the open protocol editors use to
 drive coding agents. Kimi keeps everything it does on its own: its tools, its sub-agents and
-swarms, plan mode, goals, compaction. The harness adds memory, governance, durable runs,
+swarms, plan mode, compaction (its goal mode is the exception:
+[below](#goal-mode-not-supported)). The harness adds memory, governance, durable runs,
 records, budgets and its tools.
 
 **Why ACP.** Moonshot archived the Python Kimi CLI (`kimi-cli`: its final release, 1.52.0, runs
@@ -162,6 +163,21 @@ it starts in; only the `mode=` the target gives is set, on a session the run sta
   an argument Kimi does not show (a `Bash` `timeout`) is not in them.
 * **Background work and Kimi's own turns.** Nothing of them reaches the client: the harness
   reads Kimi's log ([above](#background-work)).
+
+## Goal mode: not supported
+
+Kimi's goal mode (`CreateGoal`, `UpdateGoal`, `SetGoalBudget`) keeps working after a turn ends:
+while a goal is active Kimi starts the next turn itself. Measured with Kimi 2.1.1 over ACP: the
+prompt is answered when the first turn ends; Kimi then runs the goal's further turns on its
+own, calls its model in them and asks permission for their calls, and sends the client none of
+their text or tool updates (its ACP server forwards only the turn a prompt started).
+
+Under the harness a run ends with its prompt's turn, and the agent's process with it unless
+background work keeps it ([below](#background-work)), so an active goal stops there: the first
+turn's work is done and recorded, the goal's later turns do not run. `CreateGoal` is a write, so
+a person is asked before a goal starts. For work that goes on over many steps, give the run
+the whole task (Kimi works through it in one turn), or schedule it (`agent.schedule(...)`,
+[runs.md](../runs.md)).
 
 ## Background work
 
