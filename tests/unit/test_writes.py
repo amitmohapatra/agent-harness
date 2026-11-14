@@ -48,6 +48,16 @@ async def test_writes_run_in_the_background_and_drain_waits_for_them() -> None:
     await writes.aclose()
 
 
+def test_the_queue_holds_10_000_writes_for_4_writers_and_a_full_one_waits_5_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/architecture.md: ``MAX_PENDING`` 10 000, ``WRITERS`` 4, ``WRITE_ATTEMPTS`` 3,
+    ``SUBMIT_WAIT_SECONDS`` 5."""
+    monkeypatch.undo()  # the values themselves, not the fast ones
+    assert (module.MAX_PENDING, module.WRITERS, module.WRITE_ATTEMPTS) == (10_000, 4, 3)
+    assert module.SUBMIT_WAIT_SECONDS == 5.0
+
+
 async def test_a_write_that_may_pass_is_tried_again() -> None:
     writes, tries = Writes(), []
 
