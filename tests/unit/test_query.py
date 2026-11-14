@@ -119,6 +119,8 @@ def test_a_query_is_bounded_in_time_rows_and_length(
 
 def test_a_wrong_call_is_said(journal: Journal) -> None:
     assert "sql" in asyncio.run(query.query({"file_path": "/large_tool_results/x"}))
+    unknown = asyncio.run(query.query({"sql": "SELECT 1", "where": "x"}))
+    assert "unknown argument(s): where" in unknown  # no argument of its own: said
     missing = asyncio.run(query.query({"file_path": "/x", "sql": "SELECT 1"}))
     assert missing == "Error: File '/x' not found"
     given = asyncio.run(
