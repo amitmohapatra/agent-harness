@@ -69,6 +69,12 @@ SOURCE_SYSTEM: Final = "trellis-harness"
 #: ``output``: "at most 256 KiB of JSON"; a larger one is refused with a 422 and the call's
 #: record is lost): a larger output is recorded cut to it (:func:`recorded_output`).
 RECORDED_OUTPUT_MAX_BYTES: Final = 256 * 1024
+#: The longest question the memory service takes (``ContextRequest.query`` and
+#: ``ToolInvocationIn.task``, its OpenAPI's ``maxLength``): a longer one is sent as its head and
+#: its tail (where a long message's question usually is), never refused with a 422 that would
+#: leave the run without its context and its tool records.
+QUESTION_MAX_CHARS: Final = 4000
+_CUT: Final = " … "
 #: The ``RunStart.metadata`` key a run's ``document_ids=`` is kept under.
 DOCUMENTS: Final = "document_ids"
 #: The keys of a run's own outcome record's metadata that keep what its pushed context showed —
@@ -258,7 +264,7 @@ class RunMemory:
         ``document_ids`` narrows the documents its passages come from to those (``None``:
         every one the scope may read)."""
         return await self.ctx.context(
-            query,
+            fitted(query),
             token_budget=budget,
             tools=tools,
             hints=hints,
@@ -283,7 +289,7 @@ class RunMemory:
         return await self.ctx.history.message(message_id)
 
     async def tool_hints(self, task: str, available: Sequence[str]) -> Any:
-        return await self.ctx.tool_hints(task, available=list(available))
+        return await self.ctx.tool_hints(fitted(task), available=list(available))
 
     # ------------------------------------------------------------------ tool permissions
     async def always_allowed(self) -> list[ToolPermission]:
@@ -324,7 +330,7 @@ class RunMemory:
             status=outcome.status.value,
             error_class=outcome.error_class,
             latency_ms=outcome.latency_ms,
-            task=call.task,
+            task=fitted(call.task),
             step=call.step,
         )
 
@@ -482,3 +488,13 @@ def recorded_output(output: Any) -> Any:
     # the cut text is sent as a JSON string (quotes and escapes): half the limit leaves room
     cut = text.encode("utf-8")[: RECORDED_OUTPUT_MAX_BYTES // 2].decode("utf-8", "ignore")
     return f"{cut}... ({size} bytes; cut to the service's limit)"
+
+
+def fitted(question: str) -> str:
+    """``question`` as the memory service takes it (:data:`QUESTION_MAX_CHARS`): as it is, or
+    its head and its tail with a cut between."""
+    if len(question) <= QUESTION_MAX_CHARS:
+        return question
+    keep = QUESTION_MAX_CHARS - len(_CUT)
+    head = keep // 2
+    return question[:head] + _CUT + question[len(question) - (keep - head) :]

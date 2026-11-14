@@ -141,8 +141,6 @@ class Traffic:
         }
         self.exchanges: list[Exchange] = []
         self.violations: list[str] = []
-        #: the known drifts met (:data:`KNOWN_UNDOCUMENTED_MEMORY`): reported, not failed on
-        self.known: list[str] = []
 
     def service(self, request: httpx.Request) -> str | None:
         netloc = request.url.netloc
@@ -185,17 +183,9 @@ class Traffic:
         if body or not request.headers.get("content-type", "").startswith("multipart/"):
             self.violations += [f"INV-7 {service}: {v}" for v in api.request(request)]
         if response is not None and read:
-            if service == "memory" and response.status_code in KNOWN_UNDOCUMENTED_MEMORY:
-                self.known.append(f"{request.method} {request.url.path} -> {response.status_code}")
-                return
             self.violations += [f"INV-7 {service}: {v}" for v in api.response(request, response)]
 
 
-#: A status the memory service answers that its OpenAPI document lists for no operation: 504, its
-#: deadline middleware's answer to a request past its route class's budget
-#: (``memory_service/api/deadline.py``; a read's is 5 s, met under load on a busy machine). The
-#: document is what is wrong (reported); failing every test that met one would hide the rest.
-KNOWN_UNDOCUMENTED_MEMORY: Final = frozenset({504})
 #: A drift between agent-contracts and the services, reported rather than failed on every test
 #: (it would mask every other violation): the harness files a run's own outcome with the memory
 #: service as ``source: "system"`` (``trellis/harness/agent.py``, the outcome feedback), which the
@@ -359,6 +349,7 @@ class Invariants:
         self.waiting: set[str] = set()
         self.waived: dict[str, str] = {}
         self.files: list[Path] = []
+        self._loaded: set[Path] = set()
         self.secrets = {v for n in SECRET_VARIABLES if (v := os.environ.get(n, "").strip())}
 
     def waits(self, run_id: str) -> None:
@@ -376,10 +367,12 @@ class Invariants:
         return path
 
     # -- reading back -------------------------------------------------------------------
-    def _load_files(self) -> None:
+    def load_files(self) -> None:
+        """What the test's processes recorded, read once (a test may read it before teardown)."""
         for path in self.files:
-            if not path.exists():
+            if not path.exists() or path in self._loaded:
                 continue
+            self._loaded.add(path)
             for line in path.read_text().splitlines():
                 item = json.loads(line)
                 if "violation" in item:
@@ -426,7 +419,7 @@ class Invariants:
                 return out
 
     async def check(self) -> list[str]:
-        self._load_files()
+        self.load_files()
         out = list(dict.fromkeys(self.traffic.violations))
         runs = self.runs()
         runs_url = os.environ.get("RUNS_URL", "").rstrip("/")
@@ -435,7 +428,7 @@ class Invariants:
             records = await self._settled(client, runs_url, runs) if runs_url else {}
             events = {r: await self._events(client, runs_url, r, runs[r]) for r in records}
             out += self._inv1(records)
-            out += self._inv2_tools(events)
+            out += self._inv2_tools(events, records)
             out += await self._inv2_turns(client, memory_url, records)
             out += self._inv3_inv4(records, events)
             out += self._inv5()
@@ -473,7 +466,13 @@ class Invariants:
                 )
         return out
 
-    def _inv2_tools(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:
+    def _inv2_tools(
+        self, events: dict[str, list[dict[str, Any]]], records: dict[str, dict[str, Any]]
+    ) -> list[str]:
+        """Each call that ran has its tool record, and each record a call that ran — within a
+        run's family (the run and its child runs: a helper's or a sub-agent's call is recorded
+        on the run that made it, while its parent's stream may show it)."""
+        family = {r: _root(r, records) for r in {*events, *records}}
         recorded: dict[str, Counter[str]] = defaultdict(Counter)
         for e in self.traffic.exchanges:
             if (
@@ -483,10 +482,10 @@ class Invariants:
             ):
                 run = (e.request.get("scope") or {}).get("agent_run_id")
                 if run:
-                    recorded[run][_call_key(e.request.get("tool"), e.request.get("args"))] += 1
-        out = []
+                    key = _call_key(e.request.get("tool"), e.request.get("args"))
+                    recorded[family.get(str(run), str(run))][key] += 1
+        ran: dict[str, Counter[str]] = defaultdict(Counter)
         for run_id, evs in events.items():
-            ran: Counter[str] = Counter()
             args: dict[str, Any] = {}
             for p in evs:
                 ev = p.get("event", p)
@@ -494,19 +493,19 @@ class Invariants:
                     args[ev.get("tool_call_id")] = (ev.get("data") or {}).get("args")
                 if ev.get("type") == "TOOL_CALL_RESULT" and _executed(ev):
                     tool = (ev.get("data") or {}).get("tool")
-                    ran[_call_key(tool, args.get(ev.get("tool_call_id")))] += 1
-            if run_id not in recorded and not any(
-                e.service == "memory" for e in self.traffic.exchanges
-            ):
-                continue  # memory off: nothing to record into
-            got = recorded.get(run_id, Counter())
-            missing = [k for k in ran if k not in got and k.split(":", 1)[0] not in SERVICE_LOGGED]
-            ghost = [k for k in got if k not in ran]
+                    ran[family[run_id]][_call_key(tool, args.get(ev.get("tool_call_id")))] += 1
+        if not any(e.service == "memory" for e in self.traffic.exchanges):
+            return []  # memory off: nothing to record into
+        out = []
+        for root in {*ran, *recorded}:
+            got, made = recorded.get(root, Counter()), ran.get(root, Counter())
+            missing = [k for k in made if k not in got and k.split(":", 1)[0] not in SERVICE_LOGGED]
+            ghost = [k for k in got if k not in made]
             if missing:
-                out.append(f"INV-2 run {run_id}: calls that ran have no tool record: {missing[:3]}")
+                out.append(f"INV-2 run {root}: calls that ran have no tool record: {missing[:3]}")
             if ghost:
                 out.append(
-                    f"INV-2 run {run_id}: tool records of calls its events never show: {ghost[:3]}"
+                    f"INV-2 run {root}: tool records of calls its events never show: {ghost[:3]}"
                 )
         return out
 
@@ -612,6 +611,13 @@ class Invariants:
                     call.get("idempotency_key"),
                     edited if decision == "EDIT" and isinstance(edited, dict) else call.get("args"),
                 )
+                if not starts and decision != "REJECT":
+                    # a question a background run's call needed, asked in its chat's turn: the
+                    # approved call ran in that other run of the test (a rejected one is looked
+                    # for in its own run only: another run's same call is not this one)
+                    others = [ev for r, evs in events.items() if r != run_id for ev in evs]
+                    ran = _starts(others, call.get("tool"), None)
+                    starts = [a for a in ran if a == call.get("args")]
                 if decision == "REJECT" and starts:
                     out.append(f"INV-4 run {run_id}: {call.get('tool')} ran though it was rejected")
                 if decision in ("APPROVE", "EDIT") and len(starts) != 1:
@@ -722,7 +728,6 @@ class Invariants:
                 ev = p.get("event", p)
                 by_attempt[int(ev.get("attempt") or 1)].append(ev)
             starts: Counter[str] = Counter()
-            ends: Counter[str] = Counter()
             for attempt, evs_a in sorted(by_attempt.items()):
                 out += _attempt_shape(f"INV-10 run {run_id} attempt {attempt}", evs_a)
                 # a call that paused the run (ask_user, an ask inside a tool, a refusal the
@@ -739,18 +744,32 @@ class Invariants:
                         or (ev.get("data") or {}).get("cached")
                     )
                 }
-                for ev in evs_a:
-                    if (
-                        ev.get("type") == "TOOL_CALL_START"
-                        and str(ev.get("tool_call_id")) not in paused
-                    ):
-                        starts[str(ev.get("tool_call_id"))] += 1
-                    if ev.get("type") == "TOOL_CALL_END":
-                        ends[str(ev.get("tool_call_id"))] += 1
+                # a call counts where its attempt ended (a pause, an ending): one an attempt cut
+                # short began (a crash, a worker that handed the run back) is begun again by the
+                # next, the same logical call — unless it began twice in that one attempt
+                here = Counter(
+                    str(ev.get("tool_call_id"))
+                    for ev in evs_a
+                    if ev.get("type") == "TOOL_CALL_START"
+                    and str(ev.get("tool_call_id")) not in paused
+                )
+                starts.update({call: begun - 1 for call, begun in here.items()})
+                finished = any(ev.get("type") == "RUN_FINISHED" for ev in evs_a)
+                if finished or attempt == max(by_attempt):
+                    starts.update(here.keys())
             twice = [c for c, n in starts.items() if n > 1]
             if twice:
                 out.append(f"INV-10 run {run_id}: tool calls started more than once: {twice[:3]}")
         return out
+
+
+def _root(run_id: str, records: dict[str, dict[str, Any]]) -> str:
+    """The run at the top of ``run_id``'s family (following ``parent_run_id``)."""
+    seen = {run_id}
+    while (parent := (records.get(run_id) or {}).get("parent_run_id")) and parent not in seen:
+        seen.add(parent)
+        run_id = parent
+    return run_id
 
 
 def _call_key(tool: Any, args: Any) -> str:

@@ -5,6 +5,7 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+<<<<<<< HEAD
 ### Added: a provider's own tools in `ReAct`
 
 `ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
@@ -199,6 +200,22 @@ A library's feature works as the library does it; the harness governs, records a
   `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
   notification (`history.from_client`).
 
+=======
+### Fixed: what the user-scenario suite found (tests/scenarios)
+
+- **A message longer than 4,000 characters got no memory context and lost its tool records.**
+  The whole message went to the memory service as `ContextRequest.query`,
+  `HintsRequest.task` and `ToolInvocationIn.task`, which it caps at 4,000 characters: a `422`,
+  so the run had no context and each tool record was "failed and is lost". The question is
+  sent as its head and its tail when it is longer (`clients.memory.fitted`).
+- **AG-UI: the same `runId` posted twice at once (a client's retry racing its first try)
+  started the run twice.** The id was checked before the run was opened and only marked
+  taken after: it is taken before the first await, and the second request is a `422`.
+- **A file that did not fit the file store left its first bytes there** (a full disk), so the
+  next file failed too: a write that fails removes what it wrote (`FileStore.put`).
+- **AG-UI: a user message with no text (`content: ""`) and no `state` started a run** that
+  failed inside the framework (`EmptyInputError`); it is a `422`, as a blank message is.
+>>>>>>> origin/claude/cool-maxwell-w5avo8-scenarios
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
 
 Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to
