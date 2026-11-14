@@ -49,7 +49,7 @@ it (``client.query``) instead of into a new process that resumes the session.
   no turn's usage.
 * **Its life.** One process per conversation, in this process only; at most :data:`KEPT`. It
   closes :data:`IDLE_SECONDS` after its last activity when nothing works in it (no background
-  task, and no turn of its own for a finished one due or under way), and
+  task, and no turn of its own for a finished one under way or due), and
   :data:`WORKING_SECONDS` after its last turn whatever does; when a turn needs other options
   than it was started with; and with the harness (``Harness.aclose``). Work that ends with
   it is said in the conversation's next run (``claude_session``), never dropped in silence.
@@ -571,7 +571,8 @@ class LiveSession:
         #: a turn the session injected is under way
         self.injected = False
         #: a background task ended while no turn was served: the session's own turn for it is
-        #: due (Claude Code runs it as soon as it gets to it), until that turn begins
+        #: due (Claude Code runs it as soon as it gets to it), until that turn begins — waited
+        #: for :data:`SETTLE_SECONDS` at least
         self.due = False
         self.closed = False
         #: why the process ended, when it ended of itself with an error
@@ -812,8 +813,8 @@ class LiveSession:
             isinstance(message, TaskUpdatedMessage) and message.status in TERMINAL_TASK_STATUSES
         ):
             self.working.pop(message.task_id, None)
-            # its notification, with no turn served, is followed by a turn of the session's own
-            self.due = self.due or (isinstance(message, TaskNotificationMessage) and not self.turn)
+            # its end, with no turn served, is followed by a turn of the session's own
+            self.due = self.due or self.turn is None
             found = self.background.get(message.task_id)
             if found is not None:
                 found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
@@ -1014,14 +1015,16 @@ class LiveSession:
     # ------------------------------------------------------------------ its end
     def _rest(self) -> None:
         """No turn is served: the session closes when its time is up (:data:`IDLE_SECONDS`
-        after this, nothing working in it — no background task, and no turn of its own due
-        or under way; :data:`WORKING_SECONDS` after its last turn)."""
+        after this, nothing working in it — no background task, no turn of its own under way,
+        and none due for :data:`SETTLE_SECONDS`; :data:`WORKING_SECONDS` after its last
+        turn)."""
         loop = asyncio.get_running_loop()
         if self._timer is not None:
             self._timer.cancel()
         last = self._rested + WORKING_SECONDS - loop.time()
-        busy = self.working or self.due or self.injected
-        wait = max(0.0, last) if busy else min(IDLE_SECONDS, max(0.0, last))
+        idle = max(IDLE_SECONDS, SETTLE_SECONDS) if self.due else IDLE_SECONDS
+        busy = self.working or self.injected
+        wait = max(0.0, last) if busy else min(idle, max(0.0, last))
         self._timer = loop.call_later(wait, self._expired)
 
     def _expired(self) -> None:

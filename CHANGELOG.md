@@ -22,7 +22,9 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   task ended while no turn was served, Claude Code runs a turn of its own for it as soon as it
   gets to it; the session counted as idle from the task's end, and closed (its process with
   it) if that turn had not begun in time, or ran long: what the turn said was lost to the
-  conversation. Such a turn, due or under way, is work now (`LiveSession.due`, `injected`).
+  conversation. Such a turn under way is work now (`LiveSession.injected`), and one due —
+  from the task's end until the turn begins — is waited for 30 seconds at least
+  (`LiveSession.due`, `SETTLE_SECONDS`) before the session counts as idle.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
