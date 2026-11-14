@@ -81,8 +81,6 @@ def run_here(tool: Any) -> Any:
     the bridge (the module's seam); any other tool as it is."""
     from agents import ApplyPatchTool, ComputerTool, CustomTool, LocalShellTool, ShellTool
 
-    from trellis.harness.tools.convert.openai_agents import with_fields
-
     if isinstance(tool, LocalShellTool | ShellTool) and getattr(tool, "executor", None):
         return with_fields(tool, executor=_executor(tool))
     if isinstance(tool, CustomTool):
@@ -92,6 +90,47 @@ def run_here(tool: Any) -> Any:
     if isinstance(tool, ComputerTool):
         return _computing(tool)
     return tool
+
+
+def with_fields(tool: Any, **fields: Any) -> Any:
+    """A copy of ``tool`` (one of the SDK's tool dataclasses) with ``fields`` changed: made
+    again as the SDK makes it (``dataclasses.replace``), or — a subclass whose constructor
+    takes fields of its own (a sandbox capability's ``exec_command``, its ``apply_patch``) —
+    copied as it is."""
+    if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
+        return dataclasses.replace(tool, **fields)
+    made = copy.copy(tool)
+    for name, value in fields.items():
+        setattr(made, name, value)
+    return made
+
+
+def spec_of(runtime: Runtime, name: str, **said: Any) -> ToolSpec:
+    """The SDK's tool ``name`` as the run's tool set has it, else undeclared: what it ``said``
+    of itself (its description, its schema), no risk."""
+    return runtime.native.get(name) or ToolSpec(name=name, **said)
+
+
+@dataclasses.dataclass(slots=True)
+class Carried:
+    """A call's own code (``run``) as the bridge runs it (``Tool.run``): what it returned kept
+    (``live``: as the SDK takes it from the tool itself) and what it raised (``raised``: a
+    pause is no failure), for the SDK to be handed once the bridge has governed, journaled
+    and recorded the call."""
+
+    run: Callable[[dict[str, Any]], Any]
+    live: list[Any] = dataclasses.field(default_factory=list)
+    raised: list[Exception] = dataclasses.field(default_factory=list)
+
+    async def __call__(self, given: dict[str, Any]) -> Any:
+        try:
+            answer = await _awaited(self.run(given))
+        except Exception as error:
+            if not is_pause_signal(error):
+                self.raised.append(error)
+            raise
+        self.live.append(answer)
+        return answer
 
 
 async def through(
@@ -117,20 +156,13 @@ async def through(
     runtime = current()
     if runtime is None:
         return await _awaited(run(args))
-    live: list[Any] = []
-    raised: list[Exception] = []
+    carried = Carried(run)
+    live, raised = carried.live, carried.raised
 
     async def ran(given: dict[str, Any]) -> Any:
-        try:
-            answer = await _awaited(run(given))
-        except Exception as error:
-            if not is_pause_signal(error):
-                raised.append(error)
-            raise
-        live.append(answer)
-        return _recorded(answer)
+        return _recorded(await carried(given))
 
-    spec = runtime.native.get(name) or ToolSpec(name=name)
+    spec = spec_of(runtime, name)
     try:
         outcome = await bridge.call(Tool(spec, ran), args, call_id=call_id, decision=decision)
     except Exception as error:

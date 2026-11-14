@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import dataclasses
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Sequence
@@ -31,13 +30,13 @@ from agents import FunctionTool
 from agents.tool_context import ToolContext
 
 from trellis.contracts import AgentPaused, ToolOutcome, ToolSpec
-from trellis.contracts.errors import is_pause_signal
 from trellis.harness import budget
 from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
+from trellis.harness.tools.convert.openai_local import Carried, run_here, spec_of, with_fields
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
 __all__ = [
@@ -117,8 +116,6 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     has each call go through the bridge where the SDK hands it to the tool's own code
     (``tools.convert.openai_local.run_here``)."""
     if not isinstance(tool, FunctionTool):
-        from trellis.harness.tools.convert.openai_local import run_here
-
         return run_here(tool)
     if getattr(tool.on_invoke_tool, MADE, False):
         return tool
@@ -140,8 +137,6 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         runtime = current()
         if isinstance(args, str) or runtime is None:
             return await original(context, arguments)
-        raised: list[BaseException] = []
-        produced: list[Any] = []
 
         async def run(given: dict[str, Any]) -> Any:
             try:
@@ -149,36 +144,30 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             except asyncio.CancelledError as cut:
                 if not _own_time_is_up(runtime, due):
                     raise
-                raised.append(cut)
                 raise PastItsOwnLimit(tool.name) from cut
-            except Exception as error:
-                if not is_pause_signal(error):
-                    raised.append(error)
-                raise
             if waits_inside(context):
                 raise WaitsInside(tool.name, answer)
-            produced.append(answer)
             return answer
 
-        # as the run's tool set has it (an agent tool: a helper, read), else undeclared
-        spec = runtime.native.get(tool.name) or ToolSpec(
-            name=tool.name,
-            description=tool.description or tool.name,
-            input_schema=tool.params_json_schema,
-        )
+        carried = Carried(run)
         try:
-            outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
+            outcome = await bridge.call(
+                Tool(own_spec(runtime, tool), carried), args, call_id=context.tool_call_id
+            )
         except WaitsInside as waiting:
             return waiting.answer
         hooked = bridge.hooked(outcome)
-        if raised and not outcome.ok:
+        if carried.raised and not outcome.ok:
+            error = carried.raised[-1]
             said = text_of(outcome.output) if hooked else None
-            return await _told(original, raised[-1], context, arguments, said=said)
+            # a call the SDK cut at the tool's own limit: its cancellation, the SDK's to act on
+            cut = error.__cause__ if isinstance(error, PastItsOwnLimit) else None
+            return await _told(original, cut or error, context, arguments, said=said)
         # what the tool returned, as the SDK takes it from the tool itself: an image or a file
         # the model sees, a typed result its tool_use_behavior, guardrails and hooks are
         # handed — the record keeps its readable form; else (the journal's result of a call
         # made before a pause, the hooks' word, governance's) what the bridge says
-        return produced[-1] if produced and outcome.ok and not hooked else outcome.output
+        return carried.live[-1] if carried.live and outcome.ok and not hooked else outcome.output
 
     setattr(invoke, MADE, True)
     return with_fields(
@@ -186,17 +175,15 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     )
 
 
-def with_fields(tool: Any, **fields: Any) -> Any:
-    """A copy of ``tool`` (one of the SDK's tool dataclasses) with ``fields`` changed: made
-    again as the SDK makes it (``dataclasses.replace``), or — a subclass whose constructor
-    takes fields of its own (a sandbox capability's ``exec_command``, its ``apply_patch``) —
-    copied as it is."""
-    if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
-        return dataclasses.replace(tool, **fields)
-    made = copy.copy(tool)
-    for name, value in fields.items():
-        setattr(made, name, value)
-    return made
+def own_spec(runtime: Runtime, tool: FunctionTool) -> ToolSpec:
+    """An agent's own ``FunctionTool`` as the run's tool set has it (an agent tool: a helper,
+    read), else undeclared (``openai_local.spec_of``): what the tool says of itself."""
+    return spec_of(
+        runtime,
+        tool.name,
+        description=tool.description or tool.name,
+        input_schema=tool.params_json_schema,
+    )
 
 
 class PastItsOwnLimit(TimeoutError):

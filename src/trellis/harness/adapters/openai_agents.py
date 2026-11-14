@@ -530,7 +530,7 @@ def governed_capability(capability: Any) -> Any:
     model call when the model's route would drop it (:func:`_capability_served`). A sandbox
     ``Memory``'s own model calls — its extraction and consolidation agents, run by the SDK when
     the sandbox closes — are made through the run's model route with their usage counted
-    (:class:`ThroughRun`). Everything else is the capability's own; the agent's capability is
+    (:func:`through_run`). Everything else is the capability's own; the agent's capability is
     not changed."""
     from agents.sandbox.capabilities.memory import Memory
 
@@ -541,22 +541,39 @@ def governed_capability(capability: Any) -> Any:
         provider = None if runtime is None else _provider_of(runtime)
         made.generate = dataclasses.replace(
             generate,
-            phase_one_model=ThroughRun.of(generate.phase_one_model, provider),
-            phase_two_model=ThroughRun.of(generate.phase_two_model, provider),
+            phase_one_model=through_run(generate.phase_one_model, provider),
+            phase_two_model=through_run(generate.phase_two_model, provider),
         )
     object.__setattr__(made, "__class__", _governing(type(capability)))
     return made
 
 
-@functools.cache
+#: How many sandbox capability classes are kept in their governed form (:func:`_governing`):
+#: the SDK has under ten; one left out is made again.
+CAPABILITY_KINDS: Final = 64
+
+
+@functools.lru_cache(maxsize=CAPABILITY_KINDS)
 def _governing(kind: type) -> type:
     """``kind`` (a sandbox ``Capability`` class) whose tools are governed
-    (:func:`governed_capability`)."""
-    from trellis.harness.tools.convert.openai_agents import governed
+    (:func:`governed_capability`) and, like the agent's own (:func:`_gated`), held at the SDK's
+    approval gate when governance asks — the approved call continues the SDK's paused run, in
+    the same sandbox — unless the run has tool hooks (their question comes first: the call
+    pauses as a harness pause does)."""
+    from agents import FunctionTool
+
+    from trellis.harness.tools.convert.openai_agents import governed, held, own_spec
 
     class Governing(kind):  # type: ignore[misc,valid-type]
         def tools(self) -> list[Any]:
-            return [governed(tool) for tool in super().tools()]
+            made = [governed(tool) for tool in super().tools()]
+            runtime = current()
+            if runtime is None or runtime.agent.hooks:
+                return made
+            return [
+                held(tool, own_spec(runtime, tool)) if isinstance(tool, FunctionTool) else tool
+                for tool in made
+            ]
 
         def sampling_params(self, sampling_params: dict[str, Any]) -> dict[str, Any]:
             asked = super().sampling_params(sampling_params)
@@ -598,21 +615,15 @@ def _capability_served(capability: Any, model: Any, asked: Mapping[str, Any]) ->
         )
 
 
-class ThroughRun:
-    """A sandbox ``Memory``'s model (its ``phase_one_model``/``phase_two_model``, named) made
-    through the model route of the run whose sandbox it summarises (:func:`_provider_of`:
-    Bifrost for the names the run leaves to the default provider, the run's own provider
-    else) — the route it was made with, so a sandbox you keep and close after the run still
-    asks through it — each reply's usage counted toward the budget of the run it is asked in
-    and its call watched for a stall. Made outside a run, it reads the route of the run asking.
-    Two are the same when they name the same model (the SDK compares a session's memory
-    configs). Made by :meth:`of`, a subclass of the SDK's ``Model``."""
-
-    @staticmethod
-    def of(model: Any, provider: Any = None) -> Any:
-        """``model`` through ``provider`` (the run's, :func:`_provider_of`) when it is a name; a
-        model object as it is."""
-        return _through_run_class()(model, provider) if isinstance(model, str) else model
+def through_run(model: Any, provider: Any) -> Any:
+    """A sandbox ``Memory``'s model (its ``phase_one_model``/``phase_two_model``) asked through
+    the model route of the run whose sandbox it summarises: a name, through ``provider`` (the
+    run's, :func:`_provider_of` — the route it was made with, so a sandbox you keep and close
+    after the run still asks through it; ``None``: the route of the run asking), each reply's
+    usage counted toward the budget of the run it is asked in and its call watched for a
+    stall. Two of one name are the same model (the SDK compares a session's memory configs).
+    A model object is your own: as it is."""
+    return _through_run_class()(model, provider) if isinstance(model, str) else model
 
 
 def _provider_of(runtime: Runtime | None) -> Any:
@@ -623,11 +634,11 @@ def _provider_of(runtime: Runtime | None) -> Any:
 
     if runtime is None:
         return RunConfig().model_provider
-    given = runtime.framework_options.get("run_config")
     gateway = runtime.agent.harness.model_gateway
     route = _route_of(gateway, runtime.framework_options)
     if route is not None:
         return routed_provider(cast("Bifrost", gateway), route)
+    given = runtime.framework_options.get("run_config")
     return (RunConfig() if given is None else _coerced(given)).model_provider
 
 
@@ -637,13 +648,13 @@ def _through_run_class() -> type:
 
     from trellis.harness.hooks.openai_agents import counted
 
-    class Through(Model, ThroughRun):  # type: ignore[misc]
-        def __init__(self, name: str, provider: Any = None) -> None:
+    class ThroughRun(Model):  # type: ignore[misc]
+        def __init__(self, name: str, provider: Any) -> None:
             self.name = name
             self._provider = provider
 
         def __eq__(self, other: object) -> bool:
-            return isinstance(other, Through) and other.name == self.name
+            return isinstance(other, ThroughRun) and other.name == self.name
 
         def __hash__(self) -> int:
             return hash(self.name)
@@ -653,35 +664,30 @@ def _through_run_class() -> type:
             return provider.get_model(self.name)
 
         async def get_response(self, *args: Any, **kwargs: Any) -> Any:
-            step = f"openai_agents:memory:{self.name}"
             runtime = current()
-            if runtime is not None:
-                runtime.model_started(step)
+            if runtime is None:  # after its run: asked through the run's route, no run to count
+                return await self._model().get_response(*args, **kwargs)
+            step = f"openai_agents:memory:{self.name}"
+            runtime.model_started(step)
             try:
                 response = await self._model().get_response(*args, **kwargs)
             finally:
-                if runtime is not None:
-                    runtime.model_ended(step)
-            if runtime is not None:
-                counted(runtime, self.name, response.usage)
+                runtime.model_ended(step)
+            counted(runtime, self.name, response.usage)
             return response
 
-        async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            runtime = current()
-            async for event in self._model().stream_response(*args, **kwargs):
-                usage = getattr(getattr(event, "response", None), "usage", None)
-                if runtime is not None and event.type == "response.completed" and usage:
-                    counted(runtime, self.name, usage)
-                yield event
+        def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            # the SDK's ``Model`` interface; its memory agents are not streamed
+            return cast("AsyncIterator[Any]", self._model().stream_response(*args, **kwargs))
 
-    return Through
+    return ThroughRun
 
 
 def _memory_said(target: Any) -> None:
     """Say once, where an agent is wrapped, of a sandbox ``Memory`` that generates memories:
     its consolidation agent writes the memory files in the sandbox with tools the SDK makes
     for it outside any seam the harness has, so those writes are the SDK's own, not governed or
-    recorded (its model calls go through the run: :class:`ThroughRun`)."""
+    recorded (its model calls go through the run: :func:`through_run`)."""
     from agents.sandbox.capabilities.memory import Memory
 
     for agent in reachable(target):
@@ -891,6 +897,7 @@ def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any] | None = N
     counts: ``tools.convert.openai_agents._helped``)."""
     from agents import FunctionTool
 
+    from trellis.harness.hooks.openai_agents import ChildModelHooks
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, AGENT_TOOL
 
     invoker = tool.on_invoke_tool
@@ -901,9 +908,9 @@ def _running(tool: Any, agent: Any, nested: Callable[[Any, Any], Any] | None = N
     assert impl is not None
     cells = dict(zip(code.co_freevars, impl.__closure__ or (), strict=True))
     given = {RUNS_AGENT: agent}
-    if nested is not None and {CHILD_CONFIG, CHILD_HOOKS} <= cells.keys():
+    if nested is not None:
         given[CHILD_CONFIG] = nested(agent, cells[CHILD_CONFIG].cell_contents)
-        given[CHILD_HOOKS] = _hooks(cells[CHILD_HOOKS].cell_contents, counted=False)
+        given[CHILD_HOOKS] = ChildModelHooks(cells[CHILD_HOOKS].cell_contents)
     closure = tuple(
         types.CellType(given[name]) if name in given else cell for name, cell in cells.items()
     )
@@ -1489,16 +1496,34 @@ def _model_of(agent: Any, options: Mapping[str, Any]) -> Any:
 def keeps_thread(gateway: Any, target: Any, options: Mapping[str, Any]) -> bool:
     """Whether the model the run starts with keeps a conversation OpenAI's servers hold
     (:data:`SERVER_THREAD`): not the SDK's chat completions model, which ignores the ids (and
-    says so), nor a name the harness routes through Bifrost to a provider it converts to chat
-    completions (:func:`_whole`). Any other model is taken at its word, as a thread store the
+    says so) — a model object of that class, or a name the SDK's OpenAI provider answers on
+    chat completions (the application's default API, or the provider's own) — nor a name the
+    harness routes through Bifrost to a provider it converts to chat completions
+    (:func:`_whole`). Any other model or provider is taken at its word, as a thread store the
     harness cannot see into is (``history``)."""
+    from agents import RunConfig
+    from agents.models import _openai_shared
+    from agents.models.multi_provider import MultiProvider
     from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 
     model = _model_of(target, options)
     if model is not None and not isinstance(model, str):
         return not isinstance(model, OpenAIChatCompletionsModel)
-    route = _route_of(gateway, options)
-    return route is None or not routes(route, model) or _whole(gateway, model)
+    given = options.get("run_config")
+    provider = (RunConfig() if given is None else _coerced(given)).model_provider
+    if not isinstance(provider, MultiProvider) or not routes(provider, model):
+        return True
+    if _route_of(gateway, options) is None:  # the SDK's OpenAI provider, on the API it was given
+        return bool(provider.openai_provider._use_responses)
+    return _openai_shared.get_use_responses_by_default() and _whole(gateway, model)
+
+
+def _converted(gateway: Any, route: Any, agent: Any, options: Mapping[str, Any]) -> bool:
+    """Whether ``agent``'s model is a name the harness routes through Bifrost (``route``: the
+    run's ``MultiProvider``) to a provider it converts to chat completions (:func:`_whole`)."""
+    model = _model_of(agent, options)
+    named = model is None or isinstance(model, str)
+    return named and routes(route, model) and not _whole(gateway, model)
 
 
 #: A ``ModelSettings`` field a Responses request carries and a chat completions one does not.
@@ -1516,13 +1541,11 @@ def unserved(gateway: Any, target: Any, options: Mapping[str, Any]) -> None:
         return
     found: list[str] = []
     for agent in reachable(target):
-        model = _model_of(agent, options)
-        named = model is None or isinstance(model, str)
-        if named and routes(route, model) and not _whole(gateway, model):
+        if _converted(gateway, route, agent, options):
             found.extend(f"{agent.name!r}: {said}" for said in _chat_only(agent, options))
     server = [key for key in SERVER_THREAD if options.get(key)]
-    if server and not keeps_thread(gateway, target, options):
-        found.append(f"{getattr(target, 'name', '')!r}: {', '.join(server)} (a server thread)")
+    if server and _converted(gateway, route, target, options):
+        found.append(f"{target.name!r}: {', '.join(server)} (a server thread)")
     if found:
         raise ConfigurationError(
             "Bifrost serves these agents' models through chat completions (it calls their "
@@ -1564,7 +1587,7 @@ def _chat_only(agent: Any, options: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def _thread_store(options: Mapping[str, Any], keeps: bool = True) -> Any:
+def _thread_store(options: Mapping[str, Any], keeps: bool) -> Any:
     """The thread store of a run with these options (``OpenAIAgentsAdapter.thread_store``):
     ``keeps``, whether the run's model keeps a server-side thread (:func:`keeps_thread`) —
     when it does not, the ids are not a thread, and none is kept (``None``)."""
@@ -1645,15 +1668,14 @@ def _one_sandbox(config: Any) -> None:
         )
 
 
-def _hooks(theirs: Any = None, *, counted: bool = True) -> Any:
+def _hooks(theirs: Any = None) -> Any:
     """The harness's ``RunHooks``, always: every model call watched for a stall, its hosted
-    tool calls recorded, and — ``counted`` — its usage counted toward the run's budget
-    (``budget.py``; an agent tool's child run is counted by its helper) — and the run's own
-    ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with everything the SDK
-    reports."""
+    tool calls recorded, its usage counted toward the run's budget (``budget.py``) — and the
+    run's own ``RunHooks`` (``theirs``: the ``hooks=`` framework option) called with everything
+    the SDK reports."""
     from trellis.harness.hooks.openai_agents import ModelHooks
 
-    return ModelHooks(theirs, counted=counted)
+    return ModelHooks(theirs)
 
 
 async def _deltas(result: Any) -> AsyncIterator[str]:

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -22,19 +21,19 @@ from agents import (
     function_tool,
 )
 from agents.memory.session import SessionABC
+from agents.models.multi_provider import MultiProvider
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from pydantic import BaseModel
 
 from tests.support.arm import declaring
 from tests.support.memory import FakeMemoryService
 from tests.support.openai_model import ScriptedModel
-from trellis import Harness, Settings
+from trellis import Harness
 from trellis.contracts import ConfigurationError, RunEventType, RunStatus
 from trellis.harness import adapters
 from trellis.harness.adapters.openai_agents import (
     OpenAIAgentsAdapter,
     ServerThread,
-    ThroughRun,
     _Continue,
     governed_capability,
 )
@@ -181,12 +180,7 @@ async def test_a_tools_own_result_reaches_the_model_and_the_sdk_as_it_returned_i
     model = ScriptedModel([("picture", {"order": "o1"}), "a box"])
     shown = await h.wrap(Agent(name="p", model=model, tools=[picture]), id="pic").run("q", user="u")
     assert shown.answer == "a box"
-    [output] = [
-        i["output"]
-        for i in model.inputs[-1]
-        if isinstance(i, dict) and i.get("type") == "function_call_output"
-    ]
-    assert output == [{"type": "input_image", "image_url": "https://example.com/a.png"}]
+    assert model.outputs() == [[{"type": "input_image", "image_url": "https://example.com/a.png"}]]
 
     model = ScriptedModel([("look", {"order": "o2"})])
     stops = Agent(name="s", model=model, tools=[look], tool_use_behavior="stop_on_first_tool")
@@ -219,7 +213,10 @@ def test_who_keeps_a_server_thread_is_the_models_route() -> None:
     chat = Agent(name="c", model=ChatScripted(["x"]))
     assert adapter.thread_store(chat, options) is None
     adapter.gateway = None  # no gateway route: the SDK's own provider keeps it
-    assert adapter.thread_store(other, options) == ServerThread("conversation_id")
+    assert adapter.thread_store(named, options) == ServerThread("conversation_id")
+    theirs = RunConfig(model_provider=MultiProvider(openai_use_responses=False))
+    on_chat = {**options, "run_config": theirs}  # its OpenAI provider on chat completions
+    assert adapter.thread_store(named, on_chat) is None
 
 
 async def test_a_server_thread_the_model_ignores_leaves_memory_the_history(
@@ -286,17 +283,31 @@ async def test_a_message_steered_into_the_run_is_not_given_to_an_agent_tools_chi
     assert "Also say hello." in said_by_user(parent.inputs[-1])
 
 
-async def test_an_agent_tools_child_model_calls_are_watched_for_a_stall(harness: Harness) -> None:
-    from trellis.harness.adapters.openai_agents import _running
-    from trellis.harness.hooks.openai_agents import ModelHooks
+async def test_an_agent_tools_child_model_calls_are_watched_and_counted_once(
+    harness: Harness,
+) -> None:
+    """A model call of an agent tool's child run is watched for a stall like the run's own,
+    and what the child spends is counted toward the run's budget once (by its helper)."""
+    from trellis import current
 
-    child = Agent(name="c", model=ScriptedModel(["x"]))
-    made = _running(child.as_tool("ask", "a"), child, lambda agent, own: RunConfig())
-    assert made is not None
-    impl = made.on_invoke_tool._invoke_tool_impl
-    cells = dict(zip(impl.__code__.co_freevars, impl.__closure__, strict=True))
-    hooks = cells["hooks"].cell_contents
-    assert isinstance(hooks, ModelHooks) and hooks._counted is False
+    watched: list[list[str]] = []
+
+    class Watching(ScriptedModel):
+        async def get_response(self, *args: Any, **kwargs: Any) -> ModelResponse:
+            runtime = current()
+            assert runtime is not None
+            watched.append(sorted(runtime._watched))
+            return await super().get_response(*args, **kwargs)
+
+    child = Watching(["child done"], usage=Usage(input_tokens=5, output_tokens=5), ids="c")
+    parent = ScriptedModel([("ask", {"input": "x"}), "done"])
+    helper = Agent(name="helper", model=child).as_tool("ask", "a")
+    target = Agent(name="outer", model=parent, tools=[helper])
+    events = [
+        e async for e in declaring(harness, ask="read").wrap(target, id="w").stream("go", user="u")
+    ]
+    assert watched == [["openai_agents:helper"]]
+    assert events[-1].data["spent"]["tokens"] == 10  # the child's reply, once
 
 
 # --------------------------------------------------------------------------- detection (P2)
@@ -434,7 +445,6 @@ async def test_a_sandbox_memorys_own_model_calls_go_through_the_run(harness: Har
 
     memory = Memory(generate=MemoryGenerateConfig(phase_one_model="phase-model"))
     made = governed_capability(memory)
-    assert isinstance(made.generate.phase_one_model, ThroughRun)
     assert made.generate == governed_capability(memory).generate  # the same names, the same
     assert memory.generate.phase_one_model == "phase-model"  # yours, unchanged
 
@@ -533,20 +543,31 @@ async def test_an_sse_server_and_a_server_managers_servers_are_governed_as_any_s
     assert await agent.adapter.native(agent.target) == []
 
 
-# --------------------------------------------------------------------------- tracing (P2)
-def test_the_sdks_tracing_is_warned_of_with_its_switch(caplog: pytest.LogCaptureFixture) -> None:
-    from agents.tracing import get_trace_provider
+# --------------------------------------------------------------------------- sandbox (P1)
+async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_sandbox(
+    harness: Harness,
+) -> None:
+    """A ``SandboxAgent``'s shell, undeclared, asks a person at the SDK's own gate: the
+    approved call continues the SDK's paused run — the model is not asked again, and the file
+    the first command wrote is there for the second."""
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Shell
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
-    from trellis.harness.adapters.openai_agents import SDK_TRACING, sdk_tracing_said
-
-    provider = get_trace_provider()
-    was = getattr(provider, "_disabled", False)
-    try:
-        provider.set_disabled(False)
-        sdk_tracing_said.cache_clear()
-        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
-            Harness(config=Settings()).wrap(Agent(name="t"), id="traced")
-        assert [r.levelname for r in caplog.records if r.getMessage() == SDK_TRACING] == ["WARNING"]
-    finally:
-        provider.set_disabled(was)
-        sdk_tracing_said.cache_clear()
+    model = ScriptedModel(
+        [
+            ("exec_command", {"cmd": "echo kept > f.txt"}),
+            ("exec_command", {"cmd": "cat f.txt"}),
+            "done",
+        ]
+    )
+    target = SandboxAgent(name="box", instructions="Work.", model=model, capabilities=[Shell()])
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(target, id="held", framework_options={"run_config": config})
+    result = await agent.run("go", user="u")
+    for command in ("echo kept > f.txt", "cat f.txt"):
+        assert result.interrupt is not None and result.interrupt.tool_call is not None
+        assert result.interrupt.tool_call.args == {"cmd": command}
+        result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="u")
+    assert result.status is RunStatus.SUCCESS and len(model.inputs) == 3  # never asked again
+    assert "kept" in str(model.outputs()[-1])

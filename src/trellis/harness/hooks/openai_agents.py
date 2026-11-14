@@ -36,15 +36,10 @@ class ModelHooks(RunHooks[Any]):
     its handoffs, its tool calls, its model calls), as ``Runner.run(hooks=theirs)`` calls
     them."""
 
-    def __init__(self, theirs: RunHooks[Any] | None = None, *, counted: bool = True) -> None:
+    def __init__(self, theirs: RunHooks[Any] | None = None) -> None:
         #: the model each agent of the run is calling, by its name, and when the call began
         self._calls: dict[str, tuple[str | None, float]] = {}
         self._theirs = theirs if theirs is not None else RunHooks()
-        #: whether each reply's usage is counted here (an agent tool's child run's is counted
-        #: by its helper, from what the SDK adds to the calling run's usage) and its function
-        #: calls kept for the harness's tools to answer repeats (the calling reply's, not the
-        #: child's)
-        self._counted = counted
 
     async def on_agent_start(self, context: Any, agent: Any) -> None:
         await self._theirs.on_agent_start(context, agent)
@@ -97,9 +92,23 @@ class ModelHooks(RunHooks[Any]):
             from trellis.harness.adapters.openai_agents import hosted_calls  # noqa: PLC0415
 
             await hosted_calls(runtime, response.output, started=started)
-            if self._counted:
-                runtime.repeats = _repeats(response.output)
-                counted(runtime, model, response.usage)
+            self.replied(runtime, model, response)
+
+    def replied(self, runtime: Any, model: str | None, response: ModelResponse) -> None:
+        """The run's model replied: its usage counted toward the run's budget, its function
+        calls kept for the harness's tools to answer the reply's repeats."""
+        runtime.repeats = _repeats(response.output)
+        counted(runtime, model, response.usage)
+
+
+class ChildModelHooks(ModelHooks):
+    """Around every model call of an agent tool's child run (``Agent.as_tool``): the stall
+    watch and the hosted tool calls, as the run's — its usage is counted by the agent tool's
+    helper (from what the SDK adds to the calling run's), and the repeats the harness's tools
+    answer are the calling reply's."""
+
+    def replied(self, runtime: Any, model: str | None, response: ModelResponse) -> None:
+        """Nothing: counted by its helper."""
 
 
 def counted(runtime: Any, model: str | None, usage: Any) -> None:
