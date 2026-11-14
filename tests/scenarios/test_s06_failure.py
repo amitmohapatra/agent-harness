@@ -26,7 +26,7 @@ import httpx
 import pytest
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, eventually, free_port, history, record
+from tests.scenarios.kit import TOOLS, Served, calling, eventually, free_port, history, record
 from trellis import Budget, Harness
 from trellis.contracts import RunStatus
 from trellis.harness.agui.sse import decode
@@ -100,7 +100,7 @@ async def test_a_server_killed_mid_turn(
                 return got is not None and got.status is RunStatus.RUNNING
 
             assert await eventually(working, within=120), one.log.read_text()[-2000:]
-            await asyncio.sleep(2)  # in its slow call
+            await calling(h, run_id)  # in its slow call
             one.kill()
             posting.cancel()
 

@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI, Request
 
 from tests.scenarios.brains import ADAPTERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, Served, asked_id, history, ledger, record
+from tests.scenarios.kit import TOOLS, Served, asked_id, history, ledger, record, runs_of, waiting
 from trellis import Harness
 from trellis.contracts import ConfigurationError, RunStatus
 
@@ -130,18 +130,13 @@ async def test_cancel_a_message_waiting_its_turn_and_a_running_one(
     first = asyncio.create_task(
         agent.run(f"{token(uid, 1)} {command('wait', seconds=6)}", user=user, thread=thread)
     )
-    await asyncio.sleep(2)
+    await waiting(thread)
     second = asyncio.create_task(
         agent.run(f"{token(uid, 2)} waits its turn", user=user, thread=thread)
     )
-    await asyncio.sleep(1)
-    running = [r async for r in h.runs.iterate(agent_id=agent.id)]
-    by_input = {}
-    for r in running:
-        rec = await record(h, r.run_id)
-        by_input[str(rec.input)[: len(token(uid, 2))]] = rec
-    waiting = by_input[token(uid, 2)]
-    await agent.cancel(waiting.run_id, reason="never mind")  # waiting for the turn
+    by_input = {str(r.input)[: len(token(uid, 2))]: r for r in await runs_of(h, agent.id, 2)}
+    queued = by_input[token(uid, 2)]
+    await agent.cancel(queued.run_id, reason="never mind")  # queued for the turn
     working = by_input[token(uid, 1)]
     await agent.cancel(working.run_id, reason="stop")  # in its slow call
     one, two = await asyncio.gather(first, second)

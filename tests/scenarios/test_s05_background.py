@@ -23,12 +23,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions
 from deepagents import create_deep_agent
 
 from tests.integration.test_react_async_subagent import RESULT, StandIn
 from tests.scenarios.brains import (
-    CLI,
     SYSTEM,
     BrainChat,
     BrainChatModel,
@@ -37,7 +35,7 @@ from tests.scenarios.brains import (
     token,
     wrapped,
 )
-from tests.scenarios.kit import TOOLS, eventually, history, record
+from tests.scenarios.kit import TOOLS, ClaudeChat, background, history, record
 from tests.support.arm import arm
 from trellis import Harness, ReAct
 from trellis.contracts import RunStatus
@@ -58,46 +56,25 @@ async def _children(h: Harness, run_id: str) -> list[Any]:
 async def test_claude_background_subagent_while_the_user_chats(
     h: Harness, uid: str, tmp_path: Path
 ) -> None:
-    tasks = tmp_path / "tasks"
-    tasks.mkdir()
     turns = [
-        [
-            {"background": {"id": "t1", "agent": "researcher", "prompt": f"research {uid}"}},
-            {"text": "started it"},
-        ],
+        [background(prompt=f"research {uid}"), {"text": "started it"}],
         [{"text": "ANS {heard}"}],
         [{"text": "ANS {heard}"}],
     ]
-    options = ClaudeAgentOptions(
-        cli_path=CLI,
-        system_prompt=SYSTEM,
-        env={
-            "FAKE_CLAUDE_TURNS": json.dumps(turns),
-            "FAKE_CLAUDE_RECORD": str(tmp_path / "cli.json"),
-            "FAKE_CLAUDE_SESSIONS": str(tmp_path),
-            "FAKE_CLAUDE_TASKS": str(tasks),
-        },
-    )
-    agent = arm(h.wrap(options, id=f"s5c-{uid}"), TOOLS)
+    chat = ClaudeChat(h, tmp_path, f"s5c-{uid}", turns)
+    agent = chat.agent
     user, thread = f"ada-{uid}", f"chat-{uid}"
     first = await agent.run(
         f"{token(uid, 1)} research it in the background", user=user, thread=thread
     )
     assert first.status is RunStatus.SUCCESS and first.answer == "started it", first.error
-    [child] = await _children(h, first.run_id)
-    assert (
-        await record(h, child.run_id)
-    ).status is RunStatus.RUNNING  # working, not done at launch
+    [child] = (await chat.children(first.run_id)).values()
+    assert child.status is RunStatus.RUNNING  # working, not done at launch
     second = await agent.run(f"{token(uid, 2)} meanwhile, hello", user=user, thread=thread)
     assert second.status is RunStatus.SUCCESS and token(uid, 2) in second.answer, second.error
     assert (await record(h, child.run_id)).status is RunStatus.RUNNING  # answered while it works
-    (tasks / "t1.done").write_text(f"found {uid}")
-
-    async def ended() -> bool:
-        return (await record(h, child.run_id)).status is RunStatus.SUCCESS
-
-    assert await eventually(ended, within=60), await record(h, child.run_id)
-    assert f"found {uid}" in str((await record(h, child.run_id)).output)
+    ended = await chat.finish(child.run_id, f"found {uid}")
+    assert ended.status is RunStatus.SUCCESS and f"found {uid}" in str(ended.output), ended
     third = await agent.run(f"{token(uid, 3)} what did it find?", user=user, thread=thread)
     assert third.status is RunStatus.SUCCESS and f"found {uid}" in third.answer, third.answer
     kept = await history(h, user=user, agent_id=agent.id, thread=thread)

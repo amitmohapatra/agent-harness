@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.scenarios.brains import ADAPTERS, STEERS, command, parse, token, wrapped
-from tests.scenarios.kit import TOOLS, answered, asked, history
+from tests.scenarios.kit import TOOLS, answered, asked, history, waiting
 from trellis import Harness
 from trellis.contracts import RunStatus
 
@@ -97,7 +97,7 @@ async def test_a_message_to_a_busy_chat(
     first = asyncio.create_task(
         agent.run(f"{first_tok} {command('wait', seconds=4)}", user=user, thread=thread)
     )
-    await asyncio.sleep(2.0)  # the first run is in its slow call
+    await waiting(thread)  # the first run is in its slow call
     second = await agent.run(f"{second_tok} also this", user=user, thread=thread, mode=mode)
     done = await first
     kept = await history(h, user=user, agent_id=agent.id, thread=thread)

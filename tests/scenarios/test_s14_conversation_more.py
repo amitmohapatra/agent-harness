@@ -22,7 +22,16 @@ import pytest
 
 from tests.scenarios.brains import STEERS, command, parse, token, wrapped
 from tests.scenarios.conftest import harness
-from tests.scenarios.kit import TOOLS, Served, answered, asked, asked_id, free_port, history
+from tests.scenarios.kit import (
+    TOOLS,
+    Served,
+    answered,
+    asked,
+    asked_id,
+    calling,
+    free_port,
+    history,
+)
 from trellis import Harness
 from trellis.contracts import RunStatus
 from trellis.harness.agui.sse import decode
@@ -163,7 +172,7 @@ async def test_a_queued_turn_and_a_direct_one_in_one_chat(uid: str, tmp_path: Pa
             handle = await agent.start(
                 f"{token(uid, 1)} {command('wait', seconds=4)}", user=user, thread=thread
             )
-            await asyncio.sleep(1.5)
+            await calling(h, handle.id)  # the queued turn works on the worker
             direct = await agent.run(
                 f"{token(uid, 2)} {command('wait', seconds=1)}", user=user, thread=thread
             )

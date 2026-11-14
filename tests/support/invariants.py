@@ -595,6 +595,12 @@ class Invariants:
                 starts = _starts(
                     events.get(run_id, []), call.get("tool"), call.get("idempotency_key")
                 )
+                if not starts:
+                    # a question a background run's call needed, asked in its chat's turn: the
+                    # call ran in that other run of the test
+                    others = [ev for r, evs in events.items() if r != run_id for ev in evs]
+                    ran = _starts(others, call.get("tool"), None)
+                    starts = [a for a in ran if a == call.get("args")]
                 if decision == "REJECT" and starts:
                     out.append(f"INV-4 run {run_id}: {call.get('tool')} ran though it was rejected")
                 if decision in ("APPROVE", "EDIT") and len(starts) != 1:

@@ -43,6 +43,8 @@ def lookup(key: str) -> str:
     return f"value-of-{key}"
 
 
+#: the thread of every ``wait`` call begun in this process (a gate: :func:`waiting`)
+BEGUN: list[str | None] = []
 #: every ``wait`` call made in this process: (thread, started, ended), monotonic seconds
 WAITS: list[tuple[str | None, float, float]] = []
 
@@ -53,10 +55,50 @@ async def wait(seconds: float) -> str:
     from trellis import current
 
     began = time.monotonic()
-    await asyncio.sleep(seconds)
     run = current()
+    BEGUN.append(run.thread if run is not None else None)
+    await asyncio.sleep(seconds)
     WAITS.append((run.thread if run is not None else None, began, time.monotonic()))
     return f"waited {seconds}"
+
+
+async def waiting(thread: str, within: float = 120.0) -> None:
+    """Until a ``wait`` call of ``thread`` is under way in this process: its run is in its slow
+    call (a gate, where a sleep would guess)."""
+
+    async def begun() -> bool:
+        return thread in BEGUN
+
+    assert await eventually(begun, within=within, every=0.05), f"no slow call began in {thread}"
+
+
+async def calling(h: Harness, run_id: str, tool: str = "wait", within: float = 180.0) -> None:
+    """Until run ``run_id`` — in whatever process — has begun a call of ``tool``, as agent-runs'
+    event log says."""
+    url, key = os.environ["RUNS_URL"], h.settings.api_key or ""
+
+    async def begun() -> bool:
+        async with httpx.AsyncClient(base_url=url, headers={"X-Api-Key": key}) as c:
+            got = await c.get(f"/v1/runs/{run_id}/events", params={"limit": 500})
+        return got.status_code == 200 and any(
+            p["event"]["type"] == "TOOL_CALL_START"
+            and (p["event"].get("data") or {}).get("tool") == tool
+            for p in got.json()
+        )
+
+    assert await eventually(begun, within=within, every=0.2), f"{run_id} never called {tool}"
+
+
+async def runs_of(h: Harness, agent_id: str, count: int, within: float = 60.0) -> list[RunRecord]:
+    """The agent's runs once there are ``count`` of them, as agent-runs keeps them."""
+    found: list[Any] = []
+
+    async def there() -> bool:
+        found[:] = [r async for r in h.runs.iterate(agent_id=agent_id)]
+        return len(found) >= count
+
+    assert await eventually(there, within=within, every=0.1), (agent_id, len(found))
+    return [await record(h, r.run_id) for r in found]
 
 
 def overlapped(threads: set[str]) -> bool:
@@ -223,3 +265,73 @@ def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+# --------------------------------------------------------------------------- Claude, in the background
+#: a subagent started in the background by the scripted Claude CLI: task ``t1`` (or ``task``)
+def background(task: str = "t1", prompt: str = "research") -> dict[str, Any]:
+    return {"background": {"id": task, "agent": "researcher", "prompt": prompt}}
+
+
+class ClaudeChat:
+    """A wrapped Claude agent whose scripted CLI answers each turn of a session with the script
+    of its number (``turns``), its background tasks driven from the test through files:
+    ``call`` has a task make a tool call, ``finish`` ends it with its summary."""
+
+    def __init__(
+        self, h: Harness, tmp: Path, agent_id: str, turns: list[list[dict[str, Any]]], **wrap: Any
+    ) -> None:
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        from tests.scenarios.brains import CLI, SYSTEM
+        from tests.support.arm import arm
+
+        self.h, self.tasks = h, tmp / "tasks"
+        self.tasks.mkdir(exist_ok=True)
+        env = {
+            "FAKE_CLAUDE_TURNS": json.dumps(turns),
+            "FAKE_CLAUDE_RECORD": str(tmp / "cli.json"),
+            "FAKE_CLAUDE_SESSIONS": str(tmp),
+            "FAKE_CLAUDE_TASKS": str(self.tasks),
+        }
+        options = ClaudeAgentOptions(cli_path=CLI, system_prompt=SYSTEM, env=env)
+        self.agent = arm(h.wrap(options, id=agent_id, **wrap), TOOLS)
+
+    async def children(self, run_id: str) -> dict[str, RunRecord]:
+        """The background runs a turn started, by what each was asked."""
+        found = [r async for r in self.h.runs.iterate(parent_run_id=run_id)]
+        return {str(r.input): r for r in [await record(self.h, c.run_id) for c in found]}
+
+    async def call(self, step: dict[str, Any], task: str = "t1") -> None:
+        """Task ``task`` makes the tool call ``step`` now."""
+        (self.tasks / f"{task}.call").write_text(json.dumps(step))
+
+    async def called(self, task: str = "t1", within: float = 60.0) -> dict[str, Any]:
+        """What task ``task``'s call was answered, once it was."""
+        answered = self.tasks / f"{task}.called"
+
+        async def there() -> bool:
+            return answered.exists()
+
+        assert await eventually(there, within=within, every=0.1), (
+            f"{task}'s call was never answered"
+        )
+        return dict(json.loads(answered.read_text()))
+
+    async def finish(
+        self, run_id: str, summary: str, task: str = "t1", within: float = 60.0
+    ) -> RunRecord:
+        """Task ``task`` ends with ``summary``; its run's record once it ended."""
+        (self.tasks / f"{task}.done").write_text(summary)
+        return await self.ended(run_id, within=within)
+
+    async def ended(self, run_id: str, within: float = 60.0) -> RunRecord:
+        async def over() -> bool:
+            return (await record(self.h, run_id)).status.value not in (
+                "RUNNING",
+                "PAUSED",
+                "QUEUED",
+            )
+
+        assert await eventually(over, within=within), await record(self.h, run_id)
+        return await record(self.h, run_id)
