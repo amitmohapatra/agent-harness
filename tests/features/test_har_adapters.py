@@ -16,6 +16,7 @@ real services):
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,7 +31,7 @@ from tests.features.conftest import ADAPTERS, eventually, harness, runs_http, ru
 from tests.features.kit import armed, ledger, lookup, record
 from tests.support.arm import arm
 from trellis import Budget, Runtime, ask_user, tool
-from trellis.contracts import RunStatus
+from trellis.contracts import ConfigurationError, RunStatus
 from trellis.harness import telemetry
 from trellis.harness.journal import content_key
 
@@ -59,14 +60,8 @@ async def test_ask_user_pauses_in_agent_runs_and_the_answer_resumes_elsewhere(
     assert stored.status is RunStatus.PAUSED and stored.awaiting.question.startswith("Which day?")
     async with harness() as h:  # another process answers
         agent, _ = await armed(adapter, h, tmp_path, plan, id=agent_id, tools=[ask_user()])
-        bad = None
-        try:
-            await agent.resume(
-                paused.interrupt.interrupt_id, "answer", answer="next week", reviewer=user
-            )
-        except Exception as exc:
-            bad = exc
-        assert bad is not None  # an answer that does not fit the question is refused
+        with pytest.raises(ConfigurationError):  # an answer that does not fit is refused
+            await agent.resume(paused.interrupt.interrupt_id, "answer", answer=17, reviewer=user)
         done = await agent.resume(
             paused.interrupt.interrupt_id, "answer", answer="2026-11-20", reviewer=user
         )
@@ -223,3 +218,34 @@ async def test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_ro
     said = built.said()
     assert f"row {rows - 2:06d}" in said  # the last page was read
     assert len(said) < len(text)  # never the whole result
+
+
+#: F-DATE (agent-runs SDK, shared by the harness): a date question's ``expects`` is
+#: ``{"type": "string", "format": "date"}``, and ``trellis.runs.answers`` checks an answer with
+#: ``validator_for(expects)(expects)`` and no format checker (answers.py:57): JSON Schema's
+#: ``format`` is then an annotation, so "next week" is taken as the date and the model reads it.
+F_DATE = (
+    "F-DATE: a date question takes any string as its answer (agent-runs SDK answers.py:57 "
+    "checks no JSON Schema format)"
+)
+
+
+@pytest.mark.plan("HAR-ASK", "F36u")
+@pytest.mark.xfail(strict=True, reason=F_DATE)
+async def test_a_date_question_refuses_an_answer_that_is_not_a_date(
+    tmp_path: Path, uid: str
+) -> None:
+    user = f"amy-{uid}"
+    plan = [("ask_user", {"question": "Which day?", "kind": "date"})]
+    async with harness() as h:
+        agent, _ = await armed("react", h, tmp_path, plan, id=f"date-q-{uid}", tools=[ask_user()])
+        paused = await agent.run("Book the delivery.", user=user, thread="c")
+        assert paused.interrupt is not None
+        try:
+            with pytest.raises(ConfigurationError):
+                await agent.resume(
+                    paused.interrupt.interrupt_id, "answer", answer="next week", reviewer=user
+                )
+        finally:
+            with contextlib.suppress(Exception):  # ended already when the answer was taken
+                await agent.cancel(paused.run_id, reason="test over")
