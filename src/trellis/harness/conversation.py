@@ -8,13 +8,14 @@ keeps one, else the memory service's window. Where neither does — memory off, 
 keeps no thread — the run store already holds every turn (its question, its answer):
 :func:`earlier` reads them, so a follow-up still has the conversation (ADR 0005).
 
-A message sent to a conversation one of whose runs works in this process does what its
-``mode`` says (:class:`Mode`): it waits its turn (``queue``, the default — what a second
-message always did), it cancels the working run and continues the conversation from there
-(``interrupt``), or it is given to the working run at its framework's next step
+A message sent to a conversation one of whose runs works does what its ``mode`` says
+(:class:`Mode`): it waits its turn (``queue``, the default — what a second message always
+did), it cancels the working run and continues the conversation from there (``interrupt``,
+wherever that run works), or it is given to the working run at its framework's next step
 (``steer``: the target's ``Adapter.steers``), and that run's answer answers it. A target
-with no hook between two of its steps steers nothing: the message waits its turn instead,
-said once per agent.
+with no hook between two of its steps steers nothing, and nothing reaches a run working in
+another process: the message waits its turn instead, said once per agent. The turns are taken
+in the order of the run store's line (``line``), on whichever process each message arrives.
 
 Every message has an id (:func:`message_id`): a digest of the conversation and the message's
 own name in it — the run's question (``<run>:input``), its answer (``<run>:answer``, the id
@@ -37,15 +38,18 @@ import hashlib
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
 from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution, RunStatus
-from trellis.harness.bounded import SAID_ONCE
+from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
+from trellis.harness.line import Here
 
 if TYPE_CHECKING:
+    from trellis.harness.line import Cache, Line
     from trellis.harness.runtime import Runtime
     from trellis.runs import ResolutionEntry
 
@@ -53,6 +57,9 @@ log = logging.getLogger("trellis.harness")
 
 #: The most earlier runs of a conversation :func:`earlier` reads from the run store.
 EARLIER_RUNS: Final = 10
+#: How many of the store's newest runs of a thread and an ending :func:`earlier` lists (one
+#: listing an ending: other users' threads named alike are among them).
+EARLIER_PAGE: Final = 50
 #: A run's answered interrupts read at once, for what the person allowed (:func:`allowed`).
 RESOLUTIONS_PAGE: Final = 50
 #: The endings whose question and answer are a turn of the conversation; a cancelled run's
@@ -62,6 +69,8 @@ ASKED: Final = ANSWERED | {RunStatus.CANCELLED}
 #: The ``RunStart.metadata`` key a run sent with ``mode="steer"`` keeps the run it was given
 #: to under (its answer is that run's: :func:`earlier` keeps it once).
 STEERED_INTO: Final = "steered_into"
+#: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
+INTERRUPTED: Final = "interrupted by a newer message of the conversation"
 
 
 class Mode(StrEnum):
@@ -216,21 +225,7 @@ async def earlier(
     thread = runtime.thread
     if runtime.parent is not None or thread is None or thread == runtime.run_id:
         return []
-    runs, tenant = runtime.agent.harness.runs, runtime.tenant
-    records = []
-    async for summary in runs.iterate(
-        agent_id=runtime.agent_id,
-        thread_id=thread,
-        tenant=tenant,
-        limit=EARLIER_RUNS,
-        max_pages=1,
-    ):
-        if summary.run_id == runtime.run_id or summary.status not in ASKED:
-            continue
-        record = await runs.get(summary.run_id, tenant=tenant)
-        if record is not None and record.user_id == runtime.user and not record.parent_run_id:
-            records.append(record)
-    records.sort(key=lambda r: r.created_at)
+    records = sorted(await _asked(runtime, thread), key=lambda r: r.created_at)[-EARLIER_RUNS:]
     conversation = runtime.conversation
     kept = runtime.agent.results.turns(conversation) if whole else {}
     turns: list[list[Said]] = []
@@ -246,7 +241,7 @@ async def earlier(
         answer = record.output if record.status in ANSWERED else None
         if (
             previous is not None
-            and record.metadata.get(STEERED_INTO) == previous.run_id
+            and record.steered_into == previous.run_id
             and answer == previous.output
         ):
             # given to that run: its answer is this one's
@@ -259,6 +254,64 @@ async def earlier(
             )
         previous = record if answer not in (None, "") else None
     return [s for turn in (turns if budget is None else _fitted(turns, budget)) for s in turn]
+
+
+@dataclass(frozen=True, slots=True)
+class Turn:
+    """An ended turn of a conversation as :func:`earlier` keeps it (``Agent.earlier_turns``):
+    what it reads of the run's record, and no more (its checkpoint, its error, its metadata
+    are not kept)."""
+
+    run_id: str
+    created_at: datetime
+    status: RunStatus
+    #: whose turn it is (another user's thread named alike is not this conversation's), and
+    #: whether it is a child run (a sub-agent's: no turn)
+    user: str | None
+    child: bool
+    input: Any
+    output: Any
+    steered_into: str | None
+
+
+async def _asked(runtime: Runtime, thread: str) -> list[Turn]:
+    """The conversation's turns that ended asked (:data:`ASKED`), the newest
+    :data:`EARLIER_RUNS` of each ending: one listing an ending, of the store's newest
+    :data:`EARLIER_PAGE` — the messages sent after this one, waiting their turn, are never
+    listed — and each ended run read once (``Agent.earlier_turns``)."""
+    agent, tenant = runtime.agent, runtime.tenant
+    found: list[Turn] = []
+    for status in sorted(ASKED):
+        mine = 0
+        async for summary in agent.harness.runs.iterate(
+            agent_id=runtime.agent_id,
+            thread_id=thread,
+            status=status,
+            tenant=tenant,
+            limit=EARLIER_PAGE,
+            max_pages=1,
+        ):
+            turn = agent.earlier_turns.get(summary.run_id)
+            if turn is None:
+                record = await agent.harness.runs.get(summary.run_id, tenant=tenant)
+                if record is None:
+                    continue
+                turn = agent.earlier_turns[record.run_id] = Turn(
+                    run_id=record.run_id,
+                    created_at=record.created_at,
+                    status=record.status,
+                    user=record.user_id,
+                    child=bool(record.parent_run_id),
+                    input=record.input,
+                    output=record.output,
+                    steered_into=record.metadata.get(STEERED_INTO),
+                )
+            if turn.user == runtime.user and not turn.child and turn.run_id != runtime.run_id:
+                found.append(turn)
+                mine += 1
+                if mine == EARLIER_RUNS:
+                    break
+    return found
 
 
 def _fitted(turns: Sequence[Sequence[Said]], budget: int) -> list[Sequence[Said]]:
@@ -333,6 +386,8 @@ class Live:
     #: set as it ends, with how it ended
     ended: asyncio.Event = field(default_factory=asyncio.Event)
     result: Any = None
+    #: the conversation's line it took its turn in (none: a run outside any)
+    line: Line | None = None
 
     async def steered(self, text: str, run_id: str) -> bool:
         """``text`` (sent as run ``run_id``) given to this run; once it ends, whether its
@@ -344,37 +399,85 @@ class Live:
 
 
 class Turns:
-    """One run of a conversation at a time in this process: the others wait their turn, in
-    order (``pipeline.attempt``). The run holding each turn is :class:`Live`, which a message
-    sent with ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches."""
+    """The conversations' line in this process (``line``: the run store keeps the order): the
+    messages of a conversation recorded in the order they were sent (:meth:`accepting`), the
+    runs waiting their turn or holding it here (:meth:`taken`), and the run holding each
+    conversation's turn here, :class:`Live`, which a message sent with ``mode="interrupt"``
+    cancels and one sent with ``mode="steer"`` reaches."""
 
     def __init__(self) -> None:
-        self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
+        #: the runs in their conversation's line here, waiting their turn or holding it
+        self._here: dict[str, Here] = {}
+        #: the messages of a conversation being recorded here, one at a time (:meth:`accepting`)
+        self._accepting: dict[str, tuple[asyncio.Lock, int]] = {}
+        #: what the lines of this process read of the runs in them (each run read once)
+        self.seen: Cache = LRU()
+
+    @contextlib.asynccontextmanager
+    async def accepting(self, key: str) -> AsyncIterator[None]:
+        """A message of the conversation ``key`` recorded in the run store while no other of
+        it is, in the order they were sent here (a lock is first come, first served): the
+        store places each after the one before, and their turns follow that order (``line``)
+        however long each start takes to answer."""
+        lock, waiting = self._accepting.get(key) or (asyncio.Lock(), 0)
+        self._accepting[key] = (lock, waiting + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, waiting = self._accepting[key]
+            if waiting == 1:
+                del self._accepting[key]
+            else:
+                self._accepting[key] = (lock, waiting - 1)
 
     @contextlib.asynccontextmanager
     async def taken(
-        self, key: str, run_id: str | None = None, *, steers: bool = False
+        self, key: str, run_id: str, *, steers: bool = False, line: Line | None = None
     ) -> AsyncIterator[Live | None]:
-        lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
-        self._held[key] = (lock, waiting + 1)
+        """Run ``run_id`` holding the turn of its conversation ``key`` while the block runs,
+        once its ``line`` says it is its turn (a run with none — started by a release before the
+        line, or outside a conversation — at once). ``None``: it takes no turn (cancelled while
+        it waited, :meth:`cancel`, or ended in the run store)."""
+        mine = self._here[run_id] = Here()
         try:
-            async with lock:
-                if run_id is None:
-                    yield None
-                    return
-                live = self._live[key] = Live(run_id, steers)
-                try:
-                    yield live
-                finally:
+            if line is not None and not await line.turn(self._here, mine):
+                yield None
+                return
+            live = self._live[key] = Live(run_id, steers, line=line)
+            try:
+                yield live
+            finally:
+                if self._live.get(key) is live:  # (runs with no line may hold a turn together)
                     del self._live[key]
-                    live.ended.set()
+                live.ended.set()
         finally:
-            lock, waiting = self._held[key]
-            if waiting == 1:
-                del self._held[key]
-            else:
-                self._held[key] = (lock, waiting - 1)
+            del self._here[run_id]
+            mine.left.set_result(None)
+
+    def cancel(self, run_id: str, reason: str) -> asyncio.Future[None] | None:
+        """Run ``run_id``, waiting its turn here, is cancelled for ``reason``: it takes no
+        turn. What is done once it left the line; ``None`` when it does not wait here."""
+        mine = self._here.get(run_id)
+        if mine is None:
+            return None
+        mine.cancelled = reason
+        mine.again.set()
+        return mine.left
+
+    async def interrupted(self, run_id: str) -> bool:
+        """Whether run ``run_id`` holds its conversation's turn here and a newer message of the
+        conversation, sent to another process with ``mode="interrupt"``, asks for it
+        (``Line.interrupted``)."""
+        for live in self._live.values():
+            if live.run_id == run_id and live.line is not None:
+                return await live.line.interrupted()
+        return False
+
+    def cancelled(self, run_id: str) -> str | None:
+        """Why run ``run_id``, in line here, was cancelled while it waited, if it was."""
+        return self._here[run_id].cancelled
 
     def live(self, key: str) -> Live | None:
         """The run holding ``key``'s turn in this process, if one does."""
@@ -397,6 +500,24 @@ def steering(agent_id: str, framework: str) -> None:
     _said_unsteered(agent_id, framework)
 
 
+def steering_elsewhere(agent_id: str) -> None:
+    """A message sent with ``mode="steer"`` while the conversation's turn is held in another
+    process waits its turn: nothing carries a message to a run working elsewhere. Said once per
+    agent."""
+    _said_elsewhere(agent_id)
+
+
+@functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
+def _said_elsewhere(agent_id: str) -> None:
+    log.warning(
+        "%s: the conversation's run works in another process, which no message reaches "
+        "between its steps, so a message sent with mode='steer' waits for it to end, as "
+        "mode='queue' does",
+        agent_id,
+        extra={"agent_id": agent_id},
+    )
+
+
 @functools.lru_cache(maxsize=SAID_ONCE)  # said once per agent, of the most recent
 def _said_unsteered(agent_id: str, framework: str) -> None:
     log.warning(
@@ -412,6 +533,7 @@ __all__ = [
     "ANSWERED",
     "ASKED",
     "EARLIER_RUNS",
+    "INTERRUPTED",
     "STEERED_INTO",
     "Live",
     "Mode",
@@ -425,4 +547,5 @@ __all__ = [
     "rendered",
     "result_id",
     "steering",
+    "steering_elsewhere",
 ]

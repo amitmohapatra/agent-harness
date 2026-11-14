@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -78,7 +79,7 @@ from trellis.harness.clients.memory import (
     context_budget,
     documents,
 )
-from trellis.harness.conversation import STEERED_INTO, Mode, Turns
+from trellis.harness.conversation import STEERED_INTO, Mode, Turn, Turns
 from trellis.harness.evals import (
     GROUNDING_SAMPLE,
     EvalCase,
@@ -98,6 +99,7 @@ from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
 from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
 from trellis.harness.journal import Journal
+from trellis.harness.line import INTERRUPTS, Line
 from trellis.harness.result import Result
 from trellis.harness.runlog import event_log
 from trellis.harness.runtime import Runtime, current, reason_of, run_of
@@ -387,6 +389,8 @@ class Agent:
         self.running: dict[str, Runtime] = {}
         #: one run of a conversation at a time in this process (``pipeline.attempt``)
         self.turns = Turns()
+        #: the conversations' ended turns ``conversation.earlier`` read (each ended run once)
+        self.earlier_turns: LRU[str, Turn] = LRU()
         #: the session its framework kept for each conversation's last turn in this process
         #: (a Claude Agent SDK session and its transcripts, an ACP agent's session): the next
         #: turn continues it (``pipeline``, ADR 0005), the most recent kept
@@ -567,7 +571,7 @@ class Agent:
         _kept_as_json(framework_options)
         tenant = await self.harness._tenant(tenant)
         conversation = conversation_key(tenant, user, thread) if thread else None
-        concurrency_key = concurrency_key or (conversation and f"thread:{conversation}")
+        concurrency_key = concurrency_key or (conversation and _queued_with(conversation))
         start = await self._start(
             input,
             user=user,
@@ -590,10 +594,12 @@ class Agent:
         self, run_id: str, *, reason: str | None = None, tenant: str | None = None
     ) -> RunRecord:
         """Cancel a run, whatever it is doing, keeping ``reason`` with it: a queued or paused
-        run is ``CANCELLED`` at once; one running in this process stops now and ends
-        ``CANCELLED``; one a worker elsewhere runs is stopped by that worker at its next
-        heartbeat (agent-runs). Its sub-agents' runs that have not ended are cancelled with
-        it. A run that already ended raises ``ConflictError``. The run's record is returned.
+        run is ``CANCELLED`` at once; one running in this process, or waiting its
+        conversation's turn here, stops now and ends ``CANCELLED``; one a worker or another
+        process runs is asked to stop — still ``RUNNING`` in the record returned — and is
+        stopped by its holder at its next heartbeat (agent-runs). Its sub-agents' runs that
+        have not ended are cancelled with it. A run that already ended raises
+        ``ConflictError``. The run's record is returned.
         ``tenant`` is the run's, named by a platform key only."""
         tenant = await self.harness._tenant(tenant)
         runs = self.harness.runs
@@ -601,11 +607,9 @@ class Agent:
         # read first: its ending clears the checkpoint, which names the run's sandbox
         held = await runs.get(run_id, tenant=tenant) if runtime is None else None
         record = await runs.cancel(run_id, reason=reason, tenant=tenant)
-        if runtime is not None:
-            runtime.cancelled = reason or "cancelled"
-            assert runtime.running_in is not None
-            runtime.running_in.cancel()
-            await asyncio.wait({runtime.running_in})
+        ending = self.stop(run_id, reason or "cancelled")
+        if ending is not None:  # it works, or waits its turn, here: it ends itself
+            await asyncio.wait({ending})
             found = await runs.get(run_id, tenant=tenant)
             assert found is not None
             record = found
@@ -614,6 +618,20 @@ class Agent:
             self._unwatched(run_id)
         await cancel_children(runs, run_id, reason=reason, tenant=tenant)
         return record
+
+    def stop(self, run_id: str, reason: str) -> asyncio.Future[Any] | None:
+        """Stop what this process does for run ``run_id``, cancelled for ``reason``: its
+        attempt under way stops now and ends it ``CANCELLED``; one waiting its conversation's
+        turn takes none and ends so too (``Turns.cancel``). What is done once it ended here;
+        ``None`` when the run neither works nor waits here."""
+        runtime = self.running.get(run_id)
+        if runtime is None:
+            return self.turns.cancel(run_id, reason)
+        assert runtime.running_in is not None
+        if runtime.cancelled is None:
+            runtime.cancelled = reason
+            runtime.running_in.cancel()
+        return runtime.running_in
 
     async def resume(
         self,
@@ -1462,36 +1480,62 @@ class Agent:
     ) -> RunRecord:
         """Record an in-process run as started; its record, which its first attempt starts
         from (``pipeline.attempt``) — with its framework options as given, where the stored
-        record keeps their JSON. (Surfaces pass their own ``run_id`` when the protocol names
-        the run, and what its front end gave it, ``app``.)"""
-        start = await self._start(
-            input,
-            user=user,
-            thread=thread,
-            tenant=tenant,
-            run_id=run_id,
-            record_input=True,
-            timeout=timeout,
-            deadline=deadline,
-            budget=budget,
-            without=without,
-            framework_options=framework_options,
-            document_ids=document_ids,
-            parent=parent,
-            app=app,
+        record keeps their JSON. A turn of a conversation (``thread``, not a child run) takes
+        the conversation's ``concurrency_key``, as a queued one does: its place in the
+        conversation's line, which every process reads (``line``). (Surfaces pass their own
+        ``run_id`` when the protocol names the run, and what its front end gave it, ``app``.)"""
+        # the messages of a conversation sent here reach the run store in the order they were
+        # sent, which places each after the one before: their turns' order (``line``)
+        tenant = await self.harness._tenant(tenant or (parent.tenant if parent else None))
+        accepting = (
+            self.turns.accepting(conversation_key(tenant, user, thread))
+            if thread and parent is None
+            else contextlib.nullcontext()
         )
-        live = None
-        if mode is Mode.STEER and parent is None and thread:
-            live = self.turns.live(conversation_key(start.tenant_id, user, thread))
-        if live is not None and live.steers:  # its answer may be this run's (``earlier``)
-            given = {**start.metadata, STEERED_INTO: live.run_id}
-            start = start.model_copy(update={"metadata": given})
-        await admitted(self.harness.runs.start(start), "start")
+        async with accepting:
+            start = await self._start(
+                input,
+                user=user,
+                thread=thread,
+                tenant=tenant,
+                run_id=run_id,
+                record_input=True,
+                timeout=timeout,
+                deadline=deadline,
+                budget=budget,
+                without=without,
+                framework_options=framework_options,
+                document_ids=document_ids,
+                parent=parent,
+                app=app,
+            )
+            conversation = conversation_key(start.tenant_id, user, thread) if thread else None
+            if conversation is not None and parent is None:  # its turn: in the line (``line``)
+                start = start.model_copy(update={"concurrency_key": _queued_with(conversation)})
+                start = await self._addressed(start, conversation, mode)
+            await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
         if not framework_options:
             return record
         given = {**record.metadata, FRAMEWORK_OPTIONS: dict(framework_options)}
         return record.model_copy(update={"metadata": given})
+
+    async def _addressed(self, start: RunStart, conversation: str, mode: Mode) -> RunStart:
+        """``start``, a message of ``conversation`` sent with ``mode``, naming in its metadata
+        the working run it is for: the run it is given to (``STEER``, where that run's target
+        takes one: its answer may be this run's, ``earlier``), or the run it interrupts
+        (``INTERRUPT``) when that run holds the conversation's turn in another process, which
+        stops it there (``Line.interrupted``); one working here is cancelled here
+        (``pipeline._arrived``)."""
+        live = self.turns.live(conversation)
+        if mode is Mode.STEER and live is not None and live.steers:
+            named = {STEERED_INTO: live.run_id}
+        elif mode is Mode.INTERRUPT and live is None:
+            h, asking = self.harness, RunRecord.from_start(start)
+            named = {INTERRUPTS: await Line(h.runs, asking, self.turns.seen, h.followers).holder()}
+        else:
+            return start
+        return start.model_copy(update={"metadata": {**start.metadata, **named}})
 
     async def _start(
         self,
@@ -1585,6 +1629,11 @@ class Agent:
         if budget is not None:
             metadata[BUDGET] = budget.kept()
         return metadata
+
+
+def _queued_with(conversation: str) -> str:
+    """The ``concurrency_key`` of a conversation's turns: the run store runs one at a time."""
+    return f"thread:{conversation}"
 
 
 class Throttled(HarnessError):

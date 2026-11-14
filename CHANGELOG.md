@@ -86,6 +86,37 @@ does with your own tools and settings ([openai-agents.md](docs/frameworks/openai
   of your computer object, or arguments that are not the action's, is refused: nothing of the
   computer is called, and the model is told the call was not run.
 
+### Fixed: a conversation's messages one at a time, in the order sent, on every replica
+
+Two messages of one chat that reached two server processes both ran, writing the same thread:
+only queued runs (`start`) waited across processes. And a burst of messages in one process
+kept its order only by luck. Now a turn of a conversation started with `run`, `stream`,
+`serve_chat` or `serve_a2a`, or continued after its answer, takes the conversation's
+`concurrency_key` and waits in the conversation's line (`trellis.harness.line`, the one
+ordering of a conversation's turns): one turn at a time, in the order the messages were sent,
+whichever replica each reaches.
+
+- A queued turn (`start`) holds its place: direct messages sent after it wait for it, and a
+  worker claims it only when no turn placed before it runs.
+- `interrupt` stops the working run wherever it works, and never works beside it: sent to
+  another replica, the message waits until the replica holding the turn has stopped it (at its
+  next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
+  once.
+- A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting behind a turn in another process follows that turn's events (one shared
+  stream a run ahead, at most 32 a process, on its own client) instead of polling.
+- A turn's earlier turns are read with one listing per ending, never paging past the messages
+  still waiting (a burst's waiting turns used to crowd the history out).
+- A process killed while it holds a turn frees it once its hold lapses; one killed after
+  recording a turn and before holding it, 60 s later.
+- The in-process run store (`LocalRuns`) holds a run as agent-runs does: one heartbeat holds
+  it for 300 s at most, and the refusal another holder gets does not name the holder. One
+  suite of checks (`tests/support/store_contract.py`) runs against `LocalRuns`, the test
+  suite's `FileRuns` and agent-runs.
+
+Needs the agent-runs of this release (runs of a key created in their place; same wire). No
+argument, signature, endpoint or schema changed. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can
