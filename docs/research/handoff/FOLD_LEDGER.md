@@ -270,3 +270,8 @@ Claude work; plus claude.py and tools/bridge.py) → a merge job runs on
 `claude/cool-maxwell-w5avo8-kimi-merge` (worktree /var/tmp/cons/kimimerge), with a targeted
 test run of the Claude and Kimi kept-process files.
 Known on main: one hanging test in test_claude_background_session.py; uv.lock merged as text.
+
+## 23:15 UTC — the round is on main in all four repos
+harness#266 (Kimi merge 304b39f) and #267 (9bd7380, one corrected Kimi test) merged. The
+Kimi merge job's targeted run: 991 passed, 54 skipped, 1 deselected (the hanging test),
+1 failed and fixed. No coding job is running. Harness main still has no full CI result.

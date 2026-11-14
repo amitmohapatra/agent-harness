@@ -1,4 +1,4 @@
-# What remains to be done (Trellis stack) — updated 2026-11-14 22:50 UTC
+# What remains to be done (Trellis stack) — updated 2026-11-14 23:15 UTC
 
 The owner asked for everything that is coded to go to main at once, without waiting for
 tests, and for this file to list everything that is done, left, found, and still to be
@@ -26,9 +26,9 @@ head. Expect red CI on harness main: cross-branch test failures, the 100% line+b
 coverage gate of `trellis.harness`, and the tests in section 4 that were never run.
 
 **Order of work next time**
-1. Merge the Kimi branch if it is not yet on main (section 2), then look at CI on harness
-   main and fix what is red (start with `uv.lock`, which was merged as text and never
-   regenerated, and the test that hangs, section 4).
+1. Look at CI on harness main and fix what is red (start with `uv.lock`, which was merged
+   as text and never regenerated, and the test that hangs, section 4). Every branch of the
+   round is on main; there is nothing left to merge.
 2. The one full test pass (section 9).
 3. The open bugs and uncoded items (section 5), security first (section 6).
 4. The performance job (section 7).
@@ -45,7 +45,7 @@ coverage gate of `trellis.harness`, and the tests in section 4 that were never r
 | agent-runs | #35 (chat order on the server: place under the key's lock, holds, sweeps), #36 (`placed_at` on record and summary, `concurrency_key` list filter, date answers), #37 (one fixed set of enforced answer formats: date, email, ipv4, ipv6, regex, uuid) | CI green |
 | agent-memory-service | #115 (round 1), #116 (504 documented on 69 operations, a decision keeps arguments as the tool redacts them, two feature-suite fixes), #117 (admin key forgets in its tenant, extracted user facts ask first, inventory lists chat statements, redaction at intake) | #115, #116 green; #117 green on 3.12, 3.13 still running at merge |
 | agent-memory-service | #118 (a deleted thread leaves every read, profile lines follow their memories, migrations 0038 and 0039) | **no CI at merge**; item tests green, whole suite not run on the final head |
-| agent-harness | #257 (OpenAI Agents fixes and SDK 0.24, a conversation's turns in order, scenario fixes, LangChain 1.5 / Deep Agents 0.7.38, ReAct background tasks, the feature suite, the harness side of `placed_at`), #259 (Claude, SDK 0.2.182), #262 (Claude round 2, ReAct parity and rewind, the fix round, LangChain leftovers, the scenario suite), #263 (CHANGELOG conflict markers removed), #264 (native skills, the SCN-13 fix, the fold's final head); #258, #260, #261 and later (these notes) | **not verified** (section 0) |
+| agent-harness | #257 (OpenAI Agents fixes and SDK 0.24, a conversation's turns in order, scenario fixes, LangChain 1.5 / Deep Agents 0.7.38, ReAct background tasks, the feature suite, the harness side of `placed_at`), #259 (Claude, SDK 0.2.182), #262 (Claude round 2, ReAct parity and rewind, the fix round, LangChain leftovers, the scenario suite), #263 (CHANGELOG conflict markers removed), #264 (native skills, the SCN-13 fix, the fold's final head), #266 and #267 (Kimi 2.6.2 and one kept-process mechanism for Claude and Kimi); #258, #260, #261, #265 and later (these notes) | **not verified** (section 0) |
 
 What those harness merges contain, by area (all **reported** unless noted):
 - OpenAI Agents: library features pass through as the SDK does them; tool order kept;
@@ -72,15 +72,30 @@ What those harness merges contain, by area (all **reported** unless noted):
 
 ---
 
-## 2. The fold: done except Kimi
+## 2. The fold: complete
 
-Every branch of the round is on harness main (fold head 76afbb3, PR #264) except one:
+Every branch of the round is on harness main: the fold's head 76afbb3 (PR #264) and the
+Kimi merge 9bd7380 (PRs #266, #267). Nothing is left to merge.
 
-| Branch | Head | State |
-|---|---|---|
-| `claude/cool-maxwell-w5avo8-bg-kimi` | 0802086 | **not on main.** It moves the kept-process ("live session") code that Claude used into a shared `bridges/live.py`, while the Claude work on main changed the same code in place in `claude_live.py` (`LiveSessions.open(owner=, among=)`, the process cap, `SessionCost`, hooks, thinking blocks): 12 conflict hunks, about 546 lines, plus `adapters/claude.py` (`asking_within`) and `tools/bridge.py` (`permitted/asked(kept=)`). A job is doing this merge on `claude/cool-maxwell-w5avo8-kimi-merge` (worktree `/var/tmp/cons/kimimerge`): keep bg-kimi's shared structure and carry every behaviour main added into it. If that branch is not an ancestor of main, this merge is still owed. |
+The Kimi merge (reported by its job): one kept-process ("live session") mechanism in
+`bridges/live.py`, shared by Claude and Kimi. Generic parts of the Claude work moved there:
+the 16-process cap counted over every agent of the same adapter kind in the server process
+(`live.among`), the place reserved before the await (`LiveSessions.place`), fair
+least-recently-used eviction (`_yielding`, `owner` / `used` on the shared `Keeper`); Kimi
+now gets the same cap and eviction. Claude-only parts stayed in `claude_live.py`: workflows
+and the shared run, `SessionCost`, tool-use-id attribution, a team's own hooks between
+turns, removal of the unattended message buffer. `LiveSessions.open` became
+`claude_live.opened()`. `adapters/claude.py` `_answered` goes through
+`Runtime.asking_within`; `tools/bridge.py` keeps `kept=` beside the rewind guard and
+`called_by`. Kimi's per-user home and the run home's links (AGENTS.md, config, sessions,
+skills) combine: the links point into the per-user home.
+Its targeted test run (the Claude and Kimi kept-process files, `test_one_question`,
+`test_background_by_adapter`): 991 passed, 54 skipped, 1 deselected (the hanging test,
+section 4), 1 failed and fixed (a Kimi allow-rule test that contradicted the documented
+"ask rules come first"; the test was corrected, not the product). The four other Kimi tests
+that had never been run passed. Not run for it: vulture and pylint duplicate-code.
 
-What the Kimi branch holds: Kimi 2.6.2 (2.1.x refused); asking mode set and confirmed before
+What the Kimi work holds: Kimi 2.6.2 (2.1.x refused); asking mode set and confirmed before
 any prompt; plans reviewed by a person with every option; allow-for-conversation mapped to
 Kimi's allow-always; telemetry and auto-update off; a failed turn is ERROR with Kimi's
 reason; mode confirmation waits on the event up to 30 s; a Kimi home per tenant and user
@@ -178,14 +193,10 @@ branches under the same prefix.
   `tests/integration/test_agui.py` (about lines 88, 291, 314) expect ids `0..n` and the old
   `publish(derived=)` signature and fail until updated. Pyright not re-run after items 2–6.
   One unit test timed out once (`test_with_memory_a_tenants_catalog_publishes_through_the_background_writes`).
-- `-bg-kimi`: never run after their last edit, may be red: in `test_acp.py`
-  `test_each_user_has_a_home_of_the_agents_own_an_overlay_of_the_teams`,
-  `test_a_config_whose_allow_rules_take_no_rule_after_them_stops_the_run_before_its_prompt`,
-  `test_a_session_the_agent_no_longer_holds_is_run_again_from_its_prompt`,
-  `test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linked`; the `kimi_allows`
-  unit test in `test_acp_adapter.py`; `test_acp_background.py` and
-  `test_background_by_adapter.py` not re-run after the home change. Coverage of `kimi_home`
-  and `_kimi_rules` not checked. Pyright last run before round 2.
+- Kimi: the five tests that had never been run after their last edit were run at the
+  merge (four passed, one test corrected). `test_a_config_that_approves_on_its_own...[auto]`
+  failed twice under load before the confirmation wait was changed; not seen since.
+  Coverage of `kimi_home` and `_kimi_rules` not checked.
 - `-bg-claude-da`: other test files not re-run after the thinking-blocks commit; pyright not
   re-run; tested against SDK 0.2.182 from an overlay (the shared venv had 0.2.160).
 - `-native-skills`: only `test_skills`, `test_acp`, `test_claude`, `test_kimi` ran green; one
