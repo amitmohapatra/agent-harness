@@ -8,17 +8,29 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 ### Fixed: a conversation's messages one at a time, in the order sent, on every replica
 
 Two messages of one chat that reached two server processes both ran, writing the same thread:
-only queued runs (`start`) waited across processes. Now a turn of a conversation started with
-`run`, `stream`, `serve_chat` or `serve_a2a`, or continued after its answer, takes the
-conversation's `concurrency_key` and waits in the run store's line (`trellis.harness.line`): one
-turn at a time, in the order the messages were sent, whichever replica each reaches; queued and
-direct turns take turns too. `interrupt` cancels the working run wherever it works (its process
-stops it at its next event or heartbeat); `steer` to a run in another process waits its turn,
-said once. A burst of messages in one process kept its order only by luck: a conversation's
-starts now reach the run store in the order they were sent, and a turn's earlier turns are read
-back until ten answered ones (a burst's waiting turns crowded them out). A process killed while
-it holds a turn frees it once its hold lapses. Needs agent-runs with `RunStore._placed` (same
-wire). [runs.md](docs/runs.md#queue-order-and-busy-conversations).
+only queued runs (`start`) waited across processes. And a burst of messages in one process
+kept its order only by luck. Now a turn of a conversation started with `run`, `stream`,
+`serve_chat` or `serve_a2a`, or continued after its answer, takes the conversation's
+`concurrency_key` and waits in the conversation's line (`trellis.harness.line`, the one
+ordering of a conversation's turns): one turn at a time, in the order the messages were sent,
+whichever replica each reaches.
+
+- A queued turn (`start`) holds its place: direct messages sent after it wait for it, and a
+  worker claims it only when no turn placed before it runs.
+- `interrupt` stops the working run wherever it works, and never works beside it: sent to
+  another replica, the message waits until the replica holding the turn has stopped it (at its
+  next hold renewal, within 20 s). `steer` to a run in another process waits its turn, said
+  once.
+- A run cancelled while it waits its turn, from any process, never runs.
+- A run waiting behind a turn in another process follows that turn's events (one shared
+  stream a run ahead, at most 32 a process, on its own client) instead of polling.
+- A turn's earlier turns are read with one listing per ending, never paging past the messages
+  still waiting (a burst's waiting turns used to crowd the history out).
+- A process killed while it holds a turn frees it once its hold lapses; one killed after
+  recording a turn and before holding it, 60 s later.
+
+Needs the agent-runs of this release (runs of a key created in their place; same wire). No
+argument, signature, endpoint or schema changed. [runs.md](docs/runs.md#queue-order-and-busy-conversations).
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 

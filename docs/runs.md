@@ -240,31 +240,37 @@ in this process or any other sharing the run store: the conversation's messages 
 one at a time, in the order they were sent, whichever replica each reaches. A run with no
 `thread` is its own conversation.
 
-The order is the run store's line (`trellis.harness.line`). A conversation's messages sent to one
-process are recorded in the order they were sent; agent-runs places each run of a key after
-the key's runs already running, in the order their starts commit. A run's place is when it
-started running — when it was started, or when its answer was recorded (a run continued after a
-pause joins the line then, after the turns that arrived while it waited) — and it takes its turn
-once no `RUNNING` run of its agent and conversation is placed before it. A run waits behind runs
-of this process until one ends here; behind a run elsewhere (another replica's, a worker's) it
-reads the line again every 0.5 s. A run that pauses for a person, ends, or whose process dies
-leaves the line: a process killed while it holds a turn frees it once its hold lapses (60 s) and
-agent-runs ends its run `holder_lost`. A queued run (`start`) a worker claimed holds its place
-too; one still waiting for a worker holds none — it is claimed once no turn of the conversation
-runs.
-A conversation is the tenant's, the user's and the thread's: a thread id is the caller's own
-name for a chat, so another user's thread named alike is another conversation — it never waits
-for this one, and never shares its memory thread, its graph checkpointer thread or its trace
-session. `<conversation>` is that key (`await h.conversation(user=, thread=)`, a digest of the
-three: the same wherever it is made, safe in a URL, 37 characters).
-`LocalRuns` claims the same way agent-runs does. A sub-agent's run and a worker's do not wait in
-the line (the queue holds a worker's).
+The order is the conversation's line (`trellis.harness.line`): the run store keeps it, and it is
+the one ordering of a conversation's turns, in a process and across them. A conversation's
+messages sent to one process are recorded in the order they were sent; agent-runs creates
+each run of a key in its place, after the key's runs already running or queued, in the order
+the starts commit. A run's place is when it was created, or when its latest answer was recorded
+(a run continued after a pause joins the line then, after the turns that arrived while it
+waited). It takes its turn once no `RUNNING` or `QUEUED` run of its agent and conversation is
+placed before it. A queued run (`start`) holds its place while it waits for a worker, and a
+worker claims it only once no run placed before it runs: a stream of messages cannot keep it
+waiting. A run that pauses for a person, ends, or whose process dies leaves the line: a process
+killed while it holds a turn frees it once its hold lapses (60 s) and agent-runs ends its run
+`holder_lost`; one killed after recording a turn and before holding it, 60 s after the start.
+
+A run waits for the run just ahead of it. One of this process: until it leaves the line here.
+One elsewhere (another replica's, a worker's): by following that run's events in agent-runs
+(its event stream says when the attempt ends or pauses), on a client of its own — one stream a
+run ahead, shared by every run waiting behind it in the process, at most 32 at once. Nothing
+polls: only where that stream cannot be followed (it dropped, or 32 are open) does a run read
+its line again, after a pause that doubles from 0.05 s to 5 s (jittered), and at the latest
+every 30 s. A run cancelled while it waits its turn (`agent.cancel`, from any process) takes
+none: it ends `CANCELLED` without running.
 
 **On failure.** A priority outside -1000..1000 or a key over 200 characters is refused by the
 contract (`ValidationError`). A run waiting for its turn is held like any run this process
 executes: it counts its working time while it waits, and a deadline or time limit ends it there.
 An agent-runs older than this release places runs by their callers' clocks: two messages of one
-conversation started at the same instant on two replicas may then both run.
+conversation started at the same instant on two replicas may then both run. During a rolling
+deploy, a turn started by a harness older than this release has no `concurrency_key`: it is
+not in the line, so a message sent meanwhile to a new replica does not wait for it (and a turn
+paused by an old release, continued on a new one, waits for nobody). Let the turns under way
+end before the last old replica goes.
 
 ## A message to a busy conversation: mode
 
@@ -288,10 +294,13 @@ Where `"steer"` reaches the working run:
 | any run working in another process | no: nothing carries a message to it | none: the message waits as `"queue"`, said once per agent |
 
 A steered message the working run never took (it ended first, or ended without an answer)
-runs as its own turn. A run interrupted in another process stops there as soon as that process
-hears from the run store: at its next event (agent-runs refuses events of an ended run) or its
-next heartbeat (every 20 s), ending `CANCELLED`; the interrupting message takes its turn at once,
-so a run stuck in one long call with no event may work on for up to 20 s beside it. **When.** `interrupt` for a chat whose user sends a correction; `steer`
+runs as its own turn. A message sent with `"interrupt"` while the turn is held in another
+process says so in its own run (its metadata names the run it interrupts) and waits in the
+line; the process holding that run reads the line each time it renews the run's hold (every
+20 s), stops the run — its call under way is cancelled — and ends it `CANCELLED`; only then
+does the message take its turn. The two never work side by side, and the message waits at
+most 20 s for the turn it interrupts to stop (a process that died: until its hold lapses). A
+turn a worker runs (`start`) is not interrupted: the message waits its turn. **When.** `interrupt` for a chat whose user sends a correction; `steer`
 for a "also…" while the agent works. **On failure.** `start` takes no `mode`: a queued run waits
 by its `concurrency_key`, and a worker's run is not held in process.
 

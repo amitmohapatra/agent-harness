@@ -411,6 +411,7 @@ reason=...)` with `RunsClient`, and `trellis.runs.Worker` stops your handler. Ev
 | running in this process (`run`, `stream`, a worker of this process) | its task is cancelled now: `CANCELLED`; `run` returns a `CANCELLED` result, `stream` ends with `RUN_FINISHED` (outcome `cancelled`, `data.reason`) |
 | running on a worker elsewhere | agent-runs asks that worker to stop: its next heartbeat (within 20 s) says `cancel_requested`, the worker cancels the attempt, and the run ends `CANCELLED`; a worker that never answers loses the run when its lease runs out |
 | running in another process's `run`, `stream`, `serve_chat` or `serve_a2a` | `CANCELLED` in agent-runs at once; that process stops its attempt when agent-runs refuses the run's next event or its next hold heartbeat (within 20 s) |
+| waiting its conversation's turn (in this process or another) | `CANCELLED`; it takes no turn and never runs (another process's: once its heartbeat is refused, within 20 s) |
 | already ended | `ConflictError` |
 
 **Automatic.** agent-runs keeps the reason and who asked; the pipeline ends the attempt as a
@@ -421,7 +422,9 @@ person at once), and theirs.
 
 **On failure.** A run kept in *another* process's `run`/`stream` stops only once that process
 hears from agent-runs: a run in one long call that sends no event works on for up to 20 s after
-its cancel (what it writes then is refused, `ConflictError`). Without agent-runs (`LocalRuns`)
+its cancel (what it writes then is refused, `ConflictError`). A message sent with
+`mode="interrupt"` has no such window: the process holding the turn stops it itself
+([runs.md](runs.md#a-message-to-a-busy-conversation-mode)). Without agent-runs (`LocalRuns`)
 there is no other process.
 
 ## Releasing on shutdown

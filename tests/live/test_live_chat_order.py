@@ -519,9 +519,7 @@ async def test_a_chat_message_through_the_chat_protocol_waits_its_turn(
 
 # --------------------------------------------------------------------------- a killed server
 async def test_a_server_killed_holding_a_turn_frees_it_once_its_hold_lapses(
-    stack: Stack,
-    http: httpx.AsyncClient,
-    invariants: Invariants,  # noqa: F811
+    stack: Stack, http: httpx.AsyncClient
 ) -> None:
     """Last: it kills the second server."""
     thread = chat()

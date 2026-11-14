@@ -50,10 +50,8 @@ def logged(folder: Path, **entry: Any) -> None:
         out.write(json.dumps({**entry, "at": time.time()}) + "\n")
 
 
-def serving(runs_url: str, api_key: str, folder: Path) -> tuple[FastAPI, Harness]:
-    server = f"pid-{os.getpid()}"
-    harness = Harness(config=Settings(), memory=False, runs=RunsClient(runs_url, api_key=api_key))
-    agents: dict[str, Agent] = {}
+def working(folder: Path, server: str) -> tuple[Any, Any]:
+    """The tools of a turn on ``server``: ``step`` (its work, logged) and ``refund``."""
 
     @tool(side_effects="read")
     async def step() -> str:
@@ -79,26 +77,20 @@ def serving(runs_url: str, api_key: str, folder: Path) -> tuple[FastAPI, Harness
         logged(folder, event="refunded", server=server, question=order)
         return f"refunded {order}"
 
-    async def function(input: str, agent: Runtime) -> str:
-        if input.startswith("refund "):
-            await agent.tools.call("refund", order=input.removeprefix("refund "))
-        else:
-            await agent.tools.call("step")
-        return f"re: {input}"
+    return step, refund
 
-    app = FastAPI()
 
-    @app.on_event("startup")
-    async def built() -> None:
-        agents["function"] = arm(harness.wrap(function, id="chat-function"), [step, refund])
-        agents["function"].serve_chat(app)
-        names = [*ADAPTERS, "kimi"] if os.environ.get("CHAT_KIMI") else ADAPTERS
-        for name in names:
-            if name == "function":
-                continue
-            target, tools = await BUILDERS[name](harness, [step], folder, [("step", {})])
-            agents[name] = arm(harness.wrap(target, id=f"chat-{name}"), tools)
-        app.state.worker = asyncio.create_task(harness.worker(list(agents.values())).run())
+async def function(input: str, agent: Runtime) -> str:
+    """The function agent's turn: its work, or a refund a person approves first."""
+    if input.startswith("refund "):
+        await agent.tools.call("refund", order=input.removeprefix("refund "))
+    else:
+        await agent.tools.call("step")
+    return f"re: {input}"
+
+
+def routed(app: FastAPI, harness: Harness, agents: dict[str, Agent], server: str) -> None:
+    """The test's routes on ``app`` (the module's docstring)."""
 
     @app.get("/ready")
     async def ready() -> dict[str, Any]:
@@ -142,14 +134,35 @@ def serving(runs_url: str, api_key: str, folder: Path) -> tuple[FastAPI, Harness
         handle = await agent.start(body["input"], user=body["user"], thread=body["thread"])
         return {"run_id": handle.id}
 
-    return app, harness
+
+def serving(runs_url: str, api_key: str, folder: Path) -> FastAPI:
+    server = f"pid-{os.getpid()}"
+    harness = Harness(config=Settings(), memory=False, runs=RunsClient(runs_url, api_key=api_key))
+    agents: dict[str, Agent] = {}
+    step, refund = working(folder, server)
+    app = FastAPI()
+
+    @app.on_event("startup")
+    async def built() -> None:
+        agents["function"] = arm(harness.wrap(function, id="chat-function"), [step, refund])
+        agents["function"].serve_chat(app)
+        names = [*ADAPTERS, "kimi"] if os.environ.get("CHAT_KIMI") else ADAPTERS
+        for name in names:
+            if name == "function":
+                continue
+            target, tools = await BUILDERS[name](harness, [step], folder, [("step", {})])
+            agents[name] = arm(harness.wrap(target, id=f"chat-{name}"), tools)
+        app.state.worker = asyncio.create_task(harness.worker(list(agents.values())).run())
+
+    routed(app, harness, agents, server)
+    return app
 
 
 def main(runs_url: str, api_key: str, port: str, folder: str) -> None:
     record_in_process()  # its exchanges with agent-runs, for the test's invariants
     if seconds := os.environ.get("HOLD_SECONDS"):
         holding.HOLD_SECONDS = int(seconds)
-    app, _ = serving(runs_url, api_key, Path(folder))
+    app = serving(runs_url, api_key, Path(folder))
     uvicorn.run(app, host="127.0.0.1", port=int(port), log_level="warning")
 
 

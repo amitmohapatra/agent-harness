@@ -215,15 +215,17 @@ class Line:
             if not ahead:
                 return ahead is not None
             before = here.get(ahead[-1])
-            elsewhere = None if before is not None else asyncio.ensure_future(self._left(ahead[-1]))
             again = asyncio.ensure_future(mine.again.wait())
+            # the run ahead leaving: a run's ``left`` here (its own: every run behind it waits
+            # on it, so it is shielded from this wait's end), or its event log elsewhere
+            leaving = asyncio.ensure_future(
+                asyncio.shield(before.left) if before is not None else self._left(ahead[-1])
+            )
             try:
-                leaving = elsewhere if before is None else before.left
                 await asyncio.wait({leaving, again}, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 again.cancel()
-                if elsewhere is not None:  # (a run's ``left`` is its own: all behind it wait on it)
-                    elsewhere.cancel()
+                leaving.cancel()
         return False
 
     async def _left(self, run_id: str) -> None:
