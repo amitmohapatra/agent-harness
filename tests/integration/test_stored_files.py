@@ -314,6 +314,30 @@ async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None
     assert said.startswith("Error: /files/r0/e.xlsx is no table: BadZipFile"), said
 
 
+async def test_a_kept_csv_of_one_text_column_is_read_under_its_header(run: Run) -> None:
+    """``query_result(save_as="csv")`` of one text column writes ``line`` over its values; read
+    back, that header is the column's name, not a row: counting the rows counts the values
+    (it was one more: the text was taken for lines, its header among them)."""
+    data = b"line\nrow 000007 sku-007\nrow 000104 sku-007\n"
+    await run.agent.harness.files.put("t/u/c_1/r0", "q.csv", data, source="query_result")
+    said = await query.query(
+        {"file_path": "/files/r0/q.csv", "sql": "SELECT count(*) AS n FROM result"}
+    )
+    assert said.endswith("\nn\n2"), said
+    said = await query.query(
+        {"file_path": "/files/r0/q.csv", "sql": "SELECT min(line) AS f FROM result"}
+    )
+    assert said.endswith("\nf\nrow 000007 sku-007"), said
+    said = await stored.read("/files/r0/q.csv")  # read, it is the file as kept
+    assert said.endswith("\n1  line\n2  row 000007 sku-007\n3  row 000104 sku-007"), said
+    # the same lines kept as text are lines, every one of them
+    await run.agent.harness.files.put("t/u/c_1/r0", "q.txt", data, source="query_result")
+    said = await query.query(
+        {"file_path": "/files/r0/q.txt", "sql": "SELECT count(*) AS n FROM result"}
+    )
+    assert said.endswith("\nn\n3"), said
+
+
 async def test_a_file_that_is_no_table_or_too_large_says_so(
     run: Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -129,6 +129,8 @@ markers = [
   "live: needs running services (LLM_BASE_URL / MEMORY_URL / RUNS_URL); skipped otherwise",
   "performance: harness overhead benchmark (writes build/benchmark-results.json)",
   "matrix: the generated feature matrix (make matrix): run apart from make test",
+  "features: purpose-level feature proofs against the real memory service and agent-runs (make test-features); skipped without them",
+  "plan(*ids): the master test plan IDs a test proves (docs/research/FEATURE_COVERAGE.md)",
 ]
 
 [tool.ruff]

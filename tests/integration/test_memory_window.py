@@ -25,6 +25,7 @@ from tests.support.today import dated
 from trellis import Harness, ReAct, Runtime, Settings, tool
 from trellis.contracts import RunEventType, RunStatus
 from trellis.harness import snapshots
+from trellis.harness import writes as writes_module
 from trellis.harness.agent import TURN_WRITE_SECONDS
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.identity import conversation_key
@@ -310,6 +311,26 @@ async def test_a_turn_whose_write_fails_is_queued_and_delivered() -> None:
         assert result.status is RunStatus.SUCCESS
         await h.writes.drain()
         assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
+
+
+async def test_a_turn_stored_but_answered_past_the_deadline_is_stored_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service stored the turn, then its request deadline answered ``504 TIMEOUT``: the
+    write is sent again under the same ``Idempotency-Key`` and the same message ids, and the
+    thread holds the turn once."""
+    monkeypatch.setattr(writes_module, "WRITE_BACKOFF_SECONDS", 0.0)
+    service = FakeMemoryService(deadline_after={"messages": 1})
+    async with Harness(config=Settings(), memory=service.client()) as h:
+        agent = h.wrap(create_agent(ScriptedChat(["ok"]), tools=[]), id="late")
+        result = await agent.run("hi", user="u1", thread=THREAD)
+        assert result.status is RunStatus.SUCCESS
+        await h.writes.drain()
+        assert h.writes.failed == 0
+    sent = service.named("messages")
+    assert len(sent) == 2 and sent[0].idempotency_key == sent[1].idempotency_key
+    assert sent[0].body == sent[1].body
+    assert [m["content"] for m in service.threads[KEPT]] == ["hi", "ok"]
 
 
 async def test_a_slow_write_does_not_hold_the_run(monkeypatch: pytest.MonkeyPatch) -> None:

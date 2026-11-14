@@ -417,7 +417,7 @@ async def _approval_rules(
 async def _runs(client: httpx.AsyncClient, s: Settings) -> Check | None:
     if not s.runs_url:
         return None
-    headers = {"Authorization": f"Bearer {s.api_key or ''}"}
+    headers = {"X-API-Key": s.api_key or ""}  # the one header agent-runs reads the key from
     url = f"{s.runs_url.rstrip('/')}/v1/runs/doctor-check"
     return await _reached(client, "runs", url, headers, found_ok=True)
 

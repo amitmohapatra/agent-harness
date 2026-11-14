@@ -158,7 +158,7 @@ async def test_a_catalog_that_cannot_be_read_makes_writes_ask_and_the_run_goes_o
     assert done.status is RunStatus.SUCCESS and done.answer == "ordered"
 
 
-@pytest.mark.parametrize("failure", [503, 429, 422, "timeout", "malformed"])
+@pytest.mark.parametrize("failure", [503, 504, 429, 422, "timeout", "malformed"])
 async def test_a_context_that_fails_any_way_is_a_warning(
     harness: Harness, memory_service: FakeMemoryService, failure: int | str
 ) -> None:
@@ -169,7 +169,7 @@ async def test_a_context_that_fails_any_way_is_a_warning(
     assert any(w["name"] == "warning" and "no memory context" in w["message"] for w in warnings)
 
 
-@pytest.mark.parametrize("failure", [401, 403, 422, 429, 503, "timeout"])
+@pytest.mark.parametrize("failure", [401, 403, 422, 429, 503, 504, "timeout"])
 async def test_a_record_that_fails_any_way_never_fails_the_run(
     harness: Harness, memory_service: FakeMemoryService, failure: int | str
 ) -> None:
@@ -178,3 +178,17 @@ async def test_a_record_that_fails_any_way_never_fails_the_run(
     assert result.status is RunStatus.SUCCESS
     await harness.writes.drain()
     assert harness.writes.failed == 1  # reported, counted
+
+
+async def test_a_context_past_the_services_deadline_is_asked_again_and_reaches_the_run(
+    memory_service: FakeMemoryService,
+) -> None:
+    """The service's request deadline answers ``504 TIMEOUT`` (retryable, ``Retry-After``):
+    the client asks again and the run gets its context, no warning."""
+    memory_service.deadline_times["context"] = 1
+    async with Harness(config=Settings(), memory=memory_service.client(max_retries=1)) as h:
+        events = [e async for e in h.wrap(echo, id="echo").stream("q", user="u")]
+    assert events[-1].type is RunEventType.RUN_FINISHED
+    assert len(memory_service.named("context")) == 1  # the 504 came before the route ran
+    warnings = [e.data for e in events if e.type is RunEventType.CUSTOM]
+    assert not any("no memory context" in str(w.get("message")) for w in warnings), warnings
