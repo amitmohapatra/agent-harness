@@ -998,11 +998,13 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
         helpers.attribute(found.task_id, found.call_id, background=found.background)
     elif isinstance(found, TaskEnded):
         failed = found.status != TASK_COMPLETED
-        # a notification's summary is its last word; an update says only how it ended
-        said = found.summary if found.final and found.status != TASK_STOPPED else ""
         stopped = found.status not in (TASK_COMPLETED, TASK_FAILED)
-        said = STOPPED if stopped else said
-        await helpers.settled(found.task_id, failed=failed, said=said, final=found.final)
+        if found.final:  # its notification: the summary is its last word
+            said = STOPPED if stopped else found.summary
+            await helpers.settled(found.task_id, failed=failed, said=said)
+        else:  # an update says only how it ended, and more may be said
+            said = STOPPED if stopped else ""
+            await helpers.settled(found.task_id, failed=failed, said=said, final=False)
 
 
 def _noticed(runtime: Runtime, message: Any) -> None:
