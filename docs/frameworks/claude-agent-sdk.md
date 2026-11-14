@@ -351,7 +351,8 @@ turn the session runs by itself (a finished task's notification) is never a user
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 per agent. It closes
-  5 minutes after its last activity when nothing works in it, 6 hours after its last turn
+  5 minutes after its last activity when nothing works in it (no background task, and no turn
+  of its own for a finished one due or under way), 6 hours after its last turn
   whatever does, when a turn's options are not the ones it was started with
   (`framework_options`, another set of harness tools), and with the harness
   (`Harness.aclose`). Background work that ends with it is said in the conversation's next

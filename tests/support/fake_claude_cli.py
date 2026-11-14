@@ -1304,6 +1304,9 @@ def main() -> None:
             cli.turn(cli.queued.pop(0))
             continue
         if cli.owed:
+            # a session's own turn for a finished task begins when the CLI gets to it
+            # (``FAKE_CLAUDE_INJECTS_AFTER`` seconds after the task's end: a busy machine)
+            time.sleep(float(os.environ.get("FAKE_CLAUDE_INJECTS_AFTER") or 0))
             cli.injected(cli.owed.pop(0))
             continue
         message = read(timeout=0.02 if cli.tasks else None)

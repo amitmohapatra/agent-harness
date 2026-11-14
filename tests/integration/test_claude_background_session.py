@@ -804,6 +804,25 @@ async def test_with_no_live_session_the_next_turn_resumes_the_session_in_a_new_p
     assert second.answer == f"you asked: {' | '.join(asked)}"
 
 
+async def test_a_session_is_not_idle_while_its_own_turn_for_a_finished_task_is_due(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished background task's notification is followed by a turn Claude Code runs by
+    itself, as soon as it gets to it (here half a second later, longer than the idle bound):
+    the session is not idle meanwhile, nor while that turn runs — it closes once the turn
+    ended, and the next turn's session holds what it said."""
+    monkeypatch.setattr(claude_live, "IDLE_SECONDS", 0.2)
+    scripts = [[BACKGROUND, {"text": "started it"}], [{"text": "you asked: {heard}"}]]
+    target = options(tmp_path, scripts, env={"FAKE_CLAUDE_INJECTS_AFTER": "0.5"})
+    agent = harness.wrap(target, id="due")
+    await agent.run("research the market", user="u1", thread="t1")
+    (tmp_path / "tasks" / "t1.done").write_text("the market is growing")
+    await until(lambda: open_sessions(agent) == 0)
+    second = await agent.run("what came of it?", user="u1", thread="t1")
+    asked = ["research the market", NOTIFIED, "what came of it?"]
+    assert second.answer == f"you asked: {' | '.join(asked)}"
+
+
 async def test_there_is_room_for_so_many_sessions_and_a_turn_beyond_runs_as_before(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1024,7 +1043,16 @@ async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_sta
     agent = harness.wrap(options(tmp_path, scripts), id="died")
     await agent.run("the code is 4242", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
-    await until(lambda: len(served(tmp_path)) == 2)
+    live = live_of(agent)
+    mirror = None if live is None else live.mirror
+    assert mirror is not None
+    # killed once its session holds the turn (its prompt mirrored to the harness's store): the
+    # stand-in numbers a resumed session's turns by what its transcript holds
+    await until(
+        lambda: any(
+            e.get("prompt") == "a long one" for kept in mirror.transcripts.values() for e in kept
+        )
+    )
     one, _ = served(tmp_path)
     os.kill(one["pid"], signal.SIGKILL)
     failed = await slow

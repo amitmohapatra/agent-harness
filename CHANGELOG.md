@@ -151,6 +151,27 @@ not hold:
   of it again (a `ToolRetryMiddleware` retrying a failed irreversible call was asked about a
   second time); an edited call, or the same call of a new model step, is asked about anew.
 
+### Fixed: two failures a busy machine showed
+
+- **A wide table can be queried.** Typing a saved result asks every column whether a cell
+  says it holds no value (`NA`, `N/A`, `-`...); asked as `IN` a list of words, DuckDB made
+  each column's question a join of its own, and the statement that casts every column ran
+  out of the database's 512 MiB: a CSV of 200 columns (of one row) could not be queried, and
+  one of 67 failed now and then. The question is one regular expression a column now
+  (`query._missing`): a table of a thousand columns loads.
+- **A sandbox is deleted once.** The reaper (in the background, when a process makes a
+  sandbox) could list a sandbox whose run had just ended in the same process while that
+  run's end deleted it, and delete it again: two deletes of one sandbox at once, which a
+  provider may refuse (stopping the reaper's round, and logging the run's end as not
+  deleted). Whichever begins first deletes it; the other passes it over.
+- **A Claude live session waits for its own turn for a finished task.** When a background
+  task ended while no turn was served, Claude Code runs a turn of its own for it as soon as it
+  gets to it; the session counted as idle from the task's end, and closed (its process with
+  it) if that turn had not begun in time, or ran long: what the turn said was lost to the
+  conversation. Such a turn under way is work now (`LiveSession.injected`), and one due —
+  from the task's end until the turn begins — is waited for 30 seconds at least
+  (`LiveSession.due`, `SETTLE_SECONDS`) before the session counts as idle.
+
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
 The LangGraph adapter was checked feature by feature against the installed libraries

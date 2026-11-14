@@ -167,6 +167,8 @@ DECIMAL_DIGITS: Final = 15
 _VALUE: Final = re.compile(NUMBER + r"|[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9:.]+(Z|[+-][0-9:]+)?)?")
 #: What a cell holding no value says: among numbers, it is missing (``NULL``), not text.
 MISSING: Final = ("NULL", "NONE", "NA", "N/A", "#N/A", "NAN", "-", "--", "\u2014")
+#: :data:`MISSING` as one regular expression (RE2: each word as it is, any one of them).
+_MISSING_SAID: Final = "|".join(re.escape(word) for word in MISSING)
 #: The longest text read as a number.
 NUMBER_CHARS: Final = 32
 #: The Parquet of typed tables a process keeps (:class:`Typed`): as much as the results its
@@ -1176,9 +1178,11 @@ def _json_source(
 
 
 def _missing(column: str) -> str:
-    """In SQL: whether a text cell says it holds no value (:data:`MISSING`)."""
-    said = ", ".join(map(_quoted, MISSING))
-    return f"upper(trim({_name(column)})) IN ({said})"
+    """In SQL: whether a text cell says it holds no value (:data:`MISSING`) — matched as one
+    expression, not ``IN`` a list (or ``list_contains``): DuckDB makes such a question a join
+    of its own, one a column, and a statement over a few hundred columns ran out of the
+    database's memory (``DB_BYTES``)."""
+    return f"regexp_full_match(upper(trim({_name(column)})), {_quoted(_MISSING_SAID)})"
 
 
 def _counted(column: str) -> str:

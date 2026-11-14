@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import socket
 import threading
@@ -637,6 +638,7 @@ async def test_c_today_a_crash_inside_the_start_leaves_a_task_nobody_holds_the_i
     kept. The retried turn does not start it blind — the model is told the effect is unknown
     — but the request carries no idempotency key and the task's id was never kept, so the
     task runs on with nothing able to check, cancel or find it."""
+    server.seconds = math.inf  # it runs on as long as nothing stops it: never by the clock
     crashes: list[BaseException] = [Crash()]
     create = RunsClient.create
 
