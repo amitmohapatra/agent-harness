@@ -37,7 +37,7 @@ A library's feature works as the library does it; the harness governs, records a
   decision is governance's too (one question a call); an edit of a batch of several calls is
   refused unless it gives one decision for each. `interrupt(response_schema=...)` is the
   question's `expects`.
-- A middleware with only sync hooks runs; a model called in a sync node is watched for stalls.
+- A model called in a graph's sync node is accounted and watched for stalls.
 
 ### Changed: Deep Agents 0.7.38, langchain 1.5, langchain-core 1.8, langgraph 1.2.22
 
