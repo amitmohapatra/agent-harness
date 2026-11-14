@@ -1,19 +1,17 @@
 """How close ``/v1/context`` runs to the memory service's 5 s read deadline (``api/deadline.py``:
-past it the service answers ``504 TIMEOUT``, a status its OpenAPI document lists for no
-operation) under concurrent load like a busy deployment's: one tenant, users with 40 memories
-each, 1, 8 and 16 contexts asked at once (a harness asks one per run). Each level's latencies
-are written to ``$TMPDIR/context-deadline.json`` and printed; the test fails if any request is
-answered 504 at the load a single harness process makes (8 at once: its four writers and runs
-in flight), and reports the share of the deadline the 95th percentile uses."""
+past it the service answers ``504 TIMEOUT``) under concurrent load like a busy deployment's:
+one tenant, users with 40 memories each, 1, 8 and 16 contexts asked at once (a harness asks
+one per run), each asked once with no retry. Each level's latencies are printed
+(``pytest -s``) with the share of the deadline the 95th percentile uses; the test fails if
+any request is answered 504 at the load a single harness process makes (8 at once: its four
+writers and runs in flight)."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import statistics
 import time
-from pathlib import Path
 
 import pytest
 
@@ -79,8 +77,6 @@ async def test_context_latency_against_its_deadline_under_concurrent_load(uid: s
                 "timeouts_504": sum(1 for _, c in results if c == 504),
                 "other_errors": sum(1 for _, c in results if c not in (200, 504)),
             }
-    out = Path(os.environ.get("TMPDIR", "/tmp")) / "context-deadline.json"
-    out.write_text(json.dumps(report, indent=2))
     print("\n/v1/context latency by concurrency:", json.dumps(report, indent=2))
     assert report["1"]["timeouts_504"] == 0 and report["8"]["timeouts_504"] == 0, report
     assert report["8"]["other_errors"] == 0, report
