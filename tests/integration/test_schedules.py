@@ -553,6 +553,10 @@ async def test_a_vague_ask_is_choices_the_user_picks_one_of() -> None:
             h, ("schedule_task", {"task": "x", "choices": [{"when": "x"}]}), name="b"
         )
         assert "Each choice needs" in str((await bad.run("x", user="ada")).answer)
+        four = [{"task": f"report {n}", "when": "0 9 * * *"} for n in range(4)]
+        many = await planned(h, ("schedule_task", {"task": "x", "choices": four}), name="many")
+        offered = await asked(many)
+        assert [o.value for o in offered.options] == ["0", "1", "2", NEITHER]  # 3 at most
 
 
 class Failing(Chat):
