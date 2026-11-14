@@ -14,6 +14,10 @@ real memory service and agent-runs, models scripted ([docs/research/FEATURE_COVE
   key as a bearer token; agent-runs reads it from `X-API-Key` only, and answered `401`.
 - **An A2A card ignored `h.wrap(description=)`.** The card read only the target's own
   description and docstring; it now says what `h.wrap` was told first.
+- **A query over a kept CSV of one text column counted its header as a row.** The file that
+  `query_result(save_as="csv")` writes for one text column (`line` over its values) was read
+  back as lines, its header among them: one row too many. A kept `.csv` is now read under its
+  first line whatever its columns hold; `read_file` still shows the file as kept.
 
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 

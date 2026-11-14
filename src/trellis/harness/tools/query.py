@@ -198,10 +198,15 @@ def rows_of(text: str) -> tuple[list[str], list[list[Any]]]:
     if kind == "table":
         return found
     if kind == "csv":
-        read = list(csv.reader(io.StringIO(text), delimiter=found))
-        width = len(read[0])
-        return list(read[0]), [_padded(r, width) for r in read[1:] if r]
+        return _csv_rows(text, found)
     return ["line"], [[line] for line in found]
+
+
+def _csv_rows(text: str, delimiter: str) -> Table:
+    """CSV text as its table: its first row its columns, each row padded or cut to them."""
+    read = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    width = len(read[0])
+    return list(read[0]), [_padded(r, width) for r in read[1:] if r]
 
 
 def _shape(text: str, *, values: bool = True) -> tuple[str, Any]:
@@ -566,10 +571,20 @@ def _stored(path: str) -> bool:
 
 async def _kept_file(path: str) -> tuple[Source, dict[str, Any]] | str:
     """A file kept for the user (``tools.stored``), loaded from the store: its table and its
-    record, or what is wrong."""
+    record, or what is wrong. A kept CSV file is read under its first line, whatever its
+    columns hold: one column of text, which :func:`_shape` takes for lines when a result is
+    text, is a table here (its delimiter the one its first line uses most, else a comma)."""
     from trellis.harness.tools import stored  # noqa: PLC0415
 
-    return await stored.table(path)
+    found = await stored.table(path)
+    if isinstance(found, str) or not isinstance(found[0], str) or not found[0].strip():
+        return found
+    text, record = found
+    if not path.lower().endswith(".csv"):
+        return found
+    head = _QUOTED.sub("", text.splitlines()[0])
+    delimiter = max(DELIMITERS, key=head.count)
+    return {"csv": _csv_rows(text, delimiter if head.count(delimiter) else ",")}, record
 
 
 def _told(runtime: Any, path: str, record: dict[str, Any], sql: str, given: Source | None) -> str:
