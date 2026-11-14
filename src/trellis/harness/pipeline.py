@@ -71,6 +71,7 @@ from trellis.harness.adapters.langgraph import (
     carries,
     hitl_approved,
     hitl_calls,
+    hitl_rejected,
     holds,
     is_hitl,
 )
@@ -610,6 +611,10 @@ async def _kept_results(agent: Agent, runtime: Runtime, journal: Journal, result
 #: (:func:`_kept_name`). And the most bytes one turn keeps there.
 CARRIED_FOLDER: Final = ".carried"
 CARRIED_BYTES: Final = 256 * 1024
+#: What gives way when a conversation's state is past :data:`CARRIED_BYTES`: its files (Deep
+#: Agents' ``files`` channel), the largest first, as far as needed — the task list and the
+#: todos are kept whole (:func:`_fitted`).
+CARRIED_CUT: Final = "files"
 #: The suffix of a turn's file in that folder.
 CARRIED_SUFFIX: Final = ".json"
 
@@ -634,19 +639,24 @@ async def _carried(agent: Agent, runtime: Runtime) -> dict[str, Any]:
     return (await _read_carried(agent, runtime))[0]
 
 
-async def _read_carried(agent: Agent, runtime: Runtime) -> tuple[dict[str, Any], list[str]]:
+async def _read_carried(
+    agent: Agent, runtime: Runtime
+) -> tuple[dict[str, Any], list[str], set[tuple[str, str]]]:
     """:func:`_carried`, and the files it merged — and those that hold no state (a write cut
     off, another program's file): the files a turn that keeps its own over them supersedes. A
-    file that could not be read at all (the store out of reach) is neither."""
+    file that could not be read at all (the store out of reach) is neither. And the entries
+    (channel, key) any file it read holds (not deleted: ``None``) — what a deletion marker
+    keeps from coming back (:func:`_unmarked`)."""
     folder = _carried_at(agent, runtime)
     files = agent.harness.files
     merged: dict[str, Any] = {}
     read: list[str] = []
+    live: set[tuple[str, str]] = set()
     try:
         listed = await files.files(folder)
     except Exception as exc:
         _not_read(runtime, f"{type(exc).__name__}: {exc}")
-        return merged, read
+        return merged, read, live
     names = sorted(n for where, n, size in listed if where == folder and size is not None)
     for name in names:
         try:
@@ -666,7 +676,14 @@ async def _read_carried(agent: Agent, runtime: Runtime) -> tuple[dict[str, Any],
             _not_read(runtime, f"{name}: it is not a graph state by channel")
             continue
         merged = merged_state(merged, found)
-    return merged, read
+        live |= {
+            (channel, key)
+            for channel, value in found.items()
+            if isinstance(value, dict)
+            for key, entry in value.items()
+            if entry is not None
+        }
+    return merged, read, live
 
 
 def _not_read(runtime: Runtime, problem: str) -> None:
@@ -688,14 +705,19 @@ async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
     merges both: no task is lost whatever the order of their reads, writes and removals."""
     folder = _carried_at(agent, runtime)
     files = agent.harness.files
-    kept, read = await _read_carried(agent, runtime)
-    state = merged_state(kept, runtime.carried)
+    kept, read, live = await _read_carried(agent, runtime)
+    state = _unmarked(merged_state(kept, runtime.carried), live)
     if state == kept:
         return  # what is kept holds this turn's state already
     try:
-        data = json.dumps(state).encode()
-        if len(data) > CARRIED_BYTES:
-            raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
+        data, dropped = _fitted(state)
+        if dropped:
+            runtime.events.warning(
+                "carried_files_dropped",
+                f"past the {CARRIED_BYTES} bytes a conversation carries to its next turn on "
+                f"another server, these files were left out (this process keeps them): "
+                f"{', '.join(dropped)}",
+            )
         await files.put(folder, _kept_name(runtime), data, source=CARRIED_FOLDER)
     except Exception as exc:
         problem = f"{type(exc).__name__}: {exc}"
@@ -714,6 +736,41 @@ async def _keep_carried(agent: Agent, runtime: Runtime) -> None:
                 type(exc).__name__,
                 exc,
             )
+
+
+def _unmarked(state: dict[str, Any], live: set[tuple[str, str]]) -> dict[str, Any]:
+    """``state`` without the deletion markers (an entry ``None``: Deep Agents' deleted file)
+    no file kept in the store could bring back — none of those this turn read holds the entry,
+    and they are superseded by the file it keeps — so markers do not pile up turn after turn."""
+    return {
+        channel: {k: v for k, v in value.items() if v is not None or (channel, k) in live}
+        if isinstance(value, dict)
+        else value
+        for channel, value in state.items()
+    }
+
+
+def _fitted(state: dict[str, Any]) -> tuple[bytes, list[str]]:
+    """``state`` as the JSON kept in the file store, within :data:`CARRIED_BYTES`: its files
+    (:data:`CARRIED_CUT`) left out, the largest first, as far as needed, the rest whole — and
+    the paths left out. A state past the bound without its files is refused (``ValueError``)."""
+    data = json.dumps(state).encode()
+    cut = state.get(CARRIED_CUT)
+    dropped: list[str] = []
+    if len(data) > CARRIED_BYTES and isinstance(cut, dict):
+        sizes = {path: len(json.dumps([path, entry]).encode()) for path, entry in cut.items()}
+        over = len(data) - CARRIED_BYTES
+        for path in sorted(sizes, key=lambda p: (-sizes[p], p)):
+            dropped.append(path)
+            over -= sizes[path]
+            if over <= 0:
+                break
+        gone = set(dropped)
+        data = json.dumps({**state, CARRIED_CUT: {p: e for p, e in cut.items() if p not in gone}})
+        data = data.encode()
+    if len(data) > CARRIED_BYTES:
+        raise ValueError(f"{len(data)} bytes, over the {CARRIED_BYTES} bytes kept")
+    return data, dropped
 
 
 async def _worked(
@@ -1119,6 +1176,8 @@ def _replay(journal: Journal, resolution: InterruptResolution | None) -> Replay:
         journal.approved_in_framework(
             resolution, hitl_approved(held, resolution) if is_hitl(held) else None
         )
+        if is_hitl(held):
+            journal.rejected_in_framework(hitl_rejected(held, resolution))
         # from the framework's serialised run, the attempt goes on where the run paused
         goes_on = bool(pending.native_state)
         if goes_on and not governance_held(pending):

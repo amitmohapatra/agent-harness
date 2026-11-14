@@ -1492,6 +1492,81 @@ async def test_g_a_file_another_turn_removed_while_it_was_read_is_passed_over(
     assert set(kept["async_tasks"]) == {"task_x", "task_y"}
 
 
+class Warned:
+    """A run's event emitter that keeps the warnings it is given (``code``, ``message``)."""
+
+    def __init__(self) -> None:
+        self.said: list[tuple[str, str]] = []
+
+    def warning(self, code: str, message: str) -> None:
+        self.said.append((code, message))
+
+
+def carrying(run_id: str, carried: dict[str, Any]) -> Any:
+    """A turn of one conversation ending with ``carried`` (as much of a run as keeping reads),
+    its warnings kept (``events``)."""
+    return SimpleNamespace(
+        tenant="t", user="u", conversation="c1", run_id=run_id, carried=carried, events=Warned()
+    )
+
+
+@pytest.mark.parametrize("over", [0, 1], ids=["at_the_bound", "one_byte_over"])
+async def test_g_past_the_bound_the_largest_files_give_way_never_the_task_list(
+    harness: Harness, over: int
+) -> None:
+    """What a conversation carries to its next turn is kept in the file store up to 256 KiB.
+    Past it, the task list and the todos are kept whole and the files give way, the largest
+    first, as far as needed — each left out named in one warning on the run's events. At the
+    bound, all of it is kept and nothing is said."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    state = {
+        "async_tasks": {"task_1": {"task_id": "task_1", "status": "running"}},
+        "todos": [{"content": "ship it", "status": "pending"}],
+        "files": {"big.txt": "b" * 150_000, "mid.txt": "m" * 90_000, "small.txt": ""},
+    }
+    pad = 256 * 1024 - len(json.dumps(state).encode()) + over
+    state["files"]["small.txt"] = "s" * pad
+    turn = carrying("run_x", state)
+    await pipeline._keep_carried(agent, turn)
+    kept = await pipeline._carried(agent, carrying("run_z", {}))
+    assert kept["async_tasks"] == state["async_tasks"] and kept["todos"] == state["todos"]
+    if over:
+        assert set(kept["files"]) == {"mid.txt", "small.txt"}
+        ((code, said),) = turn.events.said
+        assert code == "carried_files_dropped" and said.endswith(": big.txt"), said
+    else:
+        assert kept == state and turn.events.said == []
+
+
+async def test_g_a_task_list_alone_past_the_bound_is_not_kept_and_said(
+    harness: Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A task list that alone is past the bound is not cut: nothing is written, said in the
+    log, and the process keeps it (``Agent.results``)."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    tasks = {f"task_{n}": {"task_id": f"task_{n}", "note": "x" * 1024} for n in range(300)}
+    with caplog.at_level(logging.WARNING, logger="trellis.run"):
+        await pipeline._keep_carried(agent, carrying("run_x", {"async_tasks": tasks}))
+    assert kept_files(harness) == [] and "bytes kept" in caplog.text
+
+
+async def test_g_deletion_markers_do_not_pile_up_over_a_thousand_turns(harness: Harness) -> None:
+    """A file a turn creates and the next deletes (Deep Agents marks it ``None``), a thousand
+    times over: the deleted paths are not carried on, turn after turn — what is kept stays the
+    live file and the task list, with at most the latest marker — and a marker over a file the
+    store still held kept that file from coming back."""
+    agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
+    tasks = {"task_1": {"task_id": "task_1", "status": "running"}}
+    for n in range(1000):
+        created = {"async_tasks": tasks, "files": {f"f{n}.txt": "x", "keep.txt": "k"}}
+        await pipeline._keep_carried(agent, carrying(f"run_c{n}", created))
+        await pipeline._keep_carried(agent, carrying(f"run_d{n}", {"files": {f"f{n}.txt": None}}))
+        kept = await pipeline._carried(agent, carrying("run_z", {}))
+        assert {k: v for k, v in kept["files"].items() if v is not None} == {"keep.txt": "k"}
+        assert set(kept["files"]) <= {"keep.txt", f"f{n}.txt"}, kept
+    assert kept["async_tasks"] == tasks and len(kept_files(harness)) == 1
+
+
 # --------------------------------------------------------------------------- e. cancel
 async def test_e_cancelling_the_turn_cancels_the_task_it_started(
     harness: Harness, server: StandIn
