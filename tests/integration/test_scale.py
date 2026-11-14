@@ -410,6 +410,14 @@ def test_a_worker_logs_json_lines_unless_a_terminal_reads_them() -> None:
         record.exc_info = sys.exc_info()
     parsed = json.loads(logs.JSONFormatter().format(record))
     assert parsed["run_id"] == "r2" and "ValueError: bad" in parsed["exception"]
+    shared = logging.LogRecord("trellis.run", logging.INFO, "f", 1, "run %s", ("r3",), None)
+    logging.Formatter("%(asctime)s %(message)s").format(shared)  # another handler's, first
+    assert set(json.loads(logs.JSONFormatter().format(shared))) == {
+        "time",
+        "level",
+        "logger",
+        "message",
+    }  # what that handler added to the record is no field of its own
 
     class Terminal(io.StringIO):
         def isatty(self) -> bool:
