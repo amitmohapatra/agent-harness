@@ -1037,12 +1037,12 @@ async def test_g_a_turn_cancelled_at_its_approval_leaves_its_task_for_the_next_t
     assert server.status(server.task_id) == "cancelled"
 
 
-async def test_g_a_workers_turn_still_running_while_another_turn_ends_loses_neither_turns_task(
+async def test_g_a_message_sent_while_a_workers_turn_works_waits_and_neither_turns_task_is_lost(
     harness: Harness, server: StandIn
 ) -> None:
-    """A worker's turn is not held behind the conversation's turn in the process: it starts a
-    task and is still working (a slow tool) while a message sent directly starts another and
-    ends; the worker's turn ends after it. The list has both tasks."""
+    """A worker's turn holds the conversation's turn as a turn sent directly does: it starts a
+    task and is still working (a slow tool) when a message is sent directly, which waits for it
+    (the run store's line), then starts another. The list has both tasks."""
     server.seconds = 60
     entered, released = asyncio.Event(), asyncio.Event()
 
@@ -1054,17 +1054,20 @@ async def test_g_a_workers_turn_still_running_while_another_turn_ends_loses_neit
         return "waited"
 
     wait.metadata = {"side_effects": "read"}
-    slow = [START, ("wait", {}), START, reports_the_id, "started"]
+    slow = [START, ("wait", {}), "started", START, reports_the_id]  # one turn, then the other
     model = Model(turns=[*slow, ("list_async_tasks", {}), says_what_the_tool_said])
     agent = chat(harness, server, model, tools=[wait])
     handle = await agent.start("run the optimization, then wait", user=USER, thread=THREAD)
     working = asyncio.create_task(harness.worker([agent]).run_once())
     await entered.wait()
-    second = await say(agent, "run another one")
-    assert second.status is RunStatus.SUCCESS and len(server.runs) == 2, second.error
+    sent = asyncio.create_task(say(agent, "run another one"))
+    await asyncio.sleep(0.5)
+    assert not sent.done() and len(server.runs) == 1, "it waits for the worker's turn"
     released.set()
     assert await working
     assert (await handle.result(wait=5)).answer == "started"
+    second = await sent
+    assert second.status is RunStatus.SUCCESS and len(server.runs) == 2, second.error
     listed = await say(agent, "which tasks are there?")
     for task in server.runs:
         assert f"task_id: {task}  agent: optimizer  status: running" in listed.answer

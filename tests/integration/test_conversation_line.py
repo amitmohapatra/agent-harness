@@ -27,6 +27,8 @@ from trellis.contracts import (
     Interrupt,
     InterruptDecision,
     InterruptResolution,
+    RunEvent,
+    RunEventType,
     RunStart,
     RunStatus,
 )
@@ -34,8 +36,9 @@ from trellis.harness import holding
 from trellis.harness.agent import Agent
 from trellis.harness.conversation import EARLIER_RUNS
 from trellis.harness.line import Line, placed
+from trellis.harness.runlog import RunLog
 from trellis.harness.runs import LocalRuns
-from trellis.runs import Page, ResolutionEntry, RunsError
+from trellis.runs import ConflictError, Page, ResolutionEntry, RunsError
 
 THREAD = "chat-9"
 
@@ -382,3 +385,26 @@ async def test_a_place_reads_every_page_of_answers_and_a_run_ended_is_behind_nob
     same = await runs.start(started.model_copy(update={"run_id": "run_next"}))
     assert same.status is RunStatus.RUNNING
     assert await Line(runs, ended).ahead() == []  # it no longer runs: nothing is ahead of it
+
+
+async def test_an_interrupt_or_a_steer_to_an_idle_chat_just_runs(
+    servers: tuple[Harness, Harness],
+) -> None:
+    log: Log = []
+    agent = chat(servers[0], log, {})
+    for mode in ("interrupt", "steer"):
+        result = await agent.run(mode, user="ada", thread=THREAD, mode=mode)
+        assert result.answer == f"re: {mode}"
+
+
+async def test_a_log_whose_run_ended_takes_nothing_more_whoever_listens() -> None:
+    """A run's log refused (the run no longer runs) closes; with nobody to tell, that is all."""
+
+    class Ended:
+        async def append_events(self, *args: Any, **kwargs: Any) -> None:
+            raise ConflictError("the run takes no events now", code="CONFLICT", status=409)
+
+    log = RunLog(Ended(), "run_x", tenant="t", worker_id=None, events=None)  # type: ignore[arg-type]
+    log(RunEvent(tenant_id="t", run_id="run_x", type=RunEventType.RUN_STARTED, sequence=1))
+    await log.flush()
+    assert log.closed
