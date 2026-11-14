@@ -600,6 +600,43 @@ async def test_conv04_a_cancel_from_another_server_stops_the_call_at_the_next_he
     assert len(beats) - before <= 1  # the first heartbeat after the cancel stopped it
 
 
+async def held_elsewhere(runs: LocalRuns, user: str, thread: str) -> str:
+    """A turn of ``user``'s conversation ``thread`` that another server works on: its run."""
+    key = f"thread:{conversation_key('default', user, thread)}"
+    start = RunStart(tenant_id="default", agent_id="chat", user_id=user)
+    start = start.model_copy(update={"thread_id": thread, "concurrency_key": key})
+    run_id = (await runs.start(start)).run_id
+    await runs.heartbeat(run_id, "another-server", lease_seconds=600)
+    return run_id
+
+
+async def test_secr11_another_users_turns_on_a_thread_named_alike_are_read_once_and_never_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SEC-R-11: the store lists a line by thread name, so another user's turns on a thread
+    named alike are listed too. A server reads each once (then knows it is outside the line,
+    until it moves), and nobody waits for them."""
+    runs = LocalRuns()
+    bobs = [await held_elsewhere(runs, "bob", THREAD) for _ in range(3)]
+    read: list[str] = []
+    get = runs.get
+
+    async def counted(run_id: str, **kwargs: Any) -> Any:
+        read.append(run_id)
+        return await get(run_id, **kwargs)
+
+    monkeypatch.setattr(runs, "get", counted)
+    async with Harness(config=Settings(), runs=runs) as h:
+        agent = chat(h, [], {})
+        answers = [
+            (await asyncio.wait_for(agent.run(f"ada {n}", user="ada", thread=THREAD), 10)).answer
+            for n in range(3)
+        ]
+    assert answers == ["re: ada 0", "re: ada 1", "re: ada 2"]  # bob's turns held none up
+    assert sorted(run for run in read if run in bobs) == sorted(bobs)  # each once, not a turn
+    await runs.aclose()
+
+
 async def test_perf1_runs_waiting_behind_runs_elsewhere_follow_few_streams_and_stay_held() -> None:
     """PERF-1: 200 chats each with a message waiting behind a run another server holds: this
     server follows at most 32 event streams at once (the others read their line again after a
@@ -622,16 +659,11 @@ async def test_perf1_runs_waiting_behind_runs_elsewhere_follow_few_streams_and_s
         held.add(run_id)
         return await heartbeat(run_id, *args, **kwargs)
 
+    # a turn of each chat held by another server
+    elsewhere = [await held_elsewhere(runs, "ada", f"chat-{n}") for n in range(200)]
     runs.stream_events, runs.heartbeat = counted, beating  # type: ignore[method-assign]
     async with Harness(config=Settings(), runs=runs) as h:
         agent = chat(h, [], {})
-        elsewhere = []
-        for n in range(200):  # a turn of each chat held by another server
-            key = f"thread:{conversation_key('default', 'ada', f'chat-{n}')}"
-            start = RunStart(tenant_id="default", agent_id="chat", user_id="ada")
-            start = start.model_copy(update={"thread_id": f"chat-{n}", "concurrency_key": key})
-            elsewhere.append((await runs.start(start)).run_id)
-            await heartbeat(elsewhere[-1], "another-server", lease_seconds=600)
         sent = [
             asyncio.create_task(agent.run("hello", user="ada", thread=f"chat-{n}"))
             for n in range(200)
