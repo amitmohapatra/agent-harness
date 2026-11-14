@@ -820,8 +820,8 @@ async def test_c_another_users_thread_and_another_agent_on_another_server_have_n
 async def test_c_the_kept_list_is_none_of_the_users_files(
     harness: Harness, server: StandIn
 ) -> None:
-    """Where it is kept: one small file per conversation and agent, under its tenant's and its
-    user's names, in a folder of the store that is no tenant's (none starts with a dot) —
+    """Where it is kept: one small file per turn that kept it, in a folder per conversation and
+    agent, under its tenant's and its user's names, in a folder of the store that is no tenant's (none starts with a dot) —
     none of the files kept for the user, whose listings show nothing. It holds Deep Agents'
     record of each task (ids, the sub-agent's name, a status, three times) and nothing of
     the sub-agent's server: no address, no header."""
@@ -830,8 +830,10 @@ async def test_c_the_kept_list_is_none_of_the_users_files(
     agent = harness.wrap(ReAct("You help.", model, subagents=[spec]), id="bg")
     await say(agent, "run the optimization")
     folder = f".carried/{LOCAL_TENANT}/{USER}/{conversation_key(LOCAL_TENANT, USER, THREAD)}/bg"
-    assert kept_files(harness) == [f"{folder}/state.json"]
-    written = await harness.files.read(folder, "state.json")
+    [path] = kept_files(harness)
+    where, _, name = path.rpartition("/")
+    assert where == folder and name.endswith(pipeline.CARRIED_SUFFIX)
+    written = await harness.files.read(folder, name)
     assert written is not None and len(written) < 1_000
     kept = json.loads(written)
     assert list(kept) == ["async_tasks"] and list(kept["async_tasks"]) == [server.task_id]
@@ -931,7 +933,9 @@ async def test_c_a_kept_list_that_cannot_be_read_back_is_left_out_and_said(
     assert done.answer == f"No tracked task found for task_id: {started!r}"
     assert "what the conversation carries" in caplog.text
     await say(there, "run another one")
-    again = await second.files.read(folder, name)
+    [kept] = kept_files(second)  # the turn's own file; the one that held no state removed
+    assert not kept.endswith(name)
+    again = await second.files.read(folder, kept.rpartition("/")[2])
     assert again is not None and len(json.loads(again)["async_tasks"]) == 1
 
 
@@ -1087,37 +1091,84 @@ async def test_g_two_turns_ending_together_both_keep_their_task_in_the_file_stor
     assert set(kept["async_tasks"]) == {"task_x", "task_y"}
 
 
-async def test_g_a_list_another_server_wrote_over_this_turns_is_merged_again(
+@pytest.mark.parametrize("writes_first", ["here", "there"])
+async def test_g_two_servers_in_the_worst_order_both_keep_their_task(
+    workers: tuple[Harness, Harness], monkeypatch: pytest.MonkeyPatch, writes_first: str
+) -> None:
+    """Two servers end turns of one conversation together, in the worst order: each reads
+    what is kept before either writes, then one writes and removes what it read, then the
+    other. The file store has no conditional write, so neither writes over a file of the
+    other's: each keeps its own, and the next turn, on either server, finds both tasks. What a
+    turn read is removed once its file holds it: one file each is left, then one in all once
+    a later turn merged them."""
+    here, there = (
+        h.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk") for h in workers
+    )
+    # a list the conversation had before, kept as an earlier turn left it
+    await pipeline._keep_carried(here, ending("run_0", "task_0"))
+    order = ["here", "there"] if writes_first == "here" else ["there", "here"]
+    both_read, turn = asyncio.Event(), {name: asyncio.Event() for name in order}
+    waiting: list[str] = []
+    for name, h in zip(("here", "there"), workers, strict=True):
+        files = h.files
+
+        async def put(*args: Any, _put: Any = files.put, _name: str = name, **kw: Any) -> Any:
+            waiting.append(_name)  # it has read what is kept
+            if len(waiting) == 2:
+                both_read.set()
+            await both_read.wait()
+            if _name != order[0]:
+                await turn[order[0]].wait()  # the other has written and removed what it read
+            return await _put(*args, **kw)
+
+        monkeypatch.setattr(files, "put", put)
+
+    async def ending_turn(name: str, agent: Any, task: str) -> None:
+        await pipeline._keep_carried(agent, ending(f"run_{task}", task))
+        turn[name].set()
+
+    await asyncio.gather(ending_turn("here", here, "x"), ending_turn("there", there, "y"))
+    for agent in (here, there):
+        kept = await pipeline._carried(agent, ending("run_z", "none"))
+        assert set(kept["async_tasks"]) == {"task_0", "x", "y"}
+    assert len(kept_files(workers[0])) == 2  # each turn's own; the earlier one removed
+    await pipeline._keep_carried(there, ending("run_w", "w"))
+    [last] = kept_files(workers[1])
+    assert "run_w" in last
+    kept = await pipeline._carried(here, ending("run_z", "none"))
+    assert set(kept["async_tasks"]) == {"task_0", "x", "y", "w"}
+
+
+async def test_g_a_file_another_turn_removed_while_it_was_read_is_passed_over(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The file store has no conditional write: another server's turn that read the list
-    before this one wrote it writes its own over it. Reading back what it wrote, the turn
-    finds its task gone and merges again — unless the other server writes over it every
-    time: then, after ``CARRIED_TRIES`` writes, it is said in the log (the process keeps the
-    list all the same)."""
+    """A file listed but gone by the time it is read was merged into another turn's file:
+    passed over, said nowhere. One that cannot be removed is said in the log and left for the
+    next turn to merge and remove."""
     agent = harness.wrap(create_deep_agent(model=Model(turns=["hi"]), tools=[]), id="desk")
-    files = harness.files
-    put = files.put
-    theirs = json.dumps({"async_tasks": {"task_y": {"task_id": "task_y"}}}).encode()
-    overwritten: list[int] = []
-
-    async def raced(folder: str, name: str, data: bytes, **kwargs: Any) -> Any:
-        stored = await put(folder, name, data, **kwargs)
-        if len(overwritten) < times:
-            overwritten.append(1)
-            await put(folder, name, theirs, **kwargs)  # the other server's, landing after
-        return stored
-
-    monkeypatch.setattr(files, "put", raced)
-    times = 1
     await pipeline._keep_carried(agent, ending("run_x", "task_x"))
-    kept = await pipeline._carried(agent, ending("run_z", "none"))
-    assert set(kept["async_tasks"]) == {"task_x", "task_y"} and overwritten == [1]
-    times, overwritten[:] = pipeline.CARRIED_TRIES, []
+    files = harness.files
+    read = files.read
+
+    async def gone(folder: str, name: str) -> bytes | None:
+        await files.remove(folder, name)  # another turn merged it and removed it meanwhile
+        return await read(folder, name)
+
+    monkeypatch.setattr(files, "read", gone)
+    assert await pipeline._carried(agent, ending("run_z", "none")) == {}
+    monkeypatch.setattr(files, "read", read)
+    await pipeline._keep_carried(agent, ending("run_x", "task_x"))
+
+    async def stuck(folder: str, name: str) -> None:
+        raise PermissionError("read-only bucket")
+
+    monkeypatch.setattr(files, "remove", stuck)
     with caplog.at_level(logging.WARNING, logger="trellis.run"):
-        await pipeline._keep_carried(agent, ending("run_w", "task_w"))
-    assert len(overwritten) == pipeline.CARRIED_TRIES
-    assert f"did not hold this turn's state after {pipeline.CARRIED_TRIES} writes" in caplog.text
+        await pipeline._keep_carried(agent, ending("run_y", "task_y"))
+    assert "was not removed: PermissionError: read-only bucket" in caplog.text
+    assert len(kept_files(harness)) == 2
+    kept = await pipeline._carried(agent, ending("run_z", "none"))
+    assert set(kept["async_tasks"]) == {"task_x", "task_y"}
 
 
 # --------------------------------------------------------------------------- e. cancel

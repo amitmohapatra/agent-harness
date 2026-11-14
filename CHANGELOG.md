@@ -25,15 +25,20 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   stalled. The same computer call step after step is still stopped, and an action that does
   not run is told to the model in its next call.
 - **Two turns of a conversation ending together keep both their tasks** (the carried task
-  list): they keep the file store's list one at a time in a process, and a turn reads back
-  what it wrote and merges again when another server wrote over it (the store has no
-  conditional write: across servers the window narrows, it does not close).
+  list), on one server or two, in any order. The file store has no conditional write, so no
+  turn writes over another's any more: each keeps a file of its own under the conversation's
+  folder (what it read merged with its own state), readers merge every file there, and a turn
+  removes the files it read only once its own holds them.
 - **A LangGraph graph's retry policy is the only one for its own tools.** The harness tried a
   read whose error may pass again inside each of the graph's tries:
-  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times. Where a wrapper of the graph's
-  could try the call again (any `wrap_tool_call` around its tool node's calls, the harness's
-  `GovernTools` included), the graph's tries are the call's; a tool node with no wrapper keeps
-  the harness's retries, and so do the harness's own tools.
+  `ToolRetryMiddleware(max_retries=2)` called the tool 9 times, a node's
+  `RetryPolicy(max_attempts=3)` 9 times. A graph's own tool is now tried once by the bridge,
+  and tried again around the graph's handling of its error only where the graph did not try
+  it again itself — seen as it happens: a wrapper running the call a second time, or a retry
+  policy of its node that retries the error. `ToolRetryMiddleware(max_retries=2)` and
+  `RetryPolicy(max_attempts=3)` call the tool 3 times; under a wrapper that only handles the
+  error (`ToolErrorMiddleware`, Deep Agents' file middleware, `ReAct`'s `GovernTools`), or none,
+  the harness's 3 tries stand, each a call of the run.
 - **An OpenAI function tool's own `timeout` is always that tool's timed-out call.** Counted
   from when its task began, a call whose task began late (another call holding the loop) was
   recorded as cut by a cancelled run, its start left open; it is counted from when the SDK
@@ -121,8 +126,7 @@ the next turn's `check_async_task` was refused its id.
 - **Turns that overlap lose no task.** What a turn ends with is merged into what is kept,
   task by task, instead of replacing it: a turn approved after the conversation's next turn
   ended, or a worker's turn still running while another ends, each keep their tasks. (Two
-  turns ending at the same moment could still lose one's: fixed above, within the limit of a
-  store with no conditional write.) A turn
+  turns ending at the same moment could still lose one's: fixed above.) A turn
   that waits for an approval has its list kept as it pauses: the task it started is listed
   by the next turn meanwhile, and is still found when the turn is cancelled at the approval.
 - **The five task tools say what they do** where the harness says it of Deep Agents' own

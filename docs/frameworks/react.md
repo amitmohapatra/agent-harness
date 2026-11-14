@@ -547,10 +547,10 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   each task (its ids, the sub-agent's name, a status, three times), at most 256 KiB for a
   conversation, in a folder that is none of the user's files. A store that cannot be read or
   written is said in the log, and the list stays in the process as before. The store has no
-  conditional write: the turns of one process keep the list one at a time, and a turn reads
-  back what it wrote and merges again when another server wrote over it — which narrows, but
-  cannot close, the window in which two servers ending turns of one conversation at the same
-  moment lose one's task until that conversation's next turn.
+  conditional write, so no turn writes over another's: each keeps a file of its own in the
+  conversation's folder (what it read and its own state, merged), a turn reads every file
+  there, and the files a turn read are removed once its own file holds them — two servers
+  ending turns of one conversation at the same moment each keep their task, in any order.
 * **Earlier results** — with memory on, a later turn's history holds the earlier calls and
   their results. A start's, an update's and a cancel's are left as they were said (the record
   of what was done: nothing advises starting again); a status and the list are values that
