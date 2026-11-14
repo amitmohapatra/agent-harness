@@ -31,7 +31,8 @@
   (``bridges.helpers``), from its call to that call's result; its own tool calls go through the
   same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``. A dynamic
   workflow (its ``Workflow`` tool) is one such child run, in the background: its agents'
-  calls are its run's by their kind (``claude_live.WORKFLOW_AGENT``), one workflow at a time;
+  calls are its run's by their kind (``claude_live.WORKFLOW_AGENT``) while it is the one at
+  work, and the run's own, marked with the agent, while several are;
 * conversations: a conversation's turn leaves its CLI process running, and the next turn is
   sent into it (``bridges.claude_live``: the SDK's ``ClaudeSDKClient``), so what Claude started
   in the background — a subagent with ``background``, a shell command — goes on between the
@@ -110,7 +111,6 @@ from trellis.harness.bridges.claude import (
     with_context,
 )
 from trellis.harness.bridges.claude_live import (
-    ONE_WORKFLOW,
     WORKFLOW_AGENT,
     WORKFLOW_TOOL,
     Background,
@@ -218,6 +218,8 @@ OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWa
 UNHELD_AGENTS: Final = ("SendMessage", "TeamCreate", "TeamDelete")
 #: The name of a dynamic workflow's child run (its script names it, which the call does not).
 WORKFLOW: Final = "workflow"
+#: What the record of a workflow agent's call keeps of who made it (its hook's input).
+AGENT_KEYS: Final = ("agent_id", "agent_type")
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -864,24 +866,16 @@ async def _briefed(
     return {**args, "prompt": helpers.briefed(helper, task)} if "prompt" in args else args
 
 
-def _flowing() -> bool:
-    """Whether a dynamic workflow the run started still works in its process (its child run
-    open: ``Kind.WORKFLOW``); a live session's earlier turns' is the session's to say
-    (``claude_live.ONE_WORKFLOW``)."""
-    runtime = current()
-    assert runtime is not None and runtime.helpers is not None  # inside the run's query
-    return runtime.helpers.of_kind(Kind.WORKFLOW) is not None
-
-
 async def _working(helpers: Helpers, given: Mapping[str, Any]) -> Helper | None:
     """The helper a call is the work of, from its hook's input (``given``): a subagent's, by
-    its task's id (``agent_id``: ``Helpers.of``); the dynamic workflow's, whose agents name
-    their kind (:data:`WORKFLOW_AGENT`) — one works at a time; ``None``: the run's own."""
+    its task's id (``agent_id``: ``Helpers.of``); a dynamic workflow's, whose agents name their
+    kind (:data:`WORKFLOW_AGENT`) — while it is the one workflow at work (``Helpers.of_kind``);
+    ``None``: the run's own (several workflows at work: the call cannot be told apart)."""
     who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
     if who is None:
         return None
     if kind == WORKFLOW_AGENT:
-        return helpers.of_kind(Kind.WORKFLOW)
+        return helpers.of_kind(Kind.WORKFLOW, str(who))
     return await helpers.of(str(who), kind)
 
 
@@ -1353,8 +1347,6 @@ def _governance(steps: Steps) -> Any:
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         if steps.last:  # the one last answer, in a live session that has its tools
             return _decided("deny", AT_LIMIT)
-        if given["tool_name"] == WORKFLOW_TOOL and _flowing():
-            return _decided("deny", ONE_WORKFLOW)  # its agents' calls could not be told apart
         return await decide(given, tool_use_id)
 
     async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1530,11 +1522,16 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         if name in SHELLS and "agent_id" not in given:
             shell.ran(args)
         failed = given.get("hook_event_name") == FAILED_EVENT
+        # a workflow agent's call says who made it (several workflows at once: the run's own)
+        agent = (
+            {k: given[k] for k in AGENT_KEYS} if given.get("agent_type") == WORKFLOW_AGENT else {}
+        )
         outcome = ToolOutcome(
             tool=name,
             status=ToolStatus.ERROR if failed else ToolStatus.OK,
             output=given.get("error") if failed else _result_text(given.get("tool_response")),
             error_class="ClaudeToolError" if failed else None,
+            metadata={bridge.MADE_BY: agent} if agent else {},
         )
         spec = steps.runtime.native.get(name) or native_spec(name)
         helpers = steps.runtime.helpers

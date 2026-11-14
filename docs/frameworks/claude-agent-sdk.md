@@ -113,15 +113,25 @@ the user Claude Code would ask:
   would send.
 * **A dynamic workflow is one child run.** A `Workflow` call (a script that runs agents in
   the background; the bundled CLI offers it with no flag) only hands work on, as `Agent`
-  does: it runs, and its workflow is a child run of the turn, kept open as a background
-  subagent's (below) until the workflow's task ends — `SUCCESS` with what its notification
-  says, `ERROR` when it failed or was cut off, `CANCELLED` when it was stopped or its turn
-  was cancelled. Its agents have no task of their own, and an agent's first call can reach
-  the harness before anything names that agent, so their calls are the workflow's by their
-  kind (`agent_type` `workflow-subagent`): decided by its run's hooks and governance and
-  recorded under it. So one workflow works at a time in a session: a second launch while
-  one works is refused, saying so. The tool catalog's risk for `Workflow` still decides
-  its launch.
+  does: it runs, and each workflow is a child run of the turn, kept open as a background
+  subagent's (below) until its own task ends — `SUCCESS` with what its notification says,
+  `ERROR` when it failed or was cut off, `CANCELLED` when it was stopped or its turn was
+  cancelled. Its agents have no task of their own and name only their kind in their calls
+  (`agent_type` `workflow-subagent`, an `agent_id` of each agent's own), and an agent's
+  first call can reach the harness before anything names that agent. So:
+  * while **one workflow** works in the session, its agents' calls are its run's: decided by
+    its run's hooks and governance and recorded under it;
+  * while **several** work at once, an agent first seen then cannot be told apart: its call
+    is the session's, as any call no background run decides — the turn being answered
+    decides it (one question for it, as for any call) and records it, its result's event
+    saying which agent made it (`made_by`: `agent_id`, `agent_type`; a harness tool's call
+    names no agent), and between turns it is refused, as such calls are. An agent seen while
+    its workflow was the one at work stays that workflow's. Once one workflow is left, its
+    agents' calls are its run's again. Nothing is refused at launch: Claude Code starts as
+    many workflows as it does.
+  What the workflows' agents spend is in no reply the stream carries: the process's cost
+  grows by it, and it is charged to the turn (below), not to a workflow's run. The tool
+  catalog's risk for `Workflow` still decides its launch.
 * **Not offered: messages to other agents.** `SendMessage` resumes a finished background
   subagent as a new task whose messages carry the call that first started it, or reaches
   another Claude session on the machine or in the cloud. No run holds that work, so it and

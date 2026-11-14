@@ -90,6 +90,9 @@ from trellis.harness.tools.base import (
 )
 
 log = logging.getLogger("trellis.run")
+#: The key of an observed call's metadata saying who of its framework's own made it (a Claude
+#: workflow's agent: its ``agent_id`` and ``agent_type``), kept on its result's event.
+MADE_BY: Final = "made_by"
 #: The tenants whose tool permissions could not be read, said once each (of the most recent).
 _UNREAD: LRUSet[str] = LRUSet(maxsize=SAID_ONCE)
 
@@ -914,8 +917,10 @@ def _replayed(tool: str, recorded: Any) -> ToolOutcome:
 
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
-    """A call that did not execute still appears on the stream, so a UI sees every step."""
+    """A call that did not execute still appears on the stream, so a UI sees every step — with
+    who made it, when its framework said (:data:`MADE_BY`)."""
     _started(runtime, ref, call.tool, call.args)
+    by = {MADE_BY: outcome.metadata[MADE_BY]} if MADE_BY in outcome.metadata else {}
     _ended(
         runtime,
         ref,
@@ -923,6 +928,7 @@ def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) ->
         status=outcome.status.value,
         cached=outcome.cached,
         output=outcome.output,
+        **by,
     )
 
 

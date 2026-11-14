@@ -309,12 +309,20 @@ class Helpers:
         found = [h for h in self._open.values() if h.name == name]
         return found[-1] if found else None
 
-    def of_kind(self, kind: Kind) -> Helper | None:
-        """The open helper of ``kind`` started last (a framework that says what kind of helper
-        a call is the work of, not which: Claude Code's workflow agents, one workflow at a
-        time)."""
-        found = [h for h in self._open.values() if h.kind is kind]
-        return found[-1] if found else None
+    def of_kind(self, kind: Kind, worker: str) -> Helper | None:
+        """The open helper ``worker`` works for, where the framework says what kind of helper
+        a call is the work of, not which (Claude Code's workflow agents): the one it was found
+        working for before, else the one helper of ``kind`` open now (remembered for the
+        worker). ``None`` — the run's own call — when several are open and the worker was
+        never found working for one: its call cannot be told apart."""
+        if worker in self._workers:
+            return self._open.get(self._workers[worker])
+        found = [(key, h) for key, h in self._open.items() if h.kind is kind]
+        if len(found) != 1:
+            return None
+        [(key, helper)] = found
+        self._workers[worker] = key
+        return helper
 
     def attribute(self, worker: str, key: str | None, *, background: bool = False) -> None:
         """The framework's own id of who works for the helper ``key`` (Claude Code's task

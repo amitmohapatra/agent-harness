@@ -321,8 +321,8 @@ wrapped agent did not get what the SDK gives:
   agent's first call reaching the harness before any frame names it. The launch asked a
   person as an undeclared tool, and its agents' calls were taken for the main agent's. A
   workflow is now one child run, kept as a background subagent's and ended as its task
-  ends; its agents' calls are its run's by their kind (`workflow-subagent`), governed and
-  recorded there; a second launch while one works in the session is refused.
+  ends; its agents' calls are its run's by their kind (`workflow-subagent`) while it is the
+  one at work, and the turn's, marked with the agent that made them, while several are.
 - **Messages to other agents.** `SendMessage` resumed a finished background subagent as a
   new task no child run held, or reached another Claude session: it is disallowed, as the
   schedules are, with the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`;

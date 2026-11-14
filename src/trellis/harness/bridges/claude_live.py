@@ -28,8 +28,8 @@ it (``client.query``) instead of into a new process that resumes the session.
   conversation's next turn (as a sub-agent's is asked through its parent), and the attempt
   that follows the answer decides the call from its journal. A dynamic workflow
   (``local_workflow``) is kept so too: its agents name only their kind
-  (:data:`WORKFLOW_AGENT`), and one workflow works at a time in the session
-  (:data:`ONE_WORKFLOW`), so their calls are its run's.
+  (:data:`WORKFLOW_AGENT`), so their calls are its run's while it is the one workflow at
+  work, and the turn's (as any call no background run decides) while several are.
 * **No run.** Any other call made between two turns — the main agent's in a turn the
   session injected, a subagent's with no run — has no run under way: nothing can decide it
   (the run's hooks, governance, a person's approval, its budget) or record it. Such a call is
@@ -142,16 +142,13 @@ GONE_SAID: Final = (
 #: Claude Code's dynamic workflow, as the bundled CLI (2.1.283) sends it: its tool, the task it
 #: runs as (``task_type``: no ``is_backgrounded``, it is always in the background), and what
 #: its agents are named in their hooks (``agent_type``; each ``agent_id`` is the agent's own,
-#: named in no frame before its first call). One works at a time in a session
-#: (:data:`ONE_WORKFLOW`), so its agents' calls are its run's by their kind.
+#: named in no frame before its first call). While one works in a session its agents' calls
+#: are its run's by their kind; while several do, an agent first seen then cannot be told
+#: apart, and its call is the session's — the turn being served, as any call no background
+#: run decides (:meth:`LiveSession._working`).
 WORKFLOW_TOOL: Final = "Workflow"
 WORKFLOW_TASK: Final = "local_workflow"
 WORKFLOW_AGENT: Final = "workflow-subagent"
-#: What a second workflow's launch is refused with while one works in the session.
-ONE_WORKFLOW: Final = (
-    "A workflow is already running in this session: one runs at a time. Wait for its "
-    "task-notification before starting another, or stop it with TaskStop."
-)
 #: What a background subagent's run answers when its task ended with no word of its own.
 COMPLETED: Final = "The task completed."
 #: Why a background subagent's run whose task failed without saying why ended.
@@ -726,9 +723,6 @@ class LiveSession:
         tool call is refused (:data:`UNATTENDED`) and any other event passes."""
 
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
-            if event == "PreToolUse" and given.get("tool_name") == WORKFLOW_TOOL and self._flow():
-                refused = {"permissionDecision": "deny", "permissionDecisionReason": ONE_WORKFLOW}
-                return {"hookSpecificOutput": {"hookEventName": event, **refused}}
             found = self._working(given.get("agent_id"), given.get("agent_type"))
             if found is not None:
                 answer = await found.asked(
@@ -785,20 +779,17 @@ class LiveSession:
 
     def _working(self, agent_id: Any, agent_type: Any = None) -> Background | None:
         """The background run whose work a call of the CLI's ``agent_id`` is: a subagent's,
-        named by its task's id, or the workflow's, whose agents name their kind
-        (:data:`WORKFLOW_AGENT`) in their first call's hook — their permission requests and
-        harness tool calls after it name the agent alone."""
+        named by its task's id, or a workflow's, whose agents name their kind
+        (:data:`WORKFLOW_AGENT`) in their calls' hooks — the one workflow at work then, the
+        agent remembered for its permission requests and harness tool calls, which name it
+        alone. ``None`` while several workflows work and the agent was never seen while one
+        did: its call is the session's (the turn being served)."""
         who = str(agent_id or "")
         found = self.background.get(who) or self._workers.get(who)
-        if found is None and agent_type == WORKFLOW_AGENT:
-            found = self._flow()
-            if found is not None:
-                self._workers[who] = found
+        flows = [b for b in self.background.values() if b.kind is Kind.WORKFLOW]
+        if found is None and agent_type == WORKFLOW_AGENT and len(flows) == 1:
+            found = self._workers[who] = flows[0]
         return found
-
-    def _flow(self) -> Background | None:
-        """The dynamic workflow at work in the session, if one is (one at a time)."""
-        return next((b for b in self.background.values() if b.kind is Kind.WORKFLOW), None)
 
     def _forget(self, found: Background) -> None:
         """``found``'s task ended and its run too: it is no longer the session's."""

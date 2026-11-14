@@ -48,7 +48,6 @@ from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
-    ONE_WORKFLOW,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
     ClaudeAdapter,
@@ -2413,38 +2412,129 @@ async def test_a_workflow_of_a_run_with_no_conversation_keeps_its_child_run(
     assert made == [("Workflow", run_id), ("Read", child.run_id), ("Grep", child.run_id)]
 
 
-async def test_a_second_workflow_while_one_runs_is_refused(
+async def test_two_workflows_at_once_both_run_and_their_agents_calls_are_the_sessions_own(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """One workflow at a time in a session: its agents' calls are its run's by their kind,
-    so a second launch while one works — in the same turn, or a later turn of the
-    conversation — is refused, saying why, and starts no run; the first goes on."""
-    scripts = [[WORKFLOW, ANOTHER, {"text": "{last}"}], [ANOTHER, {"text": "{last}"}]]
-    agent = harness.wrap(options(tmp_path, scripts), id="one-flow")
+    """Two workflows launched in one turn both run, each its own child run. While both work,
+    an agent first seen then cannot be told apart (its hooks name only its kind): its call is
+    the session's — the turn being served decides it once and records it, marked with the
+    agent (``agent_id``, ``agent_type``), and between turns it is refused as any call no run
+    decides. One cancelled leaves the other; once one workflow is left, its agents' calls are
+    its run's again, and each run ends as its own task does."""
+
+    @tool(side_effects="read")
+    def whoami() -> str:
+        """The run this call is made in."""
+        runtime = current()
+        assert runtime is not None
+        return runtime.run_id
+
+    refused: list[str] = []
+
+    class Guard(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            if call.tool != "Grep":
+                return None
+            refused.append(call.tool)
+            return Deny("no searching here")
+
+    scripts = [
+        [WORKFLOW, ANOTHER, {"text": "started both"}],
+        [{"stall": 1.5}, {"text": "done"}],
+        [{"text": "ok"}],
+    ]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="flows", hooks=[Guard()]), [whoami])
     first = await agent.run("fan out twice", user="u1", thread="t1")
-    assert first.answer == ONE_WORKFLOW, first.error
-    child = await child_of(harness, first.run_id)
-    second = await agent.run("and another", user="u1", thread="t1")
-    assert second.answer == ONE_WORKFLOW
-    assert not [r async for r in harness.runs.iterate(parent_run_id=second.run_id)]
-    assert (await child_of(harness, first.run_id)).status is RunStatus.RUNNING
+    assert first.answer == "started both", first.error
+    live = live_of(agent)
+    assert live is not None
+    one, two = (live.background[task] for task in ("w1", "w2"))
+    for found in (one, two):
+        record = await harness.runs.get(found.run_id, tenant="default")
+        assert record is not None and record.status is RunStatus.RUNNING
+        assert record.parent_run_id == first.run_id
+
+    asked: dict[str, Any] = {}
+
+    async def during_the_turn() -> None:
+        await until(lambda: len(served(tmp_path)) == 2)
+        asked["mine"] = await calls(tmp_path, {"by": "a1", "tool": "whoami"}, "w1")
+        grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+        asked["grep"] = await calls(tmp_path, grep, "w2")
+        asked["read"] = await calls(tmp_path, {"by": "a1", **READS}, "w1")
+
+    calling = asyncio.create_task(during_the_turn())
+    events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
+    await calling
+    turn = events[0].run_id
+    assert asked["mine"] == {"result": turn, "ok": True}  # the turn's run decided it
+    assert asked["grep"] == {"result": "Grep was not run: no searching here", "ok": False}
+    assert refused == ["Grep"]  # refused once
+    assert asked["read"] == {"result": "Read ran", "ok": True}
+    assert results(events) == ["whoami", "Read"]  # recorded on the turn's run
+    # Claude Code's own tool's record says which agent made it (a harness tool's call names
+    # no agent: its MCP request comes with none)
+    made = [e.data.get("made_by") for e in events if e.type is RunEventType.TOOL_CALL_RESULT]
+    assert made == [None, {"agent_id": "a1", "agent_type": "workflow-subagent"}]
+    # between turns no run is served: refused as any call no run decides
+    between = await calls(tmp_path, {"by": "a3", **READS}, "w2")
+    assert between == {"result": UNATTENDED, "ok": False}
+
+    await agent.cancel(two.run_id, reason="not that one")
+    await when(harness, two.run_id, RunStatus.CANCELLED)
+    await until((tmp_path / "tasks" / "w2.stopped").exists)
+    still = await harness.runs.get(one.run_id, tenant="default")
+    assert still is not None and still.status is RunStatus.RUNNING
+
+    seen, following = await followed(agent, one.run_id)
+    mine = await calls(tmp_path, {"by": "a4", "tool": "whoami"}, "w1")  # one left: its run's
+    assert mine == {"result": one.run_id, "ok": True}
     (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
-    await when(harness, child.run_id, RunStatus.SUCCESS)
+    ended = await when(harness, one.run_id, RunStatus.SUCCESS)
+    assert ended.output == FLOWED and results(seen) == ["whoami"]
+    following.cancel()
 
 
-async def test_a_second_workflow_in_a_run_with_no_conversation_is_refused_too(
-    harness: Harness, tmp_path: Path
+async def test_two_workflows_of_a_run_with_no_conversation_record_their_agents_calls_marked(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:
-    """In a process of the run's own the run's open workflow is the one at work: a second
-    launch in the same turn is refused, saying why; the first ends as its task does."""
-    agent = harness.wrap(options(tmp_path, [[WORKFLOW, ANOTHER, {"text": "{last}"}]]), id="q2")
-    running = asyncio.create_task(agent.run("fan out twice", user="u1"))
-    await until(lambda: len(agent.running) == 1 and (tmp_path / "cli.json.turns").exists())
+    """In a process of the run's own, two workflows at work: an agent's call is the run's own,
+    recorded with the agent that made it; once one workflow has ended, the other's agents'
+    calls are its run's. Both runs end ``SUCCESS`` with their own task."""
+    scripts = [[WORKFLOW, ANOTHER, {"text": "started both"}]]
+    agent = memory_harness.wrap(options(tmp_path, scripts), id="alone2")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("fan out twice", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    await until(lambda: results(seen).count("Workflow") == 2)
+    run_id = seen[0].run_id
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    (tmp_path / "tasks" / "w2.done").write_text(FLOWED)
+
+    async def statuses() -> dict[str, RunStatus]:
+        kids = [r async for r in memory_harness.runs.iterate(parent_run_id=run_id)]
+        return {k.run_id: k.status for k in kids}
+
+    async with asyncio.timeout(5):
+        while RunStatus.SUCCESS not in (await statuses()).values():  # noqa: ASYNC110
+            await asyncio.sleep(0.02)
+    [left] = [k for k, status in (await statuses()).items() if status is RunStatus.RUNNING]
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert (await calls(tmp_path, grep, "w1"))["ok"]
     (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
-    done = await running
-    assert done.answer == ONE_WORKFLOW, done.error
-    child = await child_of(harness, done.run_id)
-    assert (child.status, child.output) == (RunStatus.SUCCESS, FLOWED)
+    await running
+    await following
+    assert set((await statuses()).values()) == {RunStatus.SUCCESS}
+    await memory_harness.writes.drain()
+    made = {c.body["tool"]: c for c in memory_service.named("record_tool")}
+    assert made["Read"].scope["agent_run_id"] == run_id  # two at work: the run's own
+    [read] = [e.data for e in events if e.data.get("tool") == "Read" and "output" in e.data]
+    assert read["made_by"] == {"agent_id": "a1", "agent_type": "workflow-subagent"}
+    assert made["Grep"].scope["agent_run_id"] == left  # one left: its run's
 
 
 @pytest.mark.parametrize("how", ["cancel", "lost", "quit"])
