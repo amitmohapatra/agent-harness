@@ -225,18 +225,7 @@ async def test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_ro
     assert len(said) < len(text)  # the model never read the whole result
 
 
-#: F-DATE (agent-runs SDK, shared by the harness): a date question's ``expects`` is
-#: ``{"type": "string", "format": "date"}``, and ``trellis.runs.answers`` checks an answer with
-#: ``validator_for(expects)(expects)`` and no format checker (answers.py:57): JSON Schema's
-#: ``format`` is then an annotation, so "next week" is taken as the date and the model reads it.
-F_DATE = (
-    "F-DATE: a date question takes any string as its answer (agent-runs SDK answers.py:57 "
-    "checks no JSON Schema format)"
-)
-
-
 @pytest.mark.plan("HAR-ASK", "F36u")
-@pytest.mark.xfail(strict=True, reason=F_DATE)
 async def test_a_date_question_refuses_an_answer_that_is_not_a_date(
     tmp_path: Path, uid: str
 ) -> None:
