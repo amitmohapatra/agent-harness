@@ -11,6 +11,7 @@ import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    HookMatcher,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -672,6 +673,38 @@ def test_a_claude_result_with_no_cost_or_no_session_is_charged_its_usage() -> No
         budget.account = account
     assert [(c["input_tokens"], c["output_tokens"], c["cost"]) for c in charged] == [(3, 2, None)]
     assert journal.session_cost == 0.0 and "" not in costs
+
+
+async def test_the_teams_answers_about_a_call_are_kept_for_the_most_recent_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``after_theirs`` keeps what the team's hooks answered about a call until the harness's
+    hook reads it — for the most recent calls only (``CALLS_KEPT``: a call no harness hook
+    reads for is forgotten then). At the bound: the calls kept are read as the team's hook
+    left them, the one before is read as the model made it. A call the CLI names no id for
+    is kept for no one."""
+    from trellis.harness.bridges import claude as bridge
+    from trellis.harness.bridges.claude import after_theirs, harness_matcher
+
+    monkeypatch.setattr(bridge, "CALLS_KEPT", 2)
+    read: list[Any] = []
+
+    async def team(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        return {"hookSpecificOutput": {"updatedInput": {"by": f"team for {tool_use_id}"}}}
+
+    async def harness(given: Any, tool_use_id: str | None, hook: Any) -> Any:
+        read.append(given["tool_input"])
+        return {}
+
+    hooks = after_theirs({"PreToolUse": [HookMatcher(hooks=[team]), harness_matcher(harness)]})
+    theirs, own = (matcher.hooks[0] for matcher in hooks["PreToolUse"])
+    model = {"tool_input": {"by": "model"}}
+    for ref in ("c1", "c2", "c3", None):  # asked about calls no harness hook read for yet
+        await theirs(model, ref, None)
+    for ref in ("c1", "c2", "c3", None):
+        await own(model, ref, None)
+    team_for = [{"by": f"team for {ref}"} for ref in ("c2", "c3")]
+    assert read == [{"by": "model"}, *team_for, {"by": "model"}]
 
 
 def test_a_sessions_cost_grows_is_reset_and_grows_again() -> None:

@@ -731,7 +731,10 @@ class LiveSession:
             event: [
                 dataclasses.replace(
                     matcher,
-                    hooks=[self._hook(event, m, c) for c in range(len(matcher.hooks))],
+                    hooks=[
+                        self._hook(event, m, c, None if ours(matcher) else own)
+                        for c, own in enumerate(matcher.hooks)
+                    ],
                     # a background run's call may wait for a person in the harness's hooks;
                     # a team's keep what they set (none: Claude Code's own default)
                     timeout=HOOK_SECONDS if ours(matcher) else matcher.timeout,
@@ -741,9 +744,13 @@ class LiveSession:
             for event, matchers in hooks.items()
         }
 
-    def _hook(self, event: str, matcher: int, callback: int) -> Any:
+    def _hook(self, event: str, matcher: int, callback: int, theirs: Any) -> Any:
         """The relay of one hook: the same hook of the turn being served — of the attempt of
-        its run, for a background subagent that has one (:class:`Background`); with none, a
+        its run, for a background subagent that has one (:class:`Background`). With no run
+        under way to take it (between turns: a subagent's end, the turn the session runs by
+        itself), a hook of the team's own (``theirs``: as the process was started with it)
+        runs as Claude Code runs it, in no run's context — it is the library's, never
+        suppressed, and run once; the harness's own has no run to decide or record for: a
         tool call is refused (:data:`UNATTENDED`) and any other event passes."""
         from trellis.harness.tools.convert import claude as convert
 
@@ -769,6 +776,8 @@ class LiveSession:
                     return await turn.within(own(given, tool_use_id, hook))
                 except Left:
                     pass
+            elif theirs is not None:
+                return await theirs(given, tool_use_id, hook)
             if event != "PreToolUse":
                 return {}
             self.refused[str(given.get("tool_name") or "")] += 1
