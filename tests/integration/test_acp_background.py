@@ -224,10 +224,12 @@ async def test_a_call_made_while_no_run_is_under_way_is_refused_and_the_next_run
     under way to decide it, so it is refused, and the conversation's next run says so. That
     turn takes a while: the next prompt waits for it to end, and is answered as its own."""
     notified = {"builtin": "Bash", "args": {"command": "echo done"}}
-    task = {"after": 0.1, "result": "found", "notified": notified, "own_turn": 1.0}
+    over = tmp_path / "the-first-run-is-over"
+    task = {"gate": str(over), "result": "found", "notified": notified, "own_turn": 1.0}
     script = [{"agent": LOOK, "background": task}, {"text": "started"}, END, {"text": "next"}]
     agent = harness.wrap(fake(tmp_path, script), id="bg-own")
     await say(agent, "look")
+    over.touch()
     await until(lambda: "own" in recorded(tmp_path))
     events = [e async for e in agent.stream("and?", user=USER, thread=THREAD)]
     assert events[-1].error is None

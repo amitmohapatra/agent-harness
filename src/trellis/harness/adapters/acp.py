@@ -1182,16 +1182,7 @@ class Attempt:
                     continue
                 self._died()
                 if isinstance(item, _Ended):
-                    stop = getattr(item.answer, "stop_reason", None)
-                    if stop == END_TURN and not seen and await session.queued(own):
-                        raise ACPRunError(QUEUED)
-                    await self._settled()
-                    if item.error is not None:
-                        raise await session.failed(item.error)
-                    self._answered_usage(item.answer)
-                    # past the agent's own retries: what a run with no answer says
-                    runtime.cut_off = getattr(item.answer, "stop_reason", None) == MAX_TOKENS
-                    yield item.answer
+                    yield await self._answer(item, own, seen)
                     return
                 seen = True
                 if await self._seen(item):
@@ -1203,6 +1194,24 @@ class Attempt:
             runtime.model_ended(STEP)
             if not asking.done():
                 asking.cancel()
+
+    async def _answer(self, ended: _Ended, own: int, seen: bool) -> Any:
+        """The prompt's answer, its turn over and its usage counted: the agent's error raised
+        as the run's; and an ``end_turn`` with nothing ``seen`` of a turn fails it when the
+        agent queued the prompt behind a turn of its own (``acp_live.QUEUED``; ``own``: how
+        many of those had begun when the prompt was sent)."""
+        session = self.session
+        assert session is not None  # bound before its turns
+        stop = getattr(ended.answer, "stop_reason", None)
+        if stop == END_TURN and not seen and await session.queued(own):
+            raise ACPRunError(QUEUED)
+        await self._settled()
+        if ended.error is not None:
+            raise await session.failed(ended.error)
+        self._answered_usage(ended.answer)
+        # past the agent's own retries: what a run with no answer says
+        self.runtime.cut_off = stop == MAX_TOKENS
+        return ended.answer
 
     def _died(self) -> None:
         """What ended a harness call that was not an error (the worker dying), raised in the

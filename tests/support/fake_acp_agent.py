@@ -20,7 +20,8 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
 * ``{"agent": {..., "run_in_background": true}, "background": {...}}`` a sub-agent in the
   background, and ``{"builtin": "Bash", "args": {..., "run_in_background": true}, "background":
   {...}}`` a command: the call answers at once with the task's id (and the sub-agent's), as
-  Kimi's does, and the task works on — ``"after"`` seconds, then (a sub-agent's) ``"usage"``
+  Kimi's does, and the task works on — ``"after"`` seconds, and until the file ``"gate"``
+  names is there (a test's word that what it waits for is over) — then (a sub-agent's) ``"usage"``
   in its log and ``"asks"`` (a call it asks permission for, its request in its log first:
   ``interaction.request``; ``{"tool": ...}`` a harness tool's, called once allowed —
   ``"call_after"`` seconds later), ``"calls"`` (a harness tool's call it asks nothing for),
@@ -573,6 +574,8 @@ class FakeAgent:
     async def background(self, session_id: str, info: dict[str, Any], task: dict[str, Any]) -> None:
         """A background task's work, its end, and the turn Kimi runs of its own for it."""
         await asyncio.sleep(task.get("after", 0))
+        while "gate" in task and not os.path.exists(task["gate"]):  # noqa: ASYNC110, ASYNC240 - a file
+            await asyncio.sleep(0.01)
         agent = info.get("agentId", "")
         if "usage" in task:
             logged_usage(session_id, agent, task["usage"])

@@ -409,33 +409,38 @@ class ACPSession(Keeper[Background]):
         self._aside_run(self.close())
 
     async def read(self) -> None:
-        """What the log says since the last read: tasks started and ended, Kimi's own turns,
-        whose each permission request is, what each background sub-agent spent (nothing, of
-        an agent the harness keeps no log of)."""
+        """What the log says since the last read (:meth:`_logged`, a line at a time); then,
+        with no turn served, the session rests or ends as its work stands."""
         if self.log is None:
             return
         for agent, entry in self.log.entries():
-            kind = entry.get("type")
-            info = entry.get("info") or {}
-            if kind == "task.started" and info.get("detached"):
-                self.working[str(info.get("taskId"))] = str(info.get("description") or "task")
-            elif kind == "subagent.completed":
-                self._said[str(entry.get("subagentId"))] = str(entry.get("resultSummary") or "")
-            elif kind == "task.terminated":
-                summary = self._said.get(str(info.get("agentId")), "") or str(
-                    info.get("stopReason") or ""
-                )
-                await self._task_end(str(info.get("taskId")), str(info.get("status")), summary)
-            elif kind == "interaction.request":
-                self._asked[str(entry.get("toolCallId"))] = agent
-            elif kind == "usage.record":
-                found = next((b for b in self.background.values() if b.agent_id == agent), None)
-                if found is not None and not found.over:
-                    found.spent(entry)
-            elif agent == "main":
-                self._turned(kind, entry)
+            await self._logged(agent, entry)
         if self.turn is None and not self.closed:
             self._rest()
+
+    async def _logged(self, agent: str, entry: Mapping[str, Any]) -> None:
+        """One line of ``agent``'s log: a task started or ended, Kimi's own turns, whose a
+        permission request is, what a background sub-agent spent (nothing, of an agent the
+        harness keeps no run of)."""
+        kind = entry.get("type")
+        info = entry.get("info") or {}
+        if kind == "task.started" and info.get("detached"):
+            self.working[str(info.get("taskId"))] = str(info.get("description") or "task")
+        elif kind == "subagent.completed":
+            self._said[str(entry.get("subagentId"))] = str(entry.get("resultSummary") or "")
+        elif kind == "task.terminated":
+            summary = self._said.get(str(info.get("agentId")), "") or str(
+                info.get("stopReason") or ""
+            )
+            await self._task_end(str(info.get("taskId")), str(info.get("status")), summary)
+        elif kind == "interaction.request":
+            self._asked[str(entry.get("toolCallId"))] = agent
+        elif kind == "usage.record":
+            found = next((b for b in self.background.values() if b.agent_id == agent), None)
+            if found is not None and not found.over:
+                found.spent(entry)
+        elif agent == "main":
+            self._turned(kind, entry)
 
     def _turned(self, kind: Any, entry: Mapping[str, Any]) -> None:
         """A turn of the main agent began or ended: one of Kimi's own (no prompt's
