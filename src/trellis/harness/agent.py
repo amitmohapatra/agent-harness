@@ -98,7 +98,7 @@ from trellis.harness.frontend import FRONTEND, Frontend
 from trellis.harness.governance.decision import chosen as choice
 from trellis.harness.history import Said, from_window, recorded
 from trellis.harness.hooks import Chain, Hooks
-from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key
+from trellis.harness.identity import AGENT_GROUP, Identity, conversation_key, queued_with
 from trellis.harness.journal import Journal
 from trellis.harness.line import INTERRUPTS, Line
 from trellis.harness.result import Result
@@ -572,7 +572,7 @@ class Agent:
         _kept_as_json(framework_options)
         tenant = await self.harness._tenant(tenant)
         conversation = conversation_key(tenant, user, thread) if thread else None
-        concurrency_key = concurrency_key or (conversation and _queued_with(conversation))
+        concurrency_key = concurrency_key or (conversation and queued_with(conversation))
         start = await self._start(
             input,
             user=user,
@@ -1538,7 +1538,7 @@ class Agent:
             )
             conversation = conversation_key(start.tenant_id, user, thread) if thread else None
             if conversation is not None and parent is None:  # its turn: in the line (``line``)
-                start = start.model_copy(update={"concurrency_key": _queued_with(conversation)})
+                start = start.model_copy(update={"concurrency_key": queued_with(conversation)})
                 start = await self._addressed(start, conversation, mode)
             await admitted(self.harness.runs.start(start), "start")
         record = RunRecord.from_start(start)
@@ -1656,11 +1656,6 @@ class Agent:
         if budget is not None:
             metadata[BUDGET] = budget.kept()
         return metadata
-
-
-def _queued_with(conversation: str) -> str:
-    """The ``concurrency_key`` of a conversation's turns: the run store runs one at a time."""
-    return f"thread:{conversation}"
 
 
 class Throttled(HarnessError):

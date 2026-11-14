@@ -68,7 +68,7 @@ from trellis.harness import task_tools
 from trellis.harness.adapters.langgraph import ASKED
 from trellis.harness.conversation import Mode
 from trellis.harness.frontend import FRONTEND
-from trellis.harness.identity import conversation_key
+from trellis.harness.identity import conversation_key, queued_with
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError, LeaseLostError
 
@@ -452,7 +452,9 @@ async def _started(
     origin: Mapping[str, Any],
 ) -> RunRecord:
     """The run of a task's turn started in the run store: ``runtime``'s child, on the task's
-    own conversation (``thread``), its metadata naming where it came from."""
+    own conversation (``thread``) and in its line (``line``: a follow-up queued behind the run
+    at work waits for it, in any process), its metadata naming where it came from."""
+    conversation = conversation_key(runtime.tenant, runtime.user, thread)
     started = await agent._start(
         input,
         user=runtime.user,
@@ -461,6 +463,7 @@ async def _started(
         run_id=run_id,
         record_input=True,
         parent=runtime,
+        concurrency_key=queued_with(conversation),
     )
     started = started.model_copy(
         update={"metadata": {**started.metadata, BACKGROUND: dict(origin)}}
