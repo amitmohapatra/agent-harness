@@ -160,7 +160,7 @@ memory service. A graph with a checkpointer or a store of your own is a `create_
 middleware=middleware(), checkpointer=..., store=...)` ([below](#middleware-on-your-own-graph)).
 
 Not exposed: Deep Agents' `interrupt_on` — approvals are the [catalog](../governance.md)'s (a
-sub-agent's `interrupt_on` becomes its tools' declared risk: a tool named there asks a person) —
+sub-agent's own `interrupt_on` is kept as Deep Agents' approval gate, asked once) —
 `name` (the wrap's `id`) and `debug`.
 
 ## Two ways to run it
@@ -476,9 +476,10 @@ the run's, its pauses asked through the run, its crash continued, its cancel wit
   its `name` and `description`), called through Deep Agents' `task` tool; the call is governed
   and becomes a child run (`bridges.helpers`): given the memory context for its task, its tool
   calls governed and recorded under its run. A declarative one gets the loop's guards and its
-  model name routed as `ReAct`'s; a tool it names in `interrupt_on` asks a person — its risk,
-  as the catalog says (a name that is none of its tools stays Deep Agents' approval, asked once
-  through the run). With no Deep Agents capability asked for, the general-purpose helper is a long task's.
+  model name routed as `ReAct`'s; its `interrupt_on` is Deep Agents' own approval gate (LangChain's
+  `HumanInTheLoopMiddleware` in the sub-agent: `when`, `allowed_decisions` and `description`
+  as you give them), asked once through the run — governance takes the gate's decision for
+  its own. With no Deep Agents capability asked for, the general-purpose helper is a long task's.
 * **Wrapped agents and `a2a(url)`** — each a tool named after the agent's id (described by
   `h.wrap(description=)`, else its docstring; an A2A agent by its card), any framework, local or
   remote. The reads among them run at once, the writes one at a time.

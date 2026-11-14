@@ -296,7 +296,7 @@ def ReAct(
     runs itself (governed as the harness's). ``subagents`` are what it hands tasks to: Deep
     Agents' own (a ``SubAgent`` dict — ``name``, ``description``, ``system_prompt``, ``mode``,
     ``tools``, ``model``, ``middleware``, ``skills``, ``permissions``, ``response_format``; its
-    ``interrupt_on`` is the catalog's: its tools named there ask a person — a
+    ``interrupt_on`` is Deep Agents' own approval gate, asked once — a
     ``CompiledSubAgent`` ``{"name", "description", "runnable"}``, a ``ReAct`` graph among them),
     each called through Deep Agents' ``task`` tool, and wrapped agents (``h.wrap(...)``) and
     ``a2a(url)``, each a tool of its own; every one a child run. Code runs in
@@ -627,10 +627,11 @@ def _native(
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
     the loop's guards (``StallGuard``, ``ModelCallLimitMiddleware``, ``ModelHooks``: its own
     middleware of those names kept), the prompt cache (``middleware.PromptCache``, around its
-    own ``AnthropicPromptCachingMiddleware``) and its ``interrupt_on`` turned into its tools'
-    declared risk — a tool it names asks a person (``irreversible``), as the catalog says; a
-    name that is none of its tools (a Deep Agents tool of its own) stays Deep Agents'
-    approval, which the harness asks once. One that names no ``tools`` has the run's, as Deep
+    own ``AnthropicPromptCachingMiddleware``); its ``interrupt_on`` is Deep Agents' own
+    (LangChain's ``HumanInTheLoopMiddleware`` in the sub-agent: its ``when``,
+    ``allowed_decisions`` and ``description`` as given), an approval the harness asks once —
+    governance takes the gate's decision for its own. One that names no ``tools`` has the
+    run's, as Deep
     Agents gives it the main agent's: ``ReAct``'s are offered per model call
     (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
     its own tools has exactly those."""
@@ -652,14 +653,6 @@ def _native(
         cache,
     ]
     spec["middleware"] = [*given, *(g for g in guards if g.name not in names)]
-    gates = spec.pop("interrupt_on", None) or {}
-    asked = {name for name, config in gates.items() if config}
-    if "tools" in spec:
-        tools = [_asking(t) if _name_of(t) in asked else t for t in spec["tools"]]
-        asked -= {name for t in tools if (name := _name_of(t)) is not None}
-        spec["tools"] = tools
-    if asked:
-        spec["interrupt_on"] = {name: gates[name] for name in sorted(asked)}
     return spec
 
 
@@ -675,22 +668,6 @@ def _remote(spec: dict[str, Any]) -> dict[str, Any]:
         except TargetRefused as exc:
             raise ConfigurationError(f"{spec.get('name')}: its webhook: {exc}") from exc
     return spec
-
-
-def _name_of(tool: Any) -> str | None:
-    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
-    return name if isinstance(name, str) else None
-
-
-def _asking(tool: Any) -> Any:
-    """``tool`` as a LangChain tool declared ``irreversible`` (governance asks a person)."""
-    from langchain_core.tools import BaseTool
-    from langchain_core.tools import tool as made
-
-    found = tool if isinstance(tool, BaseTool) else made(tool)
-    return found.model_copy(
-        update={"metadata": {**(found.metadata or {}), "side_effects": "irreversible"}}
-    )
 
 
 def _declared(

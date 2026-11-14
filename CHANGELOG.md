@@ -36,6 +36,9 @@ A library's feature works as the library does it; the harness governs, records a
   checkpointer or with `RunCheckpointer`) keeps its state files and todos across the turns
   of a conversation, as it keeps its background tasks: a file one turn wrote is read by the
   next, one it deleted stays deleted. Bounded as before (256 KiB kept in the file store).
+- A `ReAct` sub-agent's `interrupt_on` is Deep Agents' own approval gate again, with its
+  `when`, `allowed_decisions` and `description` (it was flattened into an `irreversible`
+  catalog risk for the tools it named); still one question a call.
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks
