@@ -611,7 +611,7 @@ class ClaudeAdapter:
         # run at work there) is forked: the turn goes on here, in a process of its own
         held = session is not None and await self._held_elsewhere(runtime)
         kept = key is not None and not written and not _own_process(target) and not held
-        context = None if last else native_input.context
+        context = None if last else _dated(native_input.context, run, kept=kept)
         steps.last = last
         options = _options(target, context, run, session, steps, kept=kept)
         options = dataclasses.replace(options, fork_session=options.fork_session or held)
@@ -715,6 +715,19 @@ class ClaudeAdapter:
         if found is not None and unsent:
             await found.asks(runtime)
         return found
+
+
+def _dated(context: str | None, run: Invocation, *, kept: bool) -> str | None:
+    """The context a turn's prompt is given: memory's — and, a turn a live session may serve
+    that is offered ``schedule_task``, the day and hour it is (``schedules.now_said``): the
+    process keeps the tool's wording from its first turn (the hour then), and Claude Code
+    says the date once a session, again only when the day changes."""
+    from trellis.harness.schedules import SCHEDULE_TOOLS, now_said
+
+    if not kept or not any(t.name == SCHEDULE_TOOLS[0] for t in run.tools):
+        return context
+    now = now_said(run.runtime)
+    return f"{context}\n\n{now}" if context else now
 
 
 def _converses(runtime: Runtime) -> bool:

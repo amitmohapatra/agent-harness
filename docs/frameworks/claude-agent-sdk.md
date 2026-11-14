@@ -335,7 +335,10 @@ turn the session runs by itself (a finished task's notification) is never a user
 * A later turn is served by the process when it brings the same options, hooks and tools
   with the same schemas — not the same wording: a tool's description may change between
   turns (`schedule_task` says the hour it is), and the process keeps the wording it listed
-  as it started (so `schedule_task` says the hour that process started in).
+  as it started (so `schedule_task` says the hour that process started in). Claude Code says
+  the date once a session (and again when the day changes), so each turn the process serves
+  is told the day and the hour it is with its prompt (the context hook's text, after
+  memory's), whatever time has passed since its first.
 * A message is sent into the process once no turn is under way in it: sent during one, Claude
   Code may hand it to that turn at its next tool call, and it gets no answer of its own.
 * The process is one per conversation, in one server process, at most 16 per agent. It closes

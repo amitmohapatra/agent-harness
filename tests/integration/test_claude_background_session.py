@@ -952,6 +952,32 @@ async def test_a_turn_after_the_hour_turned_is_served_by_the_same_session(
     assert list(live.working) == ["t1"]  # the background work goes on
 
 
+async def test_each_turn_of_a_live_session_is_told_the_day_and_hour_it_is(
+    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live process keeps the tools' wording it listed as it started — ``schedule_task``
+    says the hour of the process's first turn — and Claude Code says the date once per
+    session (and again only when the day changes). So each turn the session serves is told
+    the day and the hour it is with its prompt: a turn 26 hours later reads its own, and
+    the same process serves it."""
+    from datetime import UTC, datetime
+
+    from trellis.harness import snapshots
+
+    clock = [datetime(2026, 11, 13, 10, 15, tzinfo=UTC)]
+    monkeypatch.setattr(snapshots, "now", lambda: clock[0])
+    scripts = [[{"text": "one"}], [{"text": "two"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="dated")
+    await agent.run("remind me at 9", user="u1", thread="t1")
+    clock[0] = datetime(2026, 11, 14, 12, 40, tzinfo=UTC)  # 26 hours later
+    await agent.run("and at 9 again", user="u1", thread="t1")
+    one, two = served(tmp_path)
+    assert two["pid"] == one["pid"]  # the same process
+    assert "It is now Fri 2026-11-13, 10:00-10:59" in one["context"]
+    assert "It is now Sat 2026-11-14, 12:00-12:59" in two["context"]
+    assert "2026-11-13" not in two["context"]
+
+
 async def test_a_session_another_worker_served_a_later_turn_of_is_not_served_stale(
     tmp_path: Path,
 ) -> None:

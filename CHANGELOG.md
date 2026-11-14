@@ -63,7 +63,11 @@ tested with are in [docs/versioning.md](docs/versioning.md).
   listed in the same words: the first turn after the hour turned closed the process and
   stopped its background work (a background subagent's run `ERROR`). A later turn must bring
   the same tools with the same schemas now (`convert.listing`), not the same wording; the
-  process keeps the wording it listed as it started.
+  process keeps the wording it listed as it started. So that a session living for hours or
+  days does not tell the model a stale hour (a wrong today-or-tomorrow for "at 9"), each turn
+  it serves is told the day and the hour it is with its prompt (`schedules.now_said`, in the
+  context the `UserPromptSubmit` hook adds): Claude Code itself says the date once a session
+  and again only when the day changes (its `date_change` reminder), never the hour.
 
 ### Fixed: a graph's own tools, as LangGraph and Deep Agents have them
 
