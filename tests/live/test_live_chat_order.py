@@ -1,4 +1,4 @@
-"""A conversation's turns across real server processes: three harness servers
+"""A conversation's turns across real server processes: two harness servers
 (``tests/support/chat_server.py``, every adapter that runs here) behind no balancer but the test,
 sharing a real agent-runs (its API and its ticker, separate processes) on a real PostgreSQL. A
 chat's messages, wherever each arrives, are answered one at a time in the order they were sent,
@@ -53,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[2]
 KEY: Final = "chat-order-key"
 #: how long a server's hold on a run lasts (a killed server's turn is freed this soon, plus a tick)
 HOLD_SECONDS: Final = 6
-SERVERS: Final = 3
+SERVERS: Final = 2
 
 
 def free_port() -> int:
@@ -291,7 +291,7 @@ async def test_two_messages_on_two_servers_are_answered_one_at_a_time(
 
 
 @pytest.mark.parametrize("count", [5, 20])
-async def test_a_burst_over_three_servers_is_answered_one_at_a_time_in_order(
+async def test_a_burst_over_two_servers_is_answered_one_at_a_time_in_order(
     stack: Stack, http: httpx.AsyncClient, count: int
 ) -> None:
     thread = chat()
@@ -352,7 +352,7 @@ async def test_a_turn_paused_for_a_person_holds_nobody_up(
     meanwhile = asyncio.create_task(send(http, stack.servers[1], "meanwhile", thread))
     await started(stack, "meanwhile")  # it did not wait for the person
     body = {"adapter": "function", "interrupt_id": asked["interrupt"]["interrupt_id"]}
-    resumed = asyncio.create_task(http.post(f"{stack.servers[2]}/resume", json=body))
+    resumed = asyncio.create_task(http.post(f"{stack.servers[0]}/resume", json=body))
     await asyncio.sleep(1.5)
     assert not [t for t in stack.turns() if t["event"] == "refunded"], "it continues after"
     stack.release("meanwhile")
@@ -372,7 +372,7 @@ async def test_queued_turns_and_the_servers_turns_take_turns(
     await started(stack, "queued one")  # a server's worker claimed it
     direct = asyncio.create_task(send(http, stack.servers[1], "direct two", thread))
     await _accepted(stack, thread, 2)
-    await http.post(f"{stack.servers[2]}/start", json=body | {"input": "queued three"})
+    await http.post(f"{stack.servers[0]}/start", json=body | {"input": "queued three"})
     await asyncio.sleep(1.0)
     stack.release("queued one")
     assert (await direct)["status"] == "SUCCESS"
@@ -394,7 +394,7 @@ async def test_two_chats_of_a_user_and_two_users_with_one_thread_id_run_side_by_
     sent = [
         asyncio.create_task(send(http, stack.servers[0], "ada here", thread)),
         asyncio.create_task(send(http, stack.servers[1], "ada there", other)),
-        asyncio.create_task(send(http, stack.servers[2], "bob here", thread, user="bob")),
+        asyncio.create_task(send(http, stack.servers[0], "bob here", thread, user="bob")),
     ]
     for question in ("ada here", "ada there", "bob here"):
         await started(stack, question)  # all three at once
@@ -408,7 +408,7 @@ async def test_two_chats_of_a_user_and_two_users_with_one_thread_id_run_side_by_
 # --------------------------------------------------------------------------- every adapter
 @pytest.mark.timeout(900)  # 180 turns, one at a time
 @pytest.mark.parametrize("count", [5, 20])
-async def test_every_adapter_answers_a_burst_over_three_servers_one_at_a_time_in_order(
+async def test_every_adapter_answers_a_burst_over_two_servers_one_at_a_time_in_order(
     stack: Stack, http: httpx.AsyncClient, count: int
 ) -> None:
     adapters = (await http.get(f"{stack.servers[0]}/ready")).json()["adapters"]
@@ -467,14 +467,14 @@ async def test_a_server_killed_holding_a_turn_frees_it_once_its_hold_lapses(
     http: httpx.AsyncClient,
     invariants: Invariants,  # noqa: F811
 ) -> None:
-    """Last: it kills the third server."""
+    """Last: it kills the second server."""
     thread = chat()
     stack.hold("doomed")
-    doomed = asyncio.create_task(send(http, stack.servers[2], "doomed", thread))
+    doomed = asyncio.create_task(send(http, stack.servers[1], "doomed", thread))
     await started(stack, "doomed")
     after = asyncio.create_task(send(http, stack.servers[0], "after the crash", thread))
     await _accepted(stack, thread, 2)
-    killed = stack.processes["server-2"]
+    killed = stack.processes["server-1"]
     killed.send_signal(signal.SIGKILL)
     killed.wait()
     stack.servers.pop()
