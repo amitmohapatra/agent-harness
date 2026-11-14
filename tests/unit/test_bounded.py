@@ -138,3 +138,11 @@ async def test_a_full_spool_loses_the_write_and_says_so_once(
     assert len((tmp_path / SPOOL_FILE).read_text().splitlines()) == 1
     assert caplog.text.count("is full") == 1
     await spooling.aclose()
+    held = (tmp_path / SPOOL_FILE).stat().st_size
+    monkeypatch.setattr(writes, "MAX_SPOOL_BYTES", 2 * held)  # room for exactly one more
+    again = Writes(spool=tmp_path)
+    for _ in range(2):
+        await again.submit("memory.transcript", down, record=record)
+    await again.drain()
+    assert (again.spooled, again.failed) == (1, 1)
+    await again.aclose()
