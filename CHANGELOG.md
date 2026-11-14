@@ -5,6 +5,15 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Added: a provider's own tools in `ReAct`
+
+`ReAct(tools=[{"type": "web_search_20250305", "name": "web_search"}])`: a provider's web
+search, web fetch or code execution, given as LangChain's `dict` tool and bound to the model as
+it is (it was refused as "not a tool"). Each server call the reply reports is the run's tool
+call, and the catalog's risk decides whether the tool is offered: one that would ask a person
+is held back, since no approval can stand before a call the provider makes inside its step
+([react.md](docs/frameworks/react.md#a-providers-own-tools-web-search-web-fetch-code-execution)).
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

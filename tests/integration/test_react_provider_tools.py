@@ -50,8 +50,12 @@ def searched(query: str, *, failed: bool = False) -> AIMessage:
     )
     return AIMessage(
         content=[
-            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
-             "input": {"query": query}},
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_1",
+                "name": "web_search",
+                "input": {"query": query},
+            },
             {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": result},
             {"type": "text", "text": "Found it: example.com/a"},
         ],
@@ -60,9 +64,7 @@ def searched(query: str, *, failed: bool = False) -> AIMessage:
 
 
 def calls(events: list[Any]) -> dict[str, Any]:
-    return {
-        e.data["tool"]: e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT
-    }
+    return {e.data["tool"]: e.data for e in events if e.type is RunEventType.TOOL_CALL_RESULT}
 
 
 def offered(model: ProviderChat) -> list[list[str]]:
@@ -82,6 +84,20 @@ async def test_a_provider_tool_is_bound_to_the_model_and_its_calls_recorded(
     said = next(e for e in events if e.type is RunEventType.TOOL_CALL_ARGS)
     assert said.data["args"] == {"query": "trellis harness"}
     assert "opaque" not in str(recorded["web_search"]["output"])  # the provider's own state
+
+
+async def test_a_sub_agents_server_calls_are_recorded_too(harness: Harness) -> None:
+    helper = {"name": "researcher", "description": "Searches the web.", "system_prompt": "s"}
+    model = ProviderChat(
+        turns=[
+            ("task", {"description": "find trellis", "subagent_type": "researcher"}),
+            searched("trellis"),
+            "It is at example.com/a",
+        ]
+    )
+    agent = harness.wrap(ReAct("s", model, tools=[SEARCH], subagents=[helper]), id="web")
+    events = [e async for e in agent.stream("find trellis", user="u")]
+    assert calls(events)["web_search"]["status"] == "ok"
 
 
 async def test_a_failed_server_call_is_recorded_as_failed(harness: Harness) -> None:

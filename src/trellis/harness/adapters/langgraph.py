@@ -78,13 +78,13 @@ from typing import Any, ClassVar, Final
 
 from trellis.contracts import ConfigurationError, InterruptDecision, InterruptResolution, ToolSpec
 from trellis.harness.adapters.base import (
+    PROVIDER_TOOLS,
     Extracted,
     HistoryIn,
     Invocation,
     Narrowing,
     NativePause,
     Output,
-    PROVIDER_TOOLS,
     ToolFormat,
     builtin,
     helper,

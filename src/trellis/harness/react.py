@@ -352,7 +352,11 @@ def ReAct(
     provided = _provided(own)
     strategies = _strategies(subagents)
     native, helpers = _subagents(
-        subagents, call_timeout=call_timeout, max_steps=max_steps, max_repeats=max_repeats
+        subagents,
+        call_timeout=call_timeout,
+        max_steps=max_steps,
+        max_repeats=max_repeats,
+        provided=provided,
     )
     tasks = _background(native, helpers, strategies, max_steps=max_steps)
     # Deep Agents' general-purpose helper, given as a sub-agent of the same name is (its own
@@ -362,6 +366,7 @@ def ReAct(
         call_timeout=call_timeout,
         max_steps=max_steps,
         max_repeats=max_repeats,
+        provided=provided,
     )
     own_helpers = {s.get("name") for s in native}
     profiled = _profiled(chat, window)
@@ -589,7 +594,12 @@ def _split(tools: Sequence[Any]) -> tuple[list[Any], list[Any]]:
 
 
 def _subagents(
-    subagents: Sequence[Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    subagents: Sequence[Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    provided: Any,
 ) -> tuple[list[dict[str, Any]], list[Any]]:
     """``subagents=`` as Deep Agents' (its ``SubAgent``, ``CompiledSubAgent`` and
     ``AsyncSubAgent`` dicts, :func:`_native`) and the harness's (wrapped agents and
@@ -611,6 +621,7 @@ def _subagents(
                     call_timeout=call_timeout,
                     max_steps=max_steps,
                     max_repeats=max_repeats,
+                    provided=provided,
                 )
             )
         elif isinstance(given, Pregel):
@@ -628,7 +639,12 @@ def _subagents(
 
 
 def _native(
-    spec: dict[str, Any], *, call_timeout: float | None, max_steps: int, max_repeats: int
+    spec: dict[str, Any],
+    *,
+    call_timeout: float | None,
+    max_steps: int,
+    max_repeats: int,
+    provided: Any,
 ) -> dict[str, Any]:
     """A Deep Agents sub-agent as ``ReAct`` gives it: a compiled one (``runnable``) or a remote
     one (``graph_id``) as it is; a declarative one with its model name routed as ``ReAct``'s,
@@ -640,7 +656,9 @@ def _native(
     approval, which the harness asks once. One that names no ``tools`` has the run's, as Deep
     Agents gives it the main agent's: ``ReAct``'s are offered per model call
     (``HarnessTools``, governed: ``GovernTools``), so it is given those two; one that names
-    its own tools has exactly those."""
+    its own tools has exactly those. The provider's own tools it is given — its own, else the
+    main agent's (``provided``), which Deep Agents hands it — are governed and recorded as the
+    main agent's are (``provider_tools.ProviderTools``)."""
     if "graph_id" in spec:  # an async sub-agent on a server: what it is told to call
         return _remote(spec)
     if "runnable" in spec:
@@ -651,8 +669,10 @@ def _native(
         spec["model"] = routed_chat_model(spec["model"])
     cache, given = ours.prompt_cache(spec.get("middleware") or [])
     names = {m.name for m in given}
+    served = _provided(spec["tools"]) if "tools" in spec else provided
     guards = [
         *([] if "tools" in spec else [ours.HarnessTools(), ours.GovernTools()]),
+        *([] if served is None else [served]),
         ours.StallGuard(max_repeats),
         ours.step_limit(max_steps),
         ours.ModelHooks(timeout=call_timeout),

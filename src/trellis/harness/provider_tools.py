@@ -41,6 +41,7 @@ from trellis.contracts import ConfigurationError, ToolOutcome, ToolSpec, ToolSta
 from trellis.harness.adapters.base import builtin
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.runtime import current
+from trellis.harness.tools import bridge
 
 log = logging.getLogger("trellis.tools")
 
@@ -160,11 +161,7 @@ class ProviderTools(AgentMiddleware):
         held = await self._held(runtime)
         if held:
             request = request.override(
-                tools=[
-                    t
-                    for t in request.tools
-                    if not (isinstance(t, dict) and name_of(t) in held)
-                ]
+                tools=[t for t in request.tools if not (isinstance(t, dict) and name_of(t) in held)]
             )
         started = time.time()
         reply = await handler(request)
@@ -196,8 +193,6 @@ class ProviderTools(AgentMiddleware):
 
     async def _recorded(self, runtime: Any, reply: ModelResponse[Any], started: float) -> None:
         """Each server call ``reply`` reports, with its result, as the run's tool call."""
-        from trellis.harness.tools import bridge
-
         for message in reply.result:
             if not isinstance(message, AIMessage):
                 continue

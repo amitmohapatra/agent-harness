@@ -669,6 +669,42 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is LangChain middleware: `ReAct(middleware=[...])` |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)); the loop's own turn limit is `max_steps`, and LangGraph's `recursion_limit` goes in `framework_options` |
 
+## What the other libraries have, in ReAct
+
+Each is the library's own piece, switched on the library's own way (its tool, its middleware,
+`framework_options`): the harness governs it, records it and counts it. None changes what a
+`ReAct` built without it sends its model (`tests/integration/test_react_golden.py`).
+
+### A provider's own tools: web search, web fetch, code execution
+
+A tool the provider runs itself, inside the model's step, is given as LangChain gives it — a
+`dict` in `tools=`, bound to the model as it is:
+
+```python
+ReAct("You answer with sources.", "anthropic/claude-sonnet-4-5",
+      tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}])
+```
+
+`create_agent` binds it and runs none of it: the provider does, and its reply says what each
+call asked and found (LangChain's `server_tool_call` and `server_tool_result` content blocks).
+The harness adds (`trellis.harness.provider_tools`):
+
+* **the catalog's risk.** Each is a tool of the run's set and of the catalog. Before each model
+  call governance decides it: the catalog's risk, else what it is known to do (a search, a
+  fetch and a file search read; code runs in the provider's own sandbox, a write announced as
+  `sandbox_exec` is). No approval can stand before a call the provider makes inside its step,
+  so a tool whose decision asks a person (`irreversible`, an approval rule, a tool nobody
+  declared) is not offered to that call, said once on the run (`PROVIDER_TOOL_HELD`): the
+  catalog offers it by declaring a risk that needs none.
+* **records.** Each server call is the run's tool call: on its stream, traced, counted,
+  recorded in the memory service, with what it was asked and what it found (never the
+  provider's encrypted state). A sub-agent's are recorded the same way.
+
+A `dict` a client would have to run (a function's schema, Anthropic's `bash`, `text_editor`,
+`computer`, `memory`) is refused: the graph has no code for it — give a function. Whether a
+route passes a provider's tool on is the route's: Anthropic's tools need an Anthropic chat
+model (a name routed to its API, or `ChatAnthropic`), OpenAI's the Responses API.
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
