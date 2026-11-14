@@ -27,11 +27,11 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 | Memory (MEM) | 24 | 9 (live) | 23 (about 90 test cases with the per-adapter ones) | 5 in the memory service (BUG-M1..M5; M2 and M5 fixed), F-504 (contract) |
 | Runs (RUN) | 13 | 6 (live) + every route in the service suite (in process) | 13 (17 tests) | — |
 | Schedules (SCH) | 9 | 3 (live) | 8 + DST skipped (9 tests) | — |
-| Files, query, sandbox (FS) | 6 | 1 (live) | 3 (+2 proven in process, the sandbox skipped: no Docker) | — |
-| Surfaces (SURF) | 6 | 4 (live) | 6 (5 tests) | H-DOC (fixed) |
+| Files, query, sandbox (FS) | 6 | 1 (live) | 3 (+2 proven in process, the sandbox skipped: no Docker) | H-CSV (fixed) |
+| Surfaces (SURF) | 6 | 4 (live) | 6 (6 tests) | H-DOC, H-A2A (fixed), H-AGUI |
 | Contracts (CON) | 3 | 2 (contract suite, in process) | 2 (+ INV-7 on every test) | — |
-| Harness inventory (HAR) | 29 | 15 (live; all 29 in process: matrix, integration) | 22 (on every applicable adapter: about 75 test cases) | F-DATE (agent-runs SDK) |
-| **Total** | **90** | **40** | **77** | **8** (3 fixed) |
+| Harness inventory (HAR) | 29 | 15 (live; all 29 in process: matrix, integration) | 22 (on every applicable adapter: about 75 test cases) | F-DATE (agent-runs SDK), H-ID |
+| **Total** | **90** | **40** | **77** | **12** (5 fixed) |
 
 (The counts are features, not tests; a feature proven before and again here counts in both.)
 
@@ -123,7 +123,7 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 | Feature: the purpose | before | e2e (this branch) | Status |
 |---|---|---|---|
 | A file a run saves is the user's alone, served by AG-UI from another replica sharing the store | integration `test_files.py`, `test_stored_files.py`; matrix X13 | `test_fs.py::test_a_saved_file_is_served_to_its_user_alone_from_another_replica` | pass |
-| `query_result(save_as=)` keeps the selected rows; a later run of the user (another process) is told of it and reads it back; another user is not told | integration `test_query_export.py`, `test_stored_files.py` | `test_fs.py::test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_back` | pass |
+| `query_result(save_as=)` keeps the selected rows; a later run of the user (another process) is told of it and reads it back; another user is not told | integration `test_query_export.py`, `test_stored_files.py` | `test_fs.py::test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_back` | pass (after H-CSV) |
 | Large results kept, paged to the last part (`read_file`), counted over every row (`query_result`) | matrix F26, F26r, F26q | `test_har_adapters.py::test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_row[5]` | pass |
 | query_result limits (200 rows, 20,000 chars, SQL 5,000), wide tables | unit `test_query*.py`, integration `test_query_safety.py` | — (in process is the right level: no service is involved) | prior |
 | Skills (sources, learned skills in the next context) | integration `test_skills.py`; matrix F41s | live `test_an_agent_learns_a_skill_from_its_runs_and_its_next_runs_are_offered_it` | prior |
@@ -133,10 +133,11 @@ tests), agent-memory-service 0f20438, agent-runs 422ef68, agent-contracts 8ca570
 
 | Feature: the purpose | before | e2e (this branch) | Status |
 |---|---|---|---|
-| AG-UI: a run paused on one replica is replayed (from agent-runs' log) and resumed on another; numbering continues | live `test_agui_streams_pauses_resumes_and_replays` (one app) | `test_surf.py::test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_other` (two apps, real HTTP) | pass |
+| AG-UI: a run paused on one replica is replayed (from agent-runs' log) and resumed on another | live `test_agui_streams_pauses_resumes_and_replays` (one app) | `test_surf.py::test_agui_a_run_paused_on_one_replica_is_replayed_and_resumed_on_the_other` (two apps, real HTTP) | pass |
+| AG-UI: a run's event ids are the same on every replica, so `Last-Event-ID` resumes where the client is and numbering continues across attempts | — | `test_surf.py::test_agui_event_ids_are_the_same_on_every_replica` | **xfail(strict): H-AGUI** |
 | AG-UI problem codes: 401 no identity, 404 another user's run (read, cancel), 409 `BAD_RESUME`, 422 bad mode, 409 cancel of an ended run | integration `test_agui.py` | same test | pass |
 | AG-UI files | integration | `test_fs.py` | pass |
-| A2A: card public with no credential; 401 without identity, past 4096 characters, another tenant; a call answers | integration `test_a2a_server.py`; live `test_a2a_round_trip_with_a_remote_question` | `test_surf.py::test_a2a_the_card_is_public_and_a_call_needs_a_trusted_identity` | pass |
+| A2A: card public with no credential, saying what `h.wrap(description=)` says (H-A2A, fixed); 401 without identity, past 4096 characters, another tenant; a call answers | integration `test_a2a_server.py`; live `test_a2a_round_trip_with_a_remote_question` | `test_surf.py::test_a2a_the_card_is_public_and_a_call_needs_a_trusted_identity` | pass |
 | Worker CLI: works the queue, SIGTERM releases the held run to the queue and exits 0 | unit `test_worker.py`; live `test_workers_claim_pause_resume_and_survive_a_crash` | `test_surf.py::test_the_worker_cli_works_the_queue_and_releases_on_sigterm` | pass |
 | Doctor against the stack | unit `test_doctor.py` | `test_surf.py::test_doctor_finds_the_services_and_says_the_keys_tenant_and_role` | pass |
 
@@ -158,7 +159,7 @@ planned endpoint)) unless said.
 | ID | Feature (doc) | matrix | live | e2e (this branch) | Status |
 |---|---|---|---|---|---|
 | HAR-GOV | governance tiers and the catalog ([governance.md](../governance.md)) | F32, F33: all | yes | `test_mem_governance.py` | pass |
-| HAR-APR | approvals, one question, a rejection read by the model | F04, F36: all | yes | `test_mem_records.py` (10) | pass |
+| HAR-APR | approvals, one question, a rejection read by the model | F04, F36: all | yes | `test_mem_records.py` (10) | pass on 8; **error on Claude and Kimi: H-ID** (INV-10) |
 | HAR-ALW | always allow | F33 | yes | `test_mem_governance.py` (10) | pass |
 | HAR-ASK | `ask_user` (date, choices, form, asked once) | F36u/m/f/o: all | — | `test_har_adapters.py::test_ask_user_…[10]` (paused in agent-runs, answered in another process, a misfit by type refused); `::test_a_date_question_refuses_an_answer_that_is_not_a_date` | pass; **xfail: F-DATE** |
 | HAR-BUDGET | budgets and limits ([runs.md](../runs.md#spending-a-budget-per-run)) | integration `test_budget.py` | — | `test_har_adapters.py::test_a_budget_ends_the_run_partial…[10]` | pass |
@@ -209,6 +210,10 @@ planned endpoint)) unless said.
 | H-DOC | agent-harness | `trellis doctor` reported every working agent-runs as failing (`401`) | the runs check sent `Authorization: Bearer`; agent-runs reads `X-API-Key` only (`doctor.py:420`) | **fixed** here (`f5cf2b0`), failing unit test first |
 | F-504 | agent-memory-service (contract) | the service answers `504 TIMEOUT` (its deadline middleware, `api/deadline.py:107`) on 69 operations (every one but the probes, `/metrics` and uploads) whose OpenAPI lists no `504` | `error_responses(...)` in each router omits 504 | proposed (needs approval: a contract change): add `504` (the `Problem` schema, `code: TIMEOUT`, `retryable: true`) to every operation `route_class()` gives a deadline — all `/v1` routes but `POST /v1/documents` — e.g. once in the app's OpenAPI hook, then `make openapi`. The harness handles it: `test_mem_resilience.py` (504 retried, a write committed then answered 504 stored once) |
 | F-DATE | agent-runs SDK (`trellis.runs.answers`, used by agent-runs and the harness) | a date question (`ask_user(kind="date")`, `expects: {"type": "string", "format": "date"}`) takes any string: "next week" resumes the run and the model reads it as the date | `validator_for(expects)(expects)` (answers.py:57) checks with no format checker, and JSON Schema's `format` is then only an annotation | proposed: `validator_for(expects)(expects, format_checker=validator_for(expects).FORMAT_CHECKER)` (and the same on `check_schema`'s side), with a failing test in agent-runs `tests/test_answering.py`. Test: `test_har_adapters.py::test_a_date_question_refuses_an_answer_that_is_not_a_date` (xfail strict) |
+| H-A2A | agent-harness | an A2A card ignored `h.wrap(description=)`: a caller choosing an agent by its card read the target's docstring, not what the operator said it does | `_description` (`a2a/server.py`) read the target's own description and docstring only | **fixed** here (`c549d44`), failing integration test first (`test_a2a_server.py::test_the_card_says_what_h_wrap_was_told_the_agent_does`) |
+| H-AGUI | agent-harness | AG-UI event ids of one run differ by replica: after `Last-Event-ID: 1` another replica sends again an event the client has, and an attempt resumed on another replica numbers from the start again, against docs/surfaces.md ("any replica resumes a stream", ids "those of the run's events") | the serving replica numbers the events it streams itself (from 0, the interrupt folded into the finishing event); a reconnect replays agent-runs' log and numbers by log position (from 1, the interrupt counted) | proposed: the serving replica sends each event under its agent-runs log position (the id a reconnect uses), on the first attempt and on a resume. Test: `test_surf.py::test_agui_event_ids_are_the_same_on_every_replica` (xfail strict) |
+| H-ID | agent-harness | on Claude and Kimi a resumed run's tool calls reuse one id across attempts: two different calls are both `run_<id>:1` in the run's events (INV-10: "tool calls started more than once"), so a client matching results to calls by id (AG-UI, the run's event log) pairs the wrong ones | `tools/bridge.py:359` `ref = call_id or f"{runtime.run_id}:{step}"`: these bridges give no call id, and `step` counts from 1 again in every attempt | proposed: when the framework gives no id, name the call by its `idempotency_key` (line 355: `"{run_id}:{key}:{occurrence}"`, this run's n-th such call, the same in every attempt and different for different calls) instead of the attempt's step. Tests: `test_mem_records.py::…[claude_agent_sdk]`, `[kimi]` (error at teardown, INV-10) |
+| H-CSV | agent-harness | `query_result(save_as="csv")` of one text column, read back in a later run, counted one row too many (208 for 207): the kept file's header was read as a row | the kept text went through `query._shape`, which takes one column of text (`line` over values) for lines | **fixed** here (`4d78d5e`): a kept `.csv` is read under its first line (`query._kept_file`); failing integration test first (`test_stored_files.py::test_a_kept_csv_of_one_text_column_is_read_under_its_header`) |
 | L-NEW | platform | a harness process started while the memory service is down runs nothing (`ConfigurationError`): the tenant a key speaks for is the memory service's word | by design (memory is the key registry; agent-runs too, after its 60 s key cache) | not in the plan's §6 list; `test_a_process_started_while_memory_is_down_runs_nothing` documents it |
 | INV | tests/support/invariants.py | four false positives of the shared checker | a memory agent tool (logged by the service) counted as unrecorded; the one answer that shows a new key read as a leak; a call with no id matched by its tool alone; a call that paused its run counted as run and as started twice | fixed here (adopting the scenarios job's version, f191ec4, and adding these) |
 
