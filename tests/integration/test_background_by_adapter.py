@@ -527,7 +527,7 @@ async def test_c_today_an_acp_agents_process_ends_with_each_turn_and_its_session
     record = recorded(tmp_path)
     assert len(record["started"]) == 2  # a process per turn
     assert [p["env"]["KIMI_DISABLE_CRON"] for p in record["started"]] == ["1", "1"]
-    assert KIMI_ENV == {"KIMI_DISABLE_CRON": "1"}
+    assert KIMI_ENV["KIMI_DISABLE_CRON"] == "1"
     new, resumed = record["sessions"]
     assert (new["how"], resumed["how"]) == ("new", "resume") and new["id"] == resumed["id"]
     assert agent.adapter.steers(agent.target) is False  # and no message reaches a turn under way

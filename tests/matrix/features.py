@@ -1406,7 +1406,11 @@ FEATURES: Final[list[Feature]] = [
         adapters={
             "function": NA("a function target runs its own calls (asyncio.gather)"),
             "claude": ONE_CALL_AT_A_TIME,
-            "kimi": NA("native: Kimi runs a turn's calls itself, one after the other (N3)"),
+            "kimi": NA(
+                "native: Kimi runs a turn's calls itself — its own reads and sub-agents together, "
+                "the harness's tools (MCP, which declare nothing they touch) one after the other "
+                "(N3)"
+            ),
         },
         way2=NA("your framework runs its calls"),
     ),

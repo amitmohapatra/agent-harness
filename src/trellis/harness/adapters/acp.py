@@ -60,6 +60,7 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import html
 import json
 import logging
 import os
@@ -152,12 +153,13 @@ EDITED: Final = (
 DENIED_WHY: Final = "Their reason: {why}"
 #: Why a sub-agent whose call failed without saying why ended.
 SUBAGENT_FAILED: Final = "the sub-agent's call failed"
-#: A swarm member in Kimi's ``AgentSwarm`` result.
-SWARM_MEMBER: Final = re.compile(
-    r'<subagent agent_id="(?P<agent>[^"]*)" item="(?P<item>[^"]*)" '
-    r'outcome="(?P<outcome>[^"]*)">(?P<text>.*?)</subagent>',
-    re.DOTALL,
-)
+#: A swarm member in Kimi's ``AgentSwarm`` result, and each of its attributes (``agent_id``,
+#: ``item`` — escaped as XML — ``outcome``; a resumed member's ``mode="resume"``; ``state``,
+#: ``stop_reason``).
+SWARM_MEMBER: Final = re.compile(r"<subagent(?P<attrs>[^>]*)>(?P<text>.*?)</subagent>", re.DOTALL)
+SWARM_ATTR: Final = re.compile(r'(\w+)="([^"]*)"')
+#: The sub-agent Kimi starts when an ``Agent`` call names none (and resumes none).
+KIMI_SUBAGENT: Final = "coder"
 
 
 # --------------------------------------------------------------------------- Kimi Code
@@ -204,10 +206,26 @@ KIMI_CODE: Final = "Kimi Code"
 #: (``claude.OUTLIVES_THE_QUERY``), and they are not of the run's tool set (no hint offers them).
 #: Kimi still lists them: ACP has no way to take a built-in off (``kimi acp`` takes no agent file).
 KIMI_OUTLIVES_THE_TURN: Final = ("CronCreate", "CronDelete", "CronList")
-#: What the harness sets in Kimi's environment, whatever the agent's own says: scheduling off
-#: (:data:`KIMI_OUTLIVES_THE_TURN`; before, Kimi scheduled a prompt nothing would fire, and
-#: answered as if it would: the break-and-fix gate).
-KIMI_ENV: Final = {"KIMI_DISABLE_CRON": "1"}
+#: Why scheduling is off (:data:`KIMI_OUTLIVES_THE_TURN`).
+CRON_OFF: Final = (
+    "Kimi's scheduling is off: a scheduled prompt fires only while Kimi runs, and the harness "
+    "ends Kimi once the run's work is done, so nothing would fire it"
+)
+#: Why Kimi's tower mode (``KIMI_CODE_EXPERIMENTAL_TOWER``: ``TowerInit``, ``TowerSpawn``,
+#: ``TowerMerge``...) is off: ``TowerSpawn`` starts each worker in Kimi's ``auto`` permission
+#: mode, which asks about none of its calls (:data:`GOVERNED_MODES`), so the harness would
+#: govern none of them — a run's sub-agents work through ``Agent`` and ``AgentSwarm``, whose
+#: calls Kimi asks about.
+TOWER_OFF: Final = (
+    "Kimi's tower mode is off: its workers run in Kimi's auto permission mode, which asks about "
+    "none of their calls, so the harness could govern none of them (use Agent and AgentSwarm)"
+)
+#: What the harness sets in Kimi's environment, whatever the agent's own says, and why (said
+#: on the run when the agent's own ``env`` asks otherwise): scheduling off (before, Kimi
+#: scheduled a prompt nothing would fire, and answered as if it would: the break-and-fix gate),
+#: and tower mode off (Kimi reads its environment's word over its config's).
+KIMI_ENV: Final = {"KIMI_DISABLE_CRON": "1", "KIMI_CODE_EXPERIMENTAL_TOWER": "0"}
+KIMI_ENV_WHY: Final = {"KIMI_DISABLE_CRON": CRON_OFF, "KIMI_CODE_EXPERIMENTAL_TOWER": TOWER_OFF}
 #: Where Kimi Code keeps its sessions, its config and its usage log, unless ``KIMI_CODE_HOME``
 #: says.
 KIMI_HOME: Final = "~/.kimi-code"
@@ -221,6 +239,8 @@ USAGE_RECORD: Final = "usage.record"
 #: finished turn with no answer. Its ``agent.turn.ended`` lines are another record.
 TURN_ENDED: Final = "turn.ended"
 AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
+#: The line of a sub-agent's log that names the profile it was started with (its type).
+PROFILE_BOUND: Final = "profile.bind"
 #: The ``stopReason`` of a turn Kimi's own repeat breaker ended (``KIMI_CODE_REPEAT_BREAKER``:
 #: the same call 12 times in a row, after reminders to answer): a finished turn with no answer.
 REPEAT_BREAKER: Final = "repeat_breaker"
@@ -253,9 +273,11 @@ class Profile:
     #: harness's adaptive limit of child runs (``admission.py``) unless the agent's own ``env``
     #: names it
     swarm_limit: str | None = None
-    #: what is set in the agent's environment whatever its own says: what a run of it, which
-    #: ends with each attempt, cannot keep, turned off (Kimi's scheduling)
+    #: what is set in the agent's environment whatever its own says: what a run of it cannot
+    #: keep or govern, turned off (Kimi's scheduling, its tower mode) — and why each is, said
+    #: on the run when the agent's own ``env`` asks otherwise (``env_why``)
     env: Mapping[str, str] = field(default_factory=dict)
+    env_why: Mapping[str, str] = field(default_factory=dict)
     label: str = THE_AGENT
 
 
@@ -313,8 +335,18 @@ class UsageLog:
         #: whether Kimi's repeat breaker ended the main agent's latest turn (:data:`REPEAT_BREAKER`)
         self.broken = False
 
-    def _files(self) -> list[Path]:
-        return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
+    def _files(self, agent: str = "*") -> list[Path]:
+        return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/{agent}/wire.jsonl"))
+
+    def profile(self, agent: str) -> str | None:
+        """The profile Kimi started the sub-agent ``agent`` (its id) with: its type, which a
+        resumed agent keeps (its log's ``profile.bind``); ``None`` when no log of it says."""
+        for path in self._files(agent):
+            for line in path.read_bytes().splitlines():
+                entry = _json_line(line)
+                if entry.get("type") == PROFILE_BOUND:
+                    return str(entry.get("profileName") or "") or None
+        return None
 
     def start(self) -> None:
         for path in self._files():
@@ -380,6 +412,7 @@ KIMI: Final = Profile(
     home="KIMI_CODE_HOME",
     swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
     env=KIMI_ENV,
+    env_why=KIMI_ENV_WHY,
     label=KIMI_CODE,
 )
 
@@ -667,6 +700,7 @@ class ACPAdapter:
         if profile is not None and profile.swarm_limit is not None:
             env.setdefault(profile.swarm_limit, str(admission.ADMISSION.limit))
         if profile is not None:
+            _overridden(profile, target.env, runtime)
             env.update(profile.env)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
@@ -734,6 +768,16 @@ async def _spawned(client: Any, *command: str, **options: Any) -> AsyncIterator[
         raise
     with contextlib.suppress(ProcessLookupError):
         await spawned.__aexit__(None, None, None)
+
+
+def _overridden(profile: Profile, own: Mapping[str, str], runtime: Runtime) -> None:
+    """The run told, for each variable the profile sets whatever the agent's own ``env`` says
+    (:attr:`Profile.env`), that the agent's own value is not used, and why."""
+    for name, value in profile.env.items():
+        if name in own and own[name] != value:
+            why = profile.env_why.get(name, "")
+            said = f"{name}={own[name]} in the agent's env is not used: {why}"
+            runtime.events.warning("acp_env", said)
 
 
 def _buffer_limit() -> int:
@@ -1164,8 +1208,10 @@ class Attempt:
         )
 
     async def _helpers_started(self, call_id: str, call: _Call) -> None:
-        """A sub-agent the agent starts (its profile's ``helpers``), or each member of a swarm
-        (``swarms``: one per item, its task the template with the item in it), a helper."""
+        """A sub-agent the agent starts (its profile's ``helpers``) or goes on with (Kimi's
+        ``resume``), or each member of a swarm (``swarms``: one per item, its task the template
+        with the item in it; one per sub-agent it resumes, its task the prompt it goes on with),
+        a helper — a resumed one by the name it was started with (:meth:`_named`)."""
         helpers, profile = self.runtime.helpers, self.profile
         if profile is None:  # an agent the harness knows no sub-agent tool of
             return
@@ -1173,15 +1219,22 @@ class Attempt:
         args = call.args
         if call.name in profile.helpers:
             task = str(args.get("prompt") or args.get("description") or "")
-            name = str(args.get("subagent_type") or "coder")
+            resumed = args.get("resume")
+            name = self._named(str(resumed)) if resumed else self._named(None, args)
             await helpers.start(call_id, kind=Kind.SUBAGENT, name=name, task=task)
         elif call.name in profile.swarms:
-            template = str(args.get("prompt_template") or "{{item}}")
-            name = str(args.get("subagent_type") or "coder")
-            for item in args.get("items") or ():
-                task = template.replace("{{item}}", str(item))
-                key = f"{call_id}/{item}"
+            for key, (kind, which), task in _swarm(call_id, args):
+                name = self._named(which if kind == "resume" else None, args)
                 await helpers.start(key, kind=Kind.SUBAGENT, name=name, task=task)
+
+    def _named(self, resumed: str | None, args: Mapping[str, Any] | None = None) -> str:
+        """A sub-agent's name: the type its call names (Kimi's default when none); a resumed
+        one's (``resumed``: its id), the type it was started with, as Kimi's log says
+        (:meth:`UsageLog.profile`) — its id when no log says."""
+        if resumed is None:
+            return str((args or {}).get("subagent_type") or KIMI_SUBAGENT)
+        found = self.usage.profile(resumed) if self.usage is not None else None
+        return found or resumed
 
     async def _helpers_ended(self, call_id: str, call: _Call, text: str, *, failed: bool) -> None:
         helpers, profile = self.runtime.helpers, self.profile
@@ -1194,14 +1247,13 @@ class Attempt:
             else:
                 await helpers.end(call_id, output=text)
         elif call.name in profile.swarms:
-            members = {m["item"]: m for m in SWARM_MEMBER.finditer(text)}
-            for item in call.args.get("items") or ():
-                member = members.get(str(item))
-                key = f"{call_id}/{item}"
-                if member is not None and member["outcome"] == "completed":
-                    await helpers.end(key, output=member["text"].strip())
+            members = _members(text)
+            for key, which, _ in _swarm(call_id, call.args):
+                member = members.get(which)
+                if member is not None and member[0] == "completed":
+                    await helpers.end(key, output=member[1])
                 else:
-                    why = member["text"].strip() if member is not None else text
+                    why = member[1] if member is not None else text
                     await helpers.end(key, error=why or SUBAGENT_FAILED)
 
     # ------------------------------------------------------------------ the ACP client
@@ -1607,6 +1659,37 @@ async def _permitted(
     return await bridge.permitted(spec, args, framework=framework, call_id=call_id)
 
 
+def _swarm(call_id: str, args: Mapping[str, Any]) -> list[tuple[str, tuple[str, str], str]]:
+    """The members a swarm call starts: each sub-agent it resumes (``resume_agent_ids``, its id
+    with the prompt it goes on with), then one per item (its task the template with the item in
+    it) — each with its key among the attempt's helpers, what it is (``("resume", <agent id>)``,
+    ``("item", <item>)``: as :func:`_members` finds it) and its task."""
+    template = str(args.get("prompt_template") or "{{item}}")
+    resumed = (args.get("resume_agent_ids") or {}).items()
+    return [
+        *((f"{call_id}@{a}", ("resume", str(a)), str(p)) for a, p in resumed),
+        *(
+            (f"{call_id}/{i}", ("item", str(i)), template.replace("{{item}}", str(i)))
+            for i in args.get("items") or ()
+        ),
+    ]
+
+
+def _members(text: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """The members a swarm's result reports, each by what it was — a resumed sub-agent by its
+    id (``("resume", <agent id>)``), any other by its item (``("item", <item>)``) — with its
+    outcome and what it said."""
+    found: dict[tuple[str, str], tuple[str, str]] = {}
+    for member in SWARM_MEMBER.finditer(text):
+        attrs = {k: html.unescape(v) for k, v in SWARM_ATTR.findall(member["attrs"])}
+        resumed = attrs.get("mode") == "resume"
+        which = (
+            ("resume", attrs.get("agent_id", "")) if resumed else ("item", attrs.get("item", ""))
+        )
+        found[which] = (attrs.get("outcome", ""), member["text"].strip())
+    return found
+
+
 def _chosen(options: list[Any], kind: str) -> Any:
     """The answer choosing the first option of ``kind`` (``allow_once``, ``reject_once``);
     the agent's question cancelled when it offers none."""
@@ -1690,6 +1773,7 @@ __all__ = [
     "KIMI",
     "KIMI_BUILTINS",
     "KIMI_ENV",
+    "KIMI_ENV_WHY",
     "KIMI_OUTLIVES_THE_TURN",
     "READS_NOT_ISOLATED",
     "ACPAdapter",

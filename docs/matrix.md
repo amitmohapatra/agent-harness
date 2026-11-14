@@ -232,7 +232,7 @@ code; [the recipes](README.md#way-2-pluggable-blocks-your-framework-our-pieces) 
 10. Kimi's own permission requests are the run's governance (F32): it has no approval setting of its own to give
 11. a function target runs its own calls (asyncio.gather)
 12. the scripted Claude CLI calls one tool at a time (the real CLI's concurrency is unverified)
-13. native: Kimi runs a turn's calls itself, one after the other (N3)
+13. native: Kimi runs a turn's calls itself — its own reads and sub-agents together, the harness's tools (MCP, which declare nothing they touch) one after the other (N3)
 14. a function target runs its own calls
 15. native: the graph runs a turn's calls its own way (N3); HarnessTools orders the writes (ReAct has it)
 16. native: the framework runs a turn's calls its own way (N3)

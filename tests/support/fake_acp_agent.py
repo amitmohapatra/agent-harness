@@ -19,7 +19,9 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   no update); ``{"swarm": {...}, "result": "..."}`` a swarm (``AgentSwarm``);
 * ``{"question": "...", "options": [...]}`` its question to the user (``AskUserQuestion``);
 * ``{"usage": {...}, "agent": "main"}`` a model request's usage, in its usage log under
-  ``KIMI_CODE_HOME`` (Kimi's ``usage.record`` line);
+  ``KIMI_CODE_HOME`` (Kimi's ``usage.record`` line); ``{"bound": {"agent": "agent-0",
+  "profile": "explore"}}`` the profile a sub-agent was started with, in its log (Kimi's
+  ``profile.bind`` line);
 * ``{"stall": seconds}`` sends nothing for that long; ``{"crash": "why"}`` the process ends;
   ``{"stop": "refusal"}`` ends the turn so; ``{"step_limit": n}`` ends it at Kimi's step limit (no
   answer, the reason only in its log's ``turn.ended``); ``{"prompt_usage": {...}}`` puts ACP's own usage on
@@ -132,17 +134,22 @@ def logged_usage(session_id: str, agent: str, usage: dict[str, Any]) -> None:
         file.write("not json\n" if usage.get("garbled") else json.dumps(line) + "\n")
 
 
+def logged(session_id: str, agent: str, line: dict[str, Any]) -> None:
+    """One line of an agent's log (``agents/<agent>/wire.jsonl``), as Kimi writes it."""
+    path = session_dir(session_id) / "agents" / agent / "wire.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as file:
+        file.write(json.dumps(line) + "\n")
+
+
 def logged_end(session_id: str, reason: str, limit: int | None = None) -> None:
     """The turn's end, as Kimi 2.1 logs every turn's after its usage (its durable
     ``TurnEnded``: ``reason`` completed, cancelled or failed; at its step limit failed, with
     ``loop.max_steps_exceeded``)."""
-    path = session_dir(session_id) / "agents" / "main" / "wire.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
     line: dict[str, Any] = {"type": "turn.ended", "agentId": "main", "turnId": 0, "reason": reason}
     if limit is not None:
         line["error"] = {"code": "loop.max_steps_exceeded", "details": {"maxSteps": limit}}
-    with path.open("a") as file:
-        file.write(json.dumps(line) + "\n")
+    logged(session_id, "main", line)
 
 
 class Stopped(Exception):
@@ -345,6 +352,10 @@ class FakeAgent:
             return None
         if "usage" in step:
             logged_usage(session_id, step.get("agent", "main"), step["usage"])
+            return None
+        if "bound" in step:
+            agent, profile = step["bound"]["agent"], step["bound"]["profile"]
+            logged(session_id, agent, {"type": "profile.bind", "profileName": profile})
             return None
         if "stall" in step:
             await asyncio.sleep(step["stall"])

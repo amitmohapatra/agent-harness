@@ -434,6 +434,55 @@ async def test_each_swarm_member_is_a_child_run(harness: Harness, tmp_path: Path
     assert "helper" in native_spec("AgentSwarm", KIMI).tags
 
 
+async def test_resumed_sub_agents_and_swarm_members_are_child_runs_by_their_own_names(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi goes on with a sub-agent it ran before: ``Agent(resume=<agent id>)``, and a swarm's
+    ``resume_agent_ids`` (each id with the prompt it goes on with) beside its items. Each is a
+    child run, named as Kimi started it (its log's ``profile.bind``: a resumed agent keeps its
+    type), its task the prompt it goes on with, ended as the swarm's result says of it — a
+    resumed member is ``mode="resume"``, an item Kimi escapes (``&amp;``) is still its item."""
+    result = (
+        "<agent_swarm_result>\n<summary>completed: 2, failed: 1</summary>\n"
+        "<resume_hint>Call AgentSwarm with resume_agent_ids ...</resume_hint>\n"
+        '<subagent mode="resume" agent_id="agent-0" item="a.ts" outcome="completed">'
+        "went on</subagent>\n"
+        '<subagent mode="resume" agent_id="agent-1" state="idle" outcome="failed" '
+        'stop_reason="timed out">it timed out</subagent>\n'
+        '<subagent agent_id="agent-2" item="x&amp;y.ts" outcome="completed">fine</subagent>\n'
+        "</agent_swarm_result>"
+    )
+    swarm = {
+        "description": "again",
+        "resume_agent_ids": {"agent-0": "continue", "agent-1": "fix it"},
+        "prompt_template": "Review {{item}}",
+        "items": ["x&y.ts"],
+    }
+    script = [
+        {"bound": {"agent": "agent-0", "profile": "explore"}},
+        {"bound": {"agent": "agent-1", "profile": "plan"}},
+        {"swarm": swarm, "result": result},
+        {
+            "agent": {"description": "more", "prompt": "carry on", "resume": "agent-0"},
+            "result": "ok",
+        },
+        {"agent": {"description": "lost", "prompt": "who?", "resume": "agent-9"}, "result": "?"},
+        {"text": "reviewed"},
+    ]
+    done = await harness.wrap(fake(tmp_path, script), id="resumes").run("review", user="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    kids = sorted(await children(harness, done.run_id), key=lambda c: c.input)
+    assert [(c.input, c.metadata["native_helper"]["name"], c.status) for c in kids] == [
+        ("Review x&y.ts", "coder", RunStatus.SUCCESS),
+        ("carry on", "explore", RunStatus.SUCCESS),
+        ("continue", "explore", RunStatus.SUCCESS),
+        ("fix it", "plan", RunStatus.ERROR),
+        ("who?", "agent-9", RunStatus.SUCCESS),  # no log of it: named by its id
+    ]
+    assert [c.output for c in kids[:3]] == ["fine", "ok", "went on"]
+    assert kids[3].error is not None and kids[3].error.message == "it timed out"
+
+
 async def test_a_swarm_runs_as_many_at_once_as_the_harness_admits_and_is_on_the_tree(
     harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -473,6 +522,29 @@ async def test_kimis_scheduling_is_turned_off_whatever_its_own_environment_says(
     await agent.run("every Monday", user="u1")
     assert recorded(tmp_path)["started"][0]["env"]["KIMI_DISABLE_CRON"] == "1"
     assert KIMI.env == KIMI_ENV
+
+
+async def test_kimis_tower_mode_is_turned_off_and_an_agent_that_asks_for_it_is_told_why(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi's tower mode (``KIMI_CODE_EXPERIMENTAL_TOWER``) starts its workers in Kimi's
+    ``auto`` permission mode, which asks about none of their calls: the harness could govern
+    none of them. Kimi's own switch turns it off, an agent's own value included (Kimi reads its
+    environment's word over its config's) — and an agent whose ``env`` asks otherwise is told,
+    for each, why it is not so (a warning on the run's stream)."""
+    asked = {"KIMI_CODE_EXPERIMENTAL_TOWER": "1", "KIMI_DISABLE_CRON": "0"}
+    agent = harness.wrap(fake(tmp_path, [{"text": "ok"}], env=asked), id="tower")
+    events = [e async for e in agent.stream("plan missions", user="u1")]
+    env = recorded(tmp_path)["started"][0]["env"]
+    assert (env["KIMI_CODE_EXPERIMENTAL_TOWER"], env["KIMI_DISABLE_CRON"]) == ("0", "1")
+    warned = [e.data["message"] for e in events if e.data.get("code") == "acp_env"]
+    assert warned == [
+        f"KIMI_DISABLE_CRON=0 in the agent's env is not used: {acp.CRON_OFF}",
+        f"KIMI_CODE_EXPERIMENTAL_TOWER=1 in the agent's env is not used: {acp.TOWER_OFF}",
+    ]
+    quiet = harness.wrap(fake(tmp_path, [{"text": "ok"}], env={"KIMI_DISABLE_CRON": "1"}), id="q")
+    events = [e async for e in quiet.stream("hi", user="u1")]
+    assert not [e for e in events if e.data.get("code") == "acp_env"]  # it asks as the harness does
 
 
 # --------------------------------------------------------------------------- sessions

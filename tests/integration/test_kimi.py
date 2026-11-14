@@ -129,6 +129,20 @@ async def test_a_schedule_kimi_could_not_keep_is_refused_by_kimi_itself(
     assert not own & set(KIMI_OUTLIVES_THE_TURN)
 
 
+async def test_kimis_tower_mode_is_off_whatever_the_agents_own_env_says(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
+) -> None:
+    """Kimi's tower mode starts its workers in its ``auto`` permission mode (they ask about
+    nothing: the harness could govern none of their calls). Turned on in the agent's ``env``,
+    Kimi offers its ``Tower*`` tools even over ACP; under the harness its own switch keeps the
+    mode off (Kimi reads its environment's word first), and the run says why."""
+    target = kimi_target(endpoint, tmp_path, env={"KIMI_CODE_EXPERIMENTAL_TOWER": "1"})
+    events = [e async for e in harness.wrap(target, id="kimi-tower").stream("hi", user="u1")]
+    assert events[-1].type is RunEventType.RUN_FINISHED and events[-1].error is None
+    assert not [t for t in endpoint.offered()[0] if t.startswith("Tower")]
+    assert [e.data.get("code") for e in events if e.data.get("name") == "warning"] == ["acp_env"]
+
+
 async def test_bash_asks_a_person_and_the_resume_continues_kimis_session(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
@@ -360,6 +374,64 @@ async def test_a_swarm_kimi_starts_runs_unchanged_each_member_a_child_run(
     ]
 
 
+def _resuming_turns(body: dict[str, Any]) -> Any:
+    """A swarm of two ``explore`` members; then the main agent goes on with the first in a
+    swarm of its resumed member alone (``resume_agent_ids``), then with the second through
+    ``Agent(resume=...)``; then it answers."""
+    messages = body["messages"]
+    tools = {t["function"]["name"] for t in body.get("tools") or ()}
+    users = [text_of(m.get("content")) for m in messages if m.get("role") == "user"]
+    if "AgentSwarm" not in tools:  # a member, by the last thing it was told (not a reminder)
+        last = [u for u in users if not u.startswith("<system-reminder>")][-1]
+        return {"continue a": "went on", "carry on b": "carried on"}.get(last) or (
+            f"reviewed {re.search(r'Review (\S+)', last)[1]}"  # type: ignore[index]
+        )
+    results = [result_text(m["content"]) for m in messages if m.get("role") == "tool"]
+    if not results:
+        swarm = {
+            "description": "review",
+            "prompt_template": "Review {{item}}",
+            "items": ["a.ts", "b.ts"],
+            "subagent_type": "explore",
+        }
+        return ("AgentSwarm", swarm)
+    ids = dict(re.findall(r'agent_id="([^"]+)" item="([^"]+)"', results[0]))
+    by_item = {item: agent for agent, item in ids.items()}
+    if len(results) == 1:
+        again = {"description": "again", "resume_agent_ids": {by_item["a.ts"]: "continue a"}}
+        return ("AgentSwarm", again)
+    if len(results) == 2:
+        more = {"description": "more", "prompt": "carry on b", "resume": by_item["b.ts"]}
+        return ("Agent", more)
+    return "done"
+
+
+async def test_resumed_members_and_agents_kimi_goes_on_with_are_child_runs_by_name(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Kimi goes on with sub-agents it ran: a swarm's ``resume_agent_ids`` and
+    ``Agent(resume=...)``. Each is a child run of its own, named as Kimi started it (its
+    ``explore`` type, which a resumed agent keeps — not ``coder``, the name of none), its task
+    the prompt it goes on with, ended with what it said."""
+    async with PlannedEndpoint(turns=_resuming_turns).serving() as endpoint:
+        agent = harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-resumes")
+        done = await agent.run("review both, then go on", user="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    found = [s async for s in harness.runs.iterate(parent_run_id=done.run_id)]
+    kids = [await harness.runs.get(s.run_id) for s in found]
+    named = sorted(
+        (k.input, k.metadata["native_helper"]["name"], k.status) for k in kids if k is not None
+    )
+    assert named == [
+        ("Review a.ts", "explore", RunStatus.SUCCESS),
+        ("Review b.ts", "explore", RunStatus.SUCCESS),
+        ("carry on b", "explore", RunStatus.SUCCESS),
+        ("continue a", "explore", RunStatus.SUCCESS),
+    ]
+    outputs = {k.input: str(k.output) for k in kids if k is not None}
+    assert outputs["continue a"] == "went on" and "carried on" in outputs["carry on b"]
+
+
 def _subagent_turns(body: dict[str, Any]) -> Any:
     tools = {t["function"]["name"] for t in body.get("tools") or ()}
     results = [m for m in body["messages"] if m.get("role") == "tool"]
@@ -380,6 +452,68 @@ async def test_a_sub_agent_kimi_starts_is_a_child_run(harness: Harness, tmp_path
     record = await harness.runs.get(kid.run_id)
     assert record is not None and record.status is RunStatus.SUCCESS
     assert record.metadata["native_helper"]["name"] == "explore"
+
+
+#: How long each of a turn's two sub-agents takes to answer (its one model reply).
+MEMBER_SECONDS = 1.5
+spans: list[tuple[float, float]] = []
+
+
+@tool(side_effects="read")
+async def slow_lookup(topic: str) -> str:
+    """Look a topic up, slowly."""
+    import asyncio
+    import time
+
+    began = time.monotonic()
+    await asyncio.sleep(0.5)
+    spans.append((began, time.monotonic()))
+    return f"facts about {topic}"
+
+
+def _together_turns(body: dict[str, Any]) -> Any:
+    """Two ``Agent`` calls in one message; then two of the harness's reads in one message;
+    then the answer."""
+    tools = {t["function"]["name"] for t in body.get("tools") or ()}
+    if "Agent" not in tools:
+        return "found"
+    done = len([m for m in body["messages"] if m.get("role") == "tool"])
+    if done == 0:
+        return [
+            (
+                "Agent",
+                {"description": f"look {x}", "prompt": f"find {x}", "subagent_type": "explore"},
+            )
+            for x in ("a", "b")
+        ]
+    if done == 2:
+        return [("slow_lookup", {"topic": x}) for x in ("a", "b")]
+    return "done"
+
+
+def _member(body: dict[str, Any]) -> bool:
+    return "Agent" not in {t["function"]["name"] for t in body.get("tools") or ()}
+
+
+async def test_kimi_runs_its_own_sub_agents_together_and_the_harness_tools_one_by_one(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """What the matrix's F25r reason says (N3): Kimi runs a turn's calls itself, by what each
+    touches (its ``ToolScheduler``): its two ``Agent`` calls of one message run together (both
+    sub-agents ask the model before either has its answer), while the harness's tools — MCP
+    tools, which declare nothing they touch — run one after the other."""
+    spans.clear()
+    endpoint = PlannedEndpoint(turns=_together_turns, stall=lambda b: MEMBER_SECONDS * _member(b))
+    async with endpoint.serving():
+        agent = arm(
+            harness.wrap(kimi_target(endpoint, tmp_path), id="kimi-together"), [slow_lookup]
+        )
+        done = await agent.run("look both ways", user="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    first, second = [at for at, body in endpoint.arrived if _member(body)]
+    assert second - first < MEMBER_SECONDS  # the second asked before the first was answered
+    (_, ended), (began, _) = sorted(spans)
+    assert began >= ended  # the harness's second read began after its first ended
 
 
 async def test_kimis_answer_streams(

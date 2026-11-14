@@ -9,7 +9,8 @@ harness tells Kimi in a prompt of its own after a rejection is that call's resul
 reviewer's edit is followed (the call made again with the edited arguments) — what a model
 told so does. A harness tool is called as Kimi names it (``mcp__trellis__<tool>``); Kimi's
 own tools (``Bash``, ``Agent``...) by their names. ``turns`` answers by the request instead,
-for a test that scripts a sub-agent's requests too.
+for a test that scripts a sub-agent's requests too; ``stall`` holds each reply that long (a
+function of the request: a sub-agent's alone), and ``arrived`` says when each request came.
 
 :func:`kimi_target` is the target: Kimi in a home and a working directory of the test's own,
 its model the endpoint. Without the ``kimi`` program the tests that need it are skipped — in CI
@@ -24,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import time
 import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
@@ -103,7 +105,7 @@ class PlannedEndpoint:
         *,
         final: str = FINAL,
         turns: Callable[[dict[str, Any]], Turn] | None = None,
-        stall: float = 0.0,
+        stall: float | Callable[[dict[str, Any]], float] = 0.0,
         streamed: bool = False,
     ) -> None:
         #: each step a call, or the calls made in one message
@@ -115,6 +117,8 @@ class PlannedEndpoint:
         self.turns = turns
         self.stall = stall
         self.requests: list[dict[str, Any]] = []
+        #: when each request came (``time.monotonic``), with its body
+        self.arrived: list[tuple[float, dict[str, Any]]] = []
         self.headers: list[dict[str, str]] = []
         self.url = ""
         #: the :data:`CUT` steps already answered with a reply cut at the output limit
@@ -214,9 +218,11 @@ class PlannedEndpoint:
 
     async def _chat(self, request: Request) -> Any:
         body = await request.json()
+        self.arrived.append((time.monotonic(), body))
         self.headers.append(dict(request.headers))
-        if self.stall:
-            await asyncio.sleep(self.stall)
+        stall = self.stall(body) if callable(self.stall) else self.stall
+        if stall:
+            await asyncio.sleep(stall)
         reply = self.reply(body)
         if not body.get("stream"):
             return JSONResponse({**reply, "object": "chat.completion"})
