@@ -203,15 +203,15 @@ class ChatScripted(OpenAIChatCompletionsModel):
 
 def test_who_keeps_a_server_thread_is_the_models_route() -> None:
     """``conversation_id`` and the like are a durable thread only where the run's model keeps
-    it: the SDK's chat completions model ignores them, and Bifrost keeps them only for the
-    providers it calls on their own Responses API."""
+    it: the SDK's chat completions model ignores them, and so does a model the gateway
+    answered it serves on chat completions only."""
     named = Agent(name="a", model="gpt-x")
     adapter = OpenAIAgentsAdapter(named)
     adapter.gateway = Bifrost("http://gw.test/v1", None)
     options = {"conversation_id": "conv_1"}
     assert adapter.thread_store(named, options) == ServerThread("conversation_id")
-    other = Agent(name="b", model="anthropic/claude-x")
-    assert adapter.thread_store(other, options) is None  # converted to chat: no thread
+    adapter.gateway.served("gpt-x", responses=False)  # it answered: chat completions only
+    assert adapter.thread_store(named, options) is None  # no thread kept there
     chat = Agent(name="c", model=ChatScripted(["x"]))
     assert adapter.thread_store(chat, options) is None
     adapter.gateway = None  # no gateway route: the SDK's own provider keeps it

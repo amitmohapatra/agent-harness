@@ -49,12 +49,14 @@ does with your own tools and settings ([openai-agents.md](docs/frameworks/openai
 - **At `max_turns` the run ends `PARTIAL` with the SDK's outcome**, no extra model call (it was
   one more paid call for a last answer): the answer is the last message the model wrote, the
   error `BUDGET_EXCEEDED` names the limit. Your own `error_handlers` still answer it.
-- **The Responses API through Bifrost.** A model name goes to Bifrost on the SDK's default API
-  (`/v1/responses`; it was forced to chat completions). Bifrost hands the request on whole only
-  to OpenAI's providers; for any other it keeps function tools only, so an agent on such a model
-  that uses a hosted tool, a stored prompt, a Responses setting, a sandbox capability needing
-  them or a server-side thread is refused with each feature named, at `h.wrap` or before the
-  run's first model call (it failed mid-run or was silently ignored).
+- **The Responses API through Bifrost, where the gateway serves it.** A model name goes to
+  Bifrost on the SDK's default API (`/v1/responses`; it was forced to chat completions). A
+  gateway that does not serve the route for a model answers so on the model's first call: the
+  call falls back to `/v1/chat/completions`, once, and the model stays there (said once), so a
+  deployment that worked before still does. On a model that fell back, an agent that uses a
+  hosted tool, a stored prompt, a Responses setting, a sandbox capability needing them or a
+  server-side thread is refused with each feature named (it failed mid-run or was silently
+  ignored).
 - **Your model routing is kept**: a `MultiProvider(provider_map=...)` entry and the `litellm/`
   and `any-llm/` prefixes keep their providers (Bifrost replaced them); a `RunConfig.model`
   object is said once as not routed.

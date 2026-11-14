@@ -16,15 +16,22 @@ kept: a `RunConfig.model_provider` of your own, a `MultiProvider(provider_map=..
 once as not routed) call the provider you chose. `set_default_openai_api("chat_completions")`
 is yours to set, with the SDK's own limits.
 
-Bifrost hands a Responses request on whole only to OpenAI's providers (`openai`, `azure`). For
-any other provider it converts the request to chat completions and keeps function tools only.
-So an agent on such a model that uses a hosted tool, a shell, patch, computer or custom tool,
-a stored prompt (`Agent.prompt`), `truncation`, `response_include`, `context_management`, a
-sandbox capability that needs them (the default `Filesystem`'s `apply_patch`, `Compaction`) or
-a server-side thread is refused, each feature named: at `h.wrap` where the agent shows it,
-else before the run's first model call. Use an `openai/...` model, a model object of your own,
-or leave the feature out. Function tools, handoffs, agent tools and MCP servers work on every
-model.
+The route is learned from the gateway itself, per model. A gateway (a version, a provider)
+that does not serve `/v1/responses` for a model answers so on the model's first call (`404`,
+`405` or `501`): that call is asked on `/v1/chat/completions` instead, as before the Responses
+route, and so is every later call of the model on that gateway (kept for 256 models, said once
+in the log). There is one fallback per call at most, and never after the model has answered on
+Responses: a refusal there is then the run's error, so no call is made twice.
+
+A chat completions request keeps function tools only. On a model that fell back, an agent that
+uses a hosted tool, a shell, patch, computer or custom tool, a stored prompt (`Agent.prompt`),
+`truncation`, `response_include`, `context_management`, a sandbox capability that needs them
+(the default `Filesystem`'s `apply_patch`, `Compaction`) or a server-side thread is refused,
+each feature named: at the fallback itself, before anything is asked on chat completions, and
+from then on at `h.wrap` or before the run's first model call. Use a model the gateway serves
+on the Responses API, a model object of your own, or leave the feature out. Function tools,
+handoffs, agent tools and MCP servers work on both routes. What a gateway does with a Responses
+request it accepts (Bifrost converts some providers' requests itself) is the gateway's.
 
 **Tracing.** The SDK's own tracing is on by default and exports every run's spans to OpenAI,
 tool inputs and outputs included, outside the harness's redaction. The harness leaves the
@@ -184,7 +191,7 @@ record).
 | | Where |
 |---|---|
 | Sandbox | its own: a `SandboxAgent`, its sandbox given as `framework_options={"run_config": RunConfig(sandbox=...)}` ([above](#using-an-existing-openai-agents-project)) |
-| Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[Shell(), src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`; the default capabilities' `apply_patch` is a hosted tool, kept on an OpenAI model and refused on one Bifrost converts to chat completions: [skills.md](../skills.md#the-openai-agents-sdks-sandboxagent)). A plain `Agent` has no skills slot (openai-agents 0.24): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
+| Skills | its own: a `SandboxAgent`'s `Skills` capability, `capabilities=[Shell(), src.openai()]` (the run's pinned skills, copied into the sandbox by its `load_skill`; the default capabilities' `apply_patch` is a hosted tool, kept on the Responses route and refused on a model the gateway serves on chat completions only: [skills.md](../skills.md#the-openai-agents-sdks-sandboxagent)). A plain `Agent` has no skills slot (openai-agents 0.24): `src.tools()` called from a function tool of yours through the run ([skills.md](../skills.md)) |
 | Hooks | `h.wrap(hooks=[...])`: the run and tool hooks ([hooks.md](../hooks.md)); a model call is the SDK's: the agent's `AgentHooks` (`Agent(hooks=...)`), or the run's `RunHooks` (`framework_options={"hooks": ...}`: every event the SDK reports, beside the harness's own) |
 | Limits | `budget=Budget(...)` (`h.wrap` or `run`) is the one cross-engine cap: tokens, dollars and harness tool calls over the whole run, sub-agents included ([api.md](../api.md#budget)) (its tokens; the SDK reports no dollars); its native turn limit is `framework_options={"max_turns": n}`; a run that reaches it ends `PARTIAL` with what the SDK produced — no model call past the limit, its answer the last message the model wrote (none: `None`), its error `BUDGET_EXCEEDED` naming `max_turns`, so an app can offer "continue"; your own `error_handlers={"max_turns": ...}` answers it instead, as in the SDK; a model looping on one call is told to answer (`bridge.STALLED`) and offered no tool on the turn after, so its reply ends the run before that limit |
 
@@ -202,7 +209,7 @@ record).
   [skills.md](../skills.md#native-or-ours)).
 * **Prompts:** `Agent(prompt=Prompt(id=..., version=...))` is a prompt stored at OpenAI, for
   OpenAI's models through the Responses API; the harness passes it through untouched, and
-  refuses it on a model Bifrost converts to chat completions ([above](#openai-agents-sdk), Models). For a
+  refuses it on a model the gateway serves on chat completions only ([above](#openai-agents-sdk), Models). For a
   stored prompt of the gateway: `instructions=(await h.prompt("triage")).text`
   ([prompts.md](../prompts.md#native-or-ours)).
 
@@ -287,7 +294,7 @@ after yours) ([runs.md](../runs.md#a-message-to-a-busy-conversation-mode)).
   `Agent` a voice workflow runs.
 * The SDK's sessions (`session=`) are yours to pass (`framework_options={"session": ...}`), as are `conversation_id`, `previous_response_id` and `auto_previous_response_id` (OpenAI's servers keep the thread): with a durable one, the SDK keeps the thread, so the memory context is pushed without the recent conversation (memory's window), as for a checkpointed LangGraph graph. A `SQLiteSession(":memory:")` is kept in RAM only and lost on a restart: memory's window stays on, and a warning says so once (`trellis.harness.history`). Long-term memory stays the memory service's.
 * A session given on `h.wrap` is never shared between conversations: each run uses a copy of it — the same class, the same storage — whose `session_id` is yours followed by the conversation's key (tenant, user, thread), so two users or two threads never read each other's turns. A session whose id cannot be changed on a copy (its id is a property, or its storage key was made from the id when it was built, as a Redis or Dapr session's) is refused at `h.wrap`: give such a session per run, one per conversation.
-* A server-side thread is a thread only where the run's model keeps it. The SDK's chat completions model ignores `conversation_id` and `previous_response_id`: memory then keeps the history, as with no thread. On Bifrost, a model of a provider it converts to chat completions is refused a server-side thread before its first model call.
+* A server-side thread is a thread only where the run's model keeps it. The SDK's chat completions model ignores `conversation_id` and `previous_response_id`: memory then keeps the history, as with no thread. On Bifrost, a model the gateway serves on chat completions only is refused a server-side thread before its first model call.
 * Token budgets (`Budget(max_tokens=...)`) are enforced on every run: the harness always passes its `RunHooks`, which count each reply's usage, whether or not the agent or the run has hooks of its own.
 * A tool's failure policy is the SDK's: a `function_tool` that raises is told to the model as the SDK formats it (its default text — from openai-agents 0.23 a fixed sentence naming nothing of the error —, the run's own `RunConfig.tool_error_formatter` for its `tool_exception` kind, or the tool's `failure_error_function`) and recorded as a failed call, the error itself on the stream and in the tool records; with `failure_error_function=None` (a function tool's or an MCP server's) the run ends with the error, as without the harness. An agent called as a tool follows its own policy the same way: its failure ends its child run as failed, the calling model reads the SDK's default text, and with `failure_error_function=None` the run ends. A tool's own `timeout=` is the SDK's (its text to the model, or `ToolTimeoutError` with `timeout_behavior="raise_exception"`), and the call is recorded as that tool's call that timed out — counted from when the SDK made the call, as the SDK counts it, however late its task began. The run's `after_tool` hooks have the last word on what the model reads: a failure a hook rewords is told in its words (the SDK's policy still decides whether the run goes on), and a failure a hook makes a result is that result — for a function tool, an MCP server's tool and a tool the SDK runs here alike.
 * A computer call is governed one action at a time (the click, then the screenshot the SDK takes after it), its actions one decision of the model: a batch pressing the same key three times presses it three times, and the same computer call made step after step is stopped as a stall. An action that may not run is skipped — the model sees the screen as it is (the SDK tells it of a computer call by its screenshot only) — and is told why in its next model call. Give the computer its risk in the catalog, or approve it for the conversation, so each screenshot is not asked about. An edited action (`edit`, or a hook's rewrite) may only be an action of the SDK's computer interface (`click`, `type`, `scroll`...) with that action's arguments: anything else — another method of your computer object, an argument the action does not take — is refused, nothing of the computer is called, and the model is told.

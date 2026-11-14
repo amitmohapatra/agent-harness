@@ -592,7 +592,7 @@ def _governing(kind: type) -> type:
 def _capability_served(capability: Any, model: Any, asked: Mapping[str, Any]) -> None:
     """Refuse, as the SDK prepares the run's sandbox agent (before its first model call), a
     capability whose tools or request parameters (``asked``) its model's route drops: a name
-    the harness routes through Bifrost to a provider it converts to chat completions
+    the harness routes through Bifrost, which serves it on chat completions only
     (:func:`_whole`), which keeps function tools only and no Responses parameter (a
     ``Compaction``'s ``context_management``)."""
     from agents.exceptions import UserError
@@ -1441,8 +1441,9 @@ def routes(theirs: Any, name: str | None) -> bool:
 def bifrost_provider(gateway: Bifrost) -> Any:
     """The OpenAI Agents SDK's model provider for Bifrost: each model name (the SDK's default
     for an agent naming none) mapped to Bifrost's form, asked on the SDK's default API — the
-    Responses API, which Bifrost serves for every provider it routes (``/v1/responses``),
-    unless the application set another (``set_default_openai_api``) — with the virtual key,
+    Responses API (``/v1/responses``), or chat completions for a model the gateway answers it
+    does not serve there (``_learning_class``), unless the application set another
+    (``set_default_openai_api``) — with the virtual key,
     the deny-all MCP scope and the run's dimensions and ``traceparent`` (read per request), no
     retries of the client's own (the gateway retries). One per gateway and event loop (a
     client's pooled connections belong to the loop that opened them)."""
@@ -1458,6 +1459,7 @@ def bifrost_provider(gateway: Bifrost) -> Any:
 def _bifrost_provider_class() -> type:
     import openai
     from agents.models import get_default_model
+    from agents.models._openai_shared import get_use_responses_by_default
     from agents.models.interface import ModelProvider
     from agents.models.openai_provider import OpenAIProvider
 
@@ -1474,20 +1476,86 @@ def _bifrost_provider_class() -> type:
                 max_retries=BIFROST_CLIENT_RETRIES,
             )
             self.inner = OpenAIProvider(openai_client=client)  # the SDK's default API
+            self.chat = OpenAIProvider(openai_client=client, use_responses=False)
 
         def get_model(self, model_name: str | None) -> Any:
-            return self.inner.get_model(self.gateway.routed(model_name or get_default_model()))
+            name = self.gateway.routed(model_name or get_default_model())
+            model = self.inner.get_model(name)
+            if not get_use_responses_by_default():  # the application's own choice of API
+                return model
+            return _learning_class()(self.gateway, name, model, self.chat.get_model(name))
 
     return BifrostProvider
+
+
+#: What a gateway answers a request on a route it does not serve (no such route, no such
+#: method on it, not implemented): the model is then asked on chat completions.
+NOT_SERVED: Final = frozenset({404, 405, 501})
+
+
+@functools.cache
+def _learning_class() -> type:
+    import openai
+    from agents.models.interface import Model
+
+    class Learning(Model):  # type: ignore[misc]
+        """A model name on Bifrost, asked on the Responses API until the gateway answers that
+        it does not serve the route for it (:data:`NOT_SERVED`, on the model's first call
+        there: nothing was asked, no tool has run for it) — then, and from then on for this
+        gateway and model (``Bifrost.served``), on chat completions, as before the Responses
+        route. What a chat completions request cannot carry is refused first, each feature
+        named (:func:`_refused_on_chat`). One fallback per call at most; a model that has
+        answered on Responses never falls back (its refusal is the run's error)."""
+
+        def __init__(self, gateway: Bifrost, name: str, responses: Any, chat: Any) -> None:
+            self.gateway, self.name, self.responses, self.chat = gateway, name, responses, chat
+
+        def _falls_back(self, error: Exception, args: Any, kwargs: Any) -> bool:
+            unserved = isinstance(error, openai.APIStatusError) and error.status_code in NOT_SERVED
+            if not unserved or not self.gateway.falls_back(self.name):
+                return False
+            asked = inspect.signature(Model.get_response).bind(self, *args, **kwargs)
+            _refused_on_chat(self.name, asked.arguments)
+            return True
+
+        async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+            if not self.gateway.keeps_responses(self.name):
+                return await self.chat.get_response(*args, **kwargs)
+            try:
+                response = await self.responses.get_response(*args, **kwargs)
+            except Exception as error:
+                if not self._falls_back(error, args, kwargs):
+                    raise
+            else:
+                self.gateway.served(self.name, responses=True)
+                return response
+            response = await self.chat.get_response(*args, **kwargs)
+            self.gateway.served(self.name, responses=False)  # it answered there: kept
+            return response
+
+        async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            if self.gateway.keeps_responses(self.name):
+                try:
+                    async for event in self.responses.stream_response(*args, **kwargs):
+                        self.gateway.served(self.name, responses=True)
+                        yield event
+                    return
+                except Exception as error:  # refused before its first event: nothing was said
+                    if not self._falls_back(error, args, kwargs):
+                        raise
+            async for event in self.chat.stream_response(*args, **kwargs):
+                self.gateway.served(self.name, responses=False)
+                yield event
+
+    return Learning
 
 
 def _whole(gateway: Any, name: str | None) -> bool:
     """Whether a model name the harness routes through Bifrost is asked with all a Responses
     request carries kept — hosted tools, a stored prompt, server-side threads, compaction: the
     SDK's default API is the Responses API (else the application chose chat completions, whose
-    limits are the SDK's own) and Bifrost calls the model's provider on its own Responses API
-    (``Bifrost.keeps_responses``; another provider's request it converts to chat
-    completions, keeping function tools only)."""
+    limits are the SDK's own) and the gateway has not answered that it serves the model on
+    chat completions only (``Bifrost.keeps_responses``: learned from its first call)."""
     from agents.models import _openai_shared, get_default_model
 
     if not _openai_shared.get_use_responses_by_default():
@@ -1544,7 +1612,7 @@ def keeps_thread(gateway: Any, target: Any, options: Mapping[str, Any]) -> bool:
 
 def _converted(gateway: Any, route: Any, agent: Any, options: Mapping[str, Any]) -> bool:
     """Whether ``agent``'s model is a name the harness routes through Bifrost (``route``: the
-    run's ``MultiProvider``) to a provider it converts to chat completions (:func:`_whole`)."""
+    run's ``MultiProvider``) which the gateway serves on chat completions only (:func:`_whole`)."""
     model = _model_of(agent, options)
     named = model is None or isinstance(model, str)
     return named and routes(route, model) and not _whole(gateway, model)
@@ -1571,36 +1639,44 @@ def unserved(gateway: Any, target: Any, options: Mapping[str, Any]) -> None:
     if server and _converted(gateway, route, target, options):
         found.append(f"{target.name!r}: {', '.join(server)} (a server thread)")
     if found:
-        raise ConfigurationError(
-            "Bifrost serves these agents' models through chat completions (it calls their "
-            "provider on its own Responses API only for OpenAI's), which would drop: "
-            + "; ".join(found)
-            + ". Use a model Bifrost serves on the Responses API (openai/...), a model object "
-            "of your own, or leave these out"
-        )
+        raise ConfigurationError(DROPPED.format(found="; ".join(found)))
+
+
+#: What a refusal says of what a chat completions request would drop (:func:`unserved`).
+DROPPED: Final = (
+    "the gateway serves these models on chat completions only (it answered that it does not "
+    "serve them on /v1/responses), which would drop: {found}. Use a model the gateway serves "
+    "on the Responses API, a model object of your own, or leave these out"
+)
 
 
 def _chat_only(agent: Any, options: Mapping[str, Any]) -> list[str]:
-    """What ``agent`` uses that a chat completions request cannot carry: each tool the SDK's
-    own chat completions converter refuses (a hosted tool, a shell, a patch editor, a
-    computer, a custom tool, a deferred or namespaced function tool: its words), a stored
-    prompt (``Agent.prompt``) and Responses settings (:data:`RESPONSES_SETTINGS`,
-    ``reasoning.mode``/``context``)."""
+    """What ``agent`` uses that a chat completions request cannot carry (:func:`_dropped`):
+    its tools, its stored prompt and its model settings as the run resolves them."""
     from agents import RunConfig
+
+    given = options.get("run_config")
+    config = RunConfig() if given is None else _coerced(given)
+    settings = agent.model_settings.resolve(config.model_settings)
+    return _dropped(agent.tools, agent.prompt, settings)
+
+
+def _dropped(tools: Sequence[Any], prompt: Any, settings: Any) -> list[str]:
+    """What a chat completions request cannot carry of a model call: each tool the SDK's own
+    chat completions converter refuses (a hosted tool, a shell, a patch editor, a computer, a
+    custom tool, a deferred or namespaced function tool: its words), a stored prompt and
+    Responses settings (:data:`RESPONSES_SETTINGS`, ``reasoning.mode``/``context``)."""
     from agents.exceptions import UserError
     from agents.models.chatcmpl_converter import Converter
 
     found = []
-    for tool in agent.tools:
+    for tool in tools:
         try:
             Converter.tool_to_openai(tool)
         except UserError as exc:
             found.append(f"tool {getattr(tool, 'name', type(tool).__name__)!r} ({exc})")
-    if agent.prompt is not None:
+    if prompt is not None:
         found.append("a stored prompt (Agent.prompt)")
-    given = options.get("run_config")
-    config = RunConfig() if given is None else _coerced(given)
-    settings = agent.model_settings.resolve(config.model_settings)
     found += [f"ModelSettings.{name}" for name in RESPONSES_SETTINGS if getattr(settings, name)]
     reasoning = settings.reasoning
     found += [
@@ -1609,6 +1685,19 @@ def _chat_only(agent: Any, options: Mapping[str, Any]) -> list[str]:
         if getattr(reasoning, name, None) is not None
     ]
     return found
+
+
+def _refused_on_chat(model: str, asked: Mapping[str, Any]) -> None:
+    """Refuse a model call about to fall back to chat completions (``_learning_class``) when
+    that request cannot carry it: what the call's tools, prompt and settings need
+    (:func:`_dropped`) and a server-side thread (``asked``: the call's arguments by name, as
+    the SDK's ``Model.get_response`` takes them), each named."""
+    found = _dropped(asked["tools"], asked["prompt"], asked["model_settings"])
+    server = [key for key in SERVER_THREAD if asked.get(key)]
+    if server:
+        found.append(f"{', '.join(server)} (a server thread)")
+    if found:
+        raise ConfigurationError(DROPPED.format(found=f"{model!r}: " + "; ".join(found)))
 
 
 def _thread_store(options: Mapping[str, Any], keeps: bool) -> Any:

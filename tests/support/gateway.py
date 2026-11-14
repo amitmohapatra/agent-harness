@@ -42,6 +42,11 @@ class FakeGateway:
     auto: dict[str, list[str]] = field(default_factory=dict)
     tools: list[str] = field(default_factory=list)
     down: tuple[str, ...] = ()
+    #: how many ``/v1/responses`` requests it serves before answering that it does not serve
+    #: the route (``404``): ``None``, every one; ``0``, a gateway with no Responses route
+    serves_responses: int | None = None
+    #: the ``/v1/responses`` requests it refused
+    refused: list[httpx.Request] = field(default_factory=list)
     completions: list[httpx.Request] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
 
@@ -127,7 +132,7 @@ class FakeGateway:
             self.completions.append(request)
             return self.chat.script.handle(request)
         if path == "/v1/responses":
-            return self.responses.handle(request)
+            return self._responded(request)
         if path == "/mcp":
             return self._rpc(json.loads(request.content))
         if path == "/api/prompt-repo/prompts":
@@ -138,6 +143,15 @@ class FakeGateway:
             return httpx.Response(200, json={"versions": rows})
         assert path == "/api/mcp/clients", path
         return httpx.Response(200, json={"clients": self._clients(), "count": len(self.auto)})
+
+    def _responded(self, request: httpx.Request) -> httpx.Response:
+        """A Responses request answered, or — past :attr:`serves_responses` — refused as a
+        route this gateway does not serve."""
+        served = len(self.responses.requests)
+        if self.serves_responses is None or served < self.serves_responses:
+            return self.responses.handle(request)
+        self.refused.append(request)
+        return httpx.Response(404, json={"error": {"message": "no route /v1/responses"}})
 
     def _rpc(self, message: dict[str, Any]) -> httpx.Response:
         if message["method"] == "tools/list":

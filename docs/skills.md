@@ -96,8 +96,9 @@ agent = h.wrap(
 tools are governed like your own function tools: say their risk in the catalog. The SDK's
 default capabilities (`Capabilities.default()`: `Filesystem`, `Shell`, `Compaction`) work only
 on OpenAI's Responses API: `Filesystem`'s `apply_patch` is a hosted tool and `Compaction` a
-Responses parameter. A model name the harness routes through Bifrost to an OpenAI provider keeps
-them; one Bifrost converts to chat completions is refused them before the run's first model call
+Responses parameter. A model name the harness routes through Bifrost keeps them where the
+gateway serves the Responses API for it; a model it serves on chat completions only is refused
+them before the run's first model call
 ([openai-agents.md](frameworks/openai-agents.md)), and an `OpenAIChatCompletionsModel` of your
 own refuses them itself (`UserError: Hosted tools are not supported with the ChatCompletions
 API`).

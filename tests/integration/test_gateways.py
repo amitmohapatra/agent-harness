@@ -275,73 +275,116 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
     assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
 
 
-async def test_what_bifrost_would_drop_for_a_provider_it_converts_is_refused(
+BIFROST = {"llm_gateway": "bifrost", "llm_base_url": URL, "llm_api_key": "vk"}
+
+
+async def test_a_gateway_without_a_responses_route_answers_on_chat_completions(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A gateway (a version, a provider) that does not serve ``/v1/responses`` for a model
+    answers that once (``404``): the turn is asked on chat completions, as before the
+    Responses route, with the same answer — one fallback, kept for the gateway and the model
+    (never asked on Responses again), said once."""
+    fake = FakeGateway(turns=["routed", "again"], serves_responses=0)
+    fake.serve_models(monkeypatch)
+    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+        agent = h.wrap(Agent(name="a", model="gpt-x"), id="named")
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            first = await agent.run("x", user="u")
+            second = await agent.run("x", user="u")
+    assert (first.answer, second.answer) == ("routed", "again"), first.error
+    assert len(fake.refused) == 1 and len(fake.completions) == 2  # one fallback, no storm
+    assert json.loads(fake.completions[0].content)["model"] == "openai/gpt-x"
+    told = "does not serve 'openai/gpt-x' on /v1/responses"
+    assert len([r for r in caplog.records if told in r.getMessage()]) == 1
+
+
+async def test_a_responses_only_feature_on_a_route_that_fell_back_is_refused_by_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bifrost calls only OpenAI's providers on their own Responses API; another provider's
-    request it converts to chat completions, keeping function tools only. An agent of such a
-    model that uses a hosted tool, a stored prompt, a Responses setting or a server-side thread
-    is refused — each named — where it is wrapped, or before its run's first model call; its
-    function tools go through."""
+    """On a model the gateway serves on chat completions only, what a chat completions request
+    cannot carry is refused, each feature named: at the fallback (before anything is asked on
+    chat completions), and from then on where the agent is wrapped; function tools go on."""
     from agents import ModelSettings, WebSearchTool
 
-    fake = FakeGateway(turns=["converted"])
+    fake = FakeGateway(turns=["plain", "never asked"], serves_responses=0)
     fake.serve_models(monkeypatch)
-    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
-    async with Harness(config=settings, gateway=fake.gateway()) as h:
-        with pytest.raises(ConfigurationError) as refused:
-            h.wrap(
-                Agent(
-                    name="searcher",
-                    model="anthropic/claude-x",
-                    tools=[WebSearchTool()],
-                    prompt={"id": "pmpt_1"},
-                    model_settings=ModelSettings(truncation="auto"),
-                ),
-                id="hosted",
-            )
-        said = str(refused.value)
-        assert "'searcher': tool 'web_search'" in said and "ModelSettings.truncation" in said
-        assert "a stored prompt (Agent.prompt)" in said
-        plain = h.wrap(Agent(name="plain", model="anthropic/claude-x"), id="plain")
+    hosted = Agent(
+        name="searcher",
+        model="gpt-x",
+        tools=[WebSearchTool()],
+        prompt={"id": "pmpt_1"},
+        model_settings=ModelSettings(truncation="auto"),
+    )
+    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+        refused = await h.wrap(hosted, id="hosted").run("x", user="u")  # not known yet: asked
+        assert refused.error is not None and fake.completions == []
+        for feature in ("tool 'web_search'", "a stored prompt", "ModelSettings.truncation"):
+            assert feature in refused.error.message, refused.error.message
+        plain = h.wrap(Agent(name="plain", model="gpt-x"), id="plain")
+        assert (await plain.run("x", user="u")).answer == "plain"  # fell back: now known
+        with pytest.raises(ConfigurationError, match="'searcher': tool 'web_search'"):
+            h.wrap(hosted, id="hosted-again")
         threaded = await plain.run("x", user="u", framework_options={"conversation_id": "c1"})
-        assert threaded.status.value == "ERROR" and threaded.error is not None
-        assert "conversation_id (a server thread)" in threaded.error.message
-        assert fake.responses.requests == []  # refused before any model call
-        answered = await plain.run("x", user="u")
-        on_openai = h.wrap(Agent(name="o", model="gpt-x", tools=[WebSearchTool()]), id="o")
-    assert answered.answer == "converted", answered.error
-    assert fake.responses.requests[0]["model"] == "anthropic/claude-x"
-    assert on_openai is not None  # OpenAI's models keep it whole
+    assert threaded.error is not None
+    assert "conversation_id (a server thread)" in threaded.error.message
+    assert len(fake.completions) == 1  # refused before any model call
+
+
+async def test_a_model_known_to_answer_on_responses_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is the answer to a model's first call on a gateway: once the model has
+    answered on Responses — here, a tool call that then ran — a later ``404`` is the run's
+    error, never the turn asked again on another route (no call runs twice)."""
+    from agents import function_tool
+
+    ran: list[str] = []
+
+    @function_tool
+    def ship(order: str) -> str:
+        """Ship an order."""
+        ran.append(order)
+        return f"shipped {order}"
+
+    fake = FakeGateway(turns=[("ship", {"order": "o1"}), "never"], serves_responses=1)
+    fake.serve_models(monkeypatch)
+    harness = declaring(Harness(config=Settings(**BIFROST), gateway=fake.gateway()), ship="read")
+    async with harness as h:
+        result = await h.wrap(Agent(name="s", model="gpt-x", tools=[ship]), id="s").run(
+            "ship o1", user="u"
+        )
+    assert result.error is not None and ran == ["o1"]
+    assert len(fake.refused) == 1 and fake.completions == []
 
 
 @pytest.mark.parametrize(
     ("capability", "dropped"),
     [("Compaction", "its request parameters (context_management)"), ("Filesystem", "its tool")],
 )
-async def test_a_sandbox_capability_bifrost_would_drop_is_refused_before_any_model_call(
+async def test_a_sandbox_capability_a_fallen_back_route_would_drop_is_refused(
     monkeypatch: pytest.MonkeyPatch, capability: str, dropped: str
 ) -> None:
     """A sandbox capability's Responses parameter (``Compaction``) or hosted tool
-    (``Filesystem``'s ``apply_patch``) is made inside the SDK's run: on a model Bifrost
-    converts to chat completions the run is refused there, before its first model call."""
+    (``Filesystem``'s ``apply_patch``) is made inside the SDK's run: on a model the gateway
+    serves on chat completions only, the run is refused there, before its first model call."""
     from agents import RunConfig
     from agents.sandbox import SandboxAgent, SandboxRunConfig, capabilities
     from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
-    fake = FakeGateway(turns=["never asked"])
+    fake = FakeGateway(turns=["plain", "never asked"], serves_responses=0)
     fake.serve_models(monkeypatch)
-    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
     target = SandboxAgent(
         name="box",
-        model="anthropic/claude-x",
+        model="gpt-x",
         capabilities=[capabilities.Shell(), getattr(capabilities, capability)()],
     )
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    async with Harness(config=settings, gateway=fake.gateway()) as h:
+    async with Harness(config=Settings(**BIFROST), gateway=fake.gateway()) as h:
+        assert (await h.wrap(Agent(name="p", model="gpt-x"), id="p").run("x", user="u")).answer
         agent = h.wrap(target, id="box", framework_options={"run_config": config})
         result = await agent.run("x", user="u")
-    assert result.error is not None and fake.responses.requests == []
+    assert result.error is not None and len(fake.completions) == 1
     assert f"the sandbox capability {capability} needs the Responses API" in result.error.message
     assert dropped in result.error.message
 
@@ -382,7 +425,7 @@ def test_an_application_on_chat_completions_keeps_the_sdks_own_limits() -> None:
             config=Settings(llm_gateway="bifrost", llm_base_url=URL),
             gateway=FakeGateway().gateway(),
         )
-        h.wrap(Agent(name="s", model="anthropic/claude-x", tools=[WebSearchTool()]), id="chat")
+        h.wrap(Agent(name="s", model="gpt-x", tools=[WebSearchTool()]), id="chat")
     finally:
         set_default_openai_api("responses")
 

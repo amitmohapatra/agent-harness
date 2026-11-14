@@ -125,10 +125,9 @@ KEYLESS: Final[dict[str, str]] = {BEARER: NO_KEY}
 #: Retries of a model call Bifrost's client makes itself: none — the gateway retries (a
 #: provider's ``network_config.max_retries``) and falls back, the one place that does.
 BIFROST_CLIENT_RETRIES: Final = 0
-#: The providers Bifrost calls on their own Responses API, as its providers' ``Responses``
-#: methods do (maximhq/bifrost ``core/providers``: ``openai`` and ``azure`` hand the request on;
-#: the others convert it to chat completions, or to their own message API).
-BIFROST_RESPONSES: Final = frozenset({"openai", "azure"})
+#: How many models a Bifrost route remembers the Responses answer of (``Bifrost.served``): one
+#: past it is asked again on its next call.
+RESPONSES_KEPT: Final = 256
 #: How many chat models made of routed names are kept (per route, name, effort, event loop).
 ROUTED_KEPT: Final = 64
 #: The fields of a model's record that name its context window in tokens, as the servers that
@@ -511,12 +510,42 @@ class Bifrost(OpenAICompatible):
         provider, name = split(model)
         return name if provider is None else f"{provider}/{name}"
 
+    def __init__(
+        self, url: str, key: str | None = None, auth: str = BEARER, *, forced: bool = False
+    ) -> None:
+        super().__init__(url, key, auth, forced=forced)
+        #: per model (as routed), what this gateway answered of ``/v1/responses`` (the OpenAI
+        #: Agents SDK's default API): ``True``, it served it; ``False``, it does not (the model
+        #: is asked on chat completions); not there, not asked yet
+        self._responses: LRU[str, bool] = LRU(RESPONSES_KEPT)
+
     def keeps_responses(self, model: str) -> bool:
-        """Bifrost serves ``/v1/responses`` for every provider it routes, but calls only its
-        OpenAI providers on their own Responses API (:data:`BIFROST_RESPONSES`); any other
-        provider's request it converts to chat completions, keeping function tools only (its
-        ``ToChatRequest``): no hosted tool, stored prompt, server-side thread or compaction."""
-        return split(self.routed(model))[0] in BIFROST_RESPONSES
+        """Whether a Responses API request for ``model`` reaches it whole — hosted tools, a
+        stored prompt, a server-side thread, compaction: not once the gateway answered that it
+        does not serve the route for the model (:meth:`served`), which is then asked on chat
+        completions and keeps function tools only."""
+        return self._responses.get(self.routed(model)) is not False
+
+    def falls_back(self, model: str) -> bool:
+        """Whether ``model`` may still be found to be served on chat completions only: it has
+        not answered on ``/v1/responses`` yet (once it has, a refusal there is an error)."""
+        return self._responses.get(self.routed(model)) is None
+
+    def served(self, model: str, *, responses: bool) -> None:
+        """What this gateway answered of ``/v1/responses`` for ``model``, learned from its
+        first call: kept, and a model it does not serve there said once."""
+        routed = self.routed(model)
+        if self._responses.get(routed) == responses:
+            return
+        self._responses[routed] = responses
+        if not responses:
+            log.warning(
+                "%s does not serve %r on /v1/responses: its OpenAI agents' calls go to "
+                "/v1/chat/completions (function tools only: no hosted tool, stored prompt, "
+                "server-side thread or compaction)",
+                self.where,
+                routed,
+            )
 
     def client_options(self) -> dict[str, Any]:
         from bifrost_sdk import NO_GATEWAY_TOOLS  # noqa: PLC0415
