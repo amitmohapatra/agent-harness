@@ -43,6 +43,7 @@ import json
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 
+from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bridges.helpers import ATTRIBUTED_SECONDS
 from trellis.harness.bridges.live import (
@@ -86,6 +87,16 @@ QUEUED: Final = (
     "prompt reached it: it queued the prompt behind that turn and runs it out of the "
     "harness's sight, so this turn cannot be followed"
 )
+#: The harness's MCP server, as the agent names its tools (``tools.convert.mcp.SERVER``: that
+#: module needs the MCP SDK, which only a run of an ACP agent imports).
+SERVER: Final = "trellis"
+HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
+#: How often the agent's usage log is read while a turn runs (and the budget checked).
+USAGE_SECONDS: Final = 0.5
+#: The most a cancelled turn waits for the agent to say it stopped.
+CANCEL_SECONDS: Final = 5.0
+#: The last of the agent's stderr kept, for the error of a process that ended mid-turn.
+STDERR_TAIL: Final = 4096
 #: Why a run failed before its first prompt: the agent's log does not say its session is in
 #: the mode the harness set, asking before a call.
 UNGOVERNED: Final = (
@@ -103,6 +114,48 @@ TASK_KILLED: Final = "killed"
 #: A request relayed to a background sub-agent's run that its run paused on
 #: (``adapters.acp.Deciding``): it waits for the attempt that follows the person's answer.
 WAITS: Final = object()
+
+
+class ACPRunError(RuntimeError):
+    """The agent ended the turn as failed, or its process ended in the middle of it."""
+
+
+def accounted(runtime: Runtime, record: Mapping[str, Any], model: str | None) -> None:
+    """One model request's usage, as the agent's log records it (``usage.record``), on
+    ``runtime``'s budget, under ``model`` (else the log's)."""
+    usage = record["usage"]
+    cached = int(usage.get("inputCacheRead") or 0)
+    written = int(usage.get("inputCacheCreation") or 0)
+    budget.account(
+        runtime,
+        model=model or str(record.get("model") or "kimi"),
+        input_tokens=int(usage.get("inputOther") or 0) + cached + written,
+        output_tokens=int(usage.get("output") or 0),
+        cached=cached,
+    )
+
+
+def chosen(options: list[Any], kind: str) -> Any:
+    """The answer choosing the first option of ``kind`` (``allow_once``, ``reject_once``);
+    the agent's question cancelled when it offers none."""
+    from acp.schema import RequestPermissionResponse
+
+    for option in options:
+        if option.kind == kind:
+            return RequestPermissionResponse(outcome=selected(option.option_id))
+    return RequestPermissionResponse(outcome=dismissed())
+
+
+def selected(option_id: str) -> Any:
+    from acp.schema import AllowedOutcome
+
+    return AllowedOutcome(outcome="selected", option_id=option_id)
+
+
+def dismissed() -> Any:
+    from acp.schema import DeniedOutcome
+
+    return DeniedOutcome(outcome="cancelled")
 
 
 async def _logged_in_time(said: Callable[[], Awaitable[bool]]) -> bool:
@@ -141,8 +194,6 @@ class Background(Kept):
         from acp import text_block
         from acp.schema import AgentMessageChunk
 
-        from trellis.harness.adapters.acp import ACPRunError
-
         assert self.ended is not None
         status, summary = self.ended
         if status == TASK_COMPLETED or runtime.budget_spent is not None:
@@ -156,7 +207,6 @@ class Background(Kept):
         """A model request's usage (a ``usage.record`` of its sub-agent's log) on the attempt
         ``turn``, and on its budget: spent, the run ends there (ACP cannot stop its task)."""
         from trellis.harness import budget
-        from trellis.harness.adapters.acp import accounted
 
         (record,) = spent
         accounted(turn.runtime, record, self.session.model)
@@ -255,8 +305,6 @@ class ACPSession(Keeper[Background]):
         self._tasks.append(asyncio.get_running_loop().create_task(work))
 
     async def _drained(self, stream: asyncio.StreamReader) -> None:
-        from trellis.harness.adapters.acp import STDERR_TAIL
-
         while chunk := await stream.read(STDERR_TAIL):
             self.stderr.extend(chunk)
             del self.stderr[:-STDERR_TAIL]
@@ -279,8 +327,6 @@ class ACPSession(Keeper[Background]):
     async def failed(self, error: BaseException) -> BaseException:
         """The agent's error — or, when the connection closed (its process ended), why the
         process ended."""
-        from trellis.harness.adapters.acp import CANCEL_SECONDS, ACPRunError
-
         if not isinstance(error, ConnectionError):
             return error
         with contextlib.suppress(TimeoutError):
@@ -343,8 +389,6 @@ class ACPSession(Keeper[Background]):
         ``default_permission_mode`` approves on its own behind ACP's ``default``). The log
         must then say so, or the run fails (:data:`UNGOVERNED`): no call is governed in a
         session that asks about none. An agent with no such log keeps the mode it starts in."""
-        from trellis.harness.adapters.acp import ACPRunError
-
         wanted = mode if mode is not None and not self.continued else None
         if wanted is None and log is not None:
             wanted = log.mode()[0]
@@ -440,8 +484,6 @@ class ACPSession(Keeper[Background]):
     async def _watching(self) -> None:
         """The log read as it is written; the session closed once its process ended of
         itself."""
-        from trellis.harness.adapters.acp import USAGE_SECONDS
-
         while self.process.returncode is None:
             await self.read()
             with contextlib.suppress(TimeoutError):
@@ -527,8 +569,6 @@ class ACPSession(Keeper[Background]):
         turn, decided by the turn being served; a background sub-agent's (whose, its log says)
         by its run's attempt, turn or no turn. With nothing to decide it — no turn, a
         background run that ended — it is refused (``live.UNATTENDED``)."""
-        from trellis.harness.adapters.acp import HARNESS_PREFIX, chosen
-
         name, turn = tool_call.title or "", self.turn
         main = turn is not None and tool_call.tool_call_id in turn.options.calls
         agent = None if main or not self.background else await self.whose(tool_call.tool_call_id)

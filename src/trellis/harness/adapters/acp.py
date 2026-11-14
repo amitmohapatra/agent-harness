@@ -109,13 +109,22 @@ from trellis.harness.adapters.claude import RESUMED, resumed_call
 from trellis.harness.bounded import SAID_ONCE, LRUSet
 from trellis.harness.bridges import live as shared
 from trellis.harness.bridges.acp_live import (
+    CANCEL_SECONDS,
     CODE,
     GONE,
     GONE_SAID,
+    HARNESS_PREFIX,
     QUEUED,
+    SERVER,
+    USAGE_SECONDS,
     WAITS,
+    ACPRunError,
     ACPSession,
     Background,
+    accounted,
+    chosen,
+    dismissed,
+    selected,
     shape,
 )
 from trellis.harness.bridges.helpers import Helpers, Kind
@@ -131,23 +140,14 @@ from trellis.harness.tools.base import UNDECLARED, SideEffects
 
 log = logging.getLogger("trellis.harness")
 
-#: The harness's MCP server, as the agent names its tools (``tools.convert.mcp.SERVER``).
-SERVER: Final = "trellis"
-HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 #: The key a turn's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "acp"
 #: The model name an ACP agent's own usage is counted under when the target names none.
 ACP_MODEL: Final = "acp"
-#: How often the agent's usage log is read while a turn runs (and the budget checked).
-USAGE_SECONDS: Final = 0.5
 #: How long, after a turn, the agent's usage log is read until it stops growing (at most), and
 #: how often.
 SETTLE_SECONDS: Final = 2.0
 SETTLE_STEP: Final = 0.1
-#: The most a cancelled turn waits for the agent to say it stopped.
-CANCEL_SECONDS: Final = 5.0
-#: The last of the agent's stderr kept, for the error of a process that ended mid-turn.
-STDERR_TAIL: Final = 4096
 #: The most MCP tools the agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
 #: The session modes the harness governs every call in: a mode that approves on its own
@@ -584,10 +584,6 @@ class ACPInput:
     #: that question's answer — the sub-agent's run, its interrupt, the person's resolution —
     #: for when its session is not on this server (``live.gone``)
     background_answer: tuple[str, str, InterruptResolution] | None = None
-
-
-class ACPRunError(RuntimeError):
-    """The agent ended the turn as failed, or its process ended in the middle of it."""
 
 
 #: The end of a turn, on the attempt's queue: the prompt's answer (or its error).
@@ -1488,7 +1484,7 @@ class Attempt:
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
-            return RequestPermissionResponse(outcome=_cancelled())
+            return RequestPermissionResponse(outcome=dismissed())
         if isinstance(decided, ToolOutcome):
             self._refused(known)
             self.followup = REJECTED.format(tool=name, why=str(decided.output))
@@ -1513,9 +1509,9 @@ class Attempt:
             answer = await self.runtime.ask(question, options=labels)
         except Paused:
             await self._stop()
-            return RequestPermissionResponse(outcome=_cancelled())
+            return RequestPermissionResponse(outcome=dismissed())
         chosen = {o.name: o.option_id for o in options}[answer]  # one of the labels asked
-        return RequestPermissionResponse(outcome=_selected(chosen))
+        return RequestPermissionResponse(outcome=selected(chosen))
 
     # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
     async def read_text_file(
@@ -1840,21 +1836,6 @@ def _members(text: str) -> dict[tuple[str, str], tuple[str, str]]:
     return found
 
 
-def accounted(runtime: Runtime, record: Mapping[str, Any], model: str | None) -> None:
-    """One model request's usage, as the agent's log records it (``usage.record``), on
-    ``runtime``'s budget, under ``model`` (else the log's)."""
-    usage = record["usage"]
-    cached = int(usage.get("inputCacheRead") or 0)
-    written = int(usage.get("inputCacheCreation") or 0)
-    budget.account(
-        runtime,
-        model=model or str(record.get("model") or "kimi"),
-        input_tokens=int(usage.get("inputOther") or 0) + cached + written,
-        output_tokens=int(usage.get("output") or 0),
-        cached=cached,
-    )
-
-
 class Deciding:
     """How a background sub-agent's run answers what its sub-agent asks permission for (the
     ``options`` of its attempt's ``live.Turn``): a harness tool's call is let through (the
@@ -1891,29 +1872,6 @@ def _spec(runtime: Runtime, profile: Profile | None, name: str) -> ToolSpec:
     tool catalog's word), else by its risk (its profile's built-ins; undeclared otherwise)."""
     side_effects = (profile.builtins if profile else {}).get(name)
     return runtime.native.get(name) or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
-
-
-def chosen(options: list[Any], kind: str) -> Any:
-    """The answer choosing the first option of ``kind`` (``allow_once``, ``reject_once``);
-    the agent's question cancelled when it offers none."""
-    from acp.schema import RequestPermissionResponse
-
-    for option in options:
-        if option.kind == kind:
-            return RequestPermissionResponse(outcome=_selected(option.option_id))
-    return RequestPermissionResponse(outcome=_cancelled())
-
-
-def _selected(option_id: str) -> Any:
-    from acp.schema import AllowedOutcome
-
-    return AllowedOutcome(outcome="selected", option_id=option_id)
-
-
-def _cancelled() -> Any:
-    from acp.schema import DeniedOutcome
-
-    return DeniedOutcome(outcome="cancelled")
 
 
 def _args(raw: Any, content: Any) -> dict[str, Any]:
