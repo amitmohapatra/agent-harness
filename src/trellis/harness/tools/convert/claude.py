@@ -38,6 +38,8 @@ from trellis.harness.tools.base import Tool
 
 #: The in-process server's name, and so the prefix Claude sees.
 SERVER: Final = "trellis"
+#: How Claude names a tool of that server: this before the tool's own name.
+PREFIX: Final = f"mcp__{SERVER}__"
 #: The server config's key (the CLI's ``--mcp-config``, which the SDK passes on with all but the
 #: server's instance) that loads its tools from the first step instead of deferring them.
 ALWAYS_LOAD: Final = "alwaysLoad"
@@ -62,6 +64,17 @@ async def named_call(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> An
         return await call_next(ctx)
     finally:
         _CALL.reset(token)
+
+
+def named(tool: str) -> str:
+    """The harness tool ``tool`` as Claude names it."""
+    return f"{PREFIX}{tool}"
+
+
+def bare(name: str) -> str | None:
+    """The harness tool's own name, of Claude's name for a tool; ``None``: not a harness
+    tool (a built-in, another server's)."""
+    return name.removeprefix(PREFIX) if name.startswith(PREFIX) else None
 
 
 def call_id() -> str | None:

@@ -179,13 +179,6 @@ _NUDGE: Final = object()
 _OVER: Final = object()
 
 
-def _bare(name: str) -> str:
-    """A tool's name as the run's tool set has it: a harness tool's without Claude's prefix."""
-    from trellis.harness.tools.convert.claude import SERVER
-
-    return name.removeprefix(f"mcp__{SERVER}__")
-
-
 def backgrounded(message: Any) -> bool:
     """Whether the task a ``task_started`` ``message`` starts works in the background of its
     call: a subagent that says so (``is_backgrounded``), and a dynamic workflow, always."""
@@ -765,11 +758,13 @@ class LiveSession:
         """The relay of one hook: the same hook of the turn being served — of the attempt of
         its run, for a background subagent that has one (:class:`Background`); with none, a
         tool call is refused (:data:`UNATTENDED`) and any other event passes."""
+        from trellis.harness.tools.convert import claude as convert
 
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
             found = await self._working(given.get("agent_id"), given.get("agent_type"))
             if found is not None and found is self.shared and event == "PreToolUse":
-                self._owned[_bare(str(given.get("tool_name") or ""))] += 1
+                tool = str(given.get("tool_name") or "")
+                self._owned[convert.bare(tool) or tool] += 1
             if found is not None:
                 answer = await found.asked(
                     lambda at: at.options.hooks[event][matcher].hooks[callback](
@@ -806,10 +801,10 @@ class LiveSession:
         """Whose a harness tool's call is, once its hook let it through, by Claude's id of
         the call (the request that makes it names the id and not who makes it:
         :meth:`_call`); forgotten when a hook refused it, and once it ran."""
-        from trellis.harness.tools.convert.claude import SERVER
+        from trellis.harness.tools.convert import claude as convert
 
         name, ref = str(given.get("tool_name") or ""), str(given.get("tool_use_id") or "")
-        if not name.startswith(f"mcp__{SERVER}__"):
+        if convert.bare(name) is None:
             return
         said = (answer.get("hookSpecificOutput") if isinstance(answer, dict) else None) or {}
         decided = said.get("permissionDecision")

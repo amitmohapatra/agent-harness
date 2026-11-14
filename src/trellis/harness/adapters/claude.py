@@ -1012,9 +1012,8 @@ def _transcript(messages: Sequence[Any]) -> list[Said]:
         UserMessage,
     )
 
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import bare
 
-    harness = f"mcp__{SERVER}__"
     out: list[Said] = []
     for message in messages:
         if getattr(message, "parent_tool_use_id", None) is not None:
@@ -1022,7 +1021,7 @@ def _transcript(messages: Sequence[Any]) -> list[Said]:
         if isinstance(message, AssistantMessage):
             text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
             calls = tuple(
-                Called(b.id, b.name.removeprefix(harness), b.input)
+                Called(b.id, bare(b.name) or b.name, b.input)
                 for b in message.content
                 if isinstance(b, ToolUseBlock)
             )
@@ -1171,13 +1170,13 @@ def _spent(
 def _resumed(native_input: ClaudeInput, run: Invocation) -> str:
     """What the resumed session is told: the call a person answered about, named as Claude
     calls it (a harness tool through the ``trellis`` server, a built-in by its own name)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import named
 
     call = native_input.answered
     if call is None:
         return RESUMED
     harness = any(t.name == call.tool for t in run.tools)
-    name = f"mcp__{SERVER}__{call.tool}" if harness else call.tool
+    name = named(call.tool) if harness else call.tool
     return resumed_call(call, name, denied=native_input.denied, asked=native_input.asked)
 
 
@@ -1238,11 +1237,11 @@ class Steps:
     def started(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self.calls[call_id] = (name, args, time.time())
         self.runtime.model_ended(STEP)
-        from trellis.harness.tools.convert.claude import SERVER
+        from trellis.harness.tools.convert.claude import bare
 
-        if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
-            bare = name.removeprefix(f"mcp__{SERVER}__")
-            self.runtime.replay.announced(content_key("call", bare, args), call_id)
+        own = bare(name)
+        if own is not None:  # its MCP request names no call: said here
+            self.runtime.replay.announced(content_key("call", own, args), call_id)
 
     def approved(self, tool_use_id: Any) -> None:
         """A person approved the call the CLI names ``tool_use_id`` before it ran: carried to
@@ -1473,14 +1472,14 @@ async def _decide(steps: Steps, given: Any, tool_use_id: str | None) -> SyncHook
     briefed (:func:`_briefed`), and a workflow's opens its child run. Before Claude takes a
     step, the run's progress is saved — its session as mirrored so far among it — so a worker
     that dies during the step continues the session from there, not from an earlier step."""
-    from trellis.harness.tools.convert.claude import SERVER, WAITING
+    from trellis.harness.tools.convert.claude import WAITING, bare
 
     runtime = current()
     assert runtime is not None  # the CLI asks inside the run it works for
     await runtime.progress(now=True)
     name, args = given["tool_name"], dict(given.get("tool_input") or {})
     call_id = tool_use_id or str(given.get("tool_use_id") or name)
-    if name.startswith(f"mcp__{SERVER}__"):
+    if bare(name) is not None:
         steps.started(call_id, name, args)  # the bridge records it
         return _decided("allow")
     assert runtime.helpers is not None  # the query runs with the attempt's helpers
@@ -1645,13 +1644,13 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
     the bridge's. Either way the stall watch goes on once no call runs. A shell command of
     Claude's own (not a subagent's: the CLI keeps their folder) is where the shell may have
     moved (``Shell.ran``)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import bare
 
     async def post_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         call_id = tool_use_id or str(given.get("tool_use_id") or given.get("tool_name"))
         found = steps.ended(call_id)
         name = str(given.get("tool_name") or "")
-        if name.startswith(f"mcp__{SERVER}__"):
+        if bare(name) is not None:
             return {}
         steps.adapter.observed(name)
         _, args, started = found or (name, dict(given.get("tool_input") or {}), time.time())
@@ -1685,16 +1684,15 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
 async def _declared(target: Any) -> list[ToolSpec]:
     """The tools ``ClaudeAgentOptions`` declare (:meth:`ClaudeAdapter.native`, less what the
     agent was seen calling)."""
-    from trellis.harness.tools.convert.claude import SERVER
+    from trellis.harness.tools.convert.claude import SERVER, bare
 
     given = target.tools if isinstance(target.tools, list) else list(BUILTIN_SIDE_EFFECTS)
     denied = set(target.disallowed_tools or ())
     found = [native_spec(name) for name in given if name not in denied]
-    own = f"mcp__{SERVER}__"
     found.extend(
         native_spec(name)
         for name in target.allowed_tools or ()
-        if name.startswith("mcp__") and not name.startswith(own) and name not in denied
+        if name.startswith("mcp__") and bare(name) is None and name not in denied
     )
     for server, config in configured_servers(target.mcp_servers).items():
         instance = config.get("instance") if isinstance(config, Mapping) else None
