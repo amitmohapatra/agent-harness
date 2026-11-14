@@ -286,6 +286,20 @@ async def test_every_sheet_of_a_workbook_is_a_table_under_its_header(run: Run) -
     ), read
 
 
+def test_a_cell_merged_in_the_last_row_or_column_is_its_value_in_every_cell_it_spans() -> None:
+    book = Workbook()
+    rows = book.active
+    assert rows is not None
+    for row in (("k", "v", "w"), ("x", 1, 2), ("y", None, None), ("z", 5, None)):
+        rows.append(row)
+    rows.merge_cells("C2:C3")  # in the last column
+    rows.merge_cells("B4:C4")  # in the last row
+    out = io.BytesIO()
+    book.save(out)
+    table = (["k", "v", "w"], [["x", 1, 2], ["y", None, 2], ["z", 5, 5]])
+    assert stored._sheets(out.getvalue()) == {"Sheet": table}
+
+
 async def test_a_csv_file_reads_as_it_is_after_how_it_was_made(run: Run) -> None:
     files = run.agent.harness.files
     await files.put("t/u/c_1/r0", "d.csv", b"a,b\n1,2\n", source="sandbox_exec")
