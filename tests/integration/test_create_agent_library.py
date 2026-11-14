@@ -296,6 +296,105 @@ async def test_a_tool_a_middleware_adds_per_call_is_offered_run_and_governed(
     assert done.answer == "aisle 4" and ran == ["shelf a"]
 
 
+# ------------------------------------------------------------------------- tool results
+@lc_tool(response_format="content_and_artifact")
+def report(sku: str) -> tuple[str, dict[str, Any]]:
+    """A stock report: the text the model reads, and the rows it does not."""
+    ran.append(f"report {sku}")
+    return f"report of {sku}", {"rows": [1, 2, 3]}
+
+
+report.metadata = {"side_effects": "read"}
+
+
+@lc_tool
+def picture(sku: str) -> list[dict[str, Any]]:
+    """A photo of a SKU, as content blocks."""
+    ran.append(f"picture {sku}")
+    return [
+        {"type": "text", "text": f"photo of {sku}"},
+        {"type": "image", "base64": "iVBORw0KGgo=", "mime_type": "image/png"},
+    ]
+
+
+picture.metadata = {"side_effects": "read"}
+
+
+async def test_a_tools_artifact_and_content_blocks_reach_the_graph_as_the_tool_made_them(
+    harness: Harness,
+) -> None:
+    """A ``content_and_artifact`` tool's message keeps its artifact (data the model does not
+    read, kept in the graph's state), and a tool's content blocks reach the model as blocks —
+    an image it sees, not its JSON as text — as the library gives them; each call is still
+    governed and recorded with the text of its result."""
+    model = ScriptedChatModel(turns=[[("report", {"sku": "a"}), ("picture", {"sku": "a"})], "ok"])
+    graph = create_agent(model, tools=[report, picture])
+    events = [e async for e in harness.wrap(graph, id="results").stream("report a", user="u")]
+    assert sorted(results(events)) == [("picture", "ok"), ("report", "ok")]
+    read = {m.name: m for m in model.seen[-1] if isinstance(m, ToolMessage)}
+    assert read["report"].content == "report of a"
+    assert read["report"].artifact == {"rows": [1, 2, 3]}
+    assert read["picture"].content == picture.invoke({"sku": "a"})
+    [recorded] = [
+        e.data
+        for e in events
+        if e.type is RunEventType.TOOL_CALL_RESULT and e.data["tool"] == "picture"
+    ]
+    assert "photo of a" in str(recorded)
+
+
+async def test_a_tools_artifact_is_kept_when_its_call_is_replayed_after_a_pause(
+    harness: Harness,
+) -> None:
+    """Without a checkpointer, the run resumed is the graph run again, and a call made before
+    the pause is answered from the journal: its message still carries the artifact the tool
+    made, though the tool does not run again."""
+    model = ScriptedChatModel(
+        turns=[[("report", {"sku": "a"}), ("order", {"sku": "a"})]] * 2 + ["ordered"]
+    )
+    graph = create_agent(model, tools=[report, order])
+    agent = harness.wrap(graph, id="replayed")
+    paused = await agent.run("report and order a", user="u")
+    assert paused.interrupt is not None
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="u")
+    assert done.status is RunStatus.SUCCESS and ran == ["report a", "order a"]
+    [kept] = [m for m in model.seen[-1] if isinstance(m, ToolMessage) and m.name == "report"]
+    assert kept.artifact == {"rows": [1, 2, 3]} and kept.content == "report of a"
+
+
+async def test_a_call_made_twice_in_one_step_runs_twice_as_the_library_runs_it(
+    harness: Harness,
+) -> None:
+    """``create_agent`` runs each call its model makes, the same call twice included: so does
+    the run, each governed and recorded, and the model reads each one's own result."""
+    model = ScriptedChatModel(turns=[[("stock", {"sku": "a"}), ("stock", {"sku": "a"})], "7"])
+    graph = create_agent(model, tools=[stock])
+    events = [e async for e in harness.wrap(graph, id="twice").stream("a twice", user="u")]
+    assert ran == ["stock a", "stock a"]
+    assert results(events) == [("stock", "ok"), ("stock", "ok")]
+    read = [m.content for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert read == ["a: 7", "a: 7"]
+
+
+async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Harness) -> None:
+    """Without the harness's middleware the graph runs its own loop, and its tool's result is
+    the library's: a result past the size the harness keeps, and a table, reach the model as the
+    tool returned them, with no tool of the harness's added to read them back."""
+
+    @lc_tool
+    def big(n: int) -> str:
+        """A long text."""
+        return "word " * n
+
+    big.metadata = {"side_effects": "read"}
+    model = ScriptedChatModel(turns=[("big", {"n": 20_000}), "read"])
+    graph = create_agent(model, tools=[big])
+    assert (await harness.wrap(graph, id="big").run("x", user="u")).answer == "read"
+    [read] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert read.content == "word " * 20_000
+    assert model.requests[-1]["tools"] == ["big"]
+
+
 # ---------------------------------------------------------------------- the calls' limits
 @pytest.mark.parametrize("how", ["end", "error"])
 async def test_model_call_limit_middleware_ends_the_run_as_it_is_told_to(

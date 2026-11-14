@@ -435,9 +435,12 @@ async def governed_call(
     The harness's tools, the graph's state tools (:data:`STATE_TOOLS`, the framework's:
     :func:`framework_made`), a call already governed and any call outside a run are let
     through as they are — a file tool of a backend outside the graph's state
-    (:data:`OUTSIDE_STATE`) is governed. A call repeating an earlier one of its model step
-    (the same tool, the same arguments) does not run — the harness's tools' included — and
-    points the model to the earlier one's result (``bridge.same``)."""
+    (:data:`OUTSIDE_STATE`) is governed. A call of the graph's own tools runs however often
+    its model step makes it, as the library runs it (a write is still made once: its
+    idempotency key); a harness tool's call repeating an earlier one of its step (the same
+    tool, the same arguments) does not run, and points the model to the earlier one's result
+    (``bridge.same``). The message the call ends with is its tool's, as the library made it
+    (:func:`_answered`)."""
     runtime = current()
     call = request.tool_call
     own = request.tool
@@ -446,15 +449,14 @@ async def governed_call(
     state_only = call["name"] in STATE_TOOLS and framework_made(own)
     if state_only and not (own.metadata or {}).get(OUTSIDE_STATE):
         return _scratch_said(runtime, call["name"], await handler(request))
-    _, step = _step_of(request)
-    first = _repeats(step).get(str(call["id"]))
-    if first is not None:
-        repeat = bridge.same(
-            runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
-        )
-        return _message(repeat, request, kept=_paged(runtime, request))
     if converted.made(own) or call["name"] in runtime.toolbox:
-        # the harness's own: its call goes through the bridge
+        # the harness's own: its call goes through the bridge, a repeat of its step's too
+        first = _repeats(_step_of(request)[1]).get(str(call["id"]))
+        if first is not None:
+            repeat = bridge.same(
+                runtime, call["name"], call["args"], call_id=str(call["id"]), first=first
+            )
+            return _message(repeat, request, kept=_paged(runtime, request))
         return _kept_own(runtime, request, await handler(request))
     produced: list[Any] = []
     raised: list[Exception] = []
@@ -501,7 +503,8 @@ async def governed_call(
     update = await _update(runtime, call, outcome, produced)
     if update is not None:
         return update  # the graph's state update, as the tool made it
-    return _answered(runtime, request, outcome, reported, raised)
+    own_message = await _made(runtime, call, outcome, produced)
+    return _answered(runtime, request, outcome, reported, raised, made=own_message)
 
 
 def _answered(
@@ -510,6 +513,8 @@ def _answered(
     outcome: ToolOutcome,
     reported: Sequence[tuple[ToolMessage, ToolError]],
     raised: Sequence[Exception],
+    *,
+    made: ToolMessage | None = None,
 ) -> ToolMessage:
     """The message a governed call that gave the graph no update ends with: the failed message
     the graph made of the tool's error (``reported``: the tool node's, a wrapper's), as the
@@ -518,11 +523,19 @@ def _answered(
     (:func:`_failed`), for the graph to handle as it does — unless the hooks made the call a
     result: then it is that result. A failure the hooks worded otherwise is raised all the same
     (the graph's retry, its wrappers and its tool node act on it as ever), and the failed
-    message the graph makes of it is the hooks' (``_Calling.said``)."""
+    message the graph makes of it is the hooks' (``_Calling.said``). A result the tool's own
+    message carries more of than its text (``made``: :func:`_made`) is that message, as the
+    library made it, unless the hooks changed it: its content blocks (an image, a file) as
+    they are, and its artifact beside the text, which the harness gives as any result's."""
     calling = _under_way()
     calling.said = None  # this try's: what an earlier one's hooks said is not this one's
     if reported and outcome.output == failed_output(outcome.tool, reported[0][1]):
         return reported[0][0]
+    if made is not None and not bridge.hooked(outcome):
+        if runtime not in _PAGED or not isinstance(made.content, str):
+            return made
+        said = _message(outcome, request, kept=_paged(runtime, request)).content
+        return made.model_copy(update={"content": said})
     message = _message(outcome, request, kept=_paged(runtime, request))
     if raised and not outcome.ok:
         if bridge.hooked(outcome):
@@ -553,6 +566,27 @@ async def _update(
         await _kept_update(runtime, call, outcome, produced[-1])
         return produced[-1]
     if outcome.cached and UPDATE in outcome.metadata:
+        kept = _update_of(outcome.metadata[UPDATE], str(call["id"]))
+        return None if isinstance(kept, ToolMessage) else kept  # a message: :func:`_made`
+    return None
+
+
+async def _made(
+    runtime: Runtime, call: Mapping[str, Any], outcome: ToolOutcome, produced: Sequence[Any]
+) -> ToolMessage | None:
+    """The tool's own message for a governed call that ended well, where it carries more than
+    the text the run records of it: content blocks (an image, a file: a multimodal result the
+    model reads as such) or an artifact (``response_format="content_and_artifact"``: data the
+    model does not read, which the graph's state keeps) — the message its tool returned now
+    (kept for a replay: :func:`_kept_update`), or, the call replayed from the journal, the one
+    kept; else ``None``: the harness's message of the outcome says all of it."""
+    if not outcome.ok:
+        return None
+    if produced and isinstance(done := produced[-1], ToolMessage):
+        if done.artifact is not None or not isinstance(done.content, str):
+            await _kept_update(runtime, call, outcome, done)  # its text alone is recorded
+        return done
+    if outcome.cached and UPDATE in outcome.metadata:  # a message (:func:`_update`: no other)
         return _update_of(outcome.metadata[UPDATE], str(call["id"]))
     return None
 
@@ -702,17 +736,20 @@ def _failed(error: Exception, message: ToolMessage) -> NoReturn:
 
 def _message(outcome: ToolOutcome, request: ToolCallRequest, *, kept: bool = False) -> ToolMessage:
     """A harness call's outcome as the tool message the model reads — ``kept``: a large one
-    kept in the run and previewed, ``read_file`` paging it (``tools.results``); a table of
-    many rows read whole is kept too, for ``query_result`` (``results.tabled``) — its table
-    named by what the call asked (:func:`_table`)."""
+    kept in the run and previewed, ``read_file`` paging it (``tools.results``); where the
+    harness runs the loop (:data:`_PAGED`), a table of many rows read whole is kept too, for
+    ``query_result`` (``results.tabled``) — its table named by what the call asked
+    (:func:`_table`). Elsewhere the result's text, as it is."""
     call = request.tool_call
-    table = _table(_step_of(request)[1], call)
+    text = text_of(outcome.output)
+    if kept:
+        content = results.readable(outcome.output, _table(_step_of(request)[1], call))
+    elif current() in _PAGED:
+        content = results.tabled(text, _table(_step_of(request)[1], call))
+    else:
+        content = text
     return ToolMessage(
-        content=(
-            results.readable(outcome.output, table)
-            if kept
-            else results.tabled(text_of(outcome.output), table)
-        ),
+        content=content,
         tool_call_id=str(call["id"]),
         name=call["name"],
         status="error" if outcome.status in FAILED else "success",
@@ -1494,25 +1531,13 @@ async def _narrow(
     request: ModelRequest[Any],
     handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
 ) -> ModelResponse[Any]:
-    """A model call offered only the tools the run offers (:func:`_offered`) — and, once the
-    run keeps a large result, the harness's ``read_file`` and ``query_result`` the graph was not
-    built with (:func:`_readers`; their calls answered in its tool node, :func:`govern_tool_nodes`),
-    its tools' large results kept and previewed as ``HarnessTools`` keeps them (:data:`_PAGED`):
-    without them a ``create_agent`` graph built without ``middleware()`` summed rows by hand
-    (the break-and-fix gate, 5 analytics turns) —, the memory context sent with the question
-    (:func:`with_question`), the end of the history marked when a caching middleware marks the
-    request (:func:`history_marked`), and the day it is after the instructions
-    (:func:`_dated`)."""
+    """A model call offered only the tools the run offers (:func:`_offered`), the memory
+    context sent with the question (:func:`with_question`), the end of the history marked when
+    a caching middleware marks the request (:func:`history_marked`), and the day it is after
+    the instructions (:func:`_dated`). Its tools' results are the library's, as they are: the
+    harness keeps and previews large results, and keeps tables for ``query_result``, only
+    where it runs the loop (``HarnessTools``: ``ReAct``, ``middleware()``)."""
     runtime = current()
-    if runtime is not None:
-        _PAGED.add(runtime)
-        present = {_named(t) for t in request.tools}
-        # as schemas: ``create_agent`` refuses a tool object its tool node lacks, and leaves a
-        # schema to the provider (the tool node answers the call: :func:`govern_tool_nodes`)
-        readers = [convert_to_openai_tool(t) for t in _readers(runtime, request.state, present)]
-        if readers:
-            request = request.override(tools=[*request.tools, *readers])
-        request = _stubs_tabled(runtime, request)
     asked = history_marked(with_question(_offered(request, runtime)))
     return await handler(_dated(asked, runtime))
 
