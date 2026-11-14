@@ -1095,7 +1095,15 @@ async def test_a_session_that_owes_a_left_turns_result_for_too_long_is_replaced(
     agent = harness.wrap(options(tmp_path, scripts), id="owing")
     await agent.run("research the market", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
-    await until(lambda: len(served(tmp_path)) == 2)
+
+    def mirrored(prompt: str) -> bool:
+        """The session's own record of the turn ``prompt`` began has come (the CLI mirrors it
+        after it took the turn): what a process that resumes the session goes on from."""
+        live = live_of(agent)
+        kept = live.mirror.transcripts.values() if live and live.mirror else ()
+        return any(e.get("prompt") == prompt for entries in kept for e in entries)
+
+    await until(lambda: mirrored("a long one"), seconds=60)
     await agent.cancel(turn_running(agent))
     assert (await slow).status is RunStatus.CANCELLED
     events = [e async for e in agent.stream("and now?", user="u1", thread="t1")]
