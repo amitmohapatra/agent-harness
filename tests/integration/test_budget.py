@@ -227,6 +227,27 @@ async def test_a_read_is_retried_after_an_error_that_may_pass(harness: Harness) 
     assert result.answer == 7 and shop.reads == ["a", "a", "a"]
 
 
+async def test_a_reads_retries_wait_at_random_under_half_a_second_then_doubled(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()  # the module's own backoff, not this file's
+    ranges: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        ranges.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr(base.random, "uniform", uniform)
+    shop = Shop(fails=3)
+
+    async def reader(input: str, agent: Runtime) -> Any:
+        return await agent.tools.call("stock", sku="a")
+
+    result = await arm(harness.wrap(reader, id="r"), shop.tools()).run("read", user="u")
+    assert shop.reads == ["a", "a", "a"]  # 3 attempts in all
+    assert ranges[:2] == [(0, 0.5), (0, 1.0)] and "stock failed" in str(result.answer)
+
+
 async def test_a_read_waits_what_retry_after_says_when_there_is_time(harness: Harness) -> None:
     shop = Shop(fails=1, after=0.05)
 
