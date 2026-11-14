@@ -46,7 +46,7 @@ from trellis.harness.files import EVENT as FILE_EVENT
 from trellis.harness.files import StoredFile, scope
 from trellis.harness.history import Said
 from trellis.harness.identity import Identity
-from trellis.harness.journal import Made, Pending, Replay, content_key
+from trellis.harness.journal import Made, Pending, Replay, calling_ident, content_key
 from trellis.runs import LeaseLostError
 
 if TYPE_CHECKING:
@@ -801,7 +801,9 @@ class Runtime:
             # makes that call again when the run resumes (``Replay.made``)
             call = _call.get()
             inside = call.made if call is not None and self.suspend is None else None
-            self.pending = Pending(key=key, interrupt=interrupt, inside=inside)
+            self.pending = Pending(
+                key=key, interrupt=interrupt, inside=inside, ident=calling_ident()
+            )
             if self.suspend is None:  # what the calls before this one read stays read
                 helpers = self.helpers
                 self.replay.paused(since=None if helpers is None else helpers.begun_again())

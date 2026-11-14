@@ -1059,6 +1059,11 @@ class Steps:
     def started(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         self.calls[call_id] = (name, args, time.time())
         self.runtime.model_ended(STEP)
+        from trellis.harness.tools.convert.claude import SERVER
+
+        if name.startswith(f"mcp__{SERVER}__"):  # its MCP request names no call: said here
+            bare = name.removeprefix(f"mcp__{SERVER}__")
+            self.runtime.replay.announced(content_key("call", bare, args), call_id)
 
     def ended(self, call_id: str) -> tuple[str, dict[str, Any], float] | None:
         self.helped.pop(call_id, None)
@@ -1232,7 +1237,7 @@ def _governance(steps: Steps) -> Any:
         try:
             # a subagent's call is decided as its helper's work: an approval names the helper
             with answers_read() as read, runtime.helpers.working(helper):
-                decided = await bridge.permitted(_spec(runtime, name), args)
+                decided = await bridge.permitted(_spec(runtime, name), args, call_id=call_id)
         except Paused:  # the run pauses: Claude stops here, and the resume goes on
             steps.helped.pop(call_id, None)
             return {**_decided("deny", WAITING), "continue_": False, "stopReason": WAITING}
@@ -1311,7 +1316,7 @@ def _asked(own: Any, steps: Steps, shell: Shell) -> Any:
             try:
                 # the same helper's work as the call's PreToolUse said (``Steps.helped``)
                 with helpers.working(steps.helped.get(this)):
-                    decided = await bridge.asked(spec, args, CLAUDE_CODE)
+                    decided = await bridge.asked(spec, args, CLAUDE_CODE, call_id=this)
             except Paused:  # the run pauses: Claude stops here, and the resume goes on
                 decided = None
             if decided is None:

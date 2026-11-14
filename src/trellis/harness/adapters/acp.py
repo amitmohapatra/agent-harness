@@ -101,7 +101,7 @@ from trellis.harness.bridges.helpers import Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
-from trellis.harness.journal import Pending
+from trellis.harness.journal import Pending, content_key
 from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
@@ -1256,6 +1256,11 @@ class Attempt:
         self._handles()
         name = tool_call.title or ""
         if name.startswith(HARNESS_PREFIX):
+            # its call through the harness's MCP server names no call: said here
+            known = self.calls.get(tool_call.tool_call_id)
+            args = known.args if known is not None else _args(tool_call.raw_input, None)
+            called = content_key("call", name.removeprefix(HARNESS_PREFIX), args)
+            self.runtime.replay.announced(called, tool_call.tool_call_id)
             return _chosen(options, "allow_once")
         if self.profile is not None and name in self.profile.questions:
             return await self._question(options, tool_call)
@@ -1277,7 +1282,7 @@ class Attempt:
         runtime.model_ended(STEP)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
         try:
-            decided = await _permitted(spec, args, self.shell, asks_as)
+            decided = await _permitted(spec, args, self.shell, asks_as, tool_call.tool_call_id)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
@@ -1587,7 +1592,7 @@ def _said_reads(agent_id: str) -> None:
 
 
 async def _permitted(
-    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str
+    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str, call_id: str
 ) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
     (``bridge.permitted``: hooks, governance), and — since the agent asks — a person asked
@@ -1598,7 +1603,8 @@ async def _permitted(
     or when the run changed its arguments (the agent is told to call it again so: that call is
     the one let through). A pause propagates."""
     reads = spec.side_effects == "read" or shell.read_only(spec.name, args)
-    return await bridge.permitted(spec, args, framework=None if reads else asks_as)
+    framework = None if reads else asks_as
+    return await bridge.permitted(spec, args, framework=framework, call_id=call_id)
 
 
 def _chosen(options: list[Any], kind: str) -> Any:

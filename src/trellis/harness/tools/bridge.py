@@ -148,8 +148,10 @@ async def call(
     made = runtime.replay.made(tool.name, args)  # the paused call made again runs as it was
     key = content_key("call", tool.name, made.args)
     step = runtime.next_step() if step is None else step
+    # the call's identity: its framework's id (given, or said before its MCP request came)
+    ident = call_id or runtime.replay.claimed(content_key("call", tool.name, args))
     async with runtime.replay.exclusive(key):
-        with runtime.replay.calling(key):
+        with runtime.replay.calling(key, ident=ident):
             outcome = await _called(runtime, tool, made, key=key, step=step, call_id=call_id)
     runtime.replay.ended(made)
     return outcome
@@ -184,7 +186,11 @@ def same(
 
 
 async def permitted(
-    spec: ToolSpec, args: dict[str, Any], *, framework: str | None = None
+    spec: ToolSpec,
+    args: dict[str, Any],
+    *,
+    framework: str | None = None,
+    call_id: str | None = None,
 ) -> ToolCall | ToolOutcome:
     """A call its framework runs itself (Claude Code's built-in tools, through its permission
     callback), decided as a harness call is — the run's ``before_tool`` hooks, then governance,
@@ -195,12 +201,13 @@ async def permitted(
     is let through as it was made, unless a person was just asked about it (governance's
     question, a hook's): one call, one question. The same call made again after it ran for
     the run (:func:`observed`: its framework began that work again — a subagent paused in its
-    work, started again) is not let through: its result is what it reads."""
+    work, started again) is not let through: its result is what it reads. ``call_id``: the
+    framework's id of the call, whose answers are its own (``Replay.calling``)."""
     runtime = current()
     assert runtime is not None  # a framework asks inside the run it works for
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
-    with runtime.replay.calling(key):
+    with runtime.replay.calling(key, ident=call_id):
         replayed, output = runtime.replay.call(key)  # it ran for the run (:func:`observed`)
         if replayed:
             said = _replayed(spec.name, output).output
@@ -218,10 +225,12 @@ async def permitted(
         return rejected
     if framework is None or decision.asks or call.args != args:
         return call
-    return await asked(spec, args, framework)
+    return await asked(spec, args, framework, call_id=call_id)
 
 
-async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCall | ToolOutcome:
+async def asked(
+    spec: ToolSpec, args: dict[str, Any], framework: str, *, call_id: str | None = None
+) -> ToolCall | ToolOutcome:
     """A call ``framework`` asks its user about before it runs it (its own permission check:
     Claude Code's ``can_use_tool``, Kimi Code's ``session/request_permission``), once
     :func:`permitted` let it through: a person is asked, as governance asks — answered from the
@@ -233,7 +242,7 @@ async def asked(spec: ToolSpec, args: dict[str, Any], framework: str) -> ToolCal
     key = content_key("call", spec.name, args)
     call = ToolCall(tool=spec.name, args=args, task=runtime.task, idempotency_key=key)
     why = FRAMEWORK_ASKS.format(framework=framework)
-    with runtime.replay.calling(key, again=True):  # the check of the call permitted
+    with runtime.replay.calling(key, again=True, ident=call_id):  # the call permitted
         _, call, rejected = await _decided(runtime, spec, call, Ask(why))
     return call if rejected is None else rejected
 
@@ -584,7 +593,8 @@ async def _decided(
             asked.question, assignee=asked.assignee, component=asked.component, props=asked.props
         )
     ours = tool is not None
-    # a call answered already in this run keeps its answer: a denial stays one
+    # a call answered already in this run keeps its answer: a denial stays the call's (a new
+    # call its framework names by another id is asked: ``Replay.answer``)
     answered = runtime.replay.answered(content_key("approve", spec.name, call.args))
     if (
         decision.asks

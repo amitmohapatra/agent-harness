@@ -555,3 +555,51 @@ def test_a_step_passed_drops_the_reads_of_its_records() -> None:
     assert journal.calls["k"] == ["y"] and journal.reads == {"k": [{}]}
     later.passed("s2")
     assert "k" not in journal.calls and "k" not in journal.reads
+
+
+def test_a_rejection_is_the_call_it_answered_where_the_session_goes_on() -> None:
+    """A rejection filed for the call its framework named ``c1``: that call, made again under
+    its id or still waiting, keeps it; another call — ``c2``, the same arguments — is asked,
+    and reads its own answer after it; run again from its input, ids are not compared."""
+    journal = Journal(session="s1")
+    first = Replay(journal)
+    with first.calling("k", ident="c1"):
+        assert first.answer("a") is None
+    asked = Interrupt(tenant_id="t", run_id="r", question="Approve?")
+    journal.pending = Pending(key="a", interrupt=asked, ident="c1")
+    journal.answered(
+        InterruptResolution(interrupt_id="r.1.1", run_id="r", decision=InterruptDecision.REJECT)
+    )
+    assert journal.answered_by == {"a": ["c1"]}
+    same = Replay(journal)
+    with same.calling("k", ident="c1"):
+        assert same.answered("a")
+        kept = same.answer("a")
+    assert kept is not None and kept.decision is InterruptDecision.REJECT
+    other = Replay(journal)
+    with other.calling("k", ident="c2"):
+        assert not other.answered("a") and other.answer("a") is None
+    journal.answers["a"].append(approval("approve"))  # c2's, filed with no id
+    with other.calling("k", ident="c2"):
+        later = other.answer("a")
+    assert later is not None and later.decision is InterruptDecision.APPROVE
+    journal.session = None  # run again from its input: the rejection is the first call's
+    again = Replay(journal)
+    with again.calling("k", ident="c9"):
+        rerun = again.answer("a")
+    assert rerun is not None and rerun.decision is InterruptDecision.REJECT
+
+
+def test_a_call_its_framework_said_it_makes_is_claimed_once_in_order() -> None:
+    replay = Replay(Journal())
+    replay.announced("k", "c1")
+    replay.announced("k", "c2")
+    assert [replay.claimed("k"), replay.claimed("k"), replay.claimed("k")] == ["c1", "c2", None]
+
+
+def test_a_step_passed_drops_whose_answers_they_were() -> None:
+    journal = Journal(answers={"a": [approval("reject")]}, answered_by={"a": ["c1"]})
+    stepped(journal, "s1").answer("a")
+    later = stepped(journal, "s2")
+    later.passed("s1")
+    assert "a" not in journal.answers and "a" not in journal.answered_by

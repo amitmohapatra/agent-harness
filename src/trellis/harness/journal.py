@@ -148,6 +148,14 @@ class Save(BaseModel):
 _READ: ContextVar[list[str] | None] = ContextVar("trellis_answers_read", default=None)
 #: The call the code running now decides or runs (its key): :meth:`Replay.calling`.
 _CALLING: ContextVar[str | None] = ContextVar("trellis_calling", default=None)
+#: That call's identity, as its framework names it (its call id): :meth:`Replay.calling`.
+_IDENT: ContextVar[str | None] = ContextVar("trellis_call_ident", default=None)
+
+
+def calling_ident() -> str | None:
+    """The framework's id of the call the code running now decides or runs, if it named one
+    (:meth:`Replay.calling`): the call a pause asked about (``Pending.ident``)."""
+    return _IDENT.get()
 
 
 @contextlib.contextmanager
@@ -194,6 +202,9 @@ class Pending(BaseModel):
 
     #: The framework's own handle on the pause (LangGraph's interrupt id), when it has one.
     native_id: str | None = None
+    #: The framework's id of the call the pause asked about, when it named one: whose answer
+    #: it is (``Journal.answered_by``).
+    ident: str | None = None
     #: The framework's serialised run, when it resumes from one (an OpenAI Agents
     #: ``RunState`` paused on a ``needs_approval`` tool).
     native_state: dict[str, Any] | None = None
@@ -256,6 +267,11 @@ class Journal(BaseModel):
     #: besides its own (``"a:<key>"``: its approval...), by cursor: a re-run that replays the
     #: call reads past them too, so an identical call after it reads its own (:meth:`Replay.call`)
     reads: dict[str, list[dict[str, int]]] = Field(default_factory=dict)
+    #: per answer (``answers``, in its order), the framework's id of the call it answered, when
+    #: it named one: a rejection is that call's — an attempt that goes on from the framework's
+    #: own state gives it to that call only (the paused call made again under its id, or still
+    #: waiting), and a new call, even an identical one, is asked (:meth:`Replay.answer`)
+    answered_by: dict[str, list[str | None]] = Field(default_factory=dict)
     #: per call, how many of its occurrences started: one more than ``calls`` records was
     #: running when the attempt ended without recording it (a crash)
     started: dict[str, int] = Field(default_factory=dict)
@@ -392,7 +408,12 @@ class Journal(BaseModel):
         is one a later attempt's model makes again (:attr:`again`: one call a place)."""
         if self.pending is None:
             return
-        self.answers.setdefault(self.pending.key, []).append(resolution.model_dump(mode="json"))
+        answers = self.answers.setdefault(self.pending.key, [])
+        answers.append(resolution.model_dump(mode="json"))
+        if self.pending.ident is not None:  # whose answer it is
+            by = self.answered_by.setdefault(self.pending.key, [])
+            by.extend(None for _ in range(len(answers) - 1 - len(by)))
+            by.append(self.pending.ident)
         inside = self.pending.inside
         if inside is not None:
             self.again = [m for m in self.again if m.at != inside.at] + [inside]
@@ -404,6 +425,7 @@ class Replay:
     """One attempt's cursor over a journal: what the n-th occurrence of a key already got."""
 
     __slots__ = (
+        "_announced",
         "_began",
         "_goes_on",
         "_made",
@@ -431,6 +453,8 @@ class Replay:
         #: (:meth:`_index`), and where each call's own reads began (:meth:`calling`)
         self._seeded: set[str] = set()
         self._began: dict[str, dict[str, int]] = {}
+        #: the framework's ids of the calls it said it is making, by call (:meth:`announced`)
+        self._announced: dict[str, list[str]] = defaultdict(list)
         #: the step a call is being made in now (its graph's checkpoint id), for a graph that
         #: keeps a checkpoint (``adapters.langgraph``); ``None`` elsewhere
         self.where: Callable[[], str | None] | None = None
@@ -446,19 +470,31 @@ class Replay:
         return self._goes_on or kept
 
     @contextlib.contextmanager
-    def calling(self, key: str, *, again: bool = False) -> Iterator[None]:
+    def calling(self, key: str, *, again: bool = False, ident: str | None = None) -> Iterator[None]:
         """The code inside decides or runs one call of ``key`` (a harness tool's call, a
         framework's own call its permission check asks about): what it reads of the journal
         is that call's (``again``: the same call's check goes on — Claude Code's own question
         after the ``PreToolUse`` decision), read again when the run pauses on it and an
-        attempt that goes on makes it again (:meth:`paused`)."""
+        attempt that goes on makes it again (:meth:`paused`). ``ident``: the framework's id of
+        the call, whose answers are its own (``Journal.answered_by``)."""
         if not again or key not in self._began:
             self._began[key] = {}
-        token = _CALLING.set(key)
+        token, named = _CALLING.set(key), _IDENT.set(ident)
         try:
             yield
         finally:
+            _IDENT.reset(named)
             _CALLING.reset(token)
+
+    def announced(self, key: str, ident: str) -> None:
+        """The framework makes call ``key`` under its id ``ident`` (a call it hands the harness
+        later, through its MCP server, where the id is not given): :meth:`claimed`."""
+        self._announced[key].append(ident)
+
+    def claimed(self, key: str) -> str | None:
+        """The framework's id of call ``key`` it made, the first it said and not yet taken."""
+        idents = self._announced.get(key)
+        return idents.pop(0) if idents else None
 
     def cursor(self) -> dict[str, int]:
         """How far this attempt has read the journal now: each cursor read so far."""
@@ -524,6 +560,10 @@ class Replay:
         """The recorded answer for this occurrence of ``key``, advancing the cursor."""
         index = self._index("a", key, len(self.journal.answers.get(key, ())))
         recorded = self.journal.answers.get(key, [])
+        while index < len(recorded) and self._anothers(key, index):
+            self._moved(f"a:{key}")
+            index += 1
+            self._seen[f"a:{key}"] = index
         if index < len(recorded):
             self._moved(f"a:{key}")
             self._seen[f"a:{key}"] = index + 1
@@ -537,7 +577,23 @@ class Replay:
     def answered(self, key: str) -> bool:
         """Whether this occurrence of ``key`` has a recorded answer (the cursor stays)."""
         given = len(self.journal.answers.get(key, ()))
-        return self._index("a", key, given) < given
+        index = self._index("a", key, given)
+        while index < given and self._anothers(key, index):
+            index += 1
+        return index < given
+
+    def _anothers(self, key: str, index: int) -> bool:
+        """Whether the ``index``-th answer of ``key`` is another call's rejection: where the
+        attempt goes on from the framework's own state, a rejection filed for a call its
+        framework named is that call's (``Journal.answered_by``), and a call of another id —
+        a new one, identical or not — is asked again."""
+        by = self.journal.answered_by.get(key, [])
+        owner = by[index] if index < len(by) else None
+        ident = _IDENT.get()
+        if owner is None or ident is None or owner == ident or not self._continues():
+            return False
+        decision = self.journal.answers[key][index].get("decision")
+        return decision == InterruptDecision.REJECT.value
 
     def occurrence(self, key: str) -> int:
         """Which occurrence of ``key`` the next call is (0 for the first)."""
@@ -641,10 +697,11 @@ class Replay:
             del entries[:gone], tags[:gone]
             if not entries:
                 kept.pop(key, None)
-            if kind == "c" and key in self.journal.reads:
-                del self.journal.reads[key][:gone]
+            parallel = self.journal.reads if kind == "c" else self.journal.answered_by
+            if key in parallel:
+                del parallel[key][:gone]
                 if not entries:
-                    del self.journal.reads[key]
+                    del parallel[key]
             if not tags:
                 del steps[marked]
             self._seen[marked] = max(0, self._seen[marked] - gone)
