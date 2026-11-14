@@ -204,6 +204,9 @@ class _Surface:
         self.hub = Hub()
         self.threads = Threads(agent)
         self._tasks: set[asyncio.Task[None]] = set()
+        #: the client run ids being started now: taken before the first await, so a client's
+        #: retry racing its first try is refused rather than started a second time
+        self._starting: set[str] = set()
 
     async def user(self, request: Request) -> str:
         """The caller: ``identity(request)``, else the trusted header (``401`` without one)."""
@@ -229,28 +232,41 @@ class _Surface:
         if (result := body.tool_result()) is not None:
             answer = await self._tool_answer(body, result, user, tenant)
             return await self._resume(body, answer, user, tenant)
-        if body.run_id and (safe_id(body.run_id) != body.run_id or self.hub.get(body.run_id)):
+        if body.run_id and (
+            safe_id(body.run_id) != body.run_id
+            or self.hub.get(body.run_id)
+            or body.run_id in self._starting
+        ):
             raise HTTPException(422, "runId must be a new identifier (letters, digits, -_.:)")
         try:
             mode = Mode(body.forwarded.mode)
         except ValueError as exc:
             raise HTTPException(422, f"forwardedProps.mode: {exc}") from exc
         payload = body.latest_user_text() or body.state
-        attached = await self._attached(body, user, tenant)
+        if payload is None or payload in ("", {}):  # an empty message and no state
+            raise HTTPException(422, "a blank message opens no run: say something")
+        claimed = body.run_id
+        if claimed:
+            self._starting.add(claimed)
         try:
-            record = await agent._opened(
-                payload,
-                user=user,
-                thread=body.thread_id,
-                tenant=tenant,
-                run_id=body.run_id,
-                document_ids=attached or None,
-                mode=mode,
-                app=_frontend(body),
-            )
-        except ConfigurationError as exc:  # a blank message: no run
-            raise HTTPException(422, str(exc)) from exc
-        buffer = self.hub.open(record.run_id, user)
+            attached = await self._attached(body, user, tenant)
+            try:
+                record = await agent._opened(
+                    payload,
+                    user=user,
+                    thread=body.thread_id,
+                    tenant=tenant,
+                    run_id=body.run_id,
+                    document_ids=attached or None,
+                    mode=mode,
+                    app=_frontend(body),
+                )
+            except ConfigurationError as exc:  # a blank message: no run
+                raise HTTPException(422, str(exc)) from exc
+            buffer = self.hub.open(record.run_id, user)
+        finally:
+            if claimed:
+                self._starting.discard(claimed)
         self._launch(
             buffer,
             body.thread_id,

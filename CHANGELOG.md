@@ -5,6 +5,19 @@ tested with are in [docs/versioning.md](docs/versioning.md).
 
 ## 0.7.0 — any provider: one route strategy, an auth strategy, a model's profile (unreleased)
 
+### Fixed: what the user-scenario suite found (tests/scenarios)
+
+- **A message longer than 4,000 characters got no memory context and lost its tool records.**
+  The whole message went to the memory service as `ContextRequest.query`,
+  `HintsRequest.task` and `ToolInvocationIn.task`, which it caps at 4,000 characters: a `422`,
+  so the run had no context and each tool record was "failed and is lost". The question is
+  sent as its head and its tail when it is longer (`clients.memory.fitted`).
+- **AG-UI: the same `runId` posted twice at once (a client's retry racing its first try)
+  started the run twice.** The id was checked before the run was opened and only marked
+  taken after: it is taken before the first await, and the second request is a `422`.
+- **AG-UI: a user message with no text (`content: ""`) and no `state` started a run** that
+  failed inside the framework (`EmptyInputError`); it is a `422`, as a blank message is.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can
