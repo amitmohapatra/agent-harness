@@ -638,3 +638,31 @@ async def test_older_turns_lose_their_calls_and_results_before_their_questions_a
     # a summarization after it has the older turns: none of their messages is taken out
     kept = await sent(FitWindow(window, turns=False), given)
     assert len(kept.messages) == len(given.messages)
+
+
+# ------------------------------------------------------------------ a tool's provider fields
+def test_a_tool_made_smaller_keeps_the_fields_its_provider_reads() -> None:
+    """Fitting the window makes a tool's definition smaller — its description cut, then its
+    signature alone. A tool carrying provider fields (LangChain's ``extras``: Anthropic's
+    ``defer_loading``, a ``cache_control``) keeps them, read where the provider's own
+    conversion reads them; a provider's own tool (a definition that is no function: web
+    search) is sent as it is; any other tool is made smaller as before."""
+    from langchain_anthropic.chat_models import convert_to_anthropic_tool
+
+    def lookup(order: str) -> str:
+        """Look an order up. A second sentence nobody needs."""
+        return order
+
+    extras = {"defer_loading": True, "cache_control": {"type": "ephemeral"}}
+    given = StructuredTool.from_function(lookup, extras=extras)
+    for smaller, said in (
+        (ours._compact(given), "Look an order up."),
+        (ours._signature(given), ours.FIT_SIGNATURE),
+    ):
+        sent: dict[str, Any] = dict(convert_to_anthropic_tool(smaller))
+        assert (sent["defer_loading"], sent["cache_control"]) == (True, {"type": "ephemeral"})
+        assert sent["description"] == said and list(sent["input_schema"]["properties"]) == ["order"]
+    search = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+    assert ours._compact(search) == search and ours._signature(search) == search
+    plain = ours._compact(StructuredTool.from_function(lookup))
+    assert isinstance(plain, dict) and plain["function"]["description"] == "Look an order up."

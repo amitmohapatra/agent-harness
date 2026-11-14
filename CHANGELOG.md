@@ -46,6 +46,8 @@ A library's feature works as the library does it; the harness governs, records a
   a retrying node) or the model's own client (`max_retries`) already retried, a failure that
   still ends the run is reported not retryable, so the run store does not run the whole run
   again on top of those tries.
+- Fitting the window keeps a tool's provider fields (`extras`: `defer_loading`,
+  `cache_control`) and leaves a provider's own tool (web search, code execution) as it is.
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks

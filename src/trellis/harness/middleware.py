@@ -3123,12 +3123,10 @@ def _narrowed(
     return _held_said(out, offered)
 
 
-def _signature(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+def _signature(tool: BaseTool | dict[str, Any]) -> BaseTool | dict[str, Any]:
     """A tool as its name and the arguments a call takes (their names, types and which are
     required), no description: what a call needs, in a few tokens."""
-    found = _compact(tool)
-    found.get("function", found)["description"] = FIT_SIGNATURE
-    return found
+    return _compact(tool, FIT_SIGNATURE)
 
 
 def _whole(tool: BaseTool | dict[str, Any]) -> bool:
@@ -3174,16 +3172,25 @@ def _described(tool: BaseTool | dict[str, Any]) -> str:
     return tool.description or ""
 
 
-def _compact(tool: BaseTool | dict[str, Any]) -> dict[str, Any]:
+def _compact(tool: BaseTool | dict[str, Any], said: str | None = None) -> BaseTool | dict[str, Any]:
     """A tool as its definition with the description cut to its first sentence (at most
-    :data:`FIT_DESCRIPTION` characters) and no parameter descriptions."""
+    :data:`FIT_DESCRIPTION` characters; ``said``: in its place) and no parameter
+    descriptions. A provider's own tool (a definition that is no function: web search, code
+    execution) is as it is: nothing of it is the harness's to cut. A tool carrying provider
+    fields (LangChain's ``extras``: Anthropic's ``defer_loading``, a ``cache_control``) stays
+    a tool carrying them — a provider reads them from the tool, not from a definition."""
+    if isinstance(tool, dict) and tool.get("type", "function") != "function":
+        return tool
     found = copy.deepcopy(convert_to_openai_tool(tool))
     function = found.get("function", found)
     first = re.split(r"(?<=[.!?])\s", str(function.get("description") or ""), maxsplit=1)[0]
-    function["description"] = first[:FIT_DESCRIPTION]
+    function["description"] = first[:FIT_DESCRIPTION] if said is None else said
     for spec in (function.get("parameters") or {}).get("properties", {}).values():
         spec.pop("description", None)
-    return found
+    if isinstance(tool, dict) or not tool.extras:
+        return found
+    cut = {"description": function["description"], "args_schema": function["parameters"]}
+    return tool.model_copy(update=cut)
 
 
 def _asked(request: ModelRequest[Any]) -> int | None:
