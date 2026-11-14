@@ -128,7 +128,10 @@ the user Claude Code would ask:
   and the turn a schedule fires has no run: its tool calls are refused and its answer reaches
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
-  would send.
+  would send. `RemoteTrigger`'s task runs in Anthropic's cloud, outside the run's governance,
+  memory and thread. A disallowed tool is hidden from the model by Claude Code itself, the
+  ones it defers behind `ToolSearch` included (seen with the bundled CLI, 2.1.325). The
+  harness's own `schedule_task` is the schedule: stored in the run store, each firing a run.
 * **A dynamic workflow is one child run.** A `Workflow` call (a script that runs agents in
   the background; the bundled CLI offers it with no flag) only hands work on, as `Agent`
   does: it runs, and each workflow is a child run of the turn, kept open as a background

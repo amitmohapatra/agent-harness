@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import weakref
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from typing import Any, Final, cast
 
 from claude_agent_sdk import McpSdkServerConfig, create_sdk_mcp_server
@@ -45,6 +46,29 @@ ALWAYS_LOAD: Final = "alwaysLoad"
 WAITING: Final = "Waiting for a person's approval."
 
 
+#: The key of a ``tools/call`` request's ``_meta`` under which Claude Code names the tool call
+#: it makes (its ``tool_use_id``, the one its hooks and permission requests carry).
+CALL_META: Final = "claudecode/toolUseId"
+#: The tool call the request being served is (:func:`named_call`); ``None``: not said.
+_CALL: ContextVar[str | None] = ContextVar("claude_tool_call", default=None)
+
+
+async def named_call(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
+    """The MCP server middleware of a server made here (``mcp.server.Server.middleware``): the
+    request is served knowing which of Claude's tool calls it is (:func:`call_id`), which
+    the SDK's tool handlers are not given."""
+    token = _CALL.set((ctx.meta or {}).get(CALL_META))
+    try:
+        return await call_next(ctx)
+    finally:
+        _CALL.reset(token)
+
+
+def call_id() -> str | None:
+    """Claude's id of the tool call a handler is serving now (:func:`named_call`)."""
+    return _CALL.get()
+
+
 #: A tool's handler, as the SDK calls it: its arguments in, an MCP tool result out.
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 #: The SDK tools each server made here serves, by the server's instance (the config itself
@@ -59,6 +83,7 @@ def convert(tools: Sequence[Tool]) -> McpSdkServerConfig:
 
 def _server(served: list[Any]) -> McpSdkServerConfig:
     server = create_sdk_mcp_server(SERVER, tools=served)
+    server["instance"].middleware.append(named_call)
     _SERVED[server["instance"]] = served
     return cast("McpSdkServerConfig", {**server, ALWAYS_LOAD: True})
 

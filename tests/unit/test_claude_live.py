@@ -37,6 +37,7 @@ from trellis.harness.bridges.helpers import Kind
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
+from trellis.harness.tools.convert import claude as convert
 
 REFUSED = {"content": [{"type": "text", "text": UNATTENDED}], "is_error": True}
 
@@ -357,8 +358,13 @@ async def test_a_background_run_that_cannot_go_on_says_why_and_asks_nothing_more
     relay = session._hooks({"PreToolUse": [HookMatcher(hooks=[hook])]})["PreToolUse"][0].hooks[0]
     hooked = await relay({"tool_name": "Read", "agent_id": "t1"}, "toolu_1", None)
     assert refusal(hooked) == ("deny", UNATTENDED)
-    session._calling["toolu_2"] = ("refund", {"order": "o1"}, found)
-    assert await session._call("refund", {"order": "o1"}) == REFUSED
+    session._calling["toolu_2"] = found
+
+    async def served(ctx: Any) -> dict[str, Any]:
+        return await session._call("refund", {"order": "o1"})
+
+    naming = SimpleNamespace(meta={convert.CALL_META: "toolu_2"})
+    assert await convert.named_call(naming, served) == REFUSED
     # a hook that asks (neither lets it through nor refuses it) says nothing of whose it is
     given = {"tool_name": "mcp__trellis__refund", "tool_use_id": "toolu_3"}
     session._noted(
@@ -458,7 +464,6 @@ def test_the_harness_tools_a_live_session_lists_are_the_same_in_every_turn() -> 
     described, list alike each turn."""
     from trellis.harness.schedules import SPECS
     from trellis.harness.tools.base import Tool
-    from trellis.harness.tools.convert import claude as convert
 
     async def run(args: dict[str, Any]) -> Any:
         return None
@@ -486,6 +491,35 @@ async def test_a_workflow_agents_call_is_the_workflows_run_only_while_one_works(
     assert await session._working("a1") is None and not session.background
     session.background["t1"] = found
     await ended(session, found, store)
+
+
+async def test_a_harness_tools_call_is_the_run_its_id_names_not_the_first_that_matches() -> None:
+    """ARCH-16: two background runs make the same harness tool call with the same arguments.
+    The request Claude Code makes names the call (its ``_meta``, the id its hook carried), so
+    each is its own run's whichever arrives first — not the first noted that matches."""
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
+    took: list[str] = []
+
+    def run(label: str) -> Any:
+        async def asked(make: Any) -> dict[str, Any]:
+            took.append(label)
+            return {"content": []}
+
+        return SimpleNamespace(asked=asked)
+
+    allow = {"hookSpecificOutput": {"permissionDecision": "allow"}}
+    for ref, label in [("toolu_a", "a"), ("toolu_b", "b")]:
+        call = {"tool_name": "mcp__trellis__refund", "tool_input": {"order": "o1"}}
+        session._noted("PreToolUse", {**call, "tool_use_id": ref}, allow, run(label))
+
+    async def served(ctx: Any) -> dict[str, Any]:
+        return await session._call("refund", {"order": "o1"})
+
+    for ref in ("toolu_b", "toolu_a"):
+        await convert.named_call(SimpleNamespace(meta={convert.CALL_META: ref}), served)
+    assert took == ["b", "a"]
+    # a request that names no call is no background run's: the turn's own, or refused
+    assert await session._call("refund", {"order": "o1"}) == REFUSED
 
 
 # --------------------------------------------------------------------------- room (PERF-3)

@@ -2324,8 +2324,11 @@ async def test_schedules_stay_disallowed_in_a_live_session(
     await agent.run("every Monday", user="u1")
     kept, alone = served(tmp_path)
     assert kept["pid"] != alone["pid"]
+    off = {"CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "RemoteTrigger"}
     for started in (kept, alone):
-        assert set(OUTLIVES_THE_QUERY) <= set(started["disallowed_tools"].split(","))
+        # the CLI's own rule hides a disallowed tool from the model, deferred ones behind
+        # ToolSearch too (the bundled CLI, 2.1.325, driven against a scripted model)
+        assert off <= set(started["disallowed_tools"].split(","))
 
 
 def test_the_frames_the_stand_in_sends_are_the_sdks_task_messages() -> None:

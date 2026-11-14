@@ -699,9 +699,14 @@ class Cli:
         self.ready()
         return [t["name"] for t in self.mcp("tools/list", {})["result"]["tools"]]
 
-    def call_tool(self, name: str, args: dict[str, Any], server: str = SERVER) -> dict[str, Any]:
+    def call_tool(
+        self, name: str, args: dict[str, Any], server: str, tool_id: str
+    ) -> dict[str, Any]:
+        """A tool of an in-process server called, the request naming the call as the bundled
+        CLI (2.1.325) does: its ``tool_use_id`` in the request's ``_meta``."""
         self.ready(server)
-        return self.mcp("tools/call", {"name": name, "arguments": args}, server)
+        params = {"name": name, "arguments": args, "_meta": {"claudecode/toolUseId": tool_id}}
+        return self.mcp("tools/call", params, server)
 
     def ready(self, server: str = SERVER) -> None:
         if server not in self.mcp_ready:
@@ -1161,7 +1166,7 @@ class Cli:
             content = [{"type": "text", "text": text}]
             self.post_tool_use(session, name, ran, tool_id, content=content, error=failure)
         elif allowed:
-            called = self.call_tool(item["tool"], ran, server)
+            called = self.call_tool(item["tool"], ran, server, tool_id)
             answered = called.get("result") or {}
             error = bool(answered.get("isError")) or "error" in called
             content = answered.get("content") or [

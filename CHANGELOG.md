@@ -313,6 +313,10 @@ cancelled after its start (the task is cancelled with it). See
   checked before the process started and counted per agent, so a hundred first turns at once
   kept a hundred. The place is taken first and counted over all agents; the idle session
   that gives its place is the one used longest ago of the user who holds the most.
+- **A harness tool's call in a kept process is the run's its id names** (ARCH-16): two
+  background runs making the same call with the same arguments were told apart by "the first
+  that matches". Claude Code names the call in the MCP request (`_meta`), which the
+  `trellis` server now reads (the `claude-agent-sdk` extra pins `mcp>=2.2,<3` for it).
 - **Options with no `system_prompt` keep none** (the SDK's default): the line about
   `outputs/` made it a custom prompt. It goes with the turn's context there, and after the
   prompt where the options have one.

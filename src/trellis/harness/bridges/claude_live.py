@@ -682,7 +682,7 @@ class LiveSession:
         self._owned: Counter[str] = Counter()
         self._shares = 0
         #: the harness tool calls their hook let through, by call: whose each is
-        self._calling: dict[str, tuple[str, dict[str, Any], Background]] = {}
+        self._calling: dict[str, Background] = {}
         #: why the session was closed (``LiveSessions.forget``)
         self.why = "the harness was closed"
         #: the messages no turn took (:func:`unattended`)
@@ -803,10 +803,9 @@ class LiveSession:
         return relay
 
     def _noted(self, event: str, given: Any, answer: Any, found: Background) -> None:
-        """Whose a harness tool's call is, once its hook let it through (the call itself
-        comes with no word of who makes it: :meth:`_call`), with the arguments Claude Code
-        makes it with — a hook's ``updatedInput`` over those it was given; forgotten when a
-        hook refused it, and once it ran."""
+        """Whose a harness tool's call is, once its hook let it through, by Claude's id of
+        the call (the request that makes it names the id and not who makes it:
+        :meth:`_call`); forgotten when a hook refused it, and once it ran."""
         from trellis.harness.tools.convert.claude import SERVER
 
         name, ref = str(given.get("tool_name") or ""), str(given.get("tool_use_id") or "")
@@ -815,11 +814,7 @@ class LiveSession:
         said = (answer.get("hookSpecificOutput") if isinstance(answer, dict) else None) or {}
         decided = said.get("permissionDecision")
         if event == "PreToolUse" and decided == "allow":
-            kept = self._calling.get(ref)
-            args = said.get("updatedInput") or (
-                kept[1] if kept is not None else dict(given.get("tool_input") or {})
-            )
-            self._calling[ref] = (name.removeprefix(f"mcp__{SERVER}__"), dict(args), found)
+            self._calling[ref] = found
         elif event != "PreToolUse" or decided == "deny":
             self._calling.pop(ref, None)
 
@@ -909,8 +904,7 @@ class LiveSession:
         call a background subagent's (:meth:`_noted`), the attempt of its run."""
         from trellis.harness.tools.convert import claude as convert
 
-        ref = next((r for r, (n, a, _) in self._calling.items() if (n, a) == (name, args)), None)
-        found = None if ref is None else self._calling.pop(ref)[2]
+        found = self._calling.pop(convert.call_id() or "", None)
         if found is not None:
 
             async def made(at: Turn) -> dict[str, Any]:
