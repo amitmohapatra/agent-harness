@@ -16,6 +16,15 @@ the mode that asks before its first prompt, its plan mode kept as the session ha
 Kimi's own log of the session must confirm it or the run fails without sending a prompt
 ([docs/frameworks/kimi.md](docs/frameworks/kimi.md#the-session-mode)).
 
+### Fixed: a user's message that starts with "/" is never a Kimi command
+
+Over ACP a prompt whose first block starts with `/` is a command of the agent's (Kimi's
+`/compact`, `/status`, `/skill:<name>`; any other answers "Unknown ACP command"), run with
+no model turn. A run's prompt usually has a block of the harness's before the user's
+message, but a sandboxed run with no memory context did not: there a user typing
+`/status of my order?` ran Kimi's command instead of asking the model. The user's message
+no longer starts the prompt's first block in any run.
+
 ### Added: Kimi's plan is a run event
 
 Kimi's todo list reaches an ACP client as its plan (`session/update` `plan`), which the

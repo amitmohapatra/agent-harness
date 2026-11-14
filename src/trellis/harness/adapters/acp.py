@@ -1272,6 +1272,11 @@ class Attempt:
             blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         if self.target.sandbox is None:  # its own folder's outputs/ are the user's (workdir)
             blocks.insert(0, text_block(DELIVERS_HERE))
+        if len(blocks) == 1:
+            # the user's words would start the prompt, where ACP reads a ``/`` as a command of
+            # the agent's (Kimi's ``/compact``, ``/skill:<name>``: run with no model turn).
+            # They are words for the model, as in every run whose prompt has a block before
+            blocks = [text_block(f"\n{native_input.prompt}")]
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:

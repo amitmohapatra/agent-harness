@@ -1324,6 +1324,20 @@ async def test_a_sandboxed_run_works_in_the_sandbox_and_says_reads_are_not_isola
     assert [output for name, output in outputs if name == "Bash"] == [" FAKE=1", ""]
 
 
+@pytest.mark.parametrize("boxed", [False, True], ids=["on-this-machine", "sandboxed"])
+async def test_a_users_message_that_starts_with_a_slash_is_words_not_a_command_of_the_agents(
+    harness: Harness, tmp_path: Path, boxed: bool
+) -> None:
+    """SEC. Over ACP a prompt whose first block starts with ``/`` is a command of the agent's,
+    run with no model turn. A user's message is never one: in a sandboxed run with nothing
+    before it too, where it would be the prompt's first block."""
+    fields = {"sandbox": sandbox(FakeSandboxes())} if boxed else {}
+    agent = harness.wrap(fake(tmp_path, [{"text": "answered"}], **fields), id="slash")
+    done = await agent.run("/compact everything", user="u1")
+    assert done.status is RunStatus.SUCCESS and done.answer == "answered"
+    assert recorded(tmp_path)["prompts"][0].endswith("/compact everything")
+
+
 async def test_without_a_sandbox_the_agents_file_requests_are_refused(tmp_path: Path) -> None:
     from acp import RequestError
 

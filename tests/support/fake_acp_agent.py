@@ -53,6 +53,9 @@ runs again with the prompt's arguments — what Kimi's model does, told so:
   title), an extension notification and an extension request (its answer, or the client's
   refusal, recorded).
 
+A prompt whose first block starts with ``/`` is a command of the agent's own, as over ACP: it
+answers ``Unknown ACP command`` with no step of its script (Kimi's ``/compact``, ``/status``...).
+
 ``FAKE_ACP_RECORD`` names a file it writes what it was started and asked with to (its
 environment's ``KIMI_*`` and ``HOME``, its working directory, the client's capabilities, each
 session's MCP servers and how it began, the prompts, the permission answers).
@@ -362,6 +365,9 @@ class FakeAgent:
     async def _prompt(self, prompt: list[Any], session_id: str) -> Any:
         text = "\n".join(getattr(b, "text", "") for b in prompt)
         record("prompts", text)
+        if getattr(prompt[0], "text", "").startswith("/"):  # a command of the agent's own
+            await self.say(session_id, "Unknown ACP command")
+            return PromptResponse(stop_reason="end_turn")
         self.cancelled[session_id] = asyncio.Event()
         data = state(session_id)
         edited = EDITED.search(text)

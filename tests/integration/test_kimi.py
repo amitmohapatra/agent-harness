@@ -1050,6 +1050,22 @@ async def test_a_conversations_next_turn_continues_kimis_session_when_its_runs_h
     assert (tmp_path / "kimi-home" / "sessions").is_dir()  # kept where Kimi keeps them
 
 
+@pytest.mark.parametrize("boxed", [False, True], ids=["on-this-machine", "sandboxed"])
+async def test_a_users_message_that_starts_with_a_slash_is_words_for_the_model(
+    harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path, boxed: bool
+) -> None:
+    """SEC. Over ACP a prompt whose first block starts with ``/`` is a command of the agent's
+    (Kimi's ``/compact``, ``/status``, ``/skill:<name>``; any other: "Unknown ACP command"),
+    run with no model turn. A user's message is words, not a command, in every run: the model
+    is asked, and reads it."""
+    fields = {"sandbox": sandbox(FakeSandboxes())} if boxed else {}
+    agent = harness.wrap(kimi_target(endpoint, tmp_path, **fields), id="kimi-slash")
+    done = await agent.run("/status of my order?", user="u1")
+    assert done.status is RunStatus.SUCCESS, done.error
+    [request] = endpoint.requests
+    assert "/status of my order?" in json.dumps(request["messages"])
+
+
 async def test_a_sandboxed_conversations_next_turn_is_given_its_earlier_turns_by_the_harness(
     harness: Harness, endpoint: PlannedEndpoint, tmp_path: Path
 ) -> None:
