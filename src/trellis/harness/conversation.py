@@ -45,6 +45,7 @@ from trellis.contracts import InterruptDecision, RunRecord, RunStatus
 from trellis.harness.bounded import LRU, SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
+from trellis.harness.line import Here
 
 if TYPE_CHECKING:
     from trellis.harness.line import Cache, Line
@@ -64,6 +65,8 @@ ASKED: Final = ANSWERED | {RunStatus.CANCELLED}
 #: The ``RunStart.metadata`` key a run sent with ``mode="steer"`` keeps the run it was given
 #: to under (its answer is that run's: :func:`earlier` keeps it once).
 STEERED_INTO: Final = "steered_into"
+#: The reason a run cancelled by a message sent with ``mode="interrupt"`` ends with.
+INTERRUPTED: Final = "interrupted by a newer message of the conversation"
 
 
 class Mode(StrEnum):
@@ -324,6 +327,8 @@ class Live:
     #: set as it ends, with how it ended
     ended: asyncio.Event = field(default_factory=asyncio.Event)
     result: Any = None
+    #: the conversation's line it took its turn in (none: a run outside any)
+    line: Line | None = None
 
     async def steered(self, text: str, run_id: str) -> bool:
         """``text`` (sent as run ``run_id``) given to this run; once it ends, whether its
@@ -335,20 +340,16 @@ class Live:
 
 
 class Turns:
-    """One run of a conversation at a time: the others wait their turn, in order
-    (``pipeline.attempt``) — in the run store's line (``line``), across processes, then in
-    this process; a run that left the line first takes no turn (:meth:`taken` gives
-    ``None``). The run holding each turn here is :class:`Live`, which a message sent with
-    ``mode="interrupt"`` cancels and one sent with ``mode="steer"`` reaches."""
+    """The conversations' line in this process (``line``: the run store keeps the order): the
+    messages of a conversation recorded in the order they were sent (:meth:`accepting`), the
+    runs waiting their turn or holding it here (:meth:`taken`), and the run holding each
+    conversation's turn here, :class:`Live`, which a message sent with ``mode="interrupt"``
+    cancels and one sent with ``mode="steer"`` reaches."""
 
     def __init__(self) -> None:
-        self._held: dict[str, tuple[asyncio.Lock, int]] = {}
         self._live: dict[str, Live] = {}
-        #: each run waiting for, or holding, its conversation's turn here: set as it leaves
-        #: the line (the run behind it looks again)
-        self._leaving: dict[str, asyncio.Event] = {}
-        #: each run waiting its turn here: set when it should look at the line again (:meth:`wake`)
-        self._poked: dict[str, asyncio.Event] = {}
+        #: the runs in their conversation's line here, waiting their turn or holding it
+        self._here: dict[str, Here] = {}
         #: the messages of a conversation being recorded here, one at a time (:meth:`accepting`)
         self._accepting: dict[str, tuple[asyncio.Lock, int]] = {}
         #: what the lines of this process read of the runs in them (each run read once)
@@ -376,45 +377,50 @@ class Turns:
 
     @contextlib.asynccontextmanager
     async def taken(
-        self, key: str, run_id: str | None = None, *, steers: bool = False, line: Line | None = None
+        self, key: str, run_id: str, *, steers: bool = False, line: Line | None = None
     ) -> AsyncIterator[Live | None]:
-        lock, waiting = self._held.get(key) or (asyncio.Lock(), 0)
-        self._held[key] = (lock, waiting + 1)
-        if run_id is not None:
-            self._leaving[run_id], self._poked[run_id] = asyncio.Event(), asyncio.Event()
+        """Run ``run_id`` holding the turn of its conversation ``key`` while the block runs,
+        once its ``line`` says it is its turn (a run with none — started by a release before the
+        line, or outside a conversation — at once). ``None``: it takes no turn (cancelled while
+        it waited, :meth:`cancel`, or ended in the run store)."""
+        mine = self._here[run_id] = Here()
         try:
-            if (
-                line is not None
-                and run_id is not None
-                and not await line.turn(self._leaving, self._poked[run_id])
-            ):
-                yield None  # it left the line before its turn came: it takes none
+            if line is not None and not await line.turn(self._here, mine):
+                yield None
                 return
-            async with lock:
-                if run_id is None:
-                    yield None
-                    return
-                live = self._live[key] = Live(run_id, steers)
-                try:
-                    yield live
-                finally:
+            live = self._live[key] = Live(run_id, steers, line=line)
+            try:
+                yield live
+            finally:
+                if self._live.get(key) is live:  # (runs with no line may hold a turn together)
                     del self._live[key]
-                    live.ended.set()
+                live.ended.set()
         finally:
-            if run_id is not None:  # it left the line here: the run behind it looks again
-                self._leaving.pop(run_id).set()
-                del self._poked[run_id]
-            lock, waiting = self._held[key]
-            if waiting == 1:
-                del self._held[key]
-            else:
-                self._held[key] = (lock, waiting - 1)
+            del self._here[run_id]
+            mine.left.set_result(None)
 
-    def wake(self, run_id: str) -> None:
-        """Run ``run_id``, waiting its turn here, looks at the line again (it may have left it:
-        cancelled)."""
-        if (poked := self._poked.get(run_id)) is not None:
-            poked.set()
+    def cancel(self, run_id: str, reason: str) -> asyncio.Future[None] | None:
+        """Run ``run_id``, waiting its turn here, is cancelled for ``reason``: it takes no
+        turn. What is done once it left the line; ``None`` when it does not wait here."""
+        mine = self._here.get(run_id)
+        if mine is None:
+            return None
+        mine.cancelled = reason
+        mine.again.set()
+        return mine.left
+
+    async def interrupted(self, run_id: str) -> bool:
+        """Whether run ``run_id`` holds its conversation's turn here and a newer message of the
+        conversation, sent to another process with ``mode="interrupt"``, asks for it
+        (``Line.interrupted``)."""
+        for live in self._live.values():
+            if live.run_id == run_id and live.line is not None:
+                return await live.line.interrupted()
+        return False
+
+    def cancelled(self, run_id: str) -> str | None:
+        """Why run ``run_id``, in line here, was cancelled while it waited, if it was."""
+        return self._here[run_id].cancelled
 
     def live(self, key: str) -> Live | None:
         """The run holding ``key``'s turn in this process, if one does."""
@@ -470,6 +476,7 @@ __all__ = [
     "ANSWERED",
     "ASKED",
     "EARLIER_RUNS",
+    "INTERRUPTED",
     "STEERED_INTO",
     "Live",
     "Mode",

@@ -35,6 +35,7 @@ from trellis.harness.bounded import LRU
 from trellis.harness.budget import Budget
 from trellis.harness.clients.bifrost import Gateway
 from trellis.harness.clients.memory import FORGET, TOOL_SEARCH, USERS_OWN, Memory, RunMemory
+from trellis.harness.conversation import INTERRUPTED
 from trellis.harness.credentials import CredentialsHook
 from trellis.harness.evals import EvalReport, EvalServices, Evaluator
 from trellis.harness.evals import evaluate as run_evaluation
@@ -172,7 +173,7 @@ class Harness:
             runs = self._making(RunsClient(s.runs_url, api_key=s.api_key))
         self.runs: RunStore = runs or LocalRuns()
         #: the runs this process executes, held in the run store while they do (``holding``)
-        self.holds = Holds(lambda: self.runs, lost=self._lost)
+        self.holds = Holds(lambda: self.runs, renewed=self._renewed, lost=self._lost)
         self.writes = Writes(spool=s.spool_dir, replay=self._replay)
         #: where the files runs make for their users are kept (``TRELLIS_FILES_URL``, else the
         #: XDG data folder): a cloud URL whose fsspec package is missing fails here, at start
@@ -471,23 +472,31 @@ class Harness:
     # ------------------------------------------------------------------ who we are
     async def _lost(self, run_id: str, tenant: str) -> None:
         """A run held here whose heartbeat or event the run store refused: when it was
-        cancelled — ``agent.cancel`` on another process, a newer message of its conversation
-        sent there with ``mode="interrupt"`` among them — its attempt under way here stops and
-        ends ``CANCELLED``, as one cancelled here does (``agent.cancel``), and one waiting its
-        turn here takes none."""
+        cancelled there — ``agent.cancel`` on another process — what this process does for it
+        stops: its attempt under way ends ``CANCELLED``, one waiting its turn takes none
+        (``Agent.stop``)."""
         try:
             record = await self.runs.get(run_id, tenant=tenant)
         except RunsError as exc:
             log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
             return
-        if record is None or record.status is not RunStatus.CANCELLED:
-            return
+        if record is not None and record.status is RunStatus.CANCELLED:
+            for agent in self.agents.values():
+                agent.stop(run_id, CANCELLED_ELSEWHERE)
+
+    async def _renewed(self, run_id: str, tenant: str) -> None:
+        """A run's hold was renewed: when it holds its conversation's turn here and a newer
+        message of the conversation, sent to another process with ``mode="interrupt"``, asks
+        for it (``Turns.interrupted``), it stops and ends ``CANCELLED`` here — and only then
+        does that message, waiting in the line behind it, take its turn."""
         for agent in self.agents.values():
-            agent.turns.wake(run_id)  # waiting its turn here: it takes none
-            runtime = agent.running.get(run_id)
-            if runtime is not None and runtime.cancelled is None and runtime.running_in:
-                runtime.cancelled = CANCELLED_ELSEWHERE
-                runtime.running_in.cancel()
+            try:
+                asked = await agent.turns.interrupted(run_id)
+            except RunsError as exc:
+                log.warning("run %s: its conversation's line was not read: %s", run_id, exc)
+                return
+            if asked:
+                agent.stop(run_id, INTERRUPTED)
 
     async def _key_info(self) -> KeyInfo:
         """What the memory service says about ``TRELLIS_API_KEY``: asked at first use, then

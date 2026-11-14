@@ -355,7 +355,7 @@ async def test_a_second_message_to_a_busy_conversation_waits_for_the_first(
     release.set()
     assert [(await first).answer, (await second).answer] == ["one", "two"]
     assert order[3:] == ["end one", "start two", "end two"]
-    assert other.answer == "three" and not agent.turns._held
+    assert other.answer == "three" and not agent.turns._here
 
 
 async def test_a_schedule_carries_the_agents_limit_and_version_to_every_fire(

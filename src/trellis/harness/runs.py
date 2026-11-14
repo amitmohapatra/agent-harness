@@ -52,7 +52,7 @@ import tempfile
 import time
 import weakref
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
@@ -271,6 +271,19 @@ class RunStore(Protocol):
 # --------------------------------------------------------------------------- in process
 
 
+#: A run's place among the runs sharing its ``concurrency_key``: when it took it, then its id
+#: (two placed at once). An earlier place is ahead.
+Place = tuple[datetime, str]
+
+
+def place(record: RunRecord, answers: Iterable[ResolutionEntry]) -> Place:
+    """The place of the run ``record`` among its key's runs, as every run store keeps it:
+    when it was started, or when the latest of its ``answers`` was recorded (it took its place
+    again then). A conversation's turns are answered in this order (``line``), and a queued
+    run is claimed only while no run placed before it runs."""
+    return max([record.created_at, *(entry.recorded_at for entry in answers)]), record.run_id
+
+
 class LocalRuns:
     """The same store in this process, for development and tests: nothing survives a restart,
     only workers in this process claim, and a due schedule fires when a worker claims. A
@@ -386,22 +399,20 @@ class LocalRuns:
     def _room(self, record: RunRecord) -> bool:
         """Whether a queued run may run now: no run of its tenant sharing its
         ``concurrency_key`` holds it (agent-runs' default limit, one) — one a worker runs, or
-        one running in its caller's process placed before it (``line.placed``): a run placed
+        one running in its caller's process placed before it (:func:`place`): a run placed
         after it waits for it there."""
         key = record.concurrency_key
-        mine = (self._place(record), record.run_id)
+        mine = self._place(record)
         return key is None or not any(
             r.status is RunStatus.RUNNING
             and r.concurrency_key == key
             and r.tenant_id == record.tenant_id
-            and (r.run_id in self._leases or (self._place(r), r.run_id) < mine)
+            and (r.run_id in self._leases or self._place(r) < mine)
             for r in self._runs.values()
         )
 
-    def _place(self, record: RunRecord) -> datetime:
-        """When the run took its place among its key's runs: its start, or its latest answer."""
-        answered = [entry.recorded_at for entry in self._resolutions.get(record.run_id, ())]
-        return max([record.created_at, *answered])
+    def _place(self, record: RunRecord) -> Place:
+        return place(record, self._resolutions.get(record.run_id, ()))
 
     async def heartbeat(
         self,
