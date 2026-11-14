@@ -988,19 +988,50 @@ async def test_the_runs_skills_are_in_kimis_skills_folder_and_its_login_is_linke
     usual = tmp_path / "home"
     usual.mkdir()
     (usual / "config.toml").write_text("default_model = 'k2'\n")
+    (usual / "AGENTS.md").write_text("Answer in metric units.\n")
+    for name in ("sql-review", "tone"):  # Kimi's own skills: one of the run's names, one not
+        (usual / "skills" / name).mkdir(parents=True)
+        (usual / "skills" / name / "SKILL.md").write_text(f"Kimi's own {name}.")
     target = fake(tmp_path, [{"skills": True}, {"text": "ok"}], **combine(store).kimi())
     result = await harness.wrap(target, id="skilled").run("review", user="ada")
     assert result.status is RunStatus.SUCCESS, result.error
     [seen] = recorded(tmp_path)["skills"]
-    assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]
+    assert "Check every JOIN." in seen["files"]["sql-review/SKILL.md"]  # the run's, of the two
     assert seen["files"]["sql-review/rules.md"] == "No SELECT *."
-    # its own configuration (no credentials kept here), and its sessions: kept in its usual
-    # home, where the conversation's next turn finds the one this run ended in
-    assert seen["linked"] == ["config.toml", "sessions"]
+    assert seen["names"] == ["sql-review", "tone"]  # its own beside the run's
+    # its own configuration (no credentials kept here), its instructions, and its sessions:
+    # kept in its usual home, where the conversation's next turn finds the one this run ended in
+    assert seen["linked"] == ["AGENTS.md", "config.toml", "sessions"]
+    assert (usual / "skills" / "tone" / "SKILL.md").is_file()  # the run's home gone, its own kept
     assert (usual / "sessions").is_dir()
     started = recorded(tmp_path)["started"][0]["env"]["KIMI_CODE_HOME"]
     gone = not Path(started).exists()  # noqa: ASYNC240
     assert started != str(usual) and gone  # the run's, removed with it
+
+
+async def test_kimis_skills_folder_holds_each_tenants_and_users_own_skills(
+    memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """SEC: the skills folder of a Kimi run's home holds the skills of its tenant and user."""
+    from tests.support.skills import SkillStore, kept_apart
+    from trellis import Settings
+    from trellis.skills import combine
+
+    memory_service.tenant = None  # a platform key: each run names its tenant
+    harness = Harness(config=Settings(), memory=memory_service.client())
+
+    async def seen(store: SkillStore, tenant: str, user: str) -> str:
+        folder = tmp_path / f"{tenant}-{user}"
+        await asyncio.to_thread(folder.mkdir)
+        target = fake(folder, [{"skills": True}, {"text": "ok"}], **combine(store).kimi())
+        result = await harness.wrap(target, id=f"k-{tenant}-{user}").run(
+            "go", user=user, tenant=tenant
+        )
+        assert result.status is RunStatus.SUCCESS, result.error
+        return recorded(folder)["skills"][0]["files"]["sql-review/SKILL.md"]
+
+    await kept_apart(seen)
+    await harness.aclose()
 
 
 # --------------------------------------------------------------------------- the rest of ACP

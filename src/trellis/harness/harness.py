@@ -83,6 +83,8 @@ LOCAL_TENANT: Final = "default"
 #: The reason a run cancelled from another process ends with here (the store keeps the one
 #: it was cancelled with).
 CANCELLED_ELSEWHERE: Final = "cancelled from another process"
+#: Why a run the run store ended meanwhile (its hold lapsed: ``holder_lost``) stops here.
+ENDED_ELSEWHERE: Final = "ended in the run store while it worked here"
 #: How long what the memory service said about ``TRELLIS_API_KEY`` is kept before it is asked
 #: again; while the service cannot be reached the last answer is kept (asked again after the
 #: retry interval).
@@ -482,18 +484,21 @@ class Harness:
 
     # ------------------------------------------------------------------ who we are
     async def _lost(self, run_id: str, tenant: str) -> None:
-        """A run held here whose heartbeat or event the run store refused: when it was
-        cancelled there — ``agent.cancel`` on another process — what this process does for it
-        stops: its attempt under way ends ``CANCELLED``, one waiting its turn takes none
-        (``Agent.stop``)."""
+        """A run held here whose heartbeat or event the run store refused: when it ended there
+        — cancelled by ``agent.cancel`` on another process, or ended by the store's sweep
+        (``holder_lost``: its hold lapsed while the store could not be reached) — what this
+        process does for it stops: its attempt under way stops and writes nothing more (the
+        run's end is the store's: a write of its own end is refused), one waiting its turn
+        takes none (``Agent.stop``)."""
         try:
             record = await self.runs.get(run_id, tenant=tenant)
         except RunsError as exc:
             log.warning("run %s not read back after its hold was refused: %s", run_id, exc)
             return
-        if record is not None and record.status is RunStatus.CANCELLED:
+        if record is not None and record.status.final:
+            why = CANCELLED_ELSEWHERE if record.status is RunStatus.CANCELLED else ENDED_ELSEWHERE
             for agent in self.agents.values():
-                agent.stop(run_id, CANCELLED_ELSEWHERE)
+                agent.stop(run_id, why)
 
     async def _renewed(self, run_id: str, tenant: str) -> None:
         """A run's hold was renewed: when it holds its conversation's turn here and a newer

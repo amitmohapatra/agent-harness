@@ -38,7 +38,7 @@ the harness's two tools.
 
 | Engine | Where | Its own mechanism (in the tested versions) |
 |---|---|---|
-| `ReAct` | `ReAct(skills=src)` | Deep Agents' `SkillsMiddleware`: the skills a `/skills/` route of the graph's backend (`CompositeBackend`), listed in the system prompt, each `SKILL.md` read with `read_file` |
+| `ReAct` | `ReAct(skills=src)` | Deep Agents' `SkillsMiddleware`: the skills a `/skills/` route of the graph's backend (`CompositeBackend`), listed in the system prompt, each `SKILL.md` read with `read_file`; its general-purpose helper (`task`) has them too, as Deep Agents gives its own |
 | Deep Agents (your graph) | `create_deep_agent(model, **src.deep_agent())`; with a sandbox, `**deep_agent(sandbox(), src)` | the same, in its one `backend=`: the sandbox the composite's default, the skills its `/skills/` route |
 | Claude Agent SDK | `ClaudeAgentOptions(**src.claude())` | a local plugin (`plugins=`, `skills="all"`): the harness writes the run's skills into a folder of the run's own before each query and removes it after (the same path for each query of a run: a session resumed after a pause finds a skill's files where it was shown them); the CLI finds them as `trellis:<name>` |
 | Kimi Code | `kimi(**src.kimi())` | Kimi's own skills folder (`$KIMI_CODE_HOME/skills`): the harness writes the run's skills there, in a home of the run's own, before each attempt; Kimi lists them and loads one with its `Skill` tool ([frameworks/kimi.md](frameworks/kimi.md#native-or-ours-sandbox-skills-hooks)) |

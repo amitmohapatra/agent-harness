@@ -1397,10 +1397,12 @@ class RunHome:
     * **skills** (``ACPAgent(skills=...)``, ``**src.kimi()``): the run's pinned skills are
       written into the agent's own skills folder (``<home>/skills/<name>/SKILL.md`` and its
       files: ``skills.write_plugin``) before each attempt — the versions the run pinned, so a
-      resume reads the same ones;
-    * **a run that is not sandboxed** keeps this process's environment, and the agent's own
-      configuration and login (``config.toml``, ``credentials``) are linked into the run's home
-      from the agent's usual one — and so are its sessions (:data:`SESSIONS`), which stay in
+      resume reads the same ones — beside the agent's own skills of its usual home, each linked
+      there (a name the run has a skill of is the run's);
+    * **a run that is not sandboxed** keeps this process's environment, and what the agent
+      keeps in its usual home for every session (:data:`LINKED`: its configuration, its login,
+      its instructions, its plugins) is linked into the run's home — and so are its sessions
+      (:data:`SESSIONS`), which stay in
       the usual home: the conversation's next turn resumes the session this run ends in
       (``sessions``), where a home removed with its run would have taken the session with it;
     * **a sandboxed run** (:class:`Sandboxed`) gets an environment of :data:`SANDBOXED_ENV`
@@ -1408,8 +1410,9 @@ class RunHome:
       credential of this machine's reaches it (its model comes through the gateway, or from
       ``env``), and its session ends with it (:meth:`closed`)."""
 
-    #: what of the agent's usual home a run's home links to (its configuration, its login)
-    LINKED: Final = ("config.toml", "credentials")
+    #: what of the agent's usual home a run's home links to: its configuration, its login, its
+    #: instructions for every session (Kimi's ``AGENTS.md``), its plugins (and their skills)
+    LINKED: Final = ("config.toml", "credentials", "AGENTS.md", "plugins")
     #: the folder of its home the agent keeps its sessions in, linked too (made if missing)
     SESSIONS: Final = "sessions"
 
@@ -1424,6 +1427,8 @@ class RunHome:
         self.work = str(self.root / "work")
         self.agent_home.mkdir(parents=True, exist_ok=True)
         Path(self.work).mkdir(parents=True, exist_ok=True)
+        #: the agent's usual home, linked (a run that is not sandboxed: :meth:`env`)
+        self.usual: Path | None = None
 
     def env(self) -> dict[str, str]:
         profile = self.target.profile
@@ -1440,6 +1445,7 @@ class RunHome:
         return env
 
     def _linked(self, usual: Path) -> None:
+        self.usual = usual
         (usual / self.SESSIONS).mkdir(parents=True, exist_ok=True)
         for name in (*self.LINKED, self.SESSIONS):
             found, link = usual / name, self.agent_home / name
@@ -1447,13 +1453,24 @@ class RunHome:
                 link.symlink_to(found)
 
     async def skills(self) -> None:
-        """The run's pinned skills, in the agent's skills folder (``<home>/skills``)."""
+        """The run's pinned skills, in the agent's skills folder (``<home>/skills``), and the
+        agent's own skills of its usual home linked beside them (a name the run has is the
+        run's)."""
         if self.target.skills is None:
             return
         from trellis.harness import skills
 
-        shutil.rmtree(self.agent_home / "skills", ignore_errors=True)  # an earlier attempt's
+        folder = self.agent_home / "skills"
+        shutil.rmtree(folder, ignore_errors=True)  # an earlier attempt's
         await skills.write_plugin(self.target.skills, self.agent_home)
+        own = self.usual / "skills" if self.usual is not None else None
+        if own is None or not own.is_dir():
+            return
+        folder.mkdir(exist_ok=True)
+        for found in sorted(own.iterdir()):
+            link = folder / found.name
+            if not link.exists():
+                link.symlink_to(found)
 
     async def closed(self) -> None:
         """The attempt ended: the run's home and working directory removed with the run (kept

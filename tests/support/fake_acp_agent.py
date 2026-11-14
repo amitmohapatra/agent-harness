@@ -361,7 +361,8 @@ class FakeAgent:
                 if p.is_file()
             }
             linked = sorted(p.name for p in HOME.iterdir() if p.is_symlink())  # noqa: ASYNC240
-            record("skills", {"files": found, "linked": linked})
+            names = sorted(p.name for p in folder.iterdir())
+            record("skills", {"files": found, "linked": linked, "names": names})
             return None
         if "error" in step:
             raise RequestError.internal_error({"why": step["error"]})

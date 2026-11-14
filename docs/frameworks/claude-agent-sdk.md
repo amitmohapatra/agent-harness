@@ -60,7 +60,8 @@ their check. That server is loaded from the first step (its config says `alwaysL
 Code otherwise defers every MCP server's tools behind its `ToolSearch`, so the model sees their
 names only and spends a step loading them. Which tools a run offers is already the harness's
 choice (the tool hints' narrowing, memory's `tool_search`); your own servers keep the CLI's
-deferral.
+deferral. The narrowing never takes Claude Code's `Skill` tool away: it is how the run's skills
+(a skill source's plugin, your own skill folders) reach Claude.
 
 **`query(...)` itself is not intercepted**: call `agent.run`/`stream`/`resume`/`start` instead.
 

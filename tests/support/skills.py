@@ -3,8 +3,11 @@ agent, editable between and during runs, and able to go down."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Final
 
 from trellis.harness.repository import NotFound
 from trellis.harness.skills import Level, Scope, SkillDoc, SkillInfo
@@ -106,3 +109,21 @@ class SkillStore:
         if path not in files:
             raise NotFound(f"no file {path}")
         return files[path]
+
+
+#: The runs of :func:`kept_apart`: two tenants' users of one name, and one with skills of her own.
+APART: Final = (("acme", "bob"), ("globex", "bob"), ("acme", "ada"))
+
+
+async def kept_apart(seen: Callable[[SkillStore, str, str], Awaitable[str]]) -> None:
+    """SEC: each of :data:`APART`'s runs, at once, is given its own tenant's ``sql-review`` (a
+    user's own over the tenant's), never another tenant's: ``seen`` runs one (the store, its
+    tenant, its user) and says what its framework's skills slot was given."""
+    store = SkillStore()
+    store.put("sql-review", "Acme's rules.", owner="acme")
+    store.put("sql-review", "Globex's rules.", owner="globex")
+    store.put("sql-review", "Ada's own rules.", level="user", owner="ada")
+    acme_bob, globex_bob, acme_ada = await asyncio.gather(*(seen(store, *run) for run in APART))
+    assert "Acme's rules." in acme_bob and "Globex" not in acme_bob
+    assert "Globex's rules." in globex_bob and "Acme" not in globex_bob
+    assert "Ada's own rules." in acme_ada  # her override wins over the tenant's
