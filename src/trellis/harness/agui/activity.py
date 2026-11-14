@@ -1,9 +1,10 @@
 """What a run did, grouped as AG-UI's ``ACTIVITY_SNAPSHOT``: one line a chat UI shows
 collapsed above the answer — "used 3 tools · ran 1 command" — replaced as each tool call ends.
 
-It is derived from the tool events the stream already carries (each call once, by its id: a
-call replayed on resume is not counted twice), so nothing is recorded for it; a reconnect served
-from agent-runs' event log (another replica) derives it again. Each line shares the number of
+It is derived from the tool events the stream already carries (each call once, by its id), so
+nothing is recorded for it: a run's line counts its calls in every attempt this replica served
+(``hub.RunBuffer.activity``), and a reconnect served from agent-runs' event log (another
+replica) derives it again from the whole log. Each line shares the number of
 the result it follows (``hub.RunBuffer.publish(derived=True)``).
 """
 

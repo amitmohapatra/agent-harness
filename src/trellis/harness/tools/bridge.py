@@ -2,7 +2,8 @@
 record.
 
 1. **replay** — a call the journal already has (a resumed run re-planning the same step)
-   returns its recorded output and runs nothing; a tool of a feature the run is without
+   returns its recorded output and runs nothing, and is not announced again (the attempt that
+   ran it did: its events are in the run's log); a tool of a feature the run is without
    (``without=``: a graph's tools are bound when it is built) is an error the model reads, and
    so are arguments that do not fit the tool's schema (``tools.base.arguments_problem``: a
    required field missing, a basic type wrong, an unknown field where none are allowed) —
@@ -356,12 +357,12 @@ async def _called(
     tool_call = ToolCall(
         tool=tool.name, args=args, task=runtime.task, step=step, idempotency_key=call_id or key
     )
-    ref = call_id or f"{runtime.run_id}:{step}"
+    # its id on the stream and in the transcript: its framework's, else what the call is (not
+    # when in its attempt it ran: an attempt that goes on from a checkpoint counts from 0 again)
+    ref = call_id or idempotency_key
     replayed, output = runtime.replay.call(key)
-    if replayed:
-        outcome = _replayed(tool.name, output)
-        _events(runtime, ref, tool_call, outcome)
-        return outcome
+    if replayed:  # on the stream already: the attempt that ran it said it, in the run's log
+        return _replayed(tool.name, output)
     # a try again of a framework's own tool (``Tool.deferring``): an attempt of the call that
     # began with its first — refused, counted, started and announced then, not again
     again = tool.deferring is not None and tool.deferring.tried > 0
@@ -914,16 +915,10 @@ def _replayed(tool: str, recorded: Any) -> ToolOutcome:
 
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
-    """A call that did not execute still appears on the stream, so a UI sees every step."""
+    """A call that did not run here (refused, rejected, its effect unknown, run by its
+    framework) still appears on the stream, so a UI sees every step."""
     _started(runtime, ref, call.tool, call.args)
-    _ended(
-        runtime,
-        ref,
-        call.tool,
-        status=outcome.status.value,
-        cached=outcome.cached,
-        output=outcome.output,
-    )
+    _ended(runtime, ref, call.tool, status=outcome.status.value, output=outcome.output)
 
 
 def _cut(runtime: Runtime, ref: str, tool: str, status: str) -> None:
