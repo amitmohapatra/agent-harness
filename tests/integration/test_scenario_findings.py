@@ -67,11 +67,6 @@ async def test_scn8_a_message_cancelled_while_it_waits_its_turn_ends_cancelled(
     assert done.status.value == "CANCELLED" and ran == ["first"], (done.status, ran)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SCN-13: scn-fixes (harness.py Harness._lost stops a run only when the store has it "
-    "CANCELLED, not when the store ended it holder_lost)",
-)
 async def test_scn13_a_run_the_store_ended_stops_where_it_works(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

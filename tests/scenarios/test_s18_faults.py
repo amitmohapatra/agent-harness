@@ -130,11 +130,6 @@ async def test_a_server_whose_clock_runs_ahead(uid: str, tmp_path: Path) -> None
         two.stop()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SCN-13: scn-fixes (a run agent-runs ended holder_lost goes on where it works: "
-    "harness.py Harness._lost stops only a CANCELLED one)",
-)
 async def test_a_network_cut_between_a_server_and_agent_runs(
     uid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invariants: Invariants
 ) -> None:
