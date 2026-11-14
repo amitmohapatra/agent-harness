@@ -1,0 +1,20 @@
+GATES BEFORE YOU REPORT DONE (architect, 19:55 UTC)
+
+The first branch that reached CI failed: 20 pyright errors in tests and 7 tests failing,
+because jobs ran only "touched test files" and pyright only on src. CI runs, in order:
+ruff check + format --check, pyright on src AND tests AND examples AND benchmark,
+`make test` (whole non-live suite, 100% line+branch coverage of trellis.harness),
+examples, docs check, the matrix.
+
+Before your final report, on your branch head:
+1. ruff check . and ruff format --check .
+2. pyright over the whole repo, tests included, with trellis.contracts / trellis.memory /
+   trellis.runs resolvable (make a `typings/trellis/{contracts,memory,runs}` symlink set as
+   the Makefile's `typings` target does, pointing at the newest worktrees of those repos).
+   "Only unresolved trellis.contracts imports" is NOT a pass: fix the resolution and read
+   the real errors. 0 errors required.
+3. python scripts/check_docs.py
+4. When you change a function's signature, grep ALL callers in src and tests and run every
+   test file that calls it, not only the files you edited.
+5. Every line and branch you added has a test that reaches it (CI fails under 100%).
+Still ONE pytest at a time, no matrix, no local coverage run. Report each gate's result.
