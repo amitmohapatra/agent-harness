@@ -96,6 +96,17 @@ def test_read_file_pages_by_lines_from_an_offset(journal: Journal) -> None:
     )
 
 
+def test_a_page_holds_at_most_20_000_characters() -> None:
+    from trellis.harness.tools.results import page
+
+    def lines_on_page(fourth: int) -> int:
+        text = "\n".join(["a" * 5_000] * 3 + ["b" * fourth, "c"])
+        return len([row for row in page(text, "/p", limit=9).splitlines() if "  " in row])
+
+    assert lines_on_page(4_985) == 4  # 3 x (1 + 2 + 5,000 + 1) + 1 + 2 + 4,985: 20,000 whole
+    assert lines_on_page(4_986) == 3  # one character more: the line goes to the next page
+
+
 def test_read_checks_the_arguments_the_model_wrote(journal: Journal) -> None:
     path = kept_path(readable("z\n" * MAX_CHARS))
     assert read({"file_path": path, "limit": 1}).startswith("1  z\n…[")
