@@ -371,6 +371,21 @@ async def test_finished_runs_go_after_their_time_with_their_artifacts(
     assert runs._artifact_runs == {} and set(runs._run_artifacts) == set()
 
 
+async def test_a_schedules_listing_pages_by_offset_and_ends_on_its_last_page() -> None:
+    runs = LocalRuns()
+    for n in range(4):
+        await runs.schedules.create(
+            ScheduleSpec(
+                tenant_id="t", agent_id="a", name=f"s{n}", cadence="daily", on_behalf_of=f"u{n}"
+            )
+        )
+    first = await runs.schedules.list(limit=2, tenant="t")
+    assert [s.name for s in first.items] == ["s3", "s2"] and first.next_cursor == "2"
+    last = await runs.schedules.list(limit=2, cursor=first.next_cursor, tenant="t")
+    assert [s.name for s in last.items] == ["s1", "s0"] and last.next_cursor is None
+    assert (await runs.schedules.list(limit=4, tenant="t")).next_cursor is None
+
+
 async def test_by_default_1000_finished_runs_are_kept_for_an_hour(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
