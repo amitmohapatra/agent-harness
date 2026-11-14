@@ -316,14 +316,17 @@ wrapped agent did not get what the SDK gives:
 - **Sessions.** Options with `session_id` failed when a pause resumed them (Claude Code
   takes it with `--resume` only to fork), and options with `continue_conversation` failed at
   once (the SDK asked the journal's store for the latest session): both work.
-- **Workflows and messages to other agents.** The bundled CLI offers a dynamic workflow
-  (`Workflow`) with no server flag: one background task whose agents have no task of their
-  own, an agent's first tool call reaching the harness before any frame names it, so its
-  calls were taken for the main agent's (and the launch asked a person as an undeclared
-  tool). `SendMessage` resumed a finished background subagent as a new task no child run
-  held, or reached another Claude session. Both are disallowed, as the schedules are, with
-  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`; 2.1.283 has none and
-  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing of what it sends).
+- **Dynamic workflows.** The bundled CLI offers `Workflow` with no flag: one background
+  task (`local_workflow`, no `is_backgrounded`) whose agents have no task of their own, an
+  agent's first call reaching the harness before any frame names it. The launch asked a
+  person as an undeclared tool, and its agents' calls were taken for the main agent's. A
+  workflow is now one child run, kept as a background subagent's and ended as its task
+  ends; its agents' calls are its run's by their kind (`workflow-subagent`), governed and
+  recorded there; a second launch while one works in the session is refused.
+- **Messages to other agents.** `SendMessage` resumed a finished background subagent as a
+  new task no child run held, or reached another Claude session: it is disallowed, as the
+  schedules are, with the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`;
+  2.1.283 has none and `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` changes nothing it sends).
 
 Tested through the harness on the query path and in a live session: every hook event of the
 options' own, `can_use_tool` with its suggestions and permission updates, every option's

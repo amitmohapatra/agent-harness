@@ -111,16 +111,23 @@ the user Claude Code would ask:
   nobody. So these, with `CronList` and `CronDelete`, are added to the query's
   `disallowed_tools`, after your own. Offered, Claude promised a weekly report that nothing
   would send.
-* **Not offered: workflows and messages to other agents.** A dynamic workflow (`Workflow`)
-  runs its agents in the background as one task: none has a task of its own, and an agent's
-  first tool call can reach the harness before anything names that agent, so its calls
-  could only be taken for the main agent's. `SendMessage` resumes a finished background
-  subagent as a new task, or reaches another Claude session on the machine or in the cloud.
-  No run holds that work, so `Workflow`, `SendMessage` and the agent-teams tools older CLIs
-  have (`TeamCreate`, `TeamDelete`) are added to `disallowed_tools` too, whatever
-  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the bundled CLI's named agents are
-  background subagents, each a child run: below). A slash command that runs a workflow
-  (`/deep-research`) finds no `Workflow` tool to call.
+* **A dynamic workflow is one child run.** A `Workflow` call (a script that runs agents in
+  the background; the bundled CLI offers it with no flag) only hands work on, as `Agent`
+  does: it runs, and its workflow is a child run of the turn, kept open as a background
+  subagent's (below) until the workflow's task ends — `SUCCESS` with what its notification
+  says, `ERROR` when it failed or was cut off, `CANCELLED` when it was stopped or its turn
+  was cancelled. Its agents have no task of their own, and an agent's first call can reach
+  the harness before anything names that agent, so their calls are the workflow's by their
+  kind (`agent_type` `workflow-subagent`): decided by its run's hooks and governance and
+  recorded under it. So one workflow works at a time in a session: a second launch while
+  one works is refused, saying so. The tool catalog's risk for `Workflow` still decides
+  its launch.
+* **Not offered: messages to other agents.** `SendMessage` resumes a finished background
+  subagent as a new task whose messages carry the call that first started it, or reaches
+  another Claude session on the machine or in the cloud. No run holds that work, so it and
+  the agent-teams tools older CLIs have (`TeamCreate`, `TeamDelete`) are added to
+  `disallowed_tools`, whatever `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` your `env` sets (the
+  bundled CLI's named agents are background subagents, each a child run: below).
 * **One call, one question.** A call whose approval a person answered before it ran
   (governance's question, whatever made it ask: a catalog rule, a hook's `Ask`) is not asked
   about again when Claude Code asks too: it runs. Another question answered while the call

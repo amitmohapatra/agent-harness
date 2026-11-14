@@ -92,6 +92,7 @@ class Kind(StrEnum):
     AGENT_TOOL = "agent_tool"  # an OpenAI agent called as a tool (``Agent.as_tool``)
     SUBAGENT = "subagent"  # Claude's ``agents=`` (its ``Agent``/``Task`` tool)
     ASYNC_TASK = "async_task"  # Deep Agents' ``start_async_task``: a task on a server of yours
+    WORKFLOW = "workflow"  # Claude Code's dynamic workflow (its ``Workflow`` tool)
 
 
 @dataclass
@@ -306,6 +307,13 @@ class Helpers:
         """The open helper called ``name`` started last (a framework that names the helper
         a call comes from, not the call that started it: Claude's ``agent_type``)."""
         found = [h for h in self._open.values() if h.name == name]
+        return found[-1] if found else None
+
+    def of_kind(self, kind: Kind) -> Helper | None:
+        """The open helper of ``kind`` started last (a framework that says what kind of helper
+        a call is the work of, not which: Claude Code's workflow agents, one workflow at a
+        time)."""
+        found = [h for h in self._open.values() if h.kind is kind]
         return found[-1] if found else None
 
     def attribute(self, worker: str, key: str | None, *, background: bool = False) -> None:

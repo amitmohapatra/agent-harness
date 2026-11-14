@@ -65,6 +65,12 @@ the bundled CLI (2.1.283) reports them when driven against a scripted model.
 Background work, as far as the SDK's message types say its shape (``task_started``,
 ``task_notification``, a turn of the session's own whose result has ``origin: {"kind":
 "task-notification"}``):
+``{"workflow": {"id": "w1", "name": "probe", "script": "..."}}`` is a dynamic workflow's
+``Workflow`` call: a ``local_workflow`` task with its ``workflow_name`` and no
+``is_backgrounded``; ``w1.call`` with ``"by": "<agent id>"`` is a call one of its agents
+makes — its hooks name the agent by that id and ``agent_type`` ``workflow-subagent``, and the
+CLI sends none of the agents' messages — and ``w1.done`` its end (no last reply of its own),
+as the bundled CLI (2.1.283) does them against a scripted model.
 ``{"background": {"id": "t1", "agent": "researcher", "prompt": "..."}}`` is an ``Agent`` call
 with ``run_in_background`` (``"shell": "<command>"`` instead: a ``Bash`` one) that returns at
 once and leaves task ``t1`` running. Files in ``FAKE_CLAUDE_TASKS`` drive a running task from
@@ -103,6 +109,10 @@ from pathlib import Path
 from typing import Any
 
 SERVER = os.environ.get("FAKE_CLAUDE_SERVER", "trellis")
+#: What a dynamic workflow's agents are named in their hooks (``agent_type``), and the task a
+#: workflow is (``task_type``), as the bundled CLI (2.1.283) sends them.
+WORKFLOW_AGENT = "workflow-subagent"
+WORKFLOW_TASK = "local_workflow"
 #: What the harness's tools answer when the run paused (``tools.convert.claude.WAITING``).
 WAITING = "Waiting for a person's approval."
 SESSIONS = Path(os.environ.get("FAKE_CLAUDE_SESSIONS") or tempfile.gettempdir()) / "fake-claude"
@@ -326,10 +336,9 @@ class Cli:
                 item = json.loads(call.read_text())
                 call.unlink()
                 task["calls"] = str(int(task.get("calls", "0")) + 1)
-                was, self.working = (
-                    self.working,
-                    {"agent_id": task_id, "agent_type": task["agent"]},
-                )
+                flow = task["agent"] == WORKFLOW_AGENT  # one of its agents, named by "by"
+                who = str(item.pop("by", "")) if flow else task_id
+                was, self.working = (self.working, {"agent_id": who, "agent_type": task["agent"]})
                 try:
                     said, ok, _ = self.tool(
                         self.session,
@@ -337,6 +346,7 @@ class Cli:
                         item,
                         tool_id=f"{task['tool_id']}_{task['calls']}",
                         parent=task["tool_id"],
+                        quiet=flow,
                     )
                 finally:
                     self.working = was
@@ -362,7 +372,7 @@ class Cli:
                 self.helped += 1
                 status = "completed" if ended is done else "failed"
                 frame = {"type": "system", "task_id": task_id, "session_id": self.session}
-                if task["agent"] != "shell":  # the subagent's last reply
+                if task["agent"] not in ("shell", WORKFLOW_AGENT):  # the subagent's last reply
                     said = [{"type": "text", "text": summary}]
                     send(assistant(self.session, said, parent=task["tool_id"]))
                 send({**frame, "subtype": "task_updated", "patch": {"status": status}})
@@ -416,9 +426,14 @@ class Cli:
         """A call that leaves a task running in the background: an ``Agent`` call (or, with
         ``shell``, a ``Bash`` one) with ``run_in_background``, through the hooks and the
         permission rules as any call; then the task's start, and the call's result at once."""
-        spec = item["background"]
+        spec = item.get("background") or item["workflow"]
         tool_id = f"toolu_bg_{spec['id']}"
-        if "shell" in spec:
+        started: dict[str, Any] = {"is_backgrounded": True}
+        if "workflow" in item:  # a workflow's task says nothing of the background
+            name, kind = "Workflow", WORKFLOW_TASK
+            args = {"script": spec["script"]}
+            started = {"workflow_name": spec["name"], "prompt": spec["script"]}
+        elif "shell" in spec:
             name, kind = "Bash", "local_bash"
             args = {"command": spec["shell"], "run_in_background": True}
         else:
@@ -437,21 +452,24 @@ class Cli:
             waits = content[0]["text"] == WAITING
             return content[0]["text"], False, waits or bool(permission.get("interrupt"))
         ran = permission.get("updatedInput", args)
-        self.tasks[spec["id"]] = {"tool_id": tool_id, "agent": spec.get("agent", "shell")}
+        agent = WORKFLOW_AGENT if kind == WORKFLOW_TASK else spec.get("agent", "shell")
+        self.tasks[spec["id"]] = {"tool_id": tool_id, "agent": agent}
         send(
             {
                 "type": "system",
                 "subtype": "task_started",
                 "task_id": spec["id"],
                 "tool_use_id": tool_id,
-                "description": spec.get("prompt") or spec.get("shell"),
+                "description": spec.get("prompt") or spec.get("shell") or spec.get("name"),
                 "task_type": kind,
-                "is_backgrounded": True,
+                **started,
                 "uuid": str(uuid.uuid4()),
                 "session_id": session,
             }
         )
-        content = [{"type": "text", "text": f"Async task launched: {spec['id']}"}]
+        launched = "Workflow launched in background. Task ID" if kind == WORKFLOW_TASK else None
+        said = f"{launched or 'Async task launched'}: {spec['id']}"
+        content = [{"type": "text", "text": said}]
         self.post_tool_use(session, name, ran, tool_id, content=content, error=None)
         self.result(session, tool_id, content)
         return content[0]["text"], True, False
@@ -869,7 +887,7 @@ class Cli:
         if "stall" in item:  # the model says nothing for a while, then goes on
             self.wait(float(item["stall"]))
             return None, read, True, False, 0
-        if "background" in item:
+        if "background" in item or "workflow" in item:
             read, completed, interrupted = self.background(session, step, item)
             return None, read, completed, interrupted, 0
         if "text" in item:
@@ -1045,17 +1063,20 @@ class Cli:
         *,
         tool_id: str | None = None,
         parent: str | None = None,
+        quiet: bool = False,
     ) -> tuple[str, bool, bool]:
         """One tool call (``parent``: of a subagent, its ``Agent`` call): the text of its
         result, whether it is done (it ran, without an error), and whether the permission
-        check stopped the turn."""
+        check stopped the turn. ``quiet``: a workflow's agent's, whose messages the CLI does
+        not send (its hooks and permission requests only)."""
         tool_id = tool_id or str(item.get("id") or f"toolu_{step}")
         builtin = item.get("builtin")
         server = item.get("server", SERVER)
         name = builtin or f"mcp__{server}__{item['tool']}"
         args = item.get("args", {})
         call = [{"type": "tool_use", "id": tool_id, "name": name, "input": args}]
-        send(assistant(session, call, parent=parent))
+        if not quiet:
+            send(assistant(session, call, parent=parent))
         permission = self.allowed(session, name, args, tool_id)
         allowed = permission.get("behavior", "allow") == "allow"
         error = not allowed
@@ -1082,7 +1103,8 @@ class Cli:
             content = [{"type": "text", "text": permission.get("message", "denied")}]
         read = "".join(c.get("text", "") for c in content if isinstance(c, dict))
         waits = read == WAITING  # the run paused: the SDK stops reading, the process ends
-        self.result(session, tool_id, content, parent)
+        if not quiet:
+            self.result(session, tool_id, content, parent)
         stops = waits or bool(permission.get("interrupt"))
         # a call that did not run, or failed, is done all the same: the "model" read why, as
         # the real CLI's transcript keeps it, and a resumed session goes on after it

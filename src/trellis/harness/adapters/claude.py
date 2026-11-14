@@ -29,7 +29,9 @@
 * spending: each query's usage and cost (its ``ResultMessage``) count toward the run's budget;
 * helpers: each subagent Claude runs (``agents=``, its ``Agent`` tool) is a child run of the run
   (``bridges.helpers``), from its call to that call's result; its own tool calls go through the
-  same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``;
+  same ``PreToolUse`` hook, and what it spends is in its query's ``ResultMessage``. A dynamic
+  workflow (its ``Workflow`` tool) is one such child run, in the background: its agents'
+  calls are its run's by their kind (``claude_live.WORKFLOW_AGENT``), one workflow at a time;
 * conversations: a conversation's turn leaves its CLI process running, and the next turn is
   sent into it (``bridges.claude_live``: the SDK's ``ClaudeSDKClient``), so what Claude started
   in the background — a subagent with ``background``, a shell command — goes on between the
@@ -107,7 +109,17 @@ from trellis.harness.bridges.claude import (
     session_store,
     with_context,
 )
-from trellis.harness.bridges.claude_live import Background, LiveSession, LiveSessions, Turn, gone
+from trellis.harness.bridges.claude_live import (
+    ONE_WORKFLOW,
+    WORKFLOW_AGENT,
+    WORKFLOW_TOOL,
+    Background,
+    LiveSession,
+    LiveSessions,
+    Turn,
+    backgrounded,
+    gone,
+)
 from trellis.harness.bridges.helpers import STOPPED, Helper, Helpers, Kind
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import SHELLS, Shell, moves
@@ -130,7 +142,8 @@ if TYPE_CHECKING:
 #: Code's own permission check asking first where it would (a team that wants every shell
 #: command approved gives ``Bash`` the risk ``irreversible``, or an ``approve_when``, in the
 #: tool catalog); a subagent's
-#: call (``Agent``, ``Task``) only hands work on — its own calls are governed one by one; a
+#: call (``Agent``, ``Task``) and a dynamic workflow's (``Workflow``) only hand work on — their
+#: agents' calls are governed one by one; a
 #: skill (``Skill``) or a plan (``ExitPlanMode``) is read, a slash command (``SlashCommand``)
 #: may do anything its command does: a write. Stopping a background task (``TaskStop``, named
 #: ``KillShell`` before) is a write. Tools that only list or look up (``ListAgents``,
@@ -153,6 +166,7 @@ BUILTIN_SIDE_EFFECTS: Final[dict[str, SideEffects]] = {
     "TodoWrite": "read",
     "Agent": "read",
     "Task": "read",
+    "Workflow": "read",
     "Skill": "read",
     "ExitPlanMode": "read",
     "EnterPlanMode": "read",
@@ -195,16 +209,15 @@ CLAUDE_CODE: Final = "Claude Code"
 #: schedules): offered, Claude promised a schedule that nothing keeps.
 OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 #: Claude Code's built-in tools that start agents no run of the harness can hold, disallowed
-#: too. A dynamic workflow (``Workflow``, alias ``RunWorkflow``) is one background task whose
-#: agents have none of their own: the stream names each only in that task's progress, and an
-#: agent's first tool call can come before any frame names it (the bundled CLI, 2.1.283,
-#: driven against a scripted model), so its calls cannot be told apart from the main agent's.
-#: ``SendMessage`` resumes a finished background subagent as a new task, whose messages carry
-#: the call that first started it, or reaches another Claude session on the machine or in the
-#: cloud. The agent-teams tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS``
-#: (``TeamCreate``, ``TeamDelete``; 2.1.283 has none, its named agents are background
-#: subagents) are left out with them, whatever the team's own environment says.
-UNHELD_AGENTS: Final = ("Workflow", "SendMessage", "TeamCreate", "TeamDelete")
+#: too. ``SendMessage`` resumes a finished background subagent as a new task, whose messages
+#: carry the call that first started it (the bundled CLI, 2.1.283, driven against a scripted
+#: model), or reaches another Claude session on the machine or in the cloud. The agent-teams
+#: tools older CLIs have behind ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` (``TeamCreate``,
+#: ``TeamDelete``; 2.1.283 has none, its named agents are background subagents) are left out
+#: with it, whatever the team's own environment says.
+UNHELD_AGENTS: Final = ("SendMessage", "TeamCreate", "TeamDelete")
+#: The name of a dynamic workflow's child run (its script names it, which the call does not).
+WORKFLOW: Final = "workflow"
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -851,6 +864,27 @@ async def _briefed(
     return {**args, "prompt": helpers.briefed(helper, task)} if "prompt" in args else args
 
 
+def _flowing() -> bool:
+    """Whether a dynamic workflow the run started still works in its process (its child run
+    open: ``Kind.WORKFLOW``); a live session's earlier turns' is the session's to say
+    (``claude_live.ONE_WORKFLOW``)."""
+    runtime = current()
+    assert runtime is not None and runtime.helpers is not None  # inside the run's query
+    return runtime.helpers.of_kind(Kind.WORKFLOW) is not None
+
+
+async def _working(helpers: Helpers, given: Mapping[str, Any]) -> Helper | None:
+    """The helper a call is the work of, from its hook's input (``given``): a subagent's, by
+    its task's id (``agent_id``: ``Helpers.of``); the dynamic workflow's, whose agents name
+    their kind (:data:`WORKFLOW_AGENT`) — one works at a time; ``None``: the run's own."""
+    who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
+    if who is None:
+        return None
+    if kind == WORKFLOW_AGENT:
+        return helpers.of_kind(Kind.WORKFLOW)
+    return await helpers.of(str(who), kind)
+
+
 async def _subagents(helpers: Helpers, message: Any) -> None:
     """A subagent's start (the main agent's ``Agent`` call: its ``subagent_type`` and
     ``prompt``; started already when its ``PreToolUse`` came first: :func:`_briefed`) or end
@@ -902,7 +936,7 @@ async def _tasks(helpers: Helpers, message: Any) -> None:
 
     if isinstance(message, TaskStartedMessage):
         if message.tool_use_id:
-            background = bool(message.data.get("is_backgrounded"))
+            background = backgrounded(message)
             helpers.attribute(message.task_id, message.tool_use_id, background=background)
     elif isinstance(message, TaskNotificationMessage):
         failed = message.status != TASK_COMPLETED
@@ -1141,8 +1175,7 @@ class Steps:
         permission request; ``None``: the run's own call."""
         helpers = self.runtime.helpers
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
-        who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
-        working = None if who is None else await helpers.of(str(who), kind)
+        working = await _working(helpers, given)
         if working is not None:
             self.helped[call_id] = working
         return working
@@ -1320,6 +1353,8 @@ def _governance(steps: Steps) -> Any:
     async def pre_tool_use(given: Any, tool_use_id: str | None, hook: Any) -> SyncHookJSONOutput:
         if steps.last:  # the one last answer, in a live session that has its tools
             return _decided("deny", AT_LIMIT)
+        if given["tool_name"] == WORKFLOW_TOOL and _flowing():
+            return _decided("deny", ONE_WORKFLOW)  # its agents' calls could not be told apart
         return await decide(given, tool_use_id)
 
     async def decide(given: Any, tool_use_id: str | None) -> SyncHookJSONOutput:
@@ -1351,6 +1386,10 @@ def _governance(steps: Steps) -> Any:
             ran = await _briefed(runtime, call_id, name, decided.args)
             steps.started(call_id, name, ran)
             return _decided("allow", updated=ran)
+        if name == WORKFLOW_TOOL:  # its child run, open from here as a background subagent's
+            flow = decided.args.get("script") or decided.args.get("name")
+            task = str(flow or decided.args.get("scriptPath") or "")
+            await runtime.helpers.start(call_id, kind=Kind.WORKFLOW, name=WORKFLOW, task=task)
         steps.started(call_id, name, decided.args)
         if decided.args != args:
             return _decided("ask", updated=decided.args)
@@ -1502,8 +1541,7 @@ def _recorded(steps: Steps, shell: Shell) -> Any:
         assert helpers is not None  # the query runs with the attempt's helpers (``_helped``)
         # a call a subagent made is recorded under its run: the CLI names the subagent by
         # its task's id (``agent_id``), which its ``task_started`` tied to its ``Agent`` call
-        who, kind = given.get("agent_id"), str(given.get("agent_type") or "")
-        working = None if who is None else await helpers.of(str(who), kind)
+        working = await _working(helpers, given)
         with helpers.working(working):
             await bridge.observed(steps.runtime, spec, args, outcome, ref=call_id, started=started)
         return {}

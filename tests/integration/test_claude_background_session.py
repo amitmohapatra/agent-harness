@@ -48,6 +48,7 @@ from trellis.harness import budget, holding
 from trellis.harness.adapters.claude import (
     AT_LIMIT,
     BUILTIN_SIDE_EFFECTS,
+    ONE_WORKFLOW,
     OUTLIVES_THE_QUERY,
     RESUMED_CALL,
     ClaudeAdapter,
@@ -2313,3 +2314,153 @@ def test_the_frames_the_stand_in_sends_are_the_sdks_task_messages() -> None:
         }
     )
     assert isinstance(started, TaskStartedMessage) and started.task_type == "local_agent"
+
+
+# --------------------------------------------------------------------------- dynamic workflows
+#: A dynamic workflow's launch: its ``Workflow`` call returns at once, task ``w1`` runs, its
+#: agents named in their hooks by ids of their own (``a1``, ``a2``) and ``workflow-subagent``.
+SCRIPT = "export const meta = { name: 'probe', description: 'probe', phases: [] }\nreturn 1"
+WORKFLOW = {"workflow": {"id": "w1", "name": "probe", "script": SCRIPT}}
+ANOTHER = {"workflow": {"id": "w2", "name": "probe", "script": SCRIPT}}
+#: What the bundled CLI's notification of a finished workflow says.
+FLOWED = 'Dynamic workflow "probe" completed'
+
+
+async def test_a_workflows_agents_calls_are_governed_and_recorded_on_its_one_child_run(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """A dynamic workflow (``Workflow``) is one child run of the turn that launched it, kept
+    open as a background subagent's while it works: the calls of its agents — each named by
+    an id of its own and ``workflow-subagent`` — are decided by that run's hooks and
+    governance and recorded under it, between turns and while a turn is answered; it ends
+    ``SUCCESS`` with what the workflow's notification says."""
+
+    @tool(side_effects="read")
+    def whoami() -> str:
+        """The run this call is made in."""
+        runtime = current()
+        assert runtime is not None
+        return runtime.run_id
+
+    class Guard(Hooks):
+        async def before_tool(self, call: ToolCall) -> Deny | None:
+            return Deny("no searching here") if call.tool == "Grep" else None
+
+    scripts = [[WORKFLOW, {"text": "started it"}], [{"stall": 0.8}, {"text": "done"}]]
+    agent = arm(harness.wrap(options(tmp_path, scripts), id="flow", hooks=[Guard()]), [whoami])
+    first = await agent.run("fan out over the repo", user="u1", thread="t1")
+    assert first.answer == "started it", first.error
+    child = await child_of(harness, first.run_id)
+    assert child.status is RunStatus.RUNNING and child.input == SCRIPT
+    assert child.metadata[HELPER] == {
+        "framework": "claude_agent_sdk",
+        "kind": "workflow",
+        "name": "workflow",
+    }
+    seen, following = await followed(agent, child.run_id)
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert await calls(tmp_path, grep, "w1") == {
+        "result": "Grep was not run: no searching here",
+        "ok": False,
+    }
+    mine = await calls(tmp_path, {"by": "a2", "tool": "whoami"}, "w1")
+    assert mine == {"result": child.run_id, "ok": True}
+
+    async def during_the_turn() -> None:
+        await until(lambda: len(served(tmp_path)) == 2)
+        (tmp_path / "tasks" / "w1.call").write_text(json.dumps({"by": "a3", **READS}))
+
+    calling = asyncio.create_task(during_the_turn())
+    events = [e async for e in agent.stream("how is it going?", user="u1", thread="t1")]
+    await calling
+    assert events[-1].data["result"] == "done" and results(events) == []
+    assert results(seen) == ["Read", "whoami", "Read"]
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    ended = await when(harness, child.run_id, RunStatus.SUCCESS)
+    assert ended.output == FLOWED
+    following.cancel()
+
+
+async def test_a_workflow_of_a_run_with_no_conversation_keeps_its_child_run(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
+) -> None:
+    """In a process of the run's own, the workflow's child run is open until its task ends:
+    its agents' calls are recorded under it, and it ends ``SUCCESS``; the run answers."""
+    agent = memory_harness.wrap(options(tmp_path, [[WORKFLOW, {"text": "started it"}]]), id="alone")
+    events: list[RunEvent] = []
+
+    async def run() -> None:
+        events.extend([e async for e in agent.stream("fan out", user="u1")])
+
+    seen, following = await followed_first(agent, events)
+    running = asyncio.create_task(run())
+    await until(lambda: "Workflow" in results(seen))
+    run_id = seen[0].run_id
+    child = await child_of(memory_harness, run_id, None)
+    assert child.status is RunStatus.RUNNING
+    assert await calls(tmp_path, {"by": "a1", **READS}, "w1") == {"result": "Read ran", "ok": True}
+    grep = {"by": "a2", "builtin": "Grep", "args": {"pattern": "x"}}
+    assert (await calls(tmp_path, grep, "w1"))["ok"]
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    await running
+    await following
+    assert events[-1].data["result"] == "started it"
+    child = await child_of(memory_harness, run_id, None)
+    assert (child.status, child.output) == (RunStatus.SUCCESS, FLOWED)
+    await memory_harness.writes.drain()
+    made = [(c.body["tool"], c.scope["agent_run_id"]) for c in memory_service.named("record_tool")]
+    assert made == [("Workflow", run_id), ("Read", child.run_id), ("Grep", child.run_id)]
+
+
+async def test_a_second_workflow_while_one_runs_is_refused(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """One workflow at a time in a session: its agents' calls are its run's by their kind,
+    so a second launch while one works — in the same turn, or a later turn of the
+    conversation — is refused, saying why, and starts no run; the first goes on."""
+    scripts = [[WORKFLOW, ANOTHER, {"text": "{last}"}], [ANOTHER, {"text": "{last}"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id="one-flow")
+    first = await agent.run("fan out twice", user="u1", thread="t1")
+    assert first.answer == ONE_WORKFLOW, first.error
+    child = await child_of(harness, first.run_id)
+    second = await agent.run("and another", user="u1", thread="t1")
+    assert second.answer == ONE_WORKFLOW
+    assert not [r async for r in harness.runs.iterate(parent_run_id=second.run_id)]
+    assert (await child_of(harness, first.run_id)).status is RunStatus.RUNNING
+    (tmp_path / "tasks" / "w1.done").write_text(FLOWED)
+    await when(harness, child.run_id, RunStatus.SUCCESS)
+
+
+@pytest.mark.parametrize("how", ["cancel", "lost", "quit"])
+async def test_a_workflow_that_does_not_finish_ends_its_run_as_it_was_ended(
+    harness: Harness, tmp_path: Path, how: str
+) -> None:
+    """The turn that launched it was cancelled (its task is stopped with ``stop_task``: the
+    run ``CANCELLED``), the session's process died (``ERROR``: lost with it), or a run with
+    no conversation ended before the workflow did (``ERROR``: cut off) — never a success."""
+    if how == "quit":
+        agent = harness.wrap(options(tmp_path, [[WORKFLOW, {"text": "ok", "quit": True}]]), id="q")
+        done = await agent.run("fan out", user="u1")
+        child = await child_of(harness, done.run_id)
+        assert child.status is RunStatus.ERROR and child.error is not None
+        assert "cut off" in child.error.message
+        return
+    scripts = [[WORKFLOW, {"stall": 2}, {"text": "never said"}], [{"text": "after"}]]
+    agent = harness.wrap(options(tmp_path, scripts), id=f"flow-{how}")
+    if how == "cancel":
+        slow = asyncio.create_task(agent.run("fan out", user="u1", thread="t1"))
+        await until(lambda: len(agent.running) == 2)
+        started = turn_running(agent)
+        child = await child_of(harness, started)
+        await agent.cancel(started)
+        assert (await slow).status is RunStatus.CANCELLED
+        await when(harness, child.run_id, RunStatus.CANCELLED)
+        await until((tmp_path / "tasks" / "w1.stopped").exists)
+        return
+    first = await agent.run("fan out", user="u1", thread="t1")
+    child = await child_of(harness, first.run_id)
+    [one] = served(tmp_path)
+    os.kill(one["pid"], signal.SIGKILL)
+    died = await when(harness, child.run_id, RunStatus.ERROR)
+    assert died.error is not None and "session was closed" in died.error.message

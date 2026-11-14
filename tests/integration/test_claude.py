@@ -705,21 +705,21 @@ async def test_tools_whose_work_needs_the_cli_after_the_query_are_not_offered(
     assert not {"Read", "Bash", "Task", "mcp__trellis__refund"} & set(disallowed)
 
 
-async def test_workflows_and_messages_to_other_agents_are_not_offered(
+async def test_messages_to_other_agents_are_not_offered_and_workflows_are(
     harness: Harness, tmp_path: Path
 ) -> None:
-    """Claude Code's dynamic workflow (``Workflow``) runs its agents in the background with no
-    task of their own, an agent's first call coming before anything names it; its
-    ``SendMessage`` resumes a finished background subagent as a task of the call that first
-    started it, or reaches another Claude session. No run of the harness can hold that work,
-    so they are disallowed — with the agent-teams tools older CLIs have, whatever the team's
-    own ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` says (the harness sets no such switch)."""
+    """Claude Code's ``SendMessage`` resumes a finished background subagent as a task of the
+    call that first started it, or reaches another Claude session: no run of the harness can
+    hold that work, so it is disallowed — with the agent-teams tools older CLIs have,
+    whatever the team's own ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` says (the harness sets no
+    such switch). A dynamic workflow (``Workflow``) is offered: it is one child run
+    (``test_claude_background_session``)."""
     target = options(tmp_path, [{"text": "ok"}])
     target.env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
-    await harness.wrap(target, id="no-workflow").run("fan this out to agents", user="u1")
+    await harness.wrap(target, id="no-teams").run("fan this out to agents", user="u1")
     disallowed = set(started_with(tmp_path)["disallowed_tools"].split(","))
-    assert {"Workflow", "SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
-    assert not {"Agent", "Task", "TaskStop", "ListAgents"} & disallowed
+    assert {"SendMessage", "TeamCreate", "TeamDelete"} <= disallowed
+    assert not {"Workflow", "Agent", "Task", "TaskStop", "ListAgents"} & disallowed
 
 
 async def test_a_large_result_is_the_harness_s_to_keep_not_the_cli_s(

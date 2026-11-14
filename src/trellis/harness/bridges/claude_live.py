@@ -26,7 +26,10 @@ it (``client.query``) instead of into a new process that resumes the session.
   relayed to the attempt under way, turn or no turn. A call that asks a person pauses that
   run as any run pauses, and waits in the CLI's callback: the question is asked in the
   conversation's next turn (as a sub-agent's is asked through its parent), and the attempt
-  that follows the answer decides the call from its journal.
+  that follows the answer decides the call from its journal. A dynamic workflow
+  (``local_workflow``) is kept so too: its agents name only their kind
+  (:data:`WORKFLOW_AGENT`), and one workflow works at a time in the session
+  (:data:`ONE_WORKFLOW`), so their calls are its run's.
 * **No run.** Any other call made between two turns — the main agent's in a turn the
   session injected, a subagent's with no run — has no run under way: nothing can decide it
   (the run's hooks, governance, a person's approval, its budget) or record it. Such a call is
@@ -80,6 +83,7 @@ from trellis.harness import budget
 from trellis.harness.asking import RunCancelled
 from trellis.harness.bounded import LRU
 from trellis.harness.bridges.claude import JournalSessions, ours
+from trellis.harness.bridges.helpers import Kind
 from trellis.harness.journal import Journal, content_key
 from trellis.runs import ConflictError
 
@@ -135,6 +139,19 @@ GONE_SAID: Final = (
     "A background subagent's question was answered, but its Claude session is gone (the "
     "server that held it stopped): its task cannot go on, and its run ended."
 )
+#: Claude Code's dynamic workflow, as the bundled CLI (2.1.283) sends it: its tool, the task it
+#: runs as (``task_type``: no ``is_backgrounded``, it is always in the background), and what
+#: its agents are named in their hooks (``agent_type``; each ``agent_id`` is the agent's own,
+#: named in no frame before its first call). One works at a time in a session
+#: (:data:`ONE_WORKFLOW`), so its agents' calls are its run's by their kind.
+WORKFLOW_TOOL: Final = "Workflow"
+WORKFLOW_TASK: Final = "local_workflow"
+WORKFLOW_AGENT: Final = "workflow-subagent"
+#: What a second workflow's launch is refused with while one works in the session.
+ONE_WORKFLOW: Final = (
+    "A workflow is already running in this session: one runs at a time. Wait for its "
+    "task-notification before starting another, or stop it with TaskStop."
+)
 #: What a background subagent's run answers when its task ended with no word of its own.
 COMPLETED: Final = "The task completed."
 #: Why a background subagent's run whose task failed without saying why ended.
@@ -143,6 +160,13 @@ FAILED: Final = "the background subagent's task failed"
 _NUDGE: Final = object()
 #: What a request relayed to a background run is answered when that run has ended.
 _OVER: Final = object()
+
+
+def backgrounded(message: Any) -> bool:
+    """Whether the task a ``task_started`` ``message`` starts works in the background of its
+    call: a subagent that says so (``is_backgrounded``), and a dynamic workflow, always."""
+    data = message.data
+    return bool(data.get("is_backgrounded")) or data.get("task_type") == WORKFLOW_TASK
 
 
 class Left(Exception):
@@ -263,6 +287,8 @@ class Background:
         self.run_id: str = helper.run_id
         self.parent_run_id: str = helper.parent_run_id
         self.name: str = helper.name
+        #: how its call started it (``Kind.WORKFLOW``: a dynamic workflow's agents work in it)
+        self.kind = helper.kind
         #: when its ``Agent`` call started it (``time.monotonic``)
         self.began: float = helper.began
         self.agent = turn.runtime.agent
@@ -612,6 +638,8 @@ class LiveSession:
         self.working: dict[str, str] = {}
         #: the background subagents that have a run, by their task's id
         self.background: dict[str, Background] = {}
+        #: the workflow's agents (by their own ``agent_id``) whose calls its run decides
+        self._workers: dict[str, Background] = {}
         #: the harness tool calls their hook let through, by call: whose each is
         self._calling: dict[str, tuple[str, dict[str, Any], Background]] = {}
         #: why the session was closed (``LiveSessions.forget``)
@@ -698,7 +726,10 @@ class LiveSession:
         tool call is refused (:data:`UNATTENDED`) and any other event passes."""
 
         async def relay(given: Any, tool_use_id: str | None, hook: Any) -> Any:
-            found = self.background.get(str(given.get("agent_id") or ""))
+            if event == "PreToolUse" and given.get("tool_name") == WORKFLOW_TOOL and self._flow():
+                refused = {"permissionDecision": "deny", "permissionDecisionReason": ONE_WORKFLOW}
+                return {"hookSpecificOutput": {"hookEventName": event, **refused}}
+            found = self._working(given.get("agent_id"), given.get("agent_type"))
             if found is not None:
                 answer = await found.asked(
                     lambda at: at.options.hooks[event][matcher].hooks[callback](
@@ -752,6 +783,29 @@ class LiveSession:
         elif event != "PreToolUse" or decided == "deny":
             self._calling.pop(ref, None)
 
+    def _working(self, agent_id: Any, agent_type: Any = None) -> Background | None:
+        """The background run whose work a call of the CLI's ``agent_id`` is: a subagent's,
+        named by its task's id, or the workflow's, whose agents name their kind
+        (:data:`WORKFLOW_AGENT`) in their first call's hook — their permission requests and
+        harness tool calls after it name the agent alone."""
+        who = str(agent_id or "")
+        found = self.background.get(who) or self._workers.get(who)
+        if found is None and agent_type == WORKFLOW_AGENT:
+            found = self._flow()
+            if found is not None:
+                self._workers[who] = found
+        return found
+
+    def _flow(self) -> Background | None:
+        """The dynamic workflow at work in the session, if one is (one at a time)."""
+        return next((b for b in self.background.values() if b.kind is Kind.WORKFLOW), None)
+
+    def _forget(self, found: Background) -> None:
+        """``found``'s task ended and its run too: it is no longer the session's."""
+        self.background.pop(found.task_id, None)
+        for who in [w for w, b in self._workers.items() if b is found]:
+            del self._workers[who]
+
     def _ends(self, agent_id: Any) -> bool:
         """Whether a call no turn can take ends the CLI's turn: the main agent's own
         (a subagent's names it), in a turn that was left and whose result is still to come."""
@@ -760,7 +814,7 @@ class LiveSession:
     async def _can_use_tool(self, name: str, args: dict[str, Any], context: Any) -> Any:
         from claude_agent_sdk import PermissionResultDeny
 
-        found = self.background.get(str(getattr(context, "agent_id", None) or ""))
+        found = self._working(getattr(context, "agent_id", None))
         if found is not None:
             answer = await found.asked(lambda at: at.options.can_use_tool(name, args, context))
             if answer is not _OVER:
@@ -885,7 +939,7 @@ class LiveSession:
             if found is not None:
                 found.finished(str(message.status), str(getattr(message, "summary", "") or ""))
                 if found.over:  # its run ended first: its task was stopped
-                    self.background.pop(message.task_id, None)
+                    self._forget(found)
 
     def _launched(self, message: Any) -> None:
         """A subagent the turn being served started in the background (the CLI says which
@@ -893,7 +947,7 @@ class LiveSession:
         open from here (:class:`Background`), no longer that turn's to end."""
         turn = self.turn
         started = None if turn is None else turn.runtime.helpers
-        if started is None or not message.tool_use_id or not message.data.get("is_backgrounded"):
+        if started is None or not message.tool_use_id or not backgrounded(message):
             return
         helper = started.detached(message.tool_use_id)
         if helper is not None:
@@ -910,7 +964,7 @@ class LiveSession:
         is refused."""
         self.sessions.attended.pop(found.run_id, None)
         if found.ended is not None:
-            self.background.pop(found.task_id, None)
+            self._forget(found)
         elif not self.closed:
             self._aside_run(self._stop(found.task_id))
 
