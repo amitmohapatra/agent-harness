@@ -789,14 +789,13 @@ async def test_a_session_whose_process_dies_fails_its_turn_and_the_next_turn_sta
     await agent.run("the code is 4242", user="u1", thread="t1")
     slow = asyncio.create_task(agent.run("a long one", user="u1", thread="t1"))
     live = live_of(agent)
-    assert live is not None and live.mirror is not None
+    mirror = None if live is None else live.mirror
+    assert mirror is not None
     # killed once its session holds the turn (its prompt mirrored to the harness's store): the
     # stand-in numbers a resumed session's turns by what its transcript holds
     await until(
         lambda: any(
-            e.get("prompt") == "a long one"
-            for kept in live.mirror.transcripts.values()
-            for e in kept
+            e.get("prompt") == "a long one" for kept in mirror.transcripts.values() for e in kept
         )
     )
     one, _ = served(tmp_path)
