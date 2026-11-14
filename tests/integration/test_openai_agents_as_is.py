@@ -622,3 +622,65 @@ async def test_a_sandbox_tool_that_asks_is_held_at_the_sdks_gate_in_the_same_san
         result = await agent.resume(result.interrupt.interrupt_id, "approve", reviewer="u")
     assert result.status is RunStatus.SUCCESS and len(model.inputs) == 3  # never asked again
     assert "kept" in str(model.outputs()[-1])
+
+
+async def test_an_encrypted_session_on_wrap_is_each_conversations_with_the_one_it_wraps(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The SDK's ``EncryptedSession`` wraps another session: given on ``h.wrap``, both are kept
+    per conversation, so bob's model never reads alice's turn."""
+    pytest.importorskip("cryptography")
+    from agents.extensions.memory import EncryptedSession
+
+    inner = SQLiteSession("inner", tmp_path / "e.db")
+    session = EncryptedSession("outer", inner, encryption_key="k" * 32)
+    model = ScriptedModel(["noted", "nothing", "42"])
+    agent = harness.wrap(
+        Agent(name="a", model=model), id="e", framework_options={"session": session}
+    )
+    await agent.run("my secret is 42", user="alice", thread="t1")
+    await agent.run("what do you know?", user="bob", thread="t1")
+    await agent.run("what is my secret?", user="alice", thread="t1")
+    assert said_by_user(model.inputs[1]) == ["what do you know?"]
+    assert said_by_user(model.inputs[2]) == ["my secret is 42", "what is my secret?"]
+    inner.close()
+
+
+async def test_the_sdks_tool_output_trimmer_runs_as_the_runs_own_input_filter(
+    harness: Harness,
+) -> None:
+    """``ToolOutputTrimmer`` is a ``call_model_input_filter`` of the run's own: it runs before
+    the harness's additions, and trims the agent's own tool's old result as without it."""
+    from agents.extensions.tool_output_trimmer import ToolOutputTrimmer
+
+    @function_tool
+    def dump(n: int) -> str:
+        """A long result."""
+        return "x" * 2000 + str(n)
+
+    model = ScriptedModel([("dump", {"n": 1}), "first", "second", "third"])
+    trimmer = ToolOutputTrimmer(recent_turns=1, max_output_chars=100, preview_chars=10)
+    own = SQLiteSession("trim")
+    agent = declaring(harness, dump="read").wrap(
+        Agent(name="t", model=model, tools=[dump]), id="trim"
+    )
+    options = {"run_config": RunConfig(call_model_input_filter=trimmer), "session": own}
+    assert (await agent.run("go", user="u", framework_options=options)).answer == "first"
+    assert len(str(model.outputs()[0])) > 2000  # its own result, as returned
+    await agent.run("again", user="u", framework_options=options)
+    await agent.run("and again", user="u", framework_options=options)
+    assert len(str(model.outputs()[0])) < 200  # an old turn's result, trimmed by the SDK
+
+
+async def test_the_runs_handoff_history_setting_is_the_sdks(harness: Harness) -> None:
+    """``RunConfig.nest_handoff_history`` reaches the SDK: the agent handed off to reads the
+    earlier conversation as the SDK nests it (one summary message)."""
+    model = ScriptedModel([("transfer_to_billing", {}), "billed"])
+    billing = Agent(name="billing", model=model)
+    triage = Agent(name="triage", model=model, handoffs=[billing])
+    config = RunConfig(nest_handoff_history=True)
+    result = await harness.wrap(triage, id="nest", framework_options={"run_config": config}).run(
+        "bill me", user="u"
+    )
+    assert result.answer == "billed"
+    assert "<CONVERSATION HISTORY>" in json.dumps(model.inputs[-1], default=str)

@@ -1185,7 +1185,7 @@ def _at_turn_limit(runtime: Runtime, error: Any, options: Mapping[str, Any]) -> 
     return TurnLimit(final_output=said[-1] if said else None, new_items=items)
 
 
-def _told_unknown_tools(options: dict[str, Any], given: Any = None) -> dict[str, Any]:
+def _told_unknown_tools(options: dict[str, Any], given: Any) -> dict[str, Any]:
     """The options with a call to a tool the model made up answered as an error the model
     reads, so the run goes on — as on every other adapter — and not a ``ModelBehaviorError``
     that ends it: the SDK's own ``RunConfig.tool_not_found_behavior="return_error_to_model"``
@@ -1633,7 +1633,11 @@ def per_conversation(session: Any, conversation: str) -> Any:
     cannot be made so, where it is wrapped)."""
     from agents.memory.session import Session
 
-    scoped = copy.copy(session)
+    # its attributes on a new object of its class: ``copy.copy`` asks a blank object for its
+    # ``__setstate__``, which a session that hands unknown attributes on to the one it wraps
+    # (the SDK's ``EncryptedSession``) answers by recursing
+    scoped = object.__new__(type(session))
+    scoped.__dict__.update(vars(session))
     for name, value in vars(session).items():
         if isinstance(value, Session) and value is not session:
             setattr(scoped, name, per_conversation(value, conversation))
