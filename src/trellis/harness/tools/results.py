@@ -384,14 +384,36 @@ def _held(state: Mapping[str, Any]) -> int:
 
 def merged(kept: Mapping[str, Any], state: Mapping[str, Any]) -> dict[str, Any]:
     """``kept`` with ``state`` over it, channel by channel: a channel both hold as a mapping
-    (Deep Agents' tasks, by their ids) keeps the entries of both, ``state``'s where both have
-    one; any other is ``state``'s."""
+    (Deep Agents' tasks, by their ids) keeps the entries of both — of an entry both have, the
+    one updated last (:func:`_later`), so two turns that overlap and change one task lose
+    neither's update, whichever ends last; any other channel is ``state``'s."""
     out = {**kept, **state}
     for name, value in state.items():
         before = kept.get(name)
         if isinstance(before, Mapping) and isinstance(value, Mapping):
-            out[name] = {**before, **value}
+            out[name] = {
+                key: _later(before[key], entry) if key in before else entry
+                for key, entry in value.items()
+            } | {key: entry for key, entry in before.items() if key not in value}
     return out
+
+
+#: A task's statuses by how far along they are: at the same second, the further one stands.
+_FURTHER: Final = {"pending": 0, "running": 1, "waiting": 2}
+
+
+def _later(kept: Any, given: Any) -> Any:
+    """Of two records of one task (Deep Agents' ``AsyncTask``), the one updated last: its
+    ``last_updated_at`` (ISO 8601, so ordered as text), then — at the same second — its status
+    the further (an ended one past one still at work), else ``given``. Anything else:
+    ``given``."""
+    if not (isinstance(kept, Mapping) and isinstance(given, Mapping)):
+        return given
+
+    def order(task: Mapping[str, Any]) -> tuple[str, int]:
+        return str(task.get("last_updated_at", "")), _FURTHER.get(str(task.get("status")), 3)
+
+    return kept if order(kept) > order(given) else given
 
 
 def read(args: dict[str, Any], *, text: str | None = None) -> str:

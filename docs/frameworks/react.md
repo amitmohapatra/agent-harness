@@ -653,9 +653,9 @@ agent = h.wrap(ReAct("You help.", "provider/model", subagents=[optimizer]), id="
   nor a checkpointer keeps no state between turns; its list is carried too, read from the
   state each turn ends with — so a turn cancelled or failed after a start leaves that task
   out of the list (with `middleware()` each step is kept, and it is in).
-* **What still does not hold** — when two overlapping turns both change the same task, the
-  record of the turn that ends last is the one kept; a turn cut off by `max_steps` after Deep
-  Agents read an outcome leaves it read (the next turn's history holds it with memory on).
+* **Overlapping turns** — two turns that overlap and both change one task lose neither's
+  update: the conversation's list is merged task by task, the record updated last standing
+  (at the same second, the further status), whichever turn ends last.
 
 ## Where sandbox, skills and hooks go
 

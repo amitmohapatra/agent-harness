@@ -349,3 +349,28 @@ async def test_a_question_answered_elsewhere_is_not_asked_again() -> None:
     await stored(runs)  # its run works again: answered on another server
     offered = background.Offered({"research": None}, described={"research": "Research."})
     await offered.asked(runtime(runs), {"task_1": {**TASK, "status": "waiting"}})
+
+
+def test_two_overlapping_turns_changing_one_task_lose_neither_update() -> None:
+    """The conversation's task list is merged task by task: of two records of one task, the
+    one updated last stands (``last_updated_at``; at the same second, the further status) —
+    whichever turn ends last — and a task only one of them has is kept."""
+    from trellis.harness.tools.results import merged
+
+    running = {**TASK, "status": "running", "last_updated_at": "2026-11-14T00:00:01Z"}
+    ended = {**TASK, "status": "success", "last_updated_at": "2026-11-14T00:00:05Z"}
+    other = {**TASK, "task_id": "task_2"}
+    newer = merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": running}})
+    assert newer["async_tasks"]["task_1"]["status"] == "success"  # the older turn ended last
+    both = merged(
+        {"async_tasks": {"task_1": running, "task_2": other}}, {"async_tasks": {"task_1": ended}}
+    )
+    assert both["async_tasks"] == {"task_1": ended, "task_2": other}
+    same = {**running, "last_updated_at": ended["last_updated_at"]}
+    assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": same}}) == {
+        "async_tasks": {"task_1": ended}
+    }
+    again = {**TASK, "run_id": "run_2", "status": "running", "last_updated_at": "2026-11-14T00:00:09Z"}
+    assert merged({"async_tasks": {"task_1": ended}}, {"async_tasks": {"task_1": again}}) == {
+        "async_tasks": {"task_1": again}  # a follow-up after its end: updated later
+    }
