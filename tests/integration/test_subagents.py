@@ -206,6 +206,7 @@ async def test_a_child_that_asks_pauses_its_parent_and_the_answer_reaches_it(
     assert question.run_id == paused.run_id and question.question == "Which tone?"
     assert question.options == ["warm", "dry"] and question.assignee == "user:ada"
     [kid] = await children(memory_harness, paused.run_id)
+    assert kid.awaiting is not None and question.reason is kid.awaiting.reason  # a choice
     assert kid.status is RunStatus.PAUSED and kid.awaiting is not None
     assert question.payload == {
         SUBAGENT: {
@@ -231,6 +232,45 @@ async def test_a_child_that_asks_pauses_its_parent_and_the_answer_reaches_it(
     # the approval is the child's feedback, where the call was made, once
     [feedback] = [f for f in memory_service.named("feedback") if f.body.get("verdict") == "approve"]
     assert feedback.body["agent_run_id"] == kid.run_id
+
+
+async def test_what_a_childs_question_expects_and_who_it_escalates_to_reach_its_parent(
+    harness: Harness,
+) -> None:
+    from datetime import UTC, datetime
+
+    due = datetime(2026, 12, 1, tzinfo=UTC)
+
+    async def budgeter(input: str, agent: Runtime) -> str:
+        found = await agent.ask(
+            "Budget?", expects={"type": "number"}, escalate_to="user:boss", deadline=due
+        )
+        return str(found)
+
+    child = harness.wrap(budgeter, id="budgeter")
+    model = ScriptedChat([("budgeter", {"message": "plan"}), "planned"])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="lead"), [child])
+    paused = await parent.run("plan it", user="ada")
+    question = paused.interrupt
+    assert question is not None and question.expects == {"type": "number"}
+    assert (question.escalate_to, question.deadline) == ("user:boss", due)
+
+
+async def test_a_large_table_a_child_asks_about_reaches_its_parent_by_reference(
+    harness: Harness,
+) -> None:
+    async def reviewer(input: str, agent: Runtime) -> str:
+        rows = [{"sku": f"s{n}", "note": "x" * 40} for n in range(600)]  # past the inline bytes
+        return str(await agent.ask("Approve these?", table=rows))
+
+    child = harness.wrap(reviewer, id="reviewer")
+    model = ScriptedChat([("reviewer", {"message": "check"}), "checked"])
+    parent = arm(harness.wrap(ReAct(system_prompt="p", model=model), id="lead"), [child])
+    paused = await parent.run("check them", user="ada")
+    [kid] = await children(harness, paused.run_id)
+    assert kid.awaiting is not None and kid.awaiting.payload_ref is not None
+    assert paused.interrupt is not None
+    assert paused.interrupt.payload_ref == kid.awaiting.payload_ref
 
 
 async def test_a_child_that_fails_is_an_error_its_parents_model_reads(harness: Harness) -> None:
