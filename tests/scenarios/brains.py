@@ -402,15 +402,24 @@ class BrainModel(ScriptedModel):
 
 
 def _kimi_messages(body: dict[str, Any]) -> list[tuple[str, str]]:
-    from tests.support.kimi import result_text
+    """Kimi's request as the brain reads it, as ``tests.support.kimi.PlannedEndpoint`` reads one:
+    a call Kimi did not run (the run paused on it) has no result; the harness's own prompt after
+    a rejection or an edit is that call's result."""
+    from tests.support.kimi import _DENIED, _REJECTED, NOT_RUN, _system_reminders, result_text
 
-    return [
-        (
-            m.get("role", ""),
-            result_text(m.get("content")) if m.get("role") == "tool" else text(m.get("content")),
-        )
-        for m in body.get("messages") or []
-    ]
+    out: list[tuple[str, str]] = []
+    for m in body.get("messages") or []:
+        role = m.get("role", "")
+        if role == "tool":
+            said = result_text(m.get("content"))
+            if not any(mark in said for mark in NOT_RUN):
+                out.append(("tool", said))
+            continue
+        said = text(m.get("content"))
+        bare = _system_reminders(said)
+        told = _REJECTED.search(bare) or _DENIED in bare or REDO.search(bare)
+        out.append(("tool" if role == "user" and not TOKEN.search(said) and told else role, said))
+    return out
 
 
 def _brain_endpoint() -> type:
@@ -437,19 +446,9 @@ def _brain_endpoint() -> type:
 def kimi_turn(body: dict[str, Any]) -> Any:
     """``PlannedEndpoint(turns=)``: Kimi's request answered by the brain (its tools named as
     Kimi names the harness's: ``mcp__trellis__<tool>``)."""
-    from tests.support.kimi import kimi_name, result_text
+    from tests.support.kimi import kimi_name
 
-    turned = decide(
-        [
-            (
-                m.get("role", ""),
-                result_text(m.get("content"))
-                if m.get("role") == "tool"
-                else text(m.get("content")),
-            )
-            for m in body.get("messages") or []
-        ]
-    )
+    turned = decide(_kimi_messages(body))
     if turned.call and body.get("tools"):
         if isinstance(turned.call, list):
             return [(kimi_name(n), a) for n, a in turned.call]
