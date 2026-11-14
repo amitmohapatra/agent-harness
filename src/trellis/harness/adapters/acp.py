@@ -8,14 +8,19 @@ release, runs nothing) and the Python ``kimi-agent-sdk`` that wrapped it; its su
 Code CLI (``@moonshot-ai/kimi-code``, TypeScript), is driven programmatically through ``kimi
 acp`` — ACP over stdio, through the official Python SDK (``agent-client-protocol``).
 
-* run: one ``kimi acp`` process per attempt; ``initialize``, a session (``session/new``, or the
-  session an earlier attempt kept resumed: ``session/resume``, else ``session/load``), then
-  ``session/prompt``. Everything the agent does on its own — its built-in tools, its sub-agents
-  and swarms, plan mode, goals, compaction — it does as it always does: the harness passes it
-  through and maps what ACP shows of it;
+* run: one ``kimi acp`` process per attempt (``bridges.acp_live.ACPSession``); ``initialize``, a
+  session (``session/new``, or the session an earlier attempt kept resumed: ``session/resume``,
+  else ``session/load``; forked, ``session/fork``, when another worker's process holds it),
+  then ``session/prompt``. A conversation's turn that ends with work in the agent's background
+  (Kimi's ``run_in_background``) leaves the process to the conversation, and the next turn is
+  served by it (``bridges.acp_live``). Everything the agent does on its own — its built-in
+  tools, its sub-agents and swarms, plan mode, goals, compaction — it does as it always does:
+  the harness passes it through and maps what ACP shows of it, and reads its log for what ACP
+  does not;
 * tools: the harness's tools reach the agent as one more MCP server (``trellis``, so
-  ``mcp__trellis__<tool>``), served for the attempt on the loopback interface
-  (``tools.convert.mcp``) and handed over in ``session/new``, beside the agent's own servers;
+  ``mcp__trellis__<tool>``), served for the process on the loopback interface
+  (``tools.convert.mcp``), each call made in the run being served, and handed over in
+  ``session/new``, beside the agent's own servers;
 * permissions: the agent's own, then a person when it asks. It asks before the calls its own
   policy asks about (``session/request_permission``; one its rules allow, in its own
   configuration, it runs): a harness tool is let through (the bridge is its check); any other
@@ -26,20 +31,25 @@ acp`` — ACP over stdio, through the official Python SDK (``agent-client-protoc
   ``governance.shell.read_only`` reads as read-only). A rejection,
   and an edit, end the turn there and the agent is told in a prompt of its own (ACP's answer
   carries no reason and no arguments): why, or to call the tool again with the edited
-  arguments — that call is approved when it comes. The agent's own questions (Kimi's
-  ``AskUserQuestion``) are the run's questions (``Runtime.ask``);
+  arguments — that call is approved when it comes. A request that offers a choice of the
+  agent's own (Kimi's ``AskUserQuestion``, the plan its ``ExitPlanMode`` presents for review)
+  is the agent's question to its user: the run's question (``Runtime.ask``), with every
+  option it offers;
 * records: every call the main agent runs itself is recorded as the run's once it ends
   (``tool_call`` / ``tool_call_update``: ``tools.bridge.observed``); a sub-agent's own calls are
   not shown over ACP — only those it asks permission for, which are governed;
-* helpers: each sub-agent the agent starts (Kimi's ``Agent``) and each member of a swarm
-  (``AgentSwarm``) is a child run of the run (``bridges.helpers``), from the call to its result;
+* helpers: each sub-agent the agent starts or goes on with (Kimi's ``Agent``, its ``resume``)
+  and each member of a swarm (``AgentSwarm``, its ``resume_agent_ids``) is a child run of the
+  run (``bridges.helpers``), from the call to its result — one run in the background, to its
+  task's end (``acp_live.Background``);
   how many members a swarm runs at once is the harness's adaptive limit of child runs
   (``admission.py``), as ``KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`` (the agent's own ``env``
   wins);
-* pause: the turn is cancelled (``session/cancel``) and the process ends; the session is in the
-  journal and the next attempt resumes it, told to call the tool again, which the journal
-  answers. The agent keeps its sessions on its machine (Kimi: ``KIMI_CODE_HOME``): a resume
-  elsewhere says so and runs the prompt again in a new session, against the journal;
+* pause: the turn is cancelled (``session/cancel``) and the process ends (kept while work in
+  its background goes on); the session is in the journal and the next attempt resumes it,
+  told to call the tool again, which the journal answers. The agent keeps its sessions on its
+  machine (Kimi: ``KIMI_CODE_HOME``): a resume elsewhere says so and runs the prompt again in
+  a new session, against the journal;
 * spending: ACP's own ``usage`` on the prompt's answer when the agent gives it and the harness
   keeps no usage log of it; Kimi gives none, and its own usage log (``usage.record``, every
   model request of every agent, sub-agents included) is read as the turn runs — tokens only
@@ -58,8 +68,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import functools
+import html
 import json
 import logging
 import os
@@ -68,9 +80,11 @@ import shlex
 import shutil
 import tempfile
 import time
+import tomllib
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Final, cast
 
 from trellis.contracts import (
@@ -82,6 +96,7 @@ from trellis.contracts import (
     ToolOutcome,
     ToolSpec,
     ToolStatus,
+    stable_id,
 )
 from trellis.harness import admission, budget, compat
 from trellis.harness.adapters.base import (
@@ -96,8 +111,30 @@ from trellis.harness.adapters.base import (
     unique,
 )
 from trellis.harness.adapters.claude import RESUMED, resumed_call
-from trellis.harness.bounded import SAID_ONCE, LRUSet
+from trellis.harness.bounded import LRU, SAID_ONCE, LRUSet
+from trellis.harness.bridges import live as shared
+from trellis.harness.bridges.acp_live import (
+    CANCEL_SECONDS,
+    CODE,
+    GONE,
+    GONE_SAID,
+    HARNESS_PREFIX,
+    QUEUED,
+    SERVER,
+    USAGE_SECONDS,
+    WAITS,
+    ACPRunError,
+    ACPSession,
+    Background,
+    accounted,
+    chosen,
+    dismissed,
+    selected,
+    shape,
+    unfilled,
+)
 from trellis.harness.bridges.helpers import Helpers, Kind
+from trellis.harness.bridges.live import LiveSessions, Turn
 from trellis.harness.gateways import NO_KEY, Capability, OpenAICompatible
 from trellis.harness.governance.shell import Shell
 from trellis.harness.history import ASKED_WITH, Called, Said, Speaker
@@ -106,39 +143,47 @@ from trellis.harness.prompts import GatewayHeaders
 from trellis.harness.runtime import Paused, Runtime, reason_of
 from trellis.harness.tools import bridge, results
 from trellis.harness.tools.base import UNDECLARED, SideEffects
+from trellis.harness.tools.elicit import elicited
 
 log = logging.getLogger("trellis.harness")
 
-#: The harness's MCP server, as the agent names its tools (``tools.convert.mcp.SERVER``).
-SERVER: Final = "trellis"
-HARNESS_PREFIX: Final = f"mcp__{SERVER}__"
 #: The key a turn's model steps are watched for a stall under (``Runtime.model_started``).
 STEP: Final = "acp"
 #: The model name an ACP agent's own usage is counted under when the target names none.
 ACP_MODEL: Final = "acp"
-#: How often the agent's usage log is read while a turn runs (and the budget checked).
-USAGE_SECONDS: Final = 0.5
 #: How long, after a turn, the agent's usage log is read until it stops growing (at most), and
 #: how often.
 SETTLE_SECONDS: Final = 2.0
 SETTLE_STEP: Final = 0.1
-#: The most a cancelled turn waits for the agent to say it stopped.
-CANCEL_SECONDS: Final = 5.0
-#: The last of the agent's stderr kept, for the error of a process that ended mid-turn.
-STDERR_TAIL: Final = 4096
 #: The most MCP tools the agent was seen calling that join its tool set (the most recent).
 SEEN_KEPT: Final = 1024
+#: The most terminals of a sandboxed run whose output is kept past their release.
+TERMINALS_KEPT: Final = 16
 #: The session modes the harness governs every call in: a mode that approves on its own
 #: (Kimi's ``auto``, ``yolo``) never asks, and governance would never see the calls.
 GOVERNED_MODES: Final = frozenset({"default", "plan"})
+#: Kimi's log lines of a session's modes (``agents/main/wire.jsonl``): its permission mode
+#: (:data:`KIMI_ASKS`: the one that asks before a call), and its plan mode going on and off.
+PERMISSION_SET: Final = "permission.set_mode"
+KIMI_ASKS: Final = "manual"
+#: ... and the two session modes of Kimi's ACP server that ask (:data:`GOVERNED_MODES`): the
+#: one that plans, and its default.
+KIMI_PLANS: Final = "plan"
+KIMI_DEFAULT: Final = "default"
+PLAN_MODE: Final[Mapping[str, bool]] = {
+    "plan_mode.enter": True,
+    "plan_mode.cancel": False,
+    "plan_mode.exit": False,
+}
 #: The framework options a run may give: :class:`ACPAgent` fields (``command`` and ``profile``
 #: are the agent's own).
 OPTIONS: Final = ("env", "cwd", "mcp_servers", "mode", "model")
 #: The agent's answer to a turn it ended for a reason the run fails with.
 FAILED_STOPS: Final = frozenset({"refusal", "max_turn_requests"})
 #: The stop reason of a turn whose last reply reached the model's output limit (Kimi retries
-#: such a reply itself first).
+#: such a reply itself first), and of one that ended as the agent ended it.
 MAX_TOKENS: Final = "max_tokens"
+END_TURN: Final = "end_turn"
 #: What the agent is told after a call the run rejected (ACP's answer carries no reason).
 REJECTED: Final = "Your call to {tool} was not run: {why} Carry on with the task without it."
 #: What the agent is told after a call whose arguments a reviewer (or a hook) changed (ACP's
@@ -147,17 +192,25 @@ EDITED: Final = (
     "A reviewer changed the arguments of your call to {tool}, so it was not run. Call {tool} "
     "again now with exactly these arguments: {args}"
 )
+#: The run event the agent's plan is (ACP's ``plan`` update: Kimi's todo list), its entries
+#: as the agent tells them (``content``, ``status``, ``priority``).
+PLAN: Final = "plan"
+#: Why a run failed whose agent could not finish its turn: the agent's own error for it.
+FAILED_TURN: Final = "the agent could not finish its turn: {why}"
+#: What a person is asked when the agent offers options and says nothing with them.
+CHOOSE: Final = "The agent asks you to choose."
 #: Why the person denied the call, after the resumed session is told they did (ACP's answer
 #: carries no reason: the prompt does).
 DENIED_WHY: Final = "Their reason: {why}"
 #: Why a sub-agent whose call failed without saying why ended.
 SUBAGENT_FAILED: Final = "the sub-agent's call failed"
-#: A swarm member in Kimi's ``AgentSwarm`` result.
-SWARM_MEMBER: Final = re.compile(
-    r'<subagent agent_id="(?P<agent>[^"]*)" item="(?P<item>[^"]*)" '
-    r'outcome="(?P<outcome>[^"]*)">(?P<text>.*?)</subagent>',
-    re.DOTALL,
-)
+#: A swarm member in Kimi's ``AgentSwarm`` result, and each of its attributes (``agent_id``,
+#: ``item`` — escaped as XML — ``outcome``; a resumed member's ``mode="resume"``; ``state``,
+#: ``stop_reason``).
+SWARM_MEMBER: Final = re.compile(r"<subagent(?P<attrs>[^>]*)>(?P<text>.*?)</subagent>", re.DOTALL)
+SWARM_ATTR: Final = re.compile(r'(\w+)="([^"]*)"')
+#: The sub-agent Kimi starts when an ``Agent`` call names none (and resumes none).
+KIMI_SUBAGENT: Final = "coder"
 
 
 # --------------------------------------------------------------------------- Kimi Code
@@ -204,10 +257,46 @@ KIMI_CODE: Final = "Kimi Code"
 #: (``claude.OUTLIVES_THE_QUERY``), and they are not of the run's tool set (no hint offers them).
 #: Kimi still lists them: ACP has no way to take a built-in off (``kimi acp`` takes no agent file).
 KIMI_OUTLIVES_THE_TURN: Final = ("CronCreate", "CronDelete", "CronList")
-#: What the harness sets in Kimi's environment, whatever the agent's own says: scheduling off
-#: (:data:`KIMI_OUTLIVES_THE_TURN`; before, Kimi scheduled a prompt nothing would fire, and
-#: answered as if it would: the break-and-fix gate).
-KIMI_ENV: Final = {"KIMI_DISABLE_CRON": "1"}
+#: Why scheduling is off (:data:`KIMI_OUTLIVES_THE_TURN`).
+CRON_OFF: Final = (
+    "Kimi's scheduling is off: a scheduled prompt fires only while Kimi runs, and the harness "
+    "ends Kimi once the run's work is done, so nothing would fire it"
+)
+#: Why Kimi's tower mode (``KIMI_CODE_EXPERIMENTAL_TOWER``: ``TowerInit``, ``TowerSpawn``,
+#: ``TowerMerge``...) is off: ``TowerSpawn`` starts each worker in Kimi's ``auto`` permission
+#: mode, which asks about none of its calls (:data:`GOVERNED_MODES`), so the harness would
+#: govern none of them — a run's sub-agents work through ``Agent``, whose calls Kimi asks
+#: about.
+TOWER_OFF: Final = (
+    "Kimi's tower mode is off: its workers run in Kimi's auto permission mode, which asks about "
+    "none of their calls, so the harness could govern none of them (use Agent)"
+)
+#: What the harness sets in Kimi's environment, whatever the agent's own says, and why (said
+#: on the run when the agent's own ``env`` asks otherwise): scheduling off (before, Kimi
+#: scheduled a prompt nothing would fire, and answered as if it would: the break-and-fix gate),
+#: and tower mode off (Kimi reads its environment's word over its config's).
+#: Its own update and its usage reports are off too: a server's Kimi stays the version that
+#: was tested, and sends its maker nothing of the tenants' use.
+UPDATES_OFF: Final = (
+    "Kimi does not update itself under the harness: an update would move it past the version "
+    "the harness was tested with while it serves runs (install the version you want)"
+)
+TELEMETRY_OFF: Final = (
+    "Kimi's usage reports to its maker are off under the harness: a server's runs are its "
+    "tenants', and what is recorded of them is the harness's to keep"
+)
+KIMI_ENV: Final = {
+    "KIMI_DISABLE_CRON": "1",
+    "KIMI_CODE_EXPERIMENTAL_TOWER": "0",
+    "KIMI_CODE_NO_AUTO_UPDATE": "1",
+    "KIMI_DISABLE_TELEMETRY": "1",
+}
+KIMI_ENV_WHY: Final = {
+    "KIMI_DISABLE_CRON": CRON_OFF,
+    "KIMI_CODE_EXPERIMENTAL_TOWER": TOWER_OFF,
+    "KIMI_CODE_NO_AUTO_UPDATE": UPDATES_OFF,
+    "KIMI_DISABLE_TELEMETRY": TELEMETRY_OFF,
+}
 #: Where Kimi Code keeps its sessions, its config and its usage log, unless ``KIMI_CODE_HOME``
 #: says.
 KIMI_HOME: Final = "~/.kimi-code"
@@ -221,6 +310,10 @@ USAGE_RECORD: Final = "usage.record"
 #: finished turn with no answer. Its ``agent.turn.ended`` lines are another record.
 TURN_ENDED: Final = "turn.ended"
 AT_STEP_LIMIT: Final = "loop.max_steps_exceeded"
+#: ... and its ``reason`` when Kimi could not finish the turn (its ``error`` says why).
+TURN_FAILED: Final = "failed"
+#: The line of a sub-agent's log that names the profile it was started with (its type).
+PROFILE_BOUND: Final = "profile.bind"
 #: The ``stopReason`` of a turn Kimi's own repeat breaker ended (``KIMI_CODE_REPEAT_BREAKER``:
 #: the same call 12 times in a row, after reminders to answer): a finished turn with no answer.
 REPEAT_BREAKER: Final = "repeat_breaker"
@@ -253,9 +346,19 @@ class Profile:
     #: harness's adaptive limit of child runs (``admission.py``) unless the agent's own ``env``
     #: names it
     swarm_limit: str | None = None
-    #: what is set in the agent's environment whatever its own says: what a run of it, which
-    #: ends with each attempt, cannot keep, turned off (Kimi's scheduling)
+    #: what is set in the agent's environment whatever its own says: what a run of it cannot
+    #: keep or govern, turned off (Kimi's scheduling, its tower mode) — and why each is, said
+    #: on the run when the agent's own ``env`` asks otherwise (``env_why``)
     env: Mapping[str, str] = field(default_factory=dict)
+    env_why: Mapping[str, str] = field(default_factory=dict)
+    #: the rules of the agent's own configuration that let it run a call without asking, for
+    #: an environment and a working folder: a run of an agent that holds any is not started
+    #: (:data:`UNASKED`)
+    allows: Callable[[Mapping[str, str], str], list[str]] | None = None
+    #: the agent's home of a tenant's user (its ``home`` variable's value), for an
+    #: environment, a working folder and whose it is: every run that is not sandboxed gets its
+    #: user's own, never one shared with another user's (sessions, caches)
+    homed: Callable[[Mapping[str, str], str, tuple[str, str]], str] | None = None
     label: str = THE_AGENT
 
 
@@ -312,18 +415,68 @@ class UsageLog:
         self.ended = False
         #: whether Kimi's repeat breaker ended the main agent's latest turn (:data:`REPEAT_BREAKER`)
         self.broken = False
+        #: the error Kimi could not finish the main agent's latest turn for (its provider's,
+        #: past Kimi's own retries), when it ended ``failed`` anywhere but at its step limit
+        self.failed: dict[str, Any] | None = None
+        #: the agents whose log is not read (a background sub-agent's: its run's to count)
+        self.skip: set[str] = set()
 
-    def _files(self) -> list[Path]:
-        return sorted(self.home.glob(f"sessions/*/{self.session_id}/agents/*/wire.jsonl"))
+    def _files(self, agent: str = "*") -> list[Path]:
+        found = self.home.glob(f"sessions/*/{self.session_id}/agents/{agent}/wire.jsonl")
+        return sorted(path for path in found if path.parent.name not in self.skip)
+
+    def profile(self, agent: str) -> str | None:
+        """The profile Kimi started the sub-agent ``agent`` (its id) with: its type, which a
+        resumed agent keeps (its log's ``profile.bind``); ``None`` when no log of it says."""
+        for path in self._files(agent):
+            for line in path.read_bytes().splitlines():
+                entry = _json_line(line)
+                if entry.get("type") == PROFILE_BOUND:
+                    return str(entry.get("profileName") or "") or None
+        return None
+
+    def mode(self) -> tuple[str, str | None]:
+        """The session mode Kimi's log says the main agent is in, as its ACP server names it
+        (``plan`` while its plan mode is on, else ``default``), and the permission mode it
+        approves on its own in there (``auto``, ``yolo``: it asks about nothing) — ``None``
+        when it asks before a call (``manual``). Kimi's ``config.toml`` starts a session in
+        either (``default_plan_mode``, ``default_permission_mode``) and its ACP server still
+        answers ``default``: the log is what says. Read whole, once a session is opened."""
+        planning, permission = False, KIMI_ASKS
+        for path in self._files("main"):
+            with path.open("rb") as file:
+                for line in file:
+                    entry = _json_line(line)
+                    kind = entry.get("type")
+                    if kind == PERMISSION_SET:
+                        permission = str(entry.get("mode"))
+                    elif kind in PLAN_MODE:
+                        planning = PLAN_MODE[kind]
+        return ("plan" if planning else "default"), (
+            None if permission == KIMI_ASKS else permission
+        )
+
+    def asking_in(self, mode: str | None) -> tuple[str, tuple[str, ...]]:
+        """The mode the session is to ask in — ``mode``, else the one it is in — and the
+        modes to set, in order, to get it there. Kimi's ACP server refuses to enter the plan
+        mode of a session already in it, leaving its permission mode as it was: so a session
+        that plans and asks is set nothing (its plan as it is), and one that plans but
+        approves on its own leaves plan mode first — only Kimi's ``config.toml`` starts a
+        session so, its plan not begun."""
+        at, alone = self.mode()
+        wanted = mode or at
+        if at == wanted == KIMI_PLANS:
+            return wanted, (() if alone is None else (KIMI_DEFAULT, KIMI_PLANS))
+        return wanted, (wanted,)
 
     def start(self) -> None:
         for path in self._files():
             self.read_to[path] = path.stat().st_size
 
-    def records(self) -> list[dict[str, Any]]:
-        """The usage records written since the last read (a line still being written is left
-        for the next)."""
-        found: list[dict[str, Any]] = []
+    def entries(self) -> list[tuple[str, dict[str, Any]]]:
+        """The lines written since the last read, each with the agent whose log it is in (a
+        line still being written is left for the next)."""
+        found: list[tuple[str, dict[str, Any]]] = []
         for path in self._files():
             at = self.read_to.get(path, 0)
             with path.open("rb") as file:
@@ -331,16 +484,23 @@ class UsageLog:
                 data = file.read()
             end = data.rfind(b"\n") + 1
             self.read_to[path] = at + end
-            for line in data[:end].splitlines():
-                entry = _json_line(line)
-                if entry.get("type") == USAGE_RECORD and isinstance(entry.get("usage"), dict):
-                    found.append(entry)
-                elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
-                    self.ended = True
-                    self.broken = entry.get("stopReason") == REPEAT_BREAKER
-                    error = entry.get("error") or {}
-                    if error.get("code") == AT_STEP_LIMIT:
-                        self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
+            found.extend((path.parent.name, _json_line(line)) for line in data[:end].splitlines())
+        return found
+
+    def records(self) -> list[dict[str, Any]]:
+        """The usage records written since the last read (and the main agent's turn's end)."""
+        found: list[dict[str, Any]] = []
+        for _, entry in self.entries():
+            if entry.get("type") == USAGE_RECORD and isinstance(entry.get("usage"), dict):
+                found.append(entry)
+            elif entry.get("type") == TURN_ENDED and entry.get("agentId") == "main":
+                self.ended = True
+                self.broken = entry.get("stopReason") == REPEAT_BREAKER
+                error = entry.get("error") or {}
+                if error.get("code") == AT_STEP_LIMIT:
+                    self.limited = int((error.get("details") or {}).get("maxSteps") or 0)
+                elif entry.get("reason") == TURN_FAILED:
+                    self.failed = error
         return found
 
 
@@ -369,6 +529,88 @@ def _kimi_usage(env: Mapping[str, str], session_id: str) -> UsageLog:
     return UsageLog(Path(home).expanduser(), session_id)
 
 
+def _kimi_rules(env: Mapping[str, str], cwd: str) -> dict[str, list[str]]:
+    """The permission rules of Kimi's own configuration, by decision (``allow``, ``ask``,
+    ``deny``), each by its pattern: those of its ``config.toml`` (``[permission]``: a ``rules``
+    entry with its decision; an ``allow``, ``ask`` or ``deny`` entry — a pattern, or a tool with
+    what it matches) and of a project's ``.kimi-code/local.toml``, in ``cwd`` or a folder above
+    it (Kimi reads its project's: every one above is looked at, which misses none). A file
+    that is not TOML holds none: Kimi itself refuses to start on it."""
+    home = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
+    above = [Path(cwd), *Path(cwd).parents]
+    found: dict[str, list[str]] = {"allow": [], "ask": [], "deny": []}
+    for path in (home / "config.toml", *(folder / ".kimi-code" / "local.toml" for folder in above)):
+        try:
+            permission = tomllib.loads(path.read_text()).get("permission")
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        section = permission if isinstance(permission, dict) else {}
+        rules = [(r.get("decision"), r) for r in section.get("rules") or ()]
+        rules += [(decision, r) for decision in found for r in section.get(decision) or ()]
+        for decision, rule in rules:
+            tool, matches = rule.get("tool"), rule.get("match") or rule.get("pattern")
+            pattern = f"{tool}({matches})" if tool and matches else str(tool or matches)
+            found.setdefault(str(decision), []).append(pattern)
+    return found
+
+
+def kimi_allows(env: Mapping[str, str], cwd: str) -> list[str]:
+    """The rules of Kimi's own configuration that let it run a call without asking, by their
+    pattern: its ``allow`` rules (:func:`_kimi_rules`; since Kimi Code 2.6 they apply over
+    ACP) that no ``ask`` rule of the same pattern stands before — Kimi's policy reads its
+    ``ask`` rules first, so such a call is asked about."""
+    rules = _kimi_rules(env, cwd)
+    return [pattern for pattern in rules["allow"] if pattern not in rules["ask"]]
+
+
+#: What of the team's Kimi home a user's own links to: its login, and what it set Kimi up
+#: with. Its sessions, its logs and what Kimi caches are the user's own.
+KIMI_SHARED: Final = ("credentials", "skills", "agents", "plugins", "AGENTS.md", "mcp.json")
+
+
+def kimi_home(env: Mapping[str, str], cwd: str, owner: tuple[str, str]) -> str:
+    """The Kimi home of a tenant's user (``owner``) on this worker, made for them alone under
+    the XDG data folder (``$XDG_DATA_HOME/trellis/kimi``, else ``~/.local/share/trellis/kimi``;
+    as Claude Code's config folder is): its sessions and what Kimi caches are theirs, never
+    another user's. It is an overlay of the team's home (``env``'s ``KIMI_CODE_HOME``, else
+    ``~/.kimi-code``): the team's login and setup are linked (:data:`KIMI_SHARED`), and its
+    ``config.toml`` is the team's, as it is, with an ``ask`` rule after it for each ``allow``
+    rule that would let a call run unasked (:func:`kimi_allows`, the project's too: Kimi reads
+    ``ask`` rules first) — so Kimi asks, and governance decides. A config those rules cannot be
+    added to (its ``[permission]`` rules written inline) is copied as it is: the run is then
+    not started (:data:`UNASKED`)."""
+    team = Path(env.get("KIMI_CODE_HOME") or KIMI_HOME).expanduser()
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    home = Path(base) / "trellis" / "kimi" / stable_id(*owner, prefix="u_")
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in KIMI_SHARED:
+        if (team / name).exists() and not (home / name).is_symlink():
+            (home / name).symlink_to(team / name)
+    config = team / "config.toml"
+    given = config.read_text() if config.exists() else ""
+    asks = "".join(
+        f'\n[[permission.rules]]\ndecision = "ask"\npattern = {json.dumps(pattern)}\n'
+        for pattern in kimi_allows(env, cwd)
+    )
+    try:
+        tomllib.loads(given + asks)
+    except tomllib.TOMLDecodeError:
+        asks = ""
+    part = home / "config.toml.part"
+    part.write_text(given + asks)
+    part.replace(home / "config.toml")
+    return str(home)
+
+
+#: Why a run of an agent whose own configuration lets it run calls without asking got no
+#: prompt.
+UNASKED: Final = (
+    "{agent}'s own configuration lets it run calls without asking ({rules}: allow rules in "
+    "its config.toml, or in a .kimi-code/local.toml of the project), and the harness governs "
+    "only the calls the agent asks about. No prompt was sent. Remove those rules: under the "
+    "harness the tool catalog's rules decide what runs without a person"
+)
+
 KIMI: Final = Profile(
     name="kimi-code",
     builtins=KIMI_BUILTINS,
@@ -380,6 +622,9 @@ KIMI: Final = Profile(
     home="KIMI_CODE_HOME",
     swarm_limit="KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY",
     env=KIMI_ENV,
+    env_why=KIMI_ENV_WHY,
+    allows=kimi_allows,
+    homed=kimi_home,
     label=KIMI_CODE,
 )
 
@@ -482,10 +727,12 @@ class ACPInput:
     asked: bool = False
     #: why they denied it, when they said
     why: str | None = None
-
-
-class ACPRunError(RuntimeError):
-    """The agent ended the turn as failed, or its process ended in the middle of it."""
+    #: the run paused before its prompt was sent — on the question of a background
+    #: sub-agent's run of its conversation (``live.Keeper.asks``): it is sent now
+    unsent: bool = False
+    #: that question's answer — the sub-agent's run, its interrupt, the person's resolution —
+    #: for when its session is not on this server (``live.gone``)
+    background_answer: tuple[str, str, InterruptResolution] | None = None
 
 
 #: The end of a turn, on the attempt's queue: the prompt's answer (or its error).
@@ -512,6 +759,13 @@ class ACPAdapter:
     def __init__(self) -> None:
         #: the MCP tools the agent was seen calling, the most recent kept
         self.seen: LRUSet[str] = LRUSet(maxsize=SEEN_KEPT)
+        #: each conversation's agent process, kept while work in its background goes on
+        #: (``bridges.acp_live``)
+        self.live = LiveSessions()
+
+    async def aclose(self) -> None:
+        """The agent is closing: every conversation's kept process ends."""
+        await self.live.aclose()
 
     def steers(self, target: Any) -> bool:
         """None: ACP has no point between an agent's steps where a client adds a message to a
@@ -599,6 +853,9 @@ class ACPAdapter:
         pending: Pending,
         resolution: InterruptResolution,
     ) -> Any:
+        answered = shared.background_answer(pending, resolution)
+        if answered is not None:
+            return dataclasses.replace(native_input, unsent=True, background_answer=answered)
         denied = resolution.decision is InterruptDecision.REJECT
         return dataclasses.replace(
             native_input,
@@ -636,11 +893,18 @@ class ACPAdapter:
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
         """The attempt's items — the agent's session updates and each prompt's answer — with
-        the attempt's helpers open while it runs."""
+        the attempt's helpers open while it runs. A background sub-agent's run has no prompt of
+        its own: its attempt is its task's end (``acp_live.Background``)."""
         helpers = Helpers(run.runtime, self.name)
         error: BaseException | None = None
+        found = cast("Background | None", self.live.attended.get(run.runtime.run_id))
+        source = (
+            self._attempt(target, native_input, run)
+            if found is None
+            else self._attended(run, found)
+        )
         try:
-            async with contextlib.aclosing(self._attempt(target, native_input, run)) as items:
+            async with contextlib.aclosing(source) as items:
                 async for item in items:
                     yield item
         except BaseException as exc:
@@ -649,15 +913,33 @@ class ACPAdapter:
         finally:
             await helpers.closed(error, paused=helpers.suspended(error))
 
+    async def _attended(self, run: Invocation, found: Background) -> AsyncGenerator[Any, None]:
+        """One attempt of a background sub-agent's run: what its sub-agent asks permission for
+        decided in it (:class:`Deciding`), its harness tools its own, until its task ends."""
+        runtime = run.runtime
+        deciding = Deciding(runtime, found.session.profile, found.session.shell)
+        turn = Turn(runtime, deciding, run.native_tools, contextvars.copy_context())
+        async with contextlib.aclosing(found.served(turn)) as items:
+            async for item in items:
+                yield item
+
     async def _attempt(
         self, target: Any, native_input: Any, run: Invocation
     ) -> AsyncGenerator[Any, None]:
-        from acp import PROTOCOL_VERSION
-        from acp.schema import ClientCapabilities
+        from acp.schema import (
+            ClientCapabilities,
+            ElicitationCapabilities,
+            ElicitationFormCapabilities,
+        )
 
         runtime = run.runtime
         target = given(target, runtime.framework_options)
         profile = target.profile
+        if profile is not None and profile.homed and profile.home and target.sandbox is None:
+            # its user's own home of the agent's, an overlay of the team's (``kimi_home``)
+            team, owner = {**os.environ, **target.env}, (runtime.tenant, runtime.user)
+            homed = profile.homed(team, target.cwd or os.getcwd(), owner)
+            target = dataclasses.replace(target, env={**target.env, profile.home: homed})
         own = target.sandbox is not None or target.skills is not None
         home = RunHome(target, runtime) if own else None
         boxed = Sandboxed(target, runtime, home) if home is not None and target.sandbox else None
@@ -667,46 +949,160 @@ class ACPAdapter:
         if profile is not None and profile.swarm_limit is not None:
             env.setdefault(profile.swarm_limit, str(admission.ADMISSION.limit))
         if profile is not None:
+            _overridden(profile, target.env, runtime)
             env.update(profile.env)
         cwd = boxed.work if boxed is not None else target.cwd or os.getcwd()
         attempt = Attempt(self, runtime, target, boxed)
         # where its shell works, the folders the target names, the run's own skills, where a
         # kept result is read (the name the model is told): what a command may read unasked
-        own = [str(home.agent_home / "skills")] if home is not None else []
-        attempt.shell = Shell(cwd, [*target.reads, *own, results.PREFIX], env)
-        capabilities = boxed.capabilities() if boxed is not None else ClientCapabilities()
+        reads = [str(home.agent_home / "skills")] if home is not None else []
+        attempt.shell = Shell(cwd, [*target.reads, *reads, results.PREFIX], env)
+        attempt.served = run.native_tools
+        # a form of the agent's for its user is answered (Kimi asks every question of an
+        # ``AskUserQuestion`` call in one form; over a permission request, only the first)
+        forms = ElicitationCapabilities(form=ElicitationFormCapabilities())
+        served = boxed.capabilities() if boxed is not None else {}
+        capabilities = ClientCapabilities(elicitation=forms, **served)
+        # a session another worker's kept process still holds (a background sub-agent of the
+        # run at work there) is forked: the turn goes on here, in a process of its own
+        journal = runtime.replay.journal
+        held = journal.session is not None and await shared.held_elsewhere(runtime, self.live)
+        # a conversation's process is kept past its turn while work in its background goes
+        # on; not a run's whose home is its own (removed with it), nor one that forks
+        keeps = shared.converses(runtime) and not own and not held and _follows(profile)
+        await self._gone(runtime, native_input)
         async with contextlib.AsyncExitStack() as stack:
             if home is not None:
                 stack.push_async_callback(home.closed)
                 await home.skills()
-            servers = [_server(s) for s in target.mcp_servers]
-            if run.native_tools is not None:
-                servers.append(await stack.enter_async_context(_harness_server(run.native_tools)))
-                attempt.served = run.native_tools
-            conn, process = await stack.enter_async_context(
-                _spawned(
-                    cast("Any", attempt),  # an ACP ``Client``: the methods the agent calls
-                    *target.command,
-                    env=env,
-                    cwd=cwd,
-                    transport_kwargs={"limit": _buffer_limit()},
-                )
+            if profile is not None and profile.allows is not None:
+                unasked = ", ".join(profile.allows(env, cwd))
+                if unasked:  # fails closed: nothing the agent would run unasked is run
+                    raise ACPRunError(UNASKED.format(agent=profile.label, rules=unasked))
+            started = Started(target, env, cwd, capabilities, attempt.shell, fork=held)
+            key = runtime.conversation if keeps else None
+            session, attempt.resumed = await self._session(key, started, run)
+            try:
+                if runtime.attempt == 1 or native_input.unsent:  # its prompt is still to send
+                    await session.asks(runtime)
+                async with contextlib.aclosing(session.served(attempt, native_input)) as items:
+                    async for item in items:
+                        yield item
+            finally:
+                await self._kept(session, runtime)
+
+    async def _session(
+        self, key: str | None, started: Started, run: Invocation
+    ) -> tuple[ACPSession, bool]:
+        """The session the turn runs in: its conversation's kept process, when it was started
+        with this turn's settings, holds the session the turn continues and is free (no turn of
+        the agent's own under way); else a new process (``key``: a conversation's, kept past
+        the turn while work in its background goes on). And whether it holds what came before
+        (a kept one, a session resumed, loaded or forked)."""
+        runtime, target = run.runtime, started.target
+        form = shape(target, started.env, run.native_tools, KIMI_HEADERS)
+        found = cast("ACPSession | None", self.live.get(key)) if key is not None else None
+        if found is not None:
+            why = None
+            if found.shape != form:
+                why = "this turn's settings are not the ones it was started with"
+            elif found.session_id != runtime.replay.journal.session:
+                why = "this turn does not continue the session it holds"
+            elif not await found.settled():
+                why = "a turn of Kimi Code's own did not end"
+            if why is not None:
+                await self.live.close(found.key, why)
+                found = None
+        resumed = found is not None
+        if found is None:
+            found = await self._started(key, form, started, run)
+            resumed = found.continued
+        shared.said(self.live, runtime, CODE)
+        return found, resumed
+
+    async def _started(
+        self, key: str | None, form: str, started: Started, run: Invocation
+    ) -> ACPSession:
+        """A new process for the turn, its session the one the run continues (resumed, else
+        loaded; forked when another worker's process holds it), or a new one."""
+        from acp import PROTOCOL_VERSION
+
+        runtime, target, env = run.runtime, started.target, started.env
+        profile = target.profile
+        model = target.model or ACP_MODEL
+        session = ACPSession(
+            key or runtime.run_id,
+            form,
+            self.live,
+            owner=(runtime.tenant, runtime.user),
+            keeps=key is not None,
+            model=model,
+        )
+        session.profile, session.shell = profile, started.shell
+        tools = run.native_tools
+
+        def spawned(client: Any) -> Any:
+            return _spawned(
+                client,
+                *target.command,
+                env=env,
+                cwd=started.cwd,
+                transport_kwargs={"limit": _buffer_limit()},
+                use_unstable_protocol=True,  # ``elicitation/create``: the agent's forms
             )
-            attempt.bind(conn, process)
-            stack.push_async_callback(attempt.stopped)  # before the connection closes
-            init = await attempt.answered(
-                conn.initialize(protocol_version=PROTOCOL_VERSION, client_capabilities=capabilities)
+
+        def served(relay: ACPSession) -> Any:
+            from trellis.harness.tools.convert import mcp
+
+            return _harness_server(mcp.relayed(tools, relay.call))
+
+        await session.start(spawned, served if tools is not None else None)
+        try:
+            init = await session.answered(
+                session.conn.initialize(
+                    protocol_version=PROTOCOL_VERSION, client_capabilities=started.capabilities
+                )
             )
             if profile is not None:
                 found = init.agent_info.version if init.agent_info is not None else ""
                 compat.require_binary(profile.name, found, command=target.command[0])
-            session = await attempt.session(init, cwd, servers, native_input)
-            if profile is not None and profile.usage is not None:
-                usage = attempt.usage = profile.usage(env, session)
-                usage.start()
-            async with contextlib.aclosing(attempt.turns(native_input)) as items:
-                async for item in items:
-                    yield item
+            servers = [*(_server(s) for s in target.mcp_servers), *session.servers]
+            opened = await session.opened(init, started.cwd, servers, runtime, fork=started.fork)
+            usage = profile.usage if profile is not None else None
+            await session.asking(target.mode, usage(env, opened) if usage is not None else None)
+            if usage is not None:
+                session.usage = usage(env, opened)
+                session.usage.start()
+                session.watch(usage(env, opened))
+        except BaseException:
+            await session.close()
+            raise
+        return session
+
+    async def _kept(self, session: ACPSession, runtime: Runtime) -> None:
+        """The turn ended: its conversation keeps the process while work in its background goes
+        on (and there is room for it: ``live.KEPT``, over the server's agents); any other
+        process ends."""
+        busy = session.keeps and not session.closed and await session.busy()
+        if busy and self.live.get(session.key) is session:
+            return
+        if busy:
+            async with self.live.place(shared.among(runtime, self)) as room:
+                if room:
+                    self.live.keep(session)
+                    return
+        if self.live.get(session.key) is session:
+            self.live.forget(session, "nothing works in its background")
+        await session.close()
+
+    async def _gone(self, runtime: Runtime, native_input: Any) -> None:
+        """The answer this turn brings to a background sub-agent's question
+        (``background_answer``), when no session here holds that sub-agent (a killed
+        server's): nothing continues it, so its run records the answer and ends
+        (``live.gone``)."""
+        answered = native_input.background_answer
+        if answered is not None and answered[0] not in self.live.attended:
+            await shared.gone(runtime, *answered, why=GONE, said=GONE_SAID, code=CODE)
 
     def observed(self, name: str) -> None:
         """A tool the agent ran itself: an MCP server's joins the tool set."""
@@ -728,12 +1124,19 @@ async def _spawned(client: Any, *command: str, **options: Any) -> AsyncIterator[
     pair = await spawned.__aenter__()
     try:
         yield pair
-    except BaseException as exc:
+    finally:  # its session ends it (``ACPSession.close``): never with an error of the turn's
         with contextlib.suppress(ProcessLookupError):
-            await spawned.__aexit__(type(exc), exc, exc.__traceback__)
-        raise
-    with contextlib.suppress(ProcessLookupError):
-        await spawned.__aexit__(None, None, None)
+            await spawned.__aexit__(None, None, None)
+
+
+def _overridden(profile: Profile, own: Mapping[str, str], runtime: Runtime) -> None:
+    """The run told, for each variable the profile sets whatever the agent's own ``env`` says
+    (:attr:`Profile.env`), that the agent's own value is not used, and why."""
+    for name, value in profile.env.items():
+        if name in own and own[name] != value:
+            why = profile.env_why.get(name, "")
+            said = f"{name}={own[name]} in the agent's env is not used: {why}"
+            runtime.events.warning("acp_env", said)
 
 
 def _buffer_limit() -> int:
@@ -742,6 +1145,27 @@ def _buffer_limit() -> int:
     from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 
     return DEFAULT_STDIO_BUFFER_LIMIT_BYTES
+
+
+@dataclass(frozen=True, slots=True)
+class Started:
+    """What an attempt starts the agent's process with: the target (with the run's framework
+    options), its environment, its working directory, the client's capabilities, its shell
+    (``governance.shell``), and whether the session it continues is forked (another worker's
+    process holds it: ``live.held_elsewhere``)."""
+
+    target: ACPAgent
+    env: dict[str, str]
+    cwd: str
+    capabilities: Any
+    shell: Shell
+    fork: bool = False
+
+
+def _follows(profile: Profile | None) -> bool:
+    """Whether the harness can follow the agent's background work: it keeps a log the harness
+    reads (its profile's ``usage``: Kimi's), which says what ACP does not."""
+    return profile is not None and profile.usage is not None
 
 
 def given(target: ACPAgent, options: Mapping[str, Any]) -> ACPAgent:
@@ -807,6 +1231,8 @@ class _Call:
     refused: bool = False
     #: its arguments came as ``rawInput`` (final), not only as the text of its updates
     given: bool = False
+    #: the client's terminal it runs in (a sandboxed run's ``Bash``): its output is the call's
+    terminal: str | None = None
 
 
 class Attempt:
@@ -826,8 +1252,10 @@ class Attempt:
         self.runtime = runtime
         self.target = target
         self.profile = target.profile
+        #: the agent's process the attempt is served by (``acp_live.ACPSession``), its
+        #: connection and its session's id
+        self.session: ACPSession | None = None
         self.conn: Any = None
-        self.process: Any = None
         self.session_id: str | None = None
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.calls: dict[str, _Call] = {}
@@ -842,79 +1270,19 @@ class Attempt:
         self.edited: tuple[str, dict[str, Any]] | None = None
         #: the turn was cancelled (a pause, a refusal, the budget): the agent is stopping
         self.cancelled = False
-        #: the session an earlier attempt kept was resumed (not a new one)
+        #: the session holds what came before (kept, resumed, loaded or forked)
         self.resumed = False
-        #: a loaded session's history is being replayed (``session/load``): not this turn's
-        self.loading = False
-        self.stderr = bytearray()
-        self.drain: asyncio.Task[None] | None = None
         #: the agent's requests being answered now (each in a task of the connection's)
         self.handling: set[asyncio.Task[Any]] = set()
-        #: the harness's tools as the attempt serves them (``tools.convert.mcp.Tools``)
+        #: the harness's tools as the run has them (``tools.convert.mcp.Tools``)
         self.served: Any = None
 
-    def bind(self, conn: Any, process: Any) -> None:
-        self.conn = conn
-        self.process = process
-        self.drain = asyncio.create_task(self._drained(process.stderr))
-
-    async def _drained(self, stream: asyncio.StreamReader) -> None:
-        while chunk := await stream.read(STDERR_TAIL):
-            self.stderr.extend(chunk)
-            del self.stderr[:-STDERR_TAIL]
-
-    async def answered(self, request: Any) -> Any:
-        """The agent's answer to ``request``; when its process ended instead (the connection
-        closed with it), why it ended."""
-        try:
-            return await request
-        except Exception as exc:
-            raise await self._failed(exc) from exc
-
-    def why_ended(self) -> str:
-        tail = self.stderr.decode(errors="replace").strip()
-        code = self.process.returncode
-        return f"the agent's process ended (exit {code}) in the middle of the turn" + (
-            f": {tail}" if tail else ""
-        )
-
-    # ------------------------------------------------------------------ the session
-    async def session(self, init: Any, cwd: str, servers: list[Any], native_input: ACPInput) -> str:
-        """The session the turn runs in: the one an earlier attempt kept, resumed (else loaded),
-        when the agent still holds it; else a new one (in ``mode``, when one is given)."""
-        from acp import RequestError
-
-        journal = self.runtime.replay.journal
-        kept = journal.session
-        caps = init.agent_capabilities.model_dump() if init.agent_capabilities else {}
-        if kept is not None:
-            resumable = (caps.get("session_capabilities") or {}).get("resume") is not None
-            try:
-                if resumable:
-                    await self.answered(
-                        self.conn.resume_session(session_id=kept, cwd=cwd, mcp_servers=servers)
-                    )
-                else:
-                    self.loading = True
-                    await self.answered(
-                        self.conn.load_session(session_id=kept, cwd=cwd, mcp_servers=servers)
-                    )
-                self.loading = False
-                self.session_id, self.resumed = kept, True
-                return kept
-            except RequestError as exc:
-                self.loading = False
-                self.runtime.events.warning(
-                    "acp_session", f"session {kept} was not resumed ({exc}): run again"
-                )
-                journal.session = None
-        created = await self.answered(self.conn.new_session(cwd=cwd, mcp_servers=servers))
-        self.session_id = journal.session = created.session_id
-        if self.target.mode is not None:
-            await self.answered(
-                self.conn.set_session_mode(session_id=created.session_id, mode_id=self.target.mode)
-            )
-        return created.session_id
+    def bind(self, session: ACPSession) -> None:
+        """The attempt is served by ``session``: its connection, its session, its usage log."""
+        self.session = session
+        self.conn = session.conn
+        self.session_id = session.session_id
+        self.usage = session.usage
 
     # ------------------------------------------------------------------ the turns
     async def turns(self, native_input: ACPInput) -> AsyncGenerator[Any, None]:
@@ -965,7 +1333,8 @@ class Attempt:
     def _first(self, native_input: ACPInput) -> list[Any]:
         from acp import text_block
 
-        if self.resumed and self.runtime.attempt > 1:  # the run's own session, after a pause
+        if self.resumed and self.runtime.attempt > 1 and not native_input.unsent:
+            # the run's own session, after a pause: told which call a person answered about
             return [text_block(self._resumed(native_input))]
         from trellis.harness.sandbox import DELIVERS_HERE
 
@@ -974,6 +1343,11 @@ class Attempt:
             blocks.insert(0, text_block(ASKED_WITH.format(context=native_input.context)))
         if self.target.sandbox is None:  # its own folder's outputs/ are the user's (workdir)
             blocks.insert(0, text_block(DELIVERS_HERE))
+        if len(blocks) == 1:
+            # the user's words would start the prompt, where ACP reads a ``/`` as a command of
+            # the agent's (Kimi's ``/compact``, ``/skill:<name>``: run with no model turn).
+            # They are words for the model, as in every run whose prompt has a block before
+            blocks = [text_block(f"\n{native_input.prompt}")]
         return blocks
 
     def _resumed(self, native_input: ACPInput) -> str:
@@ -989,13 +1363,21 @@ class Attempt:
         return f"{said} {DENIED_WHY.format(why=why)}" if why else said
 
     async def _turn(self, prompt: Any) -> AsyncGenerator[Any, None]:
+        """One prompt's updates and its answer. It is sent once the agent is free (no turn of
+        its own under way: ``Keeper.settled``); an answer that came with no turn of the
+        prompt's own — the agent queued it behind a turn of its own — fails the turn
+        (``acp_live.QUEUED``)."""
         if isinstance(prompt, str):
             from acp import text_block
 
             prompt = [text_block(prompt)]
-        runtime = self.runtime
+        runtime, session = self.runtime, self.session
+        assert session is not None  # bound before its turns
+        if not await session.settled():
+            raise ACPRunError(QUEUED)
+        own, seen = session.own_turns, False
         if self.usage is not None:
-            self.usage.ended = False  # this turn's end is still to come
+            self.usage.ended, self.usage.failed = False, None  # this turn's end is to come
         asking = asyncio.ensure_future(self.conn.prompt(session_id=self.session_id, prompt=prompt))
         asking.add_done_callback(self._ended)
         runtime.model_started(STEP)
@@ -1007,17 +1389,13 @@ class Attempt:
                 except TimeoutError:
                     self._died()
                     await self._spent()
+                    await self.launched()
                     continue
                 self._died()
                 if isinstance(item, _Ended):
-                    await self._settled()
-                    if item.error is not None:
-                        raise await self._failed(item.error)
-                    self._answered_usage(item.answer)
-                    # past the agent's own retries: what a run with no answer says
-                    runtime.cut_off = getattr(item.answer, "stop_reason", None) == MAX_TOKENS
-                    yield item.answer
+                    yield await self._answer(item, own, seen)
                     return
+                seen = True
                 if await self._seen(item):
                     await self._spent()  # a call ended: what its step spent
                 yield item
@@ -1028,24 +1406,45 @@ class Attempt:
             if not asking.done():
                 asking.cancel()
 
+    async def _answer(self, ended: _Ended, own: int, seen: bool) -> Any:
+        """The prompt's answer, its turn over and its usage counted: the agent's error raised
+        as the run's; and an ``end_turn`` with nothing ``seen`` of a turn fails it when the
+        agent queued the prompt behind a turn of its own (``acp_live.QUEUED``; ``own``: how
+        many of those had begun when the prompt was sent)."""
+        session = self.session
+        assert session is not None  # bound before its turns
+        stop = getattr(ended.answer, "stop_reason", None)
+        if stop == END_TURN and not seen and await session.queued(own):
+            raise ACPRunError(QUEUED)
+        await self._settled()
+        await self.launched()
+        if ended.error is not None:
+            raise await session.failed(ended.error)
+        self._answered_usage(ended.answer)
+        failed = self.usage.failed if self.usage is not None else None
+        if failed is not None:  # answered ``end_turn`` like a finished turn: its log says why
+            details = {k: v for k, v in failed.items() if v not in (None, "", {})}
+            raise ACPRunError(FAILED_TURN.format(why=json.dumps(details, default=str)))
+        # past the agent's own retries: what a run with no answer says
+        self.runtime.cut_off = stop == MAX_TOKENS
+        return ended.answer
+
+    async def launched(self) -> None:
+        """The turn's ``Agent`` calls whose sub-agent the agent launched in the background
+        (``ACPSession.launches``: its log says, ACP sends no end of such a call) are over for
+        the turn: the model is waited on again once none of its calls runs."""
+        assert self.session is not None  # bound before its turns
+        for call_id in await self.session.launches(self.calls):
+            self.calls[call_id].running = False
+            if not any(call.running for call in self.calls.values()):
+                self.runtime.model_started(STEP)
+
     def _died(self) -> None:
         """What ended a harness call that was not an error (the worker dying), raised in the
         attempt: in the server's request it ended only the server."""
         fatal = self.served.fatal if self.served is not None else None
         if fatal is not None:
             raise fatal
-
-    async def _failed(self, error: BaseException) -> BaseException:
-        """The agent's error — or, when the connection closed (its process ended), why the
-        process ended."""
-        if not isinstance(error, ConnectionError):
-            return error
-        with contextlib.suppress(TimeoutError):
-            async with asyncio.timeout(CANCEL_SECONDS):
-                await self.process.wait()
-                assert self.drain is not None  # bound with the process
-                await asyncio.shield(self.drain)  # what it said last
-        return ACPRunError(self.why_ended())
 
     def _ended(self, asking: asyncio.Future[Any]) -> None:
         if asking.cancelled():
@@ -1109,25 +1508,19 @@ class Attempt:
         many."""
         found = self.usage.records() if self.usage is not None else []
         for record in found:
-            usage = record["usage"]
-            cached = int(usage.get("inputCacheRead") or 0)
-            written = int(usage.get("inputCacheCreation") or 0)
-            budget.account(
-                self.runtime,
-                model=self.target.model or str(record.get("model") or "kimi"),
-                input_tokens=int(usage.get("inputOther") or 0) + cached + written,
-                output_tokens=int(usage.get("output") or 0),
-                cached=cached,
-            )
+            accounted(self.runtime, record, self.target.model)
         return len(found)
 
     # ------------------------------------------------------------------ what the agent did
     async def _seen(self, update: Any) -> bool:
         """A session update: a tool call running or ending (recorded; a sub-agent's a helper of
         the run); the stall watch follows the calls. Whether a call ended."""
-        from acp.schema import ToolCallProgress
+        from acp.schema import AgentPlanUpdate, ToolCallProgress
 
         runtime = self.runtime
+        if isinstance(update, AgentPlanUpdate):  # the agent's plan (Kimi's todo list), as it is
+            entries = [entry.model_dump(exclude_none=True) for entry in update.entries]
+            runtime.events.custom(PLAN, entries=entries)
         if not isinstance(update, ToolCallProgress):
             return False
         call = self.calls.get(update.tool_call_id)
@@ -1148,6 +1541,9 @@ class Attempt:
     async def _ran(self, update: Any, call: _Call) -> None:
         failed = update.status == "failed"
         text = _output(update)
+        if not text and call.terminal is not None and self.boxed is not None:
+            # run in the client's terminal: the agent's last update names it and says nothing
+            text = self.boxed.said(call.terminal)
         await self._helpers_ended(update.tool_call_id, call, text, failed=failed)
         if call.refused or call.name.startswith(HARNESS_PREFIX):
             return  # not run; or a harness tool, which the bridge records
@@ -1164,8 +1560,10 @@ class Attempt:
         )
 
     async def _helpers_started(self, call_id: str, call: _Call) -> None:
-        """A sub-agent the agent starts (its profile's ``helpers``), or each member of a swarm
-        (``swarms``: one per item, its task the template with the item in it), a helper."""
+        """A sub-agent the agent starts (its profile's ``helpers``) or goes on with (Kimi's
+        ``resume``), or each member of a swarm (``swarms``: one per item, its task the template
+        with the item in it; one per sub-agent it resumes, its task the prompt it goes on with),
+        a helper — a resumed one by the name it was started with (:meth:`_named`)."""
         helpers, profile = self.runtime.helpers, self.profile
         if profile is None:  # an agent the harness knows no sub-agent tool of
             return
@@ -1173,15 +1571,26 @@ class Attempt:
         args = call.args
         if call.name in profile.helpers:
             task = str(args.get("prompt") or args.get("description") or "")
-            name = str(args.get("subagent_type") or "coder")
+            resumed = args.get("resume")
+            name = self._named(str(resumed)) if resumed else self._named(None, args)
             await helpers.start(call_id, kind=Kind.SUBAGENT, name=name, task=task)
+            if args.get("run_in_background"):
+                # its call returns at once and ACP tells no end of it: its end is its task's
+                # (the log's: ``ACPSession.launches``), else it is cut off with the attempt
+                helpers.attribute(call_id, call_id, background=True)
         elif call.name in profile.swarms:
-            template = str(args.get("prompt_template") or "{{item}}")
-            name = str(args.get("subagent_type") or "coder")
-            for item in args.get("items") or ():
-                task = template.replace("{{item}}", str(item))
-                key = f"{call_id}/{item}"
+            for key, (kind, which), task in _swarm(call_id, args):
+                name = self._named(which if kind == "resume" else None, args)
                 await helpers.start(key, kind=Kind.SUBAGENT, name=name, task=task)
+
+    def _named(self, resumed: str | None, args: Mapping[str, Any] | None = None) -> str:
+        """A sub-agent's name: the type its call names (Kimi's default when none); a resumed
+        one's (``resumed``: its id), the type it was started with, as Kimi's log says
+        (:meth:`UsageLog.profile`) — its id when no log says."""
+        if resumed is None:
+            return str((args or {}).get("subagent_type") or KIMI_SUBAGENT)
+        found = self.usage.profile(resumed) if self.usage is not None else None
+        return found or resumed
 
     async def _helpers_ended(self, call_id: str, call: _Call, text: str, *, failed: bool) -> None:
         helpers, profile = self.runtime.helpers, self.profile
@@ -1194,14 +1603,13 @@ class Attempt:
             else:
                 await helpers.end(call_id, output=text)
         elif call.name in profile.swarms:
-            members = {m["item"]: m for m in SWARM_MEMBER.finditer(text)}
-            for item in call.args.get("items") or ():
-                member = members.get(str(item))
-                key = f"{call_id}/{item}"
-                if member is not None and member["outcome"] == "completed":
-                    await helpers.end(key, output=member["text"].strip())
+            members = _members(text)
+            for key, which, _ in _swarm(call_id, call.args):
+                member = members.get(which)
+                if member is not None and member[0] == "completed":
+                    await helpers.end(key, output=member[1])
                 else:
-                    why = member["text"].strip() if member is not None else text
+                    why = member[1] if member is not None else text
                     await helpers.end(key, error=why or SUBAGENT_FAILED)
 
     # ------------------------------------------------------------------ the ACP client
@@ -1210,14 +1618,17 @@ class Attempt:
         permission request for it may come before the turn reads its update)."""
         from acp.schema import ToolCallProgress, ToolCallStart
 
-        if self.loading:  # a loaded session's history, replayed: not this turn's
-            return
         if isinstance(update, ToolCallStart):
             args = _args(update.raw_input, update.content)
             given = update.raw_input is not None
             self.calls[update.tool_call_id] = _Call(name=update.title, args=args, given=given)
         elif isinstance(update, ToolCallProgress):
             known = self.calls.get(update.tool_call_id)
+            ran_in = next(
+                (b.terminal_id for b in update.content or () if b.type == "terminal"), None
+            )
+            if known is not None and ran_in is not None:
+                known.terminal = ran_in
             if known is not None and update.raw_input is not None:
                 known.args, known.given = _args(update.raw_input, None), True
             elif known is not None and not known.given and update.raw_output is None:
@@ -1261,59 +1672,64 @@ class Attempt:
             args = known.args if known is not None else _args(tool_call.raw_input, None)
             called = call_key(name.removeprefix(HARNESS_PREFIX), args)
             self.runtime.replay.announced(called, tool_call.tool_call_id)
-            return _chosen(options, "allow_once")
-        if self.profile is not None and name in self.profile.questions:
-            return await self._question(options, tool_call)
+            return chosen(options, "allow_once")
+        if _offers_a_choice(options):
+            return await self._question(options, name, tool_call)
         return await self._decided(options, name, tool_call)
 
     async def _decided(self, options: list[Any], name: str, tool_call: Any) -> Any:
         """A call of the agent's own, decided as the run decides a call."""
-        from acp.schema import RequestPermissionResponse
-
         runtime = self.runtime
         known = self.calls.get(tool_call.tool_call_id)
         args = known.args if known is not None else _args(tool_call.raw_input, tool_call.content)
         if self.edited == (name, args):
             self.edited = None
-            return _chosen(options, "allow_once")
-        side_effects = (self.profile.builtins if self.profile else {}).get(name)
-        found = runtime.native.get(name)
-        spec = found or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
+            return chosen(options, "allow_once")
+        spec = _spec(runtime, self.profile, name)
         runtime.model_ended(STEP)
         asks_as = self.profile.label if self.profile is not None else THE_AGENT
         try:
-            decided = await _permitted(spec, args, self.shell, asks_as, tool_call.tool_call_id)
+            request = (tool_call.tool_call_id, options)
+            decided = await _permitted(spec, args, self.shell, asks_as, request)
         except Paused:  # the run pauses: the agent stops here, and the resume goes on
             self._refused(known)
             await self._stop()
-            return RequestPermissionResponse(outcome=_cancelled())
+            return dismissed()
         if isinstance(decided, ToolOutcome):
             self._refused(known)
             self.followup = REJECTED.format(tool=name, why=str(decided.output))
             await self._stop()
-            return _chosen(options, "reject_once")
+            return chosen(options, "reject_once")
         if decided.args != args:
             self._refused(known)
             self.edited = (name, decided.args)
             self.followup = EDITED.format(tool=name, args=json.dumps(decided.args))
             await self._stop()
-            return _chosen(options, "reject_once")
-        return _chosen(options, "allow_once")
+            return chosen(options, "reject_once")
+        return _let_through(runtime, name, options)
 
-    async def _question(self, options: list[Any], tool_call: Any) -> Any:
-        """The agent's question to its user (Kimi's ``AskUserQuestion``), asked as the run's: a
-        choice of its options; the answer is the option of that label."""
-        from acp.schema import RequestPermissionResponse
-
-        labels = [o.name for o in options if not o.kind.startswith("reject")]
-        question = _text(tool_call.content) or "The agent asks you to choose."
+    async def _question(self, options: list[Any], name: str, tool_call: Any) -> Any:
+        """The agent's question to its user, asked as the run's (:func:`_asked`); the run
+        paused on it, the agent stops here."""
+        args = self.calls[tool_call.tool_call_id].args  # its call's update came before it
         try:
-            answer = await self.runtime.ask(question, options=labels)
+            return await _asked(self.runtime, options, name, args, tool_call)
         except Paused:
             await self._stop()
-            return RequestPermissionResponse(outcome=_cancelled())
-        chosen = {o.name: o.option_id for o in options}[answer]  # one of the labels asked
-        return RequestPermissionResponse(outcome=_selected(chosen))
+            return dismissed()
+
+    async def create_elicitation(self, message: str, mode: Any, **kwargs: Any) -> Any:
+        """A form the agent asks its user to fill (Kimi's ``AskUserQuestion``: every question
+        of the call, a field each), asked as the run's question (:func:`_filled`) on behalf of
+        the call it is for; the run paused on it, the agent stops here."""
+        self._handles()
+        known = self.calls[mode.tool_call_id]  # its call's update came before it
+        try:
+            async with self.runtime.asking_within(known.name, known.args):
+                return await _filled(self.runtime, message, mode)
+        except Paused:
+            await self._stop()
+            return unfilled()
 
     # the agent's files and terminals, in the run's sandbox (``Sandboxed``)
     async def read_text_file(
@@ -1417,8 +1833,6 @@ class RunHome:
     SESSIONS: Final = "sessions"
 
     def __init__(self, target: ACPAgent, runtime: Runtime) -> None:
-        from trellis.contracts import stable_id
-
         self.target = target
         self.runtime = runtime
         self.root = Path(tempfile.gettempdir()) / SANDBOXED_ROOT / stable_id(runtime.run_id)
@@ -1491,7 +1905,7 @@ class Sandboxed:
     ``Bash``) — so its commands and writes happen in the sandbox (``SandboxSource.opened``: the
     run's own, kept across attempts, deleted at the run's end).
 
-    Its reads are not isolated: Kimi Code 2.1.1 reads and searches the host's files itself
+    Its reads are not isolated: Kimi Code reads and searches the host's files itself
     (``Read`` looks a file up on the host first; ``Glob`` and ``Grep`` never ask the client).
     What the harness can do it does: the agent's process gets a home and a working directory of
     the run's own, both empty, and an environment of :data:`SANDBOXED_ENV` and the agent's own
@@ -1504,16 +1918,21 @@ class Sandboxed:
         self.source = target.sandbox
         self.work = home.work
         self.terminals: dict[str, tuple[asyncio.Task[Any], int | None]] = {}
+        #: what the latest terminals the agent released said (:data:`TERMINALS_KEPT`): a
+        #: call's record reads it once the call ends, after its terminal went
+        self.released: LRU[str, str] = LRU(TERMINALS_KEPT)
         self._made = False
         runtime.added.append(self.source)  # its end (and its pause) find it
         _said_reads(runtime.agent_id)
         runtime.events.warning("acp_sandbox", READS_NOT_ISOLATED)
 
-    def capabilities(self) -> Any:
-        from acp.schema import ClientCapabilities, FileSystemCapabilities
+    def capabilities(self) -> dict[str, Any]:
+        """What the client serves the agent for a sandboxed run (``ClientCapabilities``'
+        fields): its files and its terminals."""
+        from acp.schema import FileSystemCapabilities
 
         files = FileSystemCapabilities(read_text_file=True, write_text_file=True)
-        return ClientCapabilities(fs=files, terminal=True)
+        return {"fs": files, "terminal": True}
 
     async def box(self, *, changes: bool = False) -> Any:
         """The run's sandbox, its copy of the agent's working directory made the first time
@@ -1581,7 +2000,13 @@ class Sandboxed:
 
     def release(self, ident: str) -> None:
         task, _ = self.terminals.pop(ident)
+        self.released[ident] = _ran(task)[0] if task.done() else ""
         task.cancel()
+
+    def said(self, ident: str) -> str:
+        """The output of the command the terminal ``ident`` ran, once the agent released it
+        (it does before it ends the call that ran in it): what that call is recorded with."""
+        return self.released.get(ident) or ""
 
     async def stopped(self) -> None:
         """The attempt is ending: its commands still running are stopped."""
@@ -1609,7 +2034,7 @@ def _said_reads(agent_id: str) -> None:
 
 
 async def _permitted(
-    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str, call_id: str
+    spec: ToolSpec, args: dict[str, Any], shell: Shell, asks_as: str, request: Any
 ) -> ToolCall | ToolOutcome:
     """A call the agent asked permission for: decided as the run decides a call
     (``bridge.permitted``: hooks, governance), and — since the agent asks — a person asked
@@ -1618,33 +2043,140 @@ async def _permitted(
     reads (a read tool, or a shell command ``shell`` reads as read-only: placed from the
     agent's working folder, or the call's own ``cwd``, and reading only what the run may read)
     or when the run changed its arguments (the agent is told to call it again so: that call is
-    the one let through). A pause propagates."""
+    the one let through). ``request``: the agent's permission request — its call's id, and
+    whether it offers to keep an approval for its session (:func:`_keeps`: the person may then
+    allow the tool for the conversation). A pause propagates."""
     reads = spec.side_effects == "read" or shell.read_only(spec.name, args)
     framework = None if reads else asks_as
-    return await bridge.permitted(spec, args, framework=framework, call_id=call_id)
+    call_id, options = request
+    return await bridge.permitted(
+        spec, args, framework=framework, call_id=call_id, kept=_keeps(options)
+    )
 
 
-def _chosen(options: list[Any], kind: str) -> Any:
-    """The answer choosing the first option of ``kind`` (``allow_once``, ``reject_once``);
-    the agent's question cancelled when it offers none."""
-    from acp.schema import RequestPermissionResponse
-
-    for option in options:
-        if option.kind == kind:
-            return RequestPermissionResponse(outcome=_selected(option.option_id))
-    return RequestPermissionResponse(outcome=_cancelled())
+def _keeps(options: Sequence[Any]) -> bool:
+    """Whether the agent offers to keep an approval of the call for its session (ACP's
+    ``allow_always``: Kimi's "Approve for this session")."""
+    return any(option.kind == "allow_always" for option in options)
 
 
-def _selected(option_id: str) -> Any:
-    from acp.schema import AllowedOutcome
+def _let_through(runtime: Runtime, name: str, options: list[Any]) -> Any:
+    """The answer that lets a call of the tool ``name`` run: the agent's approval for its
+    session where it offers one and the person allowed the tool for the conversation
+    (``bridge.remembered``) — the agent then asks about that call no more, as it would not
+    for its own user — else for this call."""
+    lasting = _keeps(options) and bridge.remembered(runtime, name)
+    return chosen(options, "allow_always" if lasting else "allow_once")
 
-    return AllowedOutcome(outcome="selected", option_id=option_id)
+
+def _swarm(call_id: str, args: Mapping[str, Any]) -> list[tuple[str, tuple[str, str], str]]:
+    """The members a swarm call starts: each sub-agent it resumes (``resume_agent_ids``, its id
+    with the prompt it goes on with), then one per item (its task the template with the item in
+    it) — each with its key among the attempt's helpers, what it is (``("resume", <agent id>)``,
+    ``("item", <item>)``: as :func:`_members` finds it) and its task."""
+    template = str(args.get("prompt_template") or "{{item}}")
+    resumed = (args.get("resume_agent_ids") or {}).items()
+    return [
+        *((f"{call_id}@{a}", ("resume", str(a)), str(p)) for a, p in resumed),
+        *(
+            (f"{call_id}/{i}", ("item", str(i)), template.replace("{{item}}", str(i)))
+            for i in args.get("items") or ()
+        ),
+    ]
 
 
-def _cancelled() -> Any:
-    from acp.schema import DeniedOutcome
+def _members(text: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """The members a swarm's result reports, each by what it was — a resumed sub-agent by its
+    id (``("resume", <agent id>)``), any other by its item (``("item", <item>)``) — with its
+    outcome and what it said."""
+    found: dict[tuple[str, str], tuple[str, str]] = {}
+    for member in SWARM_MEMBER.finditer(text):
+        attrs = {k: html.unescape(v) for k, v in SWARM_ATTR.findall(member["attrs"])}
+        resumed = attrs.get("mode") == "resume"
+        which = (
+            ("resume", attrs.get("agent_id", "")) if resumed else ("item", attrs.get("item", ""))
+        )
+        found[which] = (attrs.get("outcome", ""), member["text"].strip())
+    return found
 
-    return DeniedOutcome(outcome="cancelled")
+
+class Deciding:
+    """How a background sub-agent's run answers what its sub-agent asks permission for (the
+    ``options`` of its attempt's ``live.Turn``): a harness tool's call is let through (the
+    bridge decides it as it runs); any other is decided as the run decides a call — let
+    through, refused, or (the run paused on it) :data:`acp_live.WAITS`, decided again by the
+    attempt that follows the person's answer. Nothing is told the sub-agent (ACP's answer
+    carries no reason, and only the main agent takes a prompt)."""
+
+    def __init__(self, runtime: Runtime, profile: Profile | None, shell: Shell) -> None:
+        self.runtime = runtime
+        self.profile = profile
+        self.shell = shell
+
+    async def request_permission(
+        self, options: list[Any], session_id: str, tool_call: Any, **kwargs: Any
+    ) -> Any:
+        name = tool_call.title or ""
+        if name.startswith(HARNESS_PREFIX):
+            return chosen(options, "allow_once")
+        args = _args(tool_call.raw_input, tool_call.content)
+        spec = _spec(self.runtime, self.profile, name)
+        asks_as = self.profile.label if self.profile is not None else THE_AGENT
+        try:
+            request = (tool_call.tool_call_id, options)
+            decided = await _permitted(spec, args, self.shell, asks_as, request)
+        except Paused:
+            return WAITS
+        if isinstance(decided, ToolOutcome) or decided.args != args:
+            return chosen(options, "reject_once")
+        return _let_through(self.runtime, name, options)
+
+
+def _offers_a_choice(options: Sequence[Any]) -> bool:
+    """Whether a permission request is the agent's question to its user rather than whether a
+    call may run: it offers options of its own to pick from — a question's answers (Kimi's
+    ``AskUserQuestion``), a plan's approaches and what else to do with it (its
+    ``ExitPlanMode``: ``Revise``, ``Reject and Exit``) — so two of them are of one kind, where
+    a call's request has one way each to allow it once, to allow it from now on and to refuse
+    it."""
+    kinds = [option.kind for option in options]
+    return len(set(kinds)) < len(kinds)
+
+
+async def _asked(
+    runtime: Runtime, options: Sequence[Any], name: str, args: dict[str, Any], tool_call: Any
+) -> Any:
+    """The agent's question to its user (:func:`_offers_a_choice`), asked as the run's: one
+    question, what the agent shows with it (a question's words, a plan) and every option it
+    offers, each by its name; the answer chooses the option of that name. Asked on behalf of
+    the agent's call (``name``, ``args``: ``Runtime.asking_within``), which a session resumed
+    after the pause is told to make again. A pause propagates."""
+    question = _text(tool_call.content) or CHOOSE
+    async with runtime.asking_within(name, args):
+        answer = await runtime.ask(question, options=[option.name for option in options])
+    picked = {option.name: option.option_id for option in options}[answer]  # one it was asked
+    return selected(picked)
+
+
+async def _filled(runtime: Runtime, message: str, mode: Any) -> Any:
+    """A form the agent asks its user to fill (ACP's ``elicitation/create``, its form
+    ``mode``), asked as the run's question the way an MCP server's form is (``tools.elicit``:
+    one field that picks from values a choice, else a form with the agent's schema), and the
+    person's answer as the agent takes it. A pause propagates."""
+    from acp.schema import CreateElicitationResponse
+    from pydantic import TypeAdapter
+
+    schema = mode.requested_schema.model_dump(by_alias=True, exclude_none=True)
+    asking = elicited(SimpleNamespace(message=message, requested_schema=schema))
+    answer = await runtime.ask(asking.question, **asking.asking)
+    return TypeAdapter(CreateElicitationResponse).validate_python(asking.result(answer))
+
+
+def _spec(runtime: Runtime, profile: Profile | None, name: str) -> ToolSpec:
+    """A call of the agent's own, as governance decides it: the run's tool of that name (the
+    tool catalog's word), else by its risk (its profile's built-ins; undeclared otherwise)."""
+    side_effects = (profile.builtins if profile else {}).get(name)
+    return runtime.native.get(name) or ToolSpec(name=name, side_effects=side_effects or UNDECLARED)
 
 
 def _args(raw: Any, content: Any) -> dict[str, Any]:
@@ -1707,6 +2239,7 @@ __all__ = [
     "KIMI",
     "KIMI_BUILTINS",
     "KIMI_ENV",
+    "KIMI_ENV_WHY",
     "KIMI_OUTLIVES_THE_TURN",
     "READS_NOT_ISOLATED",
     "ACPAdapter",

@@ -63,7 +63,7 @@ openai-agents = ["openai-agents>=0.24,<0.25"]
 claude-agent-sdk = ["claude-agent-sdk>=0.2.182,<0.3", "mcp>=2.2,<3"]
 # ``kimi()``: Kimi Code over the Agent Client Protocol (``adapters.acp``): the ACP SDK, and the MCP
 # SDK that serves the harness's tools to it. The agent itself is the ``kimi`` program
-# (``npm install -g @moonshot-ai/kimi-code@2.1.1``), its tested range in compat.BINARIES.
+# (``npm install -g @moonshot-ai/kimi-code@2.6.2``), its tested range in compat.BINARIES.
 kimi = ["agent-client-protocol>=0.12.1,<0.13", "mcp>=2.2,<3"]
 agui = ["fastapi>=0.115"]
 # Kept, empty, so `trellis-harness[query]` still installs: DuckDB is a required dependency now.

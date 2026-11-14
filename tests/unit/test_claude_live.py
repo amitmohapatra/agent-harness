@@ -16,25 +16,19 @@ from claude_agent_sdk._internal.message_parser import parse_message
 
 from trellis.contracts import RunStatus
 from trellis.harness.bounded import LRU
-from trellis.harness.bridges import claude_live
+from trellis.harness.bridges import claude_live, live
 from trellis.harness.bridges.claude import harness_matcher
 from trellis.harness.bridges.claude_live import (
-    _NUDGE,
-    _OVER,
     GONE,
     GONE_SAID,
     LEFT,
     STOPPED,
-    UNATTENDED,
     WORKFLOW_AGENT,
     Background,
-    Left,
     LiveSession,
-    LiveSessions,
-    Turn,
-    gone,
 )
 from trellis.harness.bridges.helpers import Kind
+from trellis.harness.bridges.live import NUDGE, OVER, UNATTENDED, Left, LiveSessions, Turn
 from trellis.harness.holding import Holds
 from trellis.harness.journal import Journal
 from trellis.harness.runs import LocalRuns
@@ -286,7 +280,7 @@ async def test_an_attempt_that_pauses_keeps_what_comes_after_and_ends_its_reques
     attempt = found.served(turn)
     waiting = asyncio.ensure_future(anext(attempt))
     await asyncio.sleep(0)
-    turn.queue.put_nowait(_NUDGE)  # nothing new: no end of its task yet
+    turn.queue.put_nowait(NUDGE)  # nothing new: no end of its task yet
     first = reply("one", None, None)
     turn.queue.put_nowait(first)
     assert await waiting is first
@@ -353,7 +347,7 @@ async def test_a_background_run_that_cannot_go_on_says_why_and_asks_nothing_more
     assert not asked.done()
     found.over = True
     found._woken()
-    assert await asked is _OVER
+    assert await asked is OVER
 
     async def hook(given: Any, tool_use_id: str | None, context: Any) -> Any:
         raise AssertionError("a hook of a run that is over")
@@ -429,7 +423,9 @@ async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run
 
     runs, said = LocalRuns(), []
     runtime: Any = SimpleNamespace(
-        agent=SimpleNamespace(harness=SimpleNamespace(runs=runs)),
+        agent=SimpleNamespace(
+            harness=SimpleNamespace(runs=runs), adapter=SimpleNamespace(name="claude_agent_sdk")
+        ),
         tenant="t",
         events=SimpleNamespace(warning=lambda code, message: said.append((code, message))),
     )
@@ -442,6 +438,9 @@ async def test_an_answer_its_session_is_not_here_to_take_ends_the_background_run
 
     def answer(decision: InterruptDecision) -> InterruptResolution:
         return InterruptResolution(interrupt_id="turn.1", run_id="turn", decision=decision)
+
+    async def gone(*given: Any) -> None:  # as the Claude adapter calls it
+        await live.gone(*given, why=GONE, said=GONE_SAID, code="claude_session")
 
     asked = await waiting("run_approved")
     await gone(runtime, "run_approved", asked.interrupt_id, answer(InterruptDecision.APPROVE))
@@ -539,7 +538,7 @@ def _rooms(monkeypatch: pytest.MonkeyPatch, cap: int) -> list[str]:
 
     monkeypatch.setattr(LiveSession, "start", start)
     monkeypatch.setattr(LiveSession, "close", close)
-    monkeypatch.setattr(claude_live, "KEPT", cap)
+    monkeypatch.setattr(live, "KEPT", cap)
     return started
 
 
@@ -554,7 +553,9 @@ async def test_first_turns_at_once_start_no_more_processes_than_the_cap(
     among = [one, two]
     opened = await asyncio.gather(
         *(
-            (one if n % 2 else two).open(f"c{n}", (), None, {}, owner=f"u{n}", among=among)
+            claude_live.opened(
+                one if n % 2 else two, f"c{n}", (), None, {}, owner=f"u{n}", among=among
+            )
             for n in range(100)
         )
     )
@@ -563,7 +564,7 @@ async def test_first_turns_at_once_start_no_more_processes_than_the_cap(
     for found in opened:  # each of them serves a turn: none is idle to give its place
         if found is not None:
             found.turn = SimpleNamespace()  # type: ignore[assignment]
-    assert await one.open("late", (), None, {}, owner="late", among=among) is None
+    assert await claude_live.opened(one, "late", (), None, {}, owner="late", among=among) is None
     assert len(started) == 16
 
 
@@ -578,14 +579,21 @@ async def test_a_place_goes_from_who_holds_most_the_one_used_longest_ago(
     sessions = LiveSessions()
     among = [sessions]
     for key, owner in [("b1", "bob"), ("a1", "ada"), ("a2", "ada"), ("a3", "ada")]:
-        assert await sessions.open(key, (), None, {}, owner=owner, among=among) is not None
+        assert (
+            await claude_live.opened(sessions, key, (), None, {}, owner=owner, among=among)
+            is not None
+        )
     assert sessions.get("a1") is not None  # used again: a2 is ada's least recently used
-    assert await sessions.open("c1", (), None, {}, owner="cy", among=among) is not None
+    assert (
+        await claude_live.opened(sessions, "c1", (), None, {}, owner="cy", among=among) is not None
+    )
     assert sorted(s.key for s in among[0]) == ["a1", "a3", "b1", "c1"]
     held = sessions.get("a1")
     assert held is not None
     held.working["t1"] = "research"  # at work in the background: not given up
-    assert await sessions.open("c2", (), None, {}, owner="cy", among=among) is not None
+    assert (
+        await claude_live.opened(sessions, "c2", (), None, {}, owner="cy", among=among) is not None
+    )
     assert sorted(s.key for s in among[0]) == ["a1", "b1", "c1", "c2"]  # a3 went, not a1
 
 
@@ -600,5 +608,15 @@ async def test_a_session_that_fails_to_start_gives_its_place_back(
     sessions = LiveSessions()
     monkeypatch.setattr(LiveSession, "start", broken)
     with pytest.raises(RuntimeError, match="no CLI"):
-        await sessions.open("c1", (), None, {}, owner="u", among=[sessions])
+        await claude_live.opened(sessions, "c1", (), None, {}, owner="u", among=[sessions])
     assert len(sessions) == 0 and sessions.starting == 0
+
+
+async def test_closing_a_session_cancels_what_it_left_running_aside() -> None:
+    """What a session started aside (a stop, an interrupt) ends with it."""
+    session = LiveSession("conversation", (), LiveSessions(), owner="u")
+    session._aside_run(asyncio.sleep(30))
+    [aside] = list(session._aside)
+    await session.close()
+    await asyncio.sleep(0)
+    assert aside.cancelled()

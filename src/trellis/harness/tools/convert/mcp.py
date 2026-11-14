@@ -2,15 +2,17 @@
 that reaches tools only over MCP: an ACP agent (``adapters.acp``), which is handed MCP servers
 when its session starts.
 
-The adapter serves it for one attempt (:func:`served`: streamable HTTP on the loopback
-interface, every request carrying a bearer token of the attempt's own), inside the attempt's
-task, so each call runs as the run's (``trellis.current()``). Every call goes to the bridge, as
-every framework's does; a call that pauses the run tells the agent it waits (:data:`WAITING`).
-A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
-preview naming where; the server's ``read_file`` pages it (listed from the start: an agent
-lists a server's tools once, when its session starts). A call still under way when the attempt
-ends (the run cancelled, out of time, or paused at another call) is cancelled there, as an
-in-process tool is: it never runs on past the run's end.
+The adapter serves it for the agent's process (:func:`served`: streamable HTTP on the loopback
+interface, every request carrying a bearer token of its own) as a relay (:func:`relayed`): each
+call is handed to the run being served — its own server's (:attr:`Tools.called`), in that run's
+context, so each call runs as the run's (``trellis.current()``) — for a process that outlives
+the attempt that started it (a conversation's kept ACP agent: ``bridges.acp_live``). Every call
+goes to the bridge, as every framework's does; a call that pauses the run tells the agent it
+waits (:data:`WAITING`). A result longer than ``tools.results.MAX_CHARS`` is kept in the run
+and the model reads a preview naming where; the server's ``read_file`` pages it (listed from
+the start: an agent lists a server's tools once, when its session starts). A call still under
+way when the attempt ends (the run cancelled, out of time, or paused at another call) is
+cancelled there, as an in-process tool is: it never runs on past the run's end.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -46,11 +48,24 @@ STOP_SECONDS: Final = 1
 
 class Tools(Server[Any]):
     """The harness's tools as an MCP server, and the calls it has under way: each runs in a
-    task of its own, which the attempt's end cancels (:func:`served`)."""
+    task of its own, which the attempt's end cancels (:meth:`stopped`). ``listing`` lists them,
+    ``called`` makes a call (in the context it is awaited in)."""
 
-    def __init__(self, calls: set[asyncio.Task[Any]], **handlers: Any) -> None:
-        super().__init__(SERVER, **handlers)
+    def __init__(
+        self,
+        calls: set[asyncio.Task[Any]],
+        listing: Callable[[Any, Any], Awaitable[types.ListToolsResult]],
+        called: Callable[[str, dict[str, Any]], Awaitable[types.CallToolResult]],
+    ) -> None:
+        async def call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
+            return await called(params.name, dict(params.arguments or {}))
+
+        super().__init__(SERVER, on_list_tools=listing, on_call_tool=call_tool)
         self.calls = calls
+        self.listing = listing
+        self.called = called
+        #: each tool it lists, by name with its input schema (not its wording of the moment)
+        self.listed: list[tuple[str, Any]] = []
         #: what ended a call that was not an error (``BaseException``: the worker dying,
         #: ``SystemExit``): the run's to raise (the attempt serving it), not this request's —
         #: raised here it ended the server's own task group, and the run went on
@@ -77,14 +92,13 @@ def convert(tools: Sequence[Tool]) -> Tools:
         )
         return types.ListToolsResult(tools=listed)
 
-    async def call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
-        args = dict(params.arguments or {})
-        reader = next((r for r in readers if r[0] == params.name), None)
+    async def called(name: str, args: dict[str, Any]) -> types.CallToolResult:
+        reader = next((r for r in readers if r[0] == name), None)
         if reader is not None:
             return _result(await reader[3](args), error=False)
-        tool = by_name.get(params.name)
+        tool = by_name.get(name)
         if tool is None:
-            return _result(f"no tool named {params.name!r}", error=True)
+            return _result(f"no tool named {name!r}", error=True)
         # a task of its own (in this context: the run's), which the attempt's end can cancel
         call = asyncio.ensure_future(bridge.call(tool, args))
         calls.add(call)
@@ -105,8 +119,25 @@ def convert(tools: Sequence[Tool]) -> Tools:
             return _result(WAITING, error=True)
         return _result(results.readable(outcome.output, tool.name), error=not outcome.ok)
 
-    server = Tools(calls, on_list_tools=list_tools, on_call_tool=call_tool)
+    server = Tools(calls, list_tools, called)
+    server.listed = [(t.name, t.spec.input_schema) for t in tools]
+    server.listed.extend((name, schema) for name, _, schema, _ in readers)
     return server
+
+
+def relayed(
+    server: Tools, call: Callable[[str, dict[str, Any]], Awaitable[types.CallToolResult]]
+) -> Tools:
+    """``server``'s tools, listed as it lists them (an agent lists a server's tools once, when
+    its session starts), each call handed to ``call``: the run being served's own."""
+    relay = Tools(set(), server.listing, call)
+    relay.listed = server.listed
+    return relay
+
+
+def refused(text: str) -> types.CallToolResult:
+    """What a call nothing could make is answered: ``text``, as an error."""
+    return _result(text, error=True)
 
 
 def _listed(tool: Tool) -> types.Tool:
@@ -197,4 +228,15 @@ async def served(server: Tools) -> AsyncIterator[Served]:
             await task
 
 
-__all__ = ["PATH", "SERVER", "STOPPED", "WAITING", "Served", "Tools", "convert", "served"]
+__all__ = [
+    "PATH",
+    "SERVER",
+    "STOPPED",
+    "WAITING",
+    "Served",
+    "Tools",
+    "convert",
+    "refused",
+    "relayed",
+    "served",
+]
