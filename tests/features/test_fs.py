@@ -108,13 +108,14 @@ async def test_query_result_save_as_keeps_the_rows_and_a_later_run_reads_them_ba
     expected = sorted(line for line in text.splitlines() if "sku-007" in line)
     assert body[1:] == expected and len(expected) == rows // 97 + (1 if rows % 97 > 7 else 0)
     name = saved[0].name
+    path = f"/files/{events[0].run_id}/{name}"  # how a later run of the chat names it
     # a later run, another process: told of the kept file, reads it back
     async with harness(files_url=str(store)) as h:
-        plan2 = [("query_result", {"file_path": name, "sql": "SELECT count(*) AS n FROM result"})]
+        plan2 = [("query_result", {"file_path": path, "sql": "SELECT count(*) AS n FROM result"})]
         agent, built = await armed("react", h, tmp_path, plan2, id=agent_id, tools=[big_report])
         done = await agent.run("How many rows did I export?", user=user, thread="t2")
     assert done.status is RunStatus.SUCCESS, done
-    assert name in built.said(), built.said()[:2000]  # told of it
+    assert path in built.said(), built.said()[:2000]  # told of it
     assert f"n\n{len(expected)}" in str(done.answer), done.answer
     # another user is never told of it
     async with harness(files_url=str(store)) as h:

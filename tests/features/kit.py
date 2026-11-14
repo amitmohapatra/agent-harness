@@ -145,7 +145,7 @@ def memories_of(user: str, *, tenant: str = "feat", live: bool = True) -> list[d
     rows = memory_sql(
         "select memory_id, tenant_id, user_id, scope_level, memory_type, content, predicate,"
         " normalized_hash, visibility, visibility_keys, superseded_by, valid_to,"
-        " temporal_status, reinforcement_count, deleted_at, expires_at, created_at"
+        " temporal_status, reinforcement_count, deleted_at, expires_at, created_at, indexed_at"
         " from memories where visibility_keys::text like :1",
         pattern,
     )

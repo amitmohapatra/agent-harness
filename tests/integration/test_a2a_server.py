@@ -164,6 +164,19 @@ async def test_the_card_describes_the_agent_where_the_url_says() -> None:
     await harness.aclose()
 
 
+async def test_the_card_says_what_h_wrap_was_told_the_agent_does() -> None:
+    """``h.wrap(description=)`` "says what it does (its A2A card ...; else its function's
+    docstring)": the card ignored it and showed the docstring (or "the <id> agent")."""
+    harness = Harness(config=Settings())
+    agent = harness.wrap(greeter, id="greeter", description="Books tables for the team.")
+    app = FastAPI()
+    agent.serve_a2a(app, URL)
+    async with asgi(app) as http:
+        card = (await http.get("/agents/greeter/.well-known/agent-card.json")).json()
+    assert card["description"] == "Books tables for the team."
+    await harness.aclose()
+
+
 async def test_a_run_streams_to_completion_and_the_task_is_the_run(
     served: tuple[Client, Harness],
 ) -> None:

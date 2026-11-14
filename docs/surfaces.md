@@ -161,8 +161,8 @@ Nothing the client sends in the body (`forwardedProps`, the thread...) decides w
 
 JSON-RPC at `url`'s path, the agent card at `{url}/.well-known/agent-card.json` (or the
 origin's well-known path when `url` has none). The card names the agent by its id and
-describes it with the target's own `description` (or `handoff_description`, or a function's
-docstring), one JSON-RPC interface, streaming, push notifications and the trusted-identity
+describes it with `h.wrap(description=)`, else the target's own `description` (or
+`handoff_description`, or a function's docstring), one JSON-RPC interface, streaming, push notifications and the trusted-identity
 extension (`https://trellis.dev/a2a/extensions/trusted-identity/v1`); no credential is ever
 part of it.
 

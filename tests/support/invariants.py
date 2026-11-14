@@ -711,11 +711,16 @@ class Invariants:
                 # a call that paused the run (ask_user, an ask inside a tool, a refusal the
                 # person then answers) ended that attempt with a ``paused`` result and runs again
                 # when the run resumes: its start in the paused attempt is not a second start
+                # and a call an attempt replays from the journal (``cached``: what an earlier
+                # attempt ran, announced again, not run) is the same call, not a second start
                 paused = {
                     str(ev.get("tool_call_id"))
                     for ev in evs_a
                     if ev.get("type") == "TOOL_CALL_RESULT"
-                    and (ev.get("data") or {}).get("status") == "paused"
+                    and (
+                        (ev.get("data") or {}).get("status") == "paused"
+                        or (ev.get("data") or {}).get("cached")
+                    )
                 }
                 for ev in evs_a:
                     if ev.get("type") == "TOOL_CALL_START" and str(ev.get("tool_call_id")) not in paused:

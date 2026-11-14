@@ -48,7 +48,8 @@ async def test_a_fact_told_in_one_chat_is_known_in_the_next_and_to_no_one_else(
 
     async def extracted() -> list[dict]:
         rows = facts_of(user)
-        return rows if any(r["memory_type"] != "OBSERVATION" for r in rows) else []
+        ready = [r for r in rows if r["memory_type"] != "OBSERVATION" and r["indexed_at"]]
+        return rows if ready else []  # extracted, and indexed: what recall searches
 
     rows = await eventually(extracted, within=90)
     assert rows, facts_of(user)

@@ -62,7 +62,7 @@ class Served:
         self.port = port or free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.server = uvicorn.Server(
-            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error", lifespan="off")
+            uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="error")
         )
         self.task: asyncio.Task[None] | None = None
 
@@ -249,6 +249,7 @@ async def test_the_worker_cli_works_the_queue_and_releases_on_sigterm(
         "PYTHONPATH": f"{tmp_path}:{os.getcwd()}:{os.environ.get('PYTHONPATH', '')}",
         "SCEN_TRAFFIC": str(invariants.traffic_file("worker")),
     }
+    slow = None
     process = subprocess.Popen(  # noqa: ASYNC220 - the worker outlives this call: no wait
         [
             sys.executable,
@@ -265,7 +266,11 @@ async def test_the_worker_cli_works_the_queue_and_releases_on_sigterm(
     )
     try:
         async with harness() as h:
-            agent = h.wrap(lambda input, agent: input, id=agent_id)
+
+            async def unused(input: Any, agent: Runtime) -> Any:
+                return input  # the worker process runs the agent; this side only starts runs
+
+            agent = h.wrap(unused, id=agent_id)
             quick = await agent.start("quick", user=f"jo-{uid}")
             done = await asyncio.wait_for(quick.result(), 90)
             assert done.status is RunStatus.SUCCESS and done.answer == "did quick", done
@@ -286,8 +291,9 @@ async def test_the_worker_cli_works_the_queue_and_releases_on_sigterm(
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-        async with runs_http() as c:
-            await c.post(f"/v1/runs/{slow.id}/cancel", json={"reason": "test over"})
+        if slow is not None:
+            async with runs_http() as c:
+                await c.post(f"/v1/runs/{slow.id}/cancel", json={"reason": "test over"})
 
 
 @pytest.mark.plan("SURF")

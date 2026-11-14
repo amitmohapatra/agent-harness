@@ -151,7 +151,9 @@ async def test_a_budget_ends_the_run_partial_and_is_kept_with_its_record(
 
 
 @pytest.mark.plan("HAR-DATE")
-@pytest.mark.parametrize("adapter", [a for a in ADAPTERS if a != "function"])
+#: the date line follows the model's instructions (docs/tools.md "What day it is"): a function
+#: has no model, and a hand-built graph writes its own system message in its own node
+@pytest.mark.parametrize("adapter", [a for a in ADAPTERS if a not in ("function", "graph")])
 async def test_the_model_is_told_todays_date(adapter: str, tmp_path: Path, uid: str) -> None:
     async with harness() as h:
         agent, built = await armed(adapter, h, tmp_path, [], id=f"date-{adapter}-{uid}")
@@ -215,9 +217,16 @@ async def test_a_large_result_is_kept_paged_to_its_end_and_counted_over_every_ro
         done = await agent.run("Count the report.", user=f"fa-{uid}", thread="c")
     assert done.status is RunStatus.SUCCESS, done
     assert f"n,last\n{rows},row {rows - 1:06d}" in str(done.answer), str(done.answer)[:500]
-    said = built.said()
-    assert f"row {rows - 2:06d}" in said  # the last page was read
-    assert len(said) < len(text)  # never the whole result
+    async with runs_http() as c:
+        events = (await c.get(f"/v1/runs/{done.run_id}/events", params={"limit": 500})).json()
+    reads = [
+        e["event"]["data"].get("output", "")
+        for e in events
+        if e["event"]["type"] == "TOOL_CALL_RESULT"
+        and e["event"]["data"].get("tool") == "read_file"
+    ]
+    assert reads and f"row {rows - 2:06d}" in reads[-1], reads  # the last page was read
+    assert len(built.said()) < len(text)  # the model never read the whole result
 
 
 #: F-DATE (agent-runs SDK, shared by the harness): a date question's ``expects`` is

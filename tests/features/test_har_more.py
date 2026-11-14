@@ -130,7 +130,7 @@ async def test_evaluate_verifies_answers_against_their_contexts_in_memory(
         report = await h.evaluate(
             agent,
             [{"input": "When does the Rotterdam warehouse open?"}],
-            evaluators=[grounding()],
+            judges=[grounding()],
             user=user,
         )
     scores = [s for item in report.items for s in item.scores if s.name == "grounding"]

@@ -206,7 +206,10 @@ def agent_card(agent: Agent, url: str) -> AgentCard:
 
 
 def _description(agent: Agent) -> str:
-    """What the target says about itself, where it says anything."""
+    """What ``h.wrap(description=)`` says the agent does, else what the target says about
+    itself, where it says anything."""
+    if agent.description and agent.description.strip():
+        return agent.description.strip()
     target = agent.target
     for attribute in ("description", "handoff_description"):
         value = getattr(target, attribute, None)
