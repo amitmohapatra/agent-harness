@@ -333,6 +333,10 @@ async def test_on_a_disk_the_file_tools_are_governed_and_offered_from_the_start(
     assert outside["read_file"] and outside["write_file"]
     sides = {t.name: (t.metadata or {}).get("side_effects") for t in graph_tools(graph)}
     assert sides["read_file"] == "read" and sides["edit_file"] == "write"
+    reads = {"ls", "read_file", "glob", "grep"}  # the reads read; the others write
+    governed = [n for n, mark in outside.items() if mark]
+    assert all(sides[n] == ("read" if n in reads else "write") for n in governed)
+    assert outside["delete"] and sides["delete"] == "write"
     agent = harness.wrap(graph, id="disk")
     result = await agent.run("what do the notes say?", user="u")
     assert result.answer == "seven", result.error
