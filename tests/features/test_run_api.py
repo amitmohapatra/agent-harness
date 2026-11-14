@@ -36,7 +36,13 @@ from tests.features.conftest import (
     runs_http,
     runs_sql,
 )
-from trellis.contracts import Interrupt, InterruptResolution, RunEvent, RunEventType
+from trellis.contracts import (
+    Interrupt,
+    InterruptResolution,
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+)
 from trellis.runs import parse_delivery, verify_signature
 from trellis.runs.webhooks import SIGNATURE_HEADER
 
@@ -153,7 +159,10 @@ async def test_every_status_is_reached_along_its_transitions_only(uid: str) -> N
 
 # --------------------------------------------------------------------------- RUN-02
 @pytest.mark.plan("RUN-02")
-async def test_the_queue_hands_out_by_priority_and_one_run_per_concurrency_key(uid: str) -> None:
+async def test_the_queue_hands_out_by_priority_and_one_run_per_concurrency_key(
+    uid: str, invariants: Any
+) -> None:
+    invariants.allow("INV-7", "a priority outside -1000..1000 is sent on purpose: refused")
     agent = f"order-{uid}"
     async with runs_http() as c:
         low = await start(c, agent, queue=True, priority=-5)
@@ -314,13 +323,21 @@ class Receiver:
         sock.close()
         self.url = f"http://127.0.0.1:{self.port}/hook"
         self.got: list[tuple[dict[str, str], bytes]] = []
+        #: what ``/gone`` answers: 410 (refused for good: the delivery dies at once) until fixed
+        self.gone_status = 410
 
     def app(self) -> Starlette:
         async def hook(request: Request) -> Response:
             self.got.append((dict(request.headers), await request.body()))
             return Response(status_code=204)
 
-        return Starlette(routes=[Route("/hook", hook, methods=["POST"])])
+        async def gone(request: Request) -> Response:
+            if self.gone_status < 300:
+                self.got.append((dict(request.headers), await request.body()))
+            return Response(status_code=self.gone_status)
+
+        return Starlette(routes=[Route("/hook", hook, methods=["POST"]),
+                                 Route("/gone", gone, methods=["POST"])])
 
 
 @pytest.fixture
@@ -372,8 +389,7 @@ async def test_pauses_and_endings_are_delivered_signed_and_a_rotated_secret_sign
 
             got = await eventually(lambda: _async(len(mine()) >= 2), within=60)
             assert got, receiver.got
-            kinds = sorted(str(d.event.value if hasattr(d.event, "value") else d.event)
-                           for _, _, d in mine())
+            kinds = sorted(str(d.type.value) for _, _, d in mine())
             assert kinds == ["run.finished", "run.paused"], kinds
             for headers, body, _ in mine():
                 assert verify_signature(secret, headers.get(SIGNATURE_HEADER.lower()), body)
@@ -383,18 +399,37 @@ async def test_pauses_and_endings_are_delivered_signed_and_a_rotated_secret_sign
             assert rotated.status_code == 200
             new_secret = rotated.json()["secret"]
             assert new_secret != secret
-            deliveries = await c.get("/v1/webhooks/deliveries", params={"webhook_id": hook_id})
-            assert deliveries.status_code == 200 and len(deliveries.json()) >= 2
-            delivered = deliveries.json()[0]
-            redone = await c.post(
-                f"/v1/webhooks/deliveries/{delivered['delivery_id']}/redeliver"
-            )
-            assert redone.status_code in (200, 409), redone.text
-            if redone.status_code == 200:
+            # a receiver that refuses for good: the delivery dies; fixed, it is redelivered
+            broken = await c.post("/v1/webhooks", json={
+                "url": receiver.url.replace("/hook", "/gone"), "events": ["run.finished"]})
+            broken_id, broken_secret = broken.json()["webhook_id"], broken.json()["secret"]
+            try:
+                r2 = await start(c, agent)
+                await c.post(f"/v1/runs/{r2['run_id']}/finish",
+                             json={"status": "SUCCESS", "output": "ok", "error": None})
+
+                async def dead() -> list[dict]:
+                    got = await c.get("/v1/webhooks/deliveries",
+                                      params={"webhook_id": broken_id, "state": "dead"})
+                    return got.json()
+
+                died = await eventually(dead, within=60)
+                assert died and died[0]["run_id"] == r2["run_id"], died
+                receiver.gone_status = 204
                 before = len(receiver.got)
+                redone = await c.post(
+                    f"/v1/webhooks/deliveries/{died[0]['delivery_id']}/redeliver")
+                assert redone.status_code == 200, redone.text
                 assert await eventually(lambda: _async(len(receiver.got) > before), within=60)
                 headers, body = receiver.got[-1]
-                assert verify_signature(new_secret, headers.get(SIGNATURE_HEADER.lower()), body)
+                assert parse_delivery(body).data.run.run_id == r2["run_id"]
+                assert verify_signature(broken_secret, headers.get(SIGNATURE_HEADER.lower()),
+                                        body)
+                again = await c.post(
+                    f"/v1/webhooks/deliveries/{died[0]['delivery_id']}/redeliver")
+                assert again.status_code in (404, 409)  # delivered: no longer owed
+            finally:
+                await c.delete(f"/v1/webhooks/{broken_id}")
             refused = await c.post("/v1/webhooks", json={"url": "ftp://example.com/x",
                                                          "events": ["run.finished"]})
             assert refused.status_code == 422
@@ -417,8 +452,9 @@ async def test_events_appended_on_one_replica_stream_live_from_the_other(uid: st
         run = await start(one, agent)
 
         def event(n: int, kind: RunEventType, **data: Any) -> dict[str, Any]:
+            outcome = RunOutcome.SUCCESS if kind is RunEventType.RUN_FINISHED else None
             return RunEvent(type=kind, tenant_id=TENANT, run_id=run["run_id"], sequence=n,
-                            attempt=1, data=data).model_dump(mode="json")
+                            attempt=1, outcome=outcome, data=data).model_dump(mode="json")
 
         first = await one.post(f"/v1/runs/{run['run_id']}/events",
                                json={"events": [event(1, RunEventType.RUN_STARTED)]})
@@ -521,7 +557,9 @@ async def test_cancel_works_at_every_status_and_a_child_names_its_parent(uid: st
     async with runs_http() as c:
         queued = await start(c, agent, queue=True)
         got = await c.post(f"/v1/runs/{queued['run_id']}/cancel", json={"reason": "no longer"})
-        assert got.json()["status"] == "CANCELLED" and got.json()["cancel_reason"] == "no longer"
+        assert got.json()["status"] == "CANCELLED"
+        kept = runs_sql("select cancel_reason from agent_runs where run_id = :1", queued["run_id"])
+        assert kept[0]["cancel_reason"] == "no longer"
         repeat = await c.post(f"/v1/runs/{queued['run_id']}/cancel", json={"reason": "no longer"})
         assert repeat.status_code == 200  # a retried cancel
         own = await start(c, agent)
@@ -620,7 +658,7 @@ async def test_another_tenants_runs_are_not_found_and_its_tenant_not_writable(ui
 async def test_artifacts_and_payloads_are_stored_once_and_served_back(uid: str) -> None:
     agent = f"files-{uid}"
     data = b"sku,qty\nA-1,3\n" * 1000
-    checksum = hashlib.sha256(data).hexdigest()
+    checksum = "sha256:" + hashlib.sha256(data).hexdigest()
     async with runs_http() as c:
         run = await start(c, agent, queue=True)
         assert await claim(c, agent, "w")
@@ -633,7 +671,7 @@ async def test_artifacts_and_payloads_are_stored_once_and_served_back(uid: str) 
                              headers={"Content-Type": "text/csv"})
         assert again.status_code == 200 and again.json()["artifact_id"] == up.json()["artifact_id"]
         bad = await c.post(f"/v1/runs/{run['run_id']}/artifacts",
-                           params={"worker_id": "w", "checksum": "0" * 64}, content=data,
+                           params={"worker_id": "w", "checksum": "sha256:" + "0" * 64}, content=data,
                            headers={"Content-Type": "text/csv"})
         assert bad.status_code == 422
         back = await c.get(f"/v1/artifacts/{up.json()['artifact_id']}")

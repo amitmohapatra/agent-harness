@@ -35,7 +35,8 @@ from tests.features.conftest import (
     runs_http,
     runs_sql,
 )
-from tests.features.kit import approve_all, armed, ledger, record
+from tests.features.kit import approve_all, armed, ledger, lookup, record
+from tests.support.arm import arm
 from trellis import Hooks, Runtime
 from trellis.contracts import RunStatus
 from trellis.harness import schedules as chat_schedules
@@ -56,7 +57,7 @@ async def schedule_in_chat(tmp: Path, agent_id: str, user: str, thread: str, **a
     rows = runs_sql(
         "select * from agent_schedules where agent_id = :1 and on_behalf_of = :2",
         agent_id,
-        f"user:{user}",
+        user,  # a bare id is a user's (agent-runs' principals)
     )
     assert len(rows) == 1, rows
     return rows[0]
@@ -76,7 +77,7 @@ async def work(tmp: Path, agent_id: str, plan: list[Any], *, hooks: Any = (),
         if target is None:
             agent, _ = await armed("react", h, tmp, plan, id=agent_id, hooks=hooks)
         else:
-            agent = h.wrap(target, id=agent_id, hooks=hooks)
+            agent = arm(h.wrap(target, id=agent_id, hooks=hooks), [lookup])
         worker = h.worker([agent], concurrency=1)
         while await worker.run_once():
             pass
@@ -101,13 +102,18 @@ async def test_a_schedule_set_in_chat_fires_into_the_users_conversation(
     run_id = await fire(row["schedule_id"])
     queued = await record(run_id)
     assert queued.status is RunStatus.QUEUED
-    assert queued.on_behalf_of == f"user:{user}" and queued.metadata["schedule_id"] == row["schedule_id"]
-    await work(tmp_path, agent_id, [("lookup", {"sku": "A-1"})])
+    assert queued.on_behalf_of == user and queued.metadata["schedule_id"] == row["schedule_id"]
+    async def check(input: Any, agent: Runtime) -> str:
+        # a function: a planned model would count the chat's earlier turn (schedule_task's
+        # call, replayed by memory's window) as one of its own steps
+        return str(await agent.tools.call("lookup", sku="A-1"))
+
+    await work(tmp_path, agent_id, [], target=check)
     done = await record(run_id)
     assert done.status is RunStatus.SUCCESS, done
     async with harness() as h:
         conversation = await h.conversation(user=user, thread=thread)
-    assert done.thread_id == conversation  # the same chat
+    assert done.thread_id == thread  # the same chat (agent-runs keeps the caller's thread name)
     assert "lookup:A-1" in ledger()
 
     async def delivered() -> list[dict]:
@@ -118,6 +124,8 @@ async def test_a_schedule_set_in_chat_fires_into_the_users_conversation(
 
     rows = await eventually(delivered, within=60)
     assert rows and "stock of A-1 is 3" in rows[-1]["content"], rows
+    where = memory_sql("select distinct thread_id from messages where agent_run_id = :1", run_id)
+    assert [w["thread_id"] for w in where] == [conversation]  # in the user's conversation
     # the fired run was offered none of the schedule tools (it does its task)
     async with runs_http() as c:
         events = (await c.get(f"/v1/runs/{run_id}/events", params={"limit": 500})).json()

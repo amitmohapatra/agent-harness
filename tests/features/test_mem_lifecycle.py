@@ -128,14 +128,11 @@ BUG_M1 = (
     "BUG-M1: the user's extracted facts are not recognised as their own words "
     "(memory-service pipeline.py:358); the agent forgets them without asking"
 )
-#: BUG-M2 (agent-memory-service): the user an agent acts for may not forget or update what
-#: that agent relayed for them: ``_require_owner`` (modules/memory/service.py:288) accepts only
-#: the owner principal itself or ``user:<id>``, while the owner is ``agent:<user>/<agent>``
-#: (USAGE §4: "need the memory's owner, the user an agent acts for, or a tenant admin").
-BUG_M2 = (
-    "BUG-M2: the user is refused forgetting their own statement relayed by an agent "
-    "(memory-service service.py:288)"
-)
+#: BUG-M2 (agent-memory-service, fixed on its branch claude/cool-maxwell-w5avo8-features): the
+#: user an agent acts for was refused forgetting what that agent relayed for them —
+#: ``_require_owner`` (modules/memory/service.py:288) accepted only the owner principal or
+#: ``user:<id>``, the owner being ``agent:<user>/<agent>`` (USAGE §4: "the memory's owner, the
+#: user an agent acts for, or a tenant admin"). These tests need that fix in the service.
 #: BUG-M3 (agent-memory-service): the inventory (GET /v1/memories, "what do we hold about
 #: this user?") lists memories anchored at the user's scope only, while ADR 0036 anchors a
 #: user's statements at their thread with USER visibility: list_memories
@@ -188,14 +185,13 @@ async def _forget_by_the_agent(
 
 @pytest.mark.plan("MEM-05", "INV-3", "INV-4")
 @pytest.mark.parametrize("adapter", [a for a in ADAPTERS if a != "function"])
-@pytest.mark.xfail(strict=True, reason=BUG_M2)
 async def test_forgetting_the_users_words_asks_then_they_are_gone(
     adapter: str, tmp_path: Path, uid: str, invariants: Any
 ) -> None:
     """``memory_forget`` of the user's turn as they said it: the service refuses the agent,
     the run pauses on one approval, and approved it is forgotten as the user — gone from
-    recall and marked deleted in the store. Today the approved forget is refused too
-    (BUG-M2): the documented flow never forgets."""
+    recall and marked deleted in the store (before BUG-M2's fix the approved forget was
+    refused too: the documented flow never forgot)."""
     invariants.allow("INV-4", "the first memory_forget is the service's refusal: no effect")
     invariants.allow("INV-10", FINDING_H1)
     await _forget_by_the_agent(adapter, tmp_path, uid, "turn")
@@ -210,7 +206,6 @@ async def test_forgetting_a_fact_read_from_the_users_words_asks_first(
 
 
 @pytest.mark.plan("MEM-05")
-@pytest.mark.xfail(strict=True, reason=BUG_M2)
 async def test_the_user_may_forget_what_an_agent_relayed_for_them(
     tmp_path: Path, uid: str
 ) -> None:

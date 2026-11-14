@@ -24,11 +24,15 @@ typings:  ## Link trellis.contracts, trellis.memory and trellis.runs where pyrig
 
 .PHONY: test
 test:  ## Every test except the benchmark and the live ones, at 100% line and branch coverage
-	$(PYTEST) -q -m "not performance and not live and not matrix" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
+	$(PYTEST) -q -m "not performance and not live and not matrix and not features" --cov=trellis.harness --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=100
 
 .PHONY: test-live
 test-live:  ## Opt-in tests against running services (LLM_BASE_URL, MEMORY_URL, RUNS_URL, TRELLIS_API_KEY)
 	$(PYTEST) -q -m live
+
+.PHONY: test-features
+test-features:  ## Feature proofs end to end against the real memory service and agent-runs (MEMORY_URL, RUNS_URL, FEAT_RUNS_URL_2, keys, FEAT_*_DSN: tests/features/conftest.py)
+	$(PYTEST) -q -m features tests/features
 
 .PHONY: live-shard
 live-shard:  ## One shard of the live suite (LIVE_SHARD=i/n), packed by the measured durations to finish under a job's limit
