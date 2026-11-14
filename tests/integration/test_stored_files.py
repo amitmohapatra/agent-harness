@@ -369,10 +369,10 @@ async def test_the_note_names_the_newest_and_counts_the_rest(
 
 async def test_the_note_names_the_20_newest_with_no_count_when_there_are_20(run: Run) -> None:
     files = run.agent.harness.files
-    for n in range(21):
+    for n in range(20):
         await files.put("t/u/c_1/r0", f"f{n:02d}.csv", b"a\n1", source="sandbox_exec")
-        if n == 19:
-            twenty = await stored.note(run)  # type: ignore[arg-type]
+    twenty = await stored.note(run)  # type: ignore[arg-type]
+    await files.put("t/u/c_1/r0", "f20.csv", b"a\n1", source="sandbox_exec")
     assert twenty is not None and len(twenty.splitlines()[1:]) == 20  # all named, no count
     said = await stored.note(run)  # type: ignore[arg-type]
     assert said is not None
