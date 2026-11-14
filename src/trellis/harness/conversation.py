@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-from trellis.contracts import InterruptDecision, RunStatus
+from trellis.contracts import Interrupt, InterruptDecision, InterruptResolution, RunStatus
 from trellis.harness.bounded import SAID_ONCE
 from trellis.harness.governance.decision import CONVERSATION, reach
 from trellis.harness.history import Said, Speaker
@@ -182,12 +182,23 @@ def _allowing(entry: ResolutionEntry) -> str | None:
     call = interrupt.tool_call
     if (
         call is None
-        or CONVERSATION.value not in interrupt.option_values
+        or not remembered(interrupt, resolution)
         or resolution.decision is not InterruptDecision.APPROVE
         or resolution.remember != "run"
     ):
         return None
     return reach(call.tool, interrupt.assignee)
+
+
+def remembered(interrupt: Interrupt, resolution: InterruptResolution) -> bool:
+    """Whether the answer to a call's approval covers the tool's later calls (``remember``
+    beyond ``"once"``): where the question offered it
+    (:data:`~trellis.harness.governance.decision.CONVERSATION`), or offered no choices of its
+    own (a framework's own approval, such as the OpenAI Agents SDK's ``needs_approval``: its
+    ``always_approve``)."""
+    if resolution.remember == "once" or interrupt.tool_call is None:
+        return False
+    return not interrupt.options or CONVERSATION.value in interrupt.option_values
 
 
 async def earlier(

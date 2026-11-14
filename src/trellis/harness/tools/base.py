@@ -174,6 +174,10 @@ class Tool:
     #: again around the framework's handling where the framework did not (:class:`Deferring`).
     #: Set by the harness.
     deferring: Deferring | None = field(default=None, repr=False)
+    #: A framework's own tool whose library tries a failed call again itself (an OpenAI agent's
+    #: MCP server with ``max_retry_attempts``): the library owns its tries, so it is tried once
+    #: here. Set by the harness.
+    retried: bool = False
 
     def __post_init__(self) -> None:
         if self.timeout is not None and self.timeout <= 0:
@@ -331,7 +335,7 @@ async def execute(
     retries = retries_of(tool.spec, reads=reads)
     try:
         async with within or asyncio.timeout(tool.timeout):
-            output = await retried(once, retries=0 if tool.deferring else retries)
+            output = await retried(once, retries=0 if tool.deferring or tool.retried else retries)
     except Exception as exc:
         if is_pause_signal(exc):  # it asked a person: the caller lets it through
             return ToolOutcome(tool=tool.name, status=ToolStatus.CANCELLED), exc

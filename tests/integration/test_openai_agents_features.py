@@ -619,9 +619,9 @@ async def test_the_runs_own_run_hooks_see_the_run_beside_the_harnesss(harness: H
     assert events[-1].data["spent"]["model_calls"] == 3  # counted by the harness's hooks
 
 
-async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_last_answer() -> None:
+async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_turn_limit() -> None:
     """With the run's own ``RunHooks``: a token budget still stops the run, and a run at its
-    turn limit still ends with one last answer, that call seen by the hooks too."""
+    turn limit ends ``PARTIAL`` with the SDK's outcome, no model call past it."""
     seen = Seen()
     model = ScriptedModel(
         [("look", {"order": "o1"}), "never"], usage=Usage(input_tokens=50, output_tokens=10)
@@ -642,8 +642,8 @@ async def test_run_hooks_do_not_stand_in_for_the_harnesss_budget_or_its_last_ans
             id="limited",
             framework_options={"hooks": seen, "max_turns": 1},
         ).run("where is o1?", user="u")
-    assert limited.status is RunStatus.SUCCESS and limited.answer == "o1 shipped, as far as I got"
-    assert [e for e in seen.events if e[0] == "llm_start"] == [("llm_start", "desk")] * 2
+    assert limited.status is RunStatus.PARTIAL and limited.answer is None
+    assert [e for e in seen.events if e[0] == "llm_start"] == [("llm_start", "desk")]
 
 
 # --------------------------------------------------------------------------- guardrails

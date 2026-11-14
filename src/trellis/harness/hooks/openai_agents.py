@@ -36,10 +36,15 @@ class ModelHooks(RunHooks[Any]):
     its handoffs, its tool calls, its model calls), as ``Runner.run(hooks=theirs)`` calls
     them."""
 
-    def __init__(self, theirs: RunHooks[Any] | None = None) -> None:
+    def __init__(self, theirs: RunHooks[Any] | None = None, *, counted: bool = True) -> None:
         #: the model each agent of the run is calling, by its name, and when the call began
         self._calls: dict[str, tuple[str | None, float]] = {}
         self._theirs = theirs if theirs is not None else RunHooks()
+        #: whether each reply's usage is counted here (an agent tool's child run's is counted
+        #: by its helper, from what the SDK adds to the calling run's usage) and its function
+        #: calls kept for the harness's tools to answer repeats (the calling reply's, not the
+        #: child's)
+        self._counted = counted
 
     async def on_agent_start(self, context: Any, agent: Any) -> None:
         await self._theirs.on_agent_start(context, agent)
@@ -86,22 +91,27 @@ class ModelHooks(RunHooks[Any]):
         runtime = current()
         if runtime is not None:  # what the run spent (``budget.py``)
             runtime.model_ended(_step(agent))
-            runtime.repeats = _repeats(response.output)
             from trellis.harness.tools.convert.openai_local import computer_replied  # noqa: PLC0415
 
             computer_replied(runtime, response.output)
             from trellis.harness.adapters.openai_agents import hosted_calls  # noqa: PLC0415
 
             await hosted_calls(runtime, response.output, started=started)
-            usage = response.usage
-            details = getattr(usage, "input_tokens_details", None)
-            budget.account(
-                runtime,
-                model=model,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached=int(getattr(details, "cached_tokens", 0) or 0),
-            )
+            if self._counted:
+                runtime.repeats = _repeats(response.output)
+                counted(runtime, model, response.usage)
+
+
+def counted(runtime: Any, model: str | None, usage: Any) -> None:
+    """A reply's ``usage`` (of ``model``, when named) counted toward the run's budget."""
+    details = getattr(usage, "input_tokens_details", None)
+    budget.account(
+        runtime,
+        model=model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached=int(getattr(details, "cached_tokens", 0) or 0),
+    )
 
 
 def _stopped() -> None:

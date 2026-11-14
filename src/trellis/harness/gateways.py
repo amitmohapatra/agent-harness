@@ -125,6 +125,10 @@ KEYLESS: Final[dict[str, str]] = {BEARER: NO_KEY}
 #: Retries of a model call Bifrost's client makes itself: none — the gateway retries (a
 #: provider's ``network_config.max_retries``) and falls back, the one place that does.
 BIFROST_CLIENT_RETRIES: Final = 0
+#: The providers Bifrost calls on their own Responses API, as its providers' ``Responses``
+#: methods do (maximhq/bifrost ``core/providers``: ``openai`` and ``azure`` hand the request on;
+#: the others convert it to chat completions, or to their own message API).
+BIFROST_RESPONSES: Final = frozenset({"openai", "azure"})
 #: How many chat models made of routed names are kept (per route, name, effort, event loop).
 ROUTED_KEPT: Final = 64
 #: The fields of a model's record that name its context window in tokens, as the servers that
@@ -193,6 +197,12 @@ class ModelGateway(ABC):
     @abstractmethod
     def routed(self, model: str) -> str:
         """``model`` as this route names it."""
+
+    def keeps_responses(self, model: str) -> bool:
+        """Whether a Responses API request for ``model`` reaches its provider whole on this
+        route — its hosted tools, a stored prompt, a server-side thread, compaction (the OpenAI
+        Agents SDK's default API): a route that passes the request on as it is does."""
+        return True
 
     @abstractmethod
     def judge(self, model: str) -> OpenAICompatibleJudge:
@@ -506,6 +516,13 @@ class Bifrost(OpenAICompatible):
     def routed(self, model: str) -> str:
         provider, name = split(model)
         return name if provider is None else f"{provider}/{name}"
+
+    def keeps_responses(self, model: str) -> bool:
+        """Bifrost serves ``/v1/responses`` for every provider it routes, but calls only its
+        OpenAI providers on their own Responses API (:data:`BIFROST_RESPONSES`); any other
+        provider's request it converts to chat completions, keeping function tools only (its
+        ``ToChatRequest``): no hosted tool, stored prompt, server-side thread or compaction."""
+        return split(self.routed(model))[0] in BIFROST_RESPONSES
 
     def client_options(self) -> dict[str, Any]:
         from bifrost_sdk import NO_GATEWAY_TOOLS  # noqa: PLC0415

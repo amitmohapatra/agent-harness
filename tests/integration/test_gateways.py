@@ -254,6 +254,8 @@ async def test_a_judge_by_name_through_a_provider_key(monkeypatch: pytest.Monkey
 async def test_an_openai_agent_by_name_goes_through_bifrost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A model name goes through Bifrost on the SDK's default API, the Responses API, which
+    Bifrost serves for every provider it routes (``/v1/responses``)."""
     fake = FakeGateway(turns=["routed"])
     fake.serve_models(monkeypatch)
     settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
@@ -262,12 +264,88 @@ async def test_an_openai_agent_by_name_goes_through_bifrost(
         again = await h.wrap(Agent(name="b"), id="default").run("x", user="u")
     assert result.answer == "routed", result.error
     assert again.status.value == "ERROR"  # the script is spent: the second call reached it
-    [first, second] = fake.completions
-    assert json.loads(first.content)["model"] == "openai/gpt-x"  # Bifrost's form
-    assert json.loads(second.content)["model"].startswith("openai/")  # the SDK's default
-    assert first.headers["authorization"] == "Bearer vk"
-    assert first.headers["x-bf-mcp-include-clients"] == ""  # the deny-all MCP scope
-    assert first.headers["x-bf-dim-agent"] == "named"  # whose run, read per request
+    assert fake.completions == []  # not chat completions: the SDK's default
+    [first, second] = fake.responses.requests
+    assert first["model"] == "openai/gpt-x"  # Bifrost's form
+    assert second["model"].startswith("openai/")  # the SDK's default
+    headers = fake.responses.headers[0]
+    assert headers["authorization"] == "Bearer vk"
+    assert headers["x-bf-mcp-include-clients"] == ""  # the deny-all MCP scope
+    assert headers["x-bf-dim-agent"] == "named"  # whose run, read per request
+
+
+async def test_what_bifrost_would_drop_for_a_provider_it_converts_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bifrost calls only OpenAI's providers on their own Responses API; another provider's
+    request it converts to chat completions, keeping function tools only. An agent of such a
+    model that uses a hosted tool, a stored prompt, a Responses setting or a server-side thread
+    is refused — each named — where it is wrapped, or before its run's first model call; its
+    function tools go through."""
+    from agents import ModelSettings, WebSearchTool
+
+    fake = FakeGateway(turns=["converted"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        with pytest.raises(ConfigurationError) as refused:
+            h.wrap(
+                Agent(
+                    name="searcher",
+                    model="anthropic/claude-x",
+                    tools=[WebSearchTool()],
+                    model_settings=ModelSettings(truncation="auto"),
+                ),
+                id="hosted",
+            )
+        said = str(refused.value)
+        assert "'searcher': tool 'web_search'" in said and "ModelSettings.truncation" in said
+        plain = h.wrap(Agent(name="plain", model="anthropic/claude-x"), id="plain")
+        threaded = await plain.run("x", user="u", framework_options={"conversation_id": "c1"})
+        assert threaded.status.value == "ERROR" and threaded.error is not None
+        assert "conversation_id (a server thread)" in threaded.error.message
+        assert fake.responses.requests == []  # refused before any model call
+        answered = await plain.run("x", user="u")
+        on_openai = h.wrap(Agent(name="o", model="gpt-x", tools=[WebSearchTool()]), id="o")
+    assert answered.answer == "converted", answered.error
+    assert fake.responses.requests[0]["model"] == "anthropic/claude-x"
+    assert on_openai is not None  # OpenAI's models keep it whole
+
+
+async def test_a_name_the_runs_multiprovider_gives_its_own_provider_keeps_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Only the names the run leaves to the SDK's default provider go through Bifrost: a
+    ``MultiProvider``'s ``provider_map`` (and its ``litellm/`` and ``any-llm/`` prefixes) keep
+    their providers; a ``RunConfig.model`` object calls its own provider, said once."""
+    from agents import RunConfig
+    from agents.models.interface import ModelProvider
+    from agents.models.multi_provider import MultiProvider, MultiProviderMap
+
+    class Mine(ModelProvider):
+        def get_model(self, model_name: str | None) -> Any:
+            return ScriptedModel([f"mine: {model_name}"])
+
+    providers = MultiProviderMap()
+    providers.add_provider("mine", Mine())
+    fake = FakeGateway(turns=["routed"])
+    fake.serve_models(monkeypatch)
+    settings = Settings(llm_gateway="bifrost", llm_base_url=URL, llm_api_key="vk")
+    config = RunConfig(model_provider=MultiProvider(provider_map=providers))
+    async with Harness(config=settings, gateway=fake.gateway()) as h:
+        options = {"run_config": config}
+        kept = h.wrap(Agent(name="k", model="mine/m1"), id="kept", framework_options=options)
+        routed = h.wrap(Agent(name="r", model="gpt-x"), id="routed", framework_options=options)
+        with caplog.at_level(logging.WARNING, logger="trellis.harness"):
+            own = RunConfig(model=ScriptedModel(["object"]))
+            objected = h.wrap(Agent(name="m"), id="objected", framework_options={"run_config": own})
+            first = await objected.run("x", user="u")
+        mine = await kept.run("x", user="u")
+        gateway = await routed.run("x", user="u")
+    assert mine.answer == "mine: m1" and gateway.answer == "routed"
+    assert first.answer == "object"
+    said = [r for r in caplog.records if "'RunConfig.model' has a model object" in r.getMessage()]
+    assert len(said) == 1
 
 
 async def test_a_run_config_with_its_own_provider_or_a_model_object_is_kept(

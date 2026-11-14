@@ -4,6 +4,8 @@ the harness calls, answered in the shapes the running gateway answers with.
 * ``/v1/chat/completions`` — each request recorded (:attr:`FakeGateway.completions`) and
   answered by :attr:`FakeGateway.chat`'s script (``tests/support/models.py``): the judge's
   calls, and a ``ReAct`` gateway model's once :meth:`FakeGateway.serve_models` routes them;
+* ``/v1/responses`` — an OpenAI agent's model calls (the SDK's default API), answered by
+  :attr:`FakeGateway.responses` (``tests/support/responses.py``) from the same turns;
 * ``/api/prompt-repo/prompts`` and ``/api/prompt-repo/prompts/{id}/versions`` —
   :attr:`FakeGateway.prompts`, by name: each a list of committed versions (their messages);
 * ``/api/mcp/clients`` — :attr:`FakeGateway.auto`, each client's ``tools_to_auto_execute``;
@@ -27,6 +29,7 @@ from bifrost_sdk import Bifrost
 from bifrost_sdk.admin import Admin
 
 from tests.support.models import ScriptedChat, Turn
+from tests.support.responses import ScriptedResponses
 from trellis.harness.clients.bifrost import Gateway
 
 URL = "http://gw.test/v1"
@@ -44,6 +47,8 @@ class FakeGateway:
 
     def __post_init__(self) -> None:
         self.chat = ScriptedChat(self.turns)
+        #: the Responses route, answering from the same turns as the chat completions one
+        self.responses = ScriptedResponses(self.chat.script.turns)
 
     def gateway(self) -> Gateway:
         transport = httpx.MockTransport(self.handle)
@@ -121,6 +126,8 @@ class FakeGateway:
         if path == "/v1/chat/completions":
             self.completions.append(request)
             return self.chat.script.handle(request)
+        if path == "/v1/responses":
+            return self.responses.handle(request)
         if path == "/mcp":
             return self._rpc(json.loads(request.content))
         if path == "/api/prompt-repo/prompts":

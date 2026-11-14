@@ -9,12 +9,13 @@ is not a JSON object is what the model reads back (:func:`arguments_of`), as the
 ``@function_tool`` does it — the call is not run, and the run goes on — rather than an
 exception, which ends a run (the SDK raises everything a ``FunctionTool`` raises).
 
-A result longer than ``tools.results.MAX_CHARS`` is kept in the run and the model reads a
-preview naming where; ``read_file`` (with them, enabled once the run keeps one) pages it.
-
-A call repeating an earlier one of its model reply (the same tool, the same arguments:
-``Runtime.repeats``) does not run: the model reads that its result is the earlier call's
-(``tools.bridge.same``)."""
+A harness tool's result longer than ``tools.results.MAX_CHARS`` is kept in the run and the
+model reads a preview naming where; ``read_file`` (with them, enabled once the run keeps one)
+pages it. A harness tool's call repeating an earlier one of its model reply (the same tool, the
+same arguments: ``Runtime.repeats``) does not run: the model reads that its result is the
+earlier call's (``tools.bridge.same``). An agent's own ``FunctionTool`` is neither: its result
+is what its function returned, as the SDK hands it on, and each call it is asked runs
+(:func:`governed`)."""
 
 from __future__ import annotations
 
@@ -92,9 +93,12 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
     does, so without one each call asks), a person when it asks, the journal (a resume does
     not run a call again), its time and its trace — and offered per turn only while the run
     offers it (the tool hints' narrowing), as a copy: the
-    agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
-    is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
-    else is returned as it is.
+    agent's own tool is not changed. Its result is what its function returned, unchanged — an
+    image or a file the model sees, a typed result the SDK hands its ``tool_use_behavior``,
+    output guardrails and hooks — the record keeping its readable form; a call the journal
+    already answered (a call made before a pause) returns the journal's result. An agent
+    called as a tool (``Agent.as_tool``) is, with ``helpers``, a native helper of the run for
+    each call (:func:`_helped`). Anything else is returned as it is.
 
     What the tool's own function raises is the call's failure — recorded as one — and then
     the SDK's to tell, as without the harness (:func:`_told`): the model reads what the tool's
@@ -136,10 +140,8 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         runtime = current()
         if isinstance(args, str) or runtime is None:
             return await original(context, arguments)
-        repeat = _repeat(context, arguments, args)
-        if repeat is not None:
-            return results.readable(repeat.output, tool.name)
         raised: list[BaseException] = []
+        produced: list[Any] = []
 
         async def run(given: dict[str, Any]) -> Any:
             try:
@@ -155,6 +157,7 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
                 raise
             if waits_inside(context):
                 raise WaitsInside(tool.name, answer)
+            produced.append(answer)
             return answer
 
         # as the run's tool set has it (an agent tool: a helper, read), else undeclared
@@ -167,14 +170,33 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
             outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
         except WaitsInside as waiting:
             return waiting.answer
+        hooked = bridge.hooked(outcome)
         if raised and not outcome.ok:
-            said = results.readable(outcome.output, tool.name) if bridge.hooked(outcome) else None
+            said = text_of(outcome.output) if hooked else None
             return await _told(original, raised[-1], context, arguments, said=said)
-        return results.readable(outcome.output, tool.name)
+        # what the tool returned, as the SDK takes it from the tool itself: an image or a file
+        # the model sees, a typed result its tool_use_behavior, guardrails and hooks are
+        # handed — the record keeps its readable form; else (the journal's result of a call
+        # made before a pause, the hooks' word, governance's) what the bridge says
+        return produced[-1] if produced and outcome.ok and not hooked else outcome.output
 
     setattr(invoke, MADE, True)
-    enabled = _narrowed(tool.name, tool.is_enabled)
-    return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+    return with_fields(
+        tool, on_invoke_tool=invoke, is_enabled=_narrowed(tool.name, tool.is_enabled)
+    )
+
+
+def with_fields(tool: Any, **fields: Any) -> Any:
+    """A copy of ``tool`` (one of the SDK's tool dataclasses) with ``fields`` changed: made
+    again as the SDK makes it (``dataclasses.replace``), or — a subclass whose constructor
+    takes fields of its own (a sandbox capability's ``exec_command``, its ``apply_patch``) —
+    copied as it is."""
+    if dataclasses.is_dataclass(type(tool)) and type(tool).__module__ == "agents.tool":
+        return dataclasses.replace(tool, **fields)
+    made = copy.copy(tool)
+    for name, value in fields.items():
+        setattr(made, name, value)
+    return made
 
 
 class PastItsOwnLimit(TimeoutError):
@@ -251,7 +273,7 @@ def held(tool: Any, spec: ToolSpec) -> Any:
         return True
 
     setattr(asks, HELD, True)
-    return dataclasses.replace(tool, needs_approval=asks)
+    return with_fields(tool, needs_approval=asks)
 
 
 def waits_inside(context: ToolContext[Any]) -> bool:

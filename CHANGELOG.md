@@ -24,6 +24,62 @@ Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` 
   0.24 has no background run, agent tool or handoff, and never polls a Responses `background`
   request; `tests/integration/test_background_by_adapter.py` pins what it does.
 
+### Changed: an OpenAI agent's features work as the SDK does them
+
+The harness governs, records and counts an OpenAI agent; it no longer changes what the SDK
+does with your own tools and settings ([openai-agents.md](docs/frameworks/openai-agents.md)).
+
+- **A session on `h.wrap` is each conversation's own.** It was one session for every user and
+  thread: bob's model read alice's turns. Each run now uses a copy of it — the same class, the
+  same storage — whose `session_id` is yours followed by the conversation's key (tenant, user,
+  thread). A session that cannot be kept so (its id is a property, or its storage key was made
+  from the id) is refused at `h.wrap`. A live `SandboxRunConfig(session=...)` or a
+  `session_state` on `h.wrap`, one sandbox for every user, is refused too: give it per run.
+- **`run_config` as a dict works** (it raised `TypeError` on every run), as `Runner.run` takes
+  it and as a queued run keeps it.
+- **Your tool's result is the SDK's.** An image or a file a function tool returns reaches the
+  model as one (it was a Python repr string), and a typed result reaches `tool_use_behavior`,
+  output guardrails and hooks as the object. Results of your own tools are no longer rewritten
+  (tables, the 80,000-character stub): that is the harness tools' only.
+- **Your tools keep their order** (they were sorted by name); the harness's follow them.
+- **A call your reply repeats runs each time for your own tools**, as the SDK runs it; a harness
+  tool still runs a repeated call once.
+- **Your `tool_not_found_behavior` is respected.** The friendly default (`return_error_to_model`)
+  applies only when your `run_config` does not say; say `"raise_error"` in a dict.
+- **At `max_turns` the run ends `PARTIAL` with the SDK's outcome**, no extra model call (it was
+  one more paid call for a last answer): the answer is the last message the model wrote, the
+  error `BUDGET_EXCEEDED` names the limit. Your own `error_handlers` still answer it.
+- **The Responses API through Bifrost.** A model name goes to Bifrost on the SDK's default API
+  (`/v1/responses`; it was forced to chat completions). Bifrost hands the request on whole only
+  to OpenAI's providers; for any other it keeps function tools only, so an agent on such a model
+  that uses a hosted tool, a stored prompt, a Responses setting, a sandbox capability needing
+  them or a server-side thread is refused with each feature named, at `h.wrap` or before the
+  run's first model call (it failed mid-run or was silently ignored).
+- **Your model routing is kept**: a `MultiProvider(provider_map=...)` entry and the `litellm/`
+  and `any-llm/` prefixes keep their providers (Bifrost replaced them); a `RunConfig.model`
+  object is said once as not routed.
+- **A server-side thread the model ignores no longer drops the history**: with the SDK's chat
+  completions model, memory keeps the conversation as with no thread.
+- **A `SandboxAgent`'s capability tools are governed and recorded** (`exec_command`,
+  `write_stdin`, `view_image`, `apply_patch`, `load_skill`): the catalog's risk, approvals, the
+  journal, the record, the stream. They ran with no person asked. Say their risk in the
+  catalog: undeclared, each call asks.
+- **A sandbox `Memory`'s own model calls go through the run's model route and budget** (they
+  went straight to OpenAI). Its consolidation agent's file writes in the sandbox are the SDK's
+  own, not governed, which is said once at `h.wrap`.
+- **An agent tool's own `run_config` no longer escapes the harness**: its child run gets the
+  model route, the day, a made-up tool's error and the stall watch. Messages steered into the
+  conversation are no longer given to a child's model calls.
+- **An `Agent` subclass of your own is wrapped** (it was refused). A `RealtimeAgent` or a
+  `VoicePipeline` is refused with what to do instead.
+- **The SDK's own tracing is warned of, once, at `WARNING`** (it was `INFO`): it exports tool
+  inputs and outputs to OpenAI unless turned off; the message names the switches.
+- **"Allow for this conversation" sticks for the SDK's own `needs_approval` tools**: the tool's
+  later calls run unasked in the run (the SDK's `always_approve`) and in the conversation's
+  later runs.
+- **An MCP server that retries itself owns its tries** (`max_retry_attempts`): the harness's
+  read retries no longer multiply them.
+
 ### Fixed: one question a call, run once, decided once — every adapter, whatever asks
 
 `tests/integration/test_one_question.py` checks, for every adapter and every way a call can

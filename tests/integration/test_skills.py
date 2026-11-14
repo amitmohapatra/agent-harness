@@ -16,7 +16,7 @@ import pytest
 from deepagents import create_deep_agent
 
 from tests.support.adapters import BUILDERS
-from tests.support.arm import arm
+from tests.support.arm import arm, declaring
 from tests.support.chat_model import ScriptedChatModel
 from tests.support.memory import FakeMemoryService
 from tests.support.planned import PlannedModel
@@ -294,7 +294,9 @@ async def test_an_openai_sandbox_agent_loads_a_skill_into_its_sandbox(harness: H
         capabilities=[*Capabilities.default(), src.openai()],
     )
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="oai", framework_options={"run_config": config})
+    # the sandbox's own tools are governed as the agent's: their risk said in the catalog
+    governed = declaring(harness, load_skill="read", exec_command="read")
+    agent = governed.wrap(target, id="oai", framework_options={"run_config": config})
     result = await agent.run("review", user="ada")
     assert result.status is RunStatus.SUCCESS, result.error
     assert "Check every JOIN." in str(result.answer) and "No SELECT *." in str(result.answer)
@@ -327,7 +329,8 @@ async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_go
         capabilities=[Shell(), combine(store).openai()],
     )  # fmt: skip
     config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
-    agent = harness.wrap(target, id="oai-gone", framework_options={"run_config": config})
+    governed = declaring(harness, load_skill="read")
+    agent = governed.wrap(target, id="oai-gone", framework_options={"run_config": config})
     events = [e async for e in agent.stream("review", user="ada")]
     assert events[-1].error is None, events[-1].error
     assert "no skill 'nope'" in str(events[-1].data.get("result"))  # the last result it read

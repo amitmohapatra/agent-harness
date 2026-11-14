@@ -81,12 +81,14 @@ def run_here(tool: Any) -> Any:
     the bridge (the module's seam); any other tool as it is."""
     from agents import ApplyPatchTool, ComputerTool, CustomTool, LocalShellTool, ShellTool
 
+    from trellis.harness.tools.convert.openai_agents import with_fields
+
     if isinstance(tool, LocalShellTool | ShellTool) and getattr(tool, "executor", None):
-        return dataclasses.replace(tool, executor=_executor(tool))
+        return with_fields(tool, executor=_executor(tool))
     if isinstance(tool, CustomTool):
-        return dataclasses.replace(tool, on_invoke_tool=_custom(tool))
+        return with_fields(tool, on_invoke_tool=_custom(tool))
     if isinstance(tool, ApplyPatchTool):
-        return dataclasses.replace(tool, editor=_Editor(tool))
+        return with_fields(tool, editor=_Editor(tool))
     if isinstance(tool, ComputerTool):
         return _computing(tool)
     return tool

@@ -350,10 +350,6 @@ class Agent:
             self.target = checkpointing(target)
         # a framework outside the range this release was tested with: said once, never refused
         compat.check(self.adapter.name)
-        if self.adapter.name == "openai_agents":  # its SDK's own tracing: left as set, said
-            from trellis.harness.adapters.openai_agents import sdk_tracing_said  # noqa: PLC0415
-
-            sdk_tracing_said()
         for gated in sorted(gated_tools(target)):
             log.warning(
                 "%s: %s is approved in the framework's own gate: governance counts that "
@@ -366,6 +362,9 @@ class Agent:
         #: a run's own go over them
         self.framework_options = dict(framework_options or {})
         self.adapter.check_options(self.framework_options)
+        wrapped = getattr(self.adapter, "wrapped", None)  # what the framework checks of its own
+        if wrapped is not None:
+            wrapped(target, self.framework_options, harness.model_gateway)
         #: the model's window when it is known, and the pushed context's token budget: a share
         #: of it
         self.model_window = context_window(target)
