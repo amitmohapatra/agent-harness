@@ -1600,3 +1600,35 @@ async def test_a_hosted_mcp_tools_approval_request_pauses_or_asks_its_own_callba
         Agent(name="desk", model=model, tools=[hosted]), id="hosted-callback"
     ).run("what is open?", user="u")
     assert result.status is RunStatus.SUCCESS and seen == ["list_issues"]
+
+
+async def test_a_sandbox_agents_own_memory_reaches_its_model_and_its_reads_are_the_runs(
+    harness: Harness,
+) -> None:
+    """A ``SandboxAgent``'s ``Memory`` capability (the SDK's long-term memory, kept in its
+    sandbox) works through the harness's copy of the agent: its memory summary is in the
+    model's instructions, and the command reading a memory file is a call of the run."""
+    from agents import RunConfig
+    from agents.sandbox import Manifest, MemoryReadConfig, SandboxAgent, SandboxRunConfig
+    from agents.sandbox.capabilities import Compaction, Memory, Shell
+    from agents.sandbox.entries import File
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    from tests.support.planned import PlannedModel
+
+    kept = Manifest(entries={"memories/memory_summary.md": File(content=b"Answer in metric.")})
+    model = PlannedModel([("exec_command", {"cmd": "cat memories/memory_summary.md"})])
+    memory = Memory(read=MemoryReadConfig(live_update=False), generate=None)
+    target = SandboxAgent(
+        name="box", model=model, default_manifest=kept,
+        capabilities=[Shell(), memory, Compaction()],
+    )  # fmt: skip
+    box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    agent = harness.wrap(target, id="remembers", framework_options={"run_config": box})
+    events = [e async for e in agent.stream("how long is it?", user="u")]
+    assert events[-1].error is None, events[-1].error
+    assert "Answer in metric." in str(model.system)  # the SDK's memory read prompt
+    assert "Answer in metric." in str(events[-1].data.get("result"))
+    assert [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START] == [
+        "exec_command"
+    ]

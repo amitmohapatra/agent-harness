@@ -36,7 +36,7 @@ from trellis.harness.bridges.helpers import Helpers, Kind, text_of
 from trellis.harness.journal import content_key
 from trellis.harness.runtime import Paused, Runtime, current
 from trellis.harness.tools import bridge, results
-from trellis.harness.tools.base import FIX_ARGUMENTS, Tool, arguments_of, not_run
+from trellis.harness.tools.base import FIX_ARGUMENTS, UNDECLARED, Tool, arguments_of, not_run
 
 # what the model reads about arguments that are not an object (``tools.base``, as ``ReAct``)
 __all__ = [
@@ -51,7 +51,7 @@ __all__ = [
 ]
 
 #: The attribute marking the invoke function of a ``FunctionTool`` the harness made (its calls
-#: run through the bridge already): kept by a copy of the tool (``dataclasses.replace``).
+#: run through the bridge already): kept by a copy of the tool (``copy.copy``).
 MADE: Final = "_trellis_made"
 #: The attribute the SDK marks an agent called as a tool with (``Agent.as_tool``), and the one
 #: holding that agent.
@@ -86,13 +86,23 @@ def convert(tools: Sequence[Tool]) -> list[FunctionTool]:
     return made
 
 
-def governed(tool: Any, helpers: Helpers | None = None) -> Any:
+def governed(
+    tool: Any,
+    helpers: Helpers | None = None,
+    *,
+    side_effects: str = UNDECLARED,
+    confined: bool = False,
+) -> Any:
     """An agent's own ``FunctionTool`` (one not built with ``h.tools``), its calls run as the
     harness's are — governance (the catalog's risk; the SDK's tool has nowhere to say what it
     does, so without one each call asks), a person when it asks, the journal (a resume does
     not run a call again), its time and its trace — and offered per turn only while the run
-    offers it (the tool hints' narrowing), as a copy: the
-    agent's own tool is not changed. An agent called as a tool (``Agent.as_tool``)
+    offers it (the tool hints' narrowing), as a copy (the SDK's own, ``copy.copy``: a tool
+    whose class has an ``__init__`` of its own, such as a sandbox's, stays one): the
+    agent's own tool is not changed. For a tool of the SDK's own (a ``SandboxAgent``'s
+    capabilities'): ``side_effects``, what it does where the run's tool set does not say, and
+    ``confined``, its writes keep to what the run owns (``Tool.confined``: announced, not
+    asked, unless the catalog says more). An agent called as a tool (``Agent.as_tool``)
     is, with ``helpers``, a native helper of the run for each call (:func:`_helped`). Anything
     else is returned as it is.
 
@@ -157,14 +167,16 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
                 raise WaitsInside(tool.name, answer)
             return answer
 
-        # as the run's tool set has it (an agent tool: a helper, read), else undeclared
+        # as the run's tool set has it (an agent tool: a helper, read), else as given
         spec = runtime.native.get(tool.name) or ToolSpec(
             name=tool.name,
             description=tool.description or tool.name,
             input_schema=tool.params_json_schema,
+            side_effects=side_effects,
         )
+        call = Tool(spec, run, confined=confined)
         try:
-            outcome = await bridge.call(Tool(spec, run), args, call_id=context.tool_call_id)
+            outcome = await bridge.call(call, args, call_id=context.tool_call_id)
         except WaitsInside as waiting:
             return waiting.answer
         if raised and not outcome.ok:
@@ -173,8 +185,9 @@ def governed(tool: Any, helpers: Helpers | None = None) -> Any:
         return results.readable(outcome.output, tool.name)
 
     setattr(invoke, MADE, True)
-    enabled = _narrowed(tool.name, tool.is_enabled)
-    return dataclasses.replace(tool, on_invoke_tool=invoke, is_enabled=enabled)
+    made = copy.copy(tool)
+    made.on_invoke_tool, made.is_enabled = invoke, _narrowed(tool.name, tool.is_enabled)
+    return made
 
 
 class PastItsOwnLimit(TimeoutError):

@@ -94,7 +94,11 @@ as it is.
 A `SandboxAgent` is wrapped the same way: the SDK runs it only with `RunConfig(sandbox=...)`
 (else `UserError: SandboxAgent execution requires RunConfig(sandbox=...)`), so give its sandbox
 client there. Its own tools (`exec_command`, `apply_patch`...) are the SDK's; the harness tools
-you add sit beside them ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)).
+you add sit beside them ([sandbox.md](../sandbox.md#native-sandboxes-theirs-or-ours)). The tools
+its capabilities give the model are calls of the run, governed and recorded as its other tools
+are: `load_skill` and `view_image` read; `exec_command` and `write_stdin` are writes that keep
+to the run's sandbox, announced (as Deep Agents' `execute`); `apply_patch` says nothing, so
+each call asks unless the catalog gives its risk. The catalog's word overrides each.
 
 ```python
 box = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))

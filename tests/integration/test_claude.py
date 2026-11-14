@@ -647,6 +647,22 @@ async def test_the_hints_narrow_the_tools_for_the_run(
     ]
 
 
+async def test_the_hints_never_narrow_claudes_skills_slot_away(
+    memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path, narrowing: None
+) -> None:
+    """Claude Code's ``Skill`` tool is its skills slot: what a skill source's plugin and its own
+    skill folders reach it through. Narrowed, the run's skills stay usable, as the harness's own
+    ``list_skills`` and ``load_skill`` stay offered (``skills.told``); its other built-ins the
+    hints left out are disallowed for the query."""
+    memory_service.candidates = ["t2", "t5"]
+    target = options(tmp_path, [{"text": "done"}])
+    await arm(memory_harness.wrap(target, id="n", without={"schedules"}), lookups(6)).run(
+        "x", user="u1"
+    )
+    disallowed = started_with(tmp_path)["disallowed_tools"].split(",")
+    assert "Skill" not in disallowed and "WebFetch" in disallowed
+
+
 async def test_claudes_built_in_tools_do_not_count_toward_narrowing_the_runs_own(
     memory_harness: Harness, memory_service: FakeMemoryService, tmp_path: Path
 ) -> None:

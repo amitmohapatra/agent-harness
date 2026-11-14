@@ -84,7 +84,11 @@ def run_here(tool: Any) -> Any:
     if isinstance(tool, LocalShellTool | ShellTool) and getattr(tool, "executor", None):
         return dataclasses.replace(tool, executor=_executor(tool))
     if isinstance(tool, CustomTool):
-        return dataclasses.replace(tool, on_invoke_tool=_custom(tool))
+        # a copy, not a new one: a custom tool whose class has an ``__init__`` of its own (a
+        # sandbox's ``apply_patch``) takes other arguments
+        made = copy.copy(tool)
+        made.on_invoke_tool = _custom(tool)
+        return made
     if isinstance(tool, ApplyPatchTool):
         return dataclasses.replace(tool, editor=_Editor(tool))
     if isinstance(tool, ComputerTool):

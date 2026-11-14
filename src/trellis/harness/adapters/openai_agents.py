@@ -89,7 +89,7 @@ from trellis.harness.history import ASKED_WITH, MEMORY_THREAD, Called, Said, Spe
 from trellis.harness.journal import Pending
 from trellis.harness.runtime import Runtime, current, reason_of
 from trellis.harness.tools import bridge
-from trellis.harness.tools.base import Tool, data_of
+from trellis.harness.tools.base import UNDECLARED, SideEffects, Tool, data_of
 from trellis.harness.tools.mcp import data_of_listed, side_effects_of
 
 log = logging.getLogger("trellis.harness")
@@ -415,8 +415,11 @@ def governed_agents(
     governed copy of its agent (:func:`_handed`). With ``helpers``, each agent tool's call is
     a helper of the run. The function tools ``gated`` names (those governance may ask about,
     :func:`_gated`) are held at the SDK's own approval gate when it asks
-    (``tools.convert.openai_agents.held``). The agents you wrapped are not changed."""
+    (``tools.convert.openai_agents.held``). A ``SandboxAgent``'s capabilities give the model
+    their tools governed the same way (:func:`_sandboxed`). The agents you wrapped are not
+    changed."""
     from agents import Agent
+    from agents.sandbox import SandboxAgent
 
     from trellis.harness.tools.convert.openai_agents import AGENT_OF_TOOL, governed, held
 
@@ -433,6 +436,8 @@ def governed_agents(
         if found is not None:
             return found
         copy = copies[id(agent)] = agent.clone()
+        if isinstance(agent, SandboxAgent):
+            copy.capabilities = [_sandboxed(c) for c in agent.capabilities]
         own = []
         for tool in agent.tools:
             inner = getattr(tool, AGENT_OF_TOOL, None)
@@ -458,6 +463,45 @@ def governed_agents(
         return copy
 
     return copied(target, added)
+
+
+#: What the tools a ``SandboxAgent``'s capabilities give the model do, as governance sees them
+#: (the catalog's word overrides it): a skill loaded into the sandbox (``Skills``'
+#: ``load_skill``) and an image looked at (``Filesystem``'s ``view_image``) are reads; a
+#: command in the sandbox (``Shell``'s ``exec_command``, and what is typed into it:
+#: ``write_stdin``) is a write that keeps to the run's sandbox, announced as Deep Agents'
+#: ``execute`` is. Any other (``apply_patch``) has said nothing: each call asks, unless the
+#: catalog says.
+SANDBOX_TOOLS: Final[Mapping[str, SideEffects]] = {
+    "load_skill": "read",
+    "view_image": "read",
+    "exec_command": "write",
+    "write_stdin": "write",
+}
+
+
+def _sandboxed(capability: Any) -> Any:
+    """A copy of a ``SandboxAgent``'s capability whose tools — which the SDK has it make for
+    each run, bound to the run's sandbox, after the harness copied the agent — are the run's
+    calls (``tools.convert.openai_agents.governed``, their risk :data:`SANDBOX_TOOLS`'): a
+    skill loaded, a command reading its files or running its script, governed and recorded.
+    The capability is otherwise the SDK's: its instructions, its memory, its compaction."""
+    kind = _governing(type(capability))
+    return kind.model_construct(_fields_set=capability.model_fields_set, **dict(capability))
+
+
+@functools.cache
+def _governing(kind: type) -> type:
+    """``kind`` (a sandbox capability's class) whose ``tools`` are governed."""
+    from trellis.harness.tools.convert.openai_agents import governed
+
+    def tools(self: Any) -> list[Any]:
+        made = kind.tools(self)
+        said = SANDBOX_TOOLS.get
+        return [governed(t, side_effects=said(t.name, UNDECLARED), confined=True) for t in made]
+
+    body = {"__module__": kind.__module__, "__qualname__": kind.__qualname__, "tools": tools}
+    return type(kind.__name__, (kind,), body)
 
 
 async def _gated(run: Invocation) -> dict[str, ToolSpec]:

@@ -335,6 +335,65 @@ async def test_an_openai_sandbox_agent_reads_why_a_skill_cannot_be_loaded_and_go
     assert "sql-review cannot be read" in model.said() and "unavailable" in model.said()
 
 
+def sandbox_agent(harness: Harness, plan: list[Any], *capabilities: Any, id: str) -> Any:
+    """A ``SandboxAgent`` wrapped with a local sandbox, its model making ``plan``'s calls."""
+    from agents import RunConfig
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
+
+    target = SandboxAgent(
+        name="box", instructions="Work.", model=PlannedModel(plan), capabilities=list(capabilities)
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient()))
+    return harness.wrap(target, id=id, framework_options={"run_config": config})
+
+
+async def test_a_sandbox_agents_skill_load_and_the_command_that_reads_it_are_the_runs_calls(
+    harness: Harness,
+) -> None:
+    """The tools a ``SandboxAgent``'s capabilities give the model (the SDK's: ``load_skill``,
+    ``exec_command``) are calls of the run like its own tools': recorded, counted, said; a
+    skill loaded is a read and a command in the sandbox a write (as Deep Agents' ``execute``),
+    so both run without asking."""
+    from agents.sandbox.capabilities import Shell
+
+    src = combine(store_with(files={"rules.md": "No SELECT *."}))
+    plan = [
+        ("load_skill", {"skill_name": "sql-review"}),
+        ("exec_command", {"cmd": "cat .agents/sql-review/rules.md"}),
+    ]
+    agent = sandbox_agent(harness, plan, Shell(), src.openai(), id="oai-calls")
+    events = [e async for e in agent.stream("review", user="ada")]
+    assert events[-1].error is None, events[-1].error
+    assert "No SELECT *." in str(events[-1].data.get("result"))
+    started = [e.data["tool"] for e in events if e.type is RunEventType.TOOL_CALL_START]
+    assert started == ["load_skill", "exec_command"]
+    assert events[-1].data["spent"]["tool_calls"] == 2
+
+
+async def test_a_command_in_a_sandbox_agents_sandbox_asks_where_the_catalog_says(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The catalog's word on a capability's tool governs it: a skill's script the catalog makes
+    ``exec_command`` irreversible for asks a person before it runs, and runs once approved."""
+    from agents.sandbox.capabilities import Shell
+
+    from tests.support.arm import declaring
+
+    made = tmp_path / "made.txt"
+    plan = [("exec_command", {"cmd": f"echo ran > {made}; echo done"})]
+    agent = sandbox_agent(
+        declaring(harness, exec_command="irreversible"), plan, Shell(), id="oai-asks"
+    )
+    paused = await agent.run("go", user="ada")
+    assert paused.status is RunStatus.PAUSED and paused.interrupt is not None
+    assert paused.interrupt.tool_call is not None
+    assert paused.interrupt.tool_call.tool == "exec_command" and not made.exists()
+    done = await agent.resume(paused.interrupt.interrupt_id, "approve", reviewer="ada")
+    assert done.status is RunStatus.SUCCESS, done.error
+    assert made.read_text() == "ran\n"
+
+
 # --------------------------------------------------------------------------- no skills slot
 async def test_calls_at_once_pin_the_run_once(harness: Harness) -> None:
     class Slow(SkillStore):

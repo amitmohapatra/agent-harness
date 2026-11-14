@@ -194,6 +194,10 @@ CLAUDE_CODE: Final = "Claude Code"
 #: answer reaches nobody. So they stay disallowed (with the tools that list and delete the
 #: schedules): offered, Claude promised a schedule that nothing keeps.
 OUTLIVES_THE_QUERY: Final = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+#: Claude Code's skills slot: the tool a skill source's plugin (``skills.for_run``) and its own
+#: skill folders reach the model through. The tool hints never narrow it away, as the harness's
+#: own ``list_skills`` and ``load_skill`` stay offered (``skills.told``): a run keeps its skills.
+SKILLS_SLOT: Final = "Skill"
 #: Claude Code's own limit on an MCP tool's result (``MAX_MCP_OUTPUT_TOKENS``, 25,000 tokens by
 #: default: about 50,000 characters of a CSV), raised so the harness keeps a large result first
 #: (over ``results.MAX_CHARS``, 80,000 characters, read with ``read_file`` and ``query_result``):
@@ -1258,10 +1262,13 @@ def routed_env(env: Mapping[str, str], runtime: Runtime) -> dict[str, str] | Non
 def _disallowed(runtime: Runtime, denied: Sequence[str] | None) -> list[str]:
     """The options' ``disallowed_tools`` with the framework's own tools the run does not offer:
     those whose work outlives the query (:data:`OUTLIVES_THE_QUERY`), and those the tool hints
-    narrow away (Claude's built-ins and MCP tools too, for the whole query)."""
+    narrow away (Claude's built-ins and MCP tools too, for the whole query; never its skills
+    slot, :data:`SKILLS_SLOT`)."""
     given = list(denied or ())
     narrowed = (
-        [n for n in runtime.native if not runtime.offers(n)] if runtime.offered is not None else []
+        [n for n in runtime.native if n != SKILLS_SLOT and not runtime.offers(n)]
+        if runtime.offered is not None
+        else []
     )
     hidden = [n for n in (*OUTLIVES_THE_QUERY, *narrowed) if n not in given]
     return [*given, *dict.fromkeys(hidden)]
