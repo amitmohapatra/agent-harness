@@ -336,7 +336,8 @@ def _asks_two(body: dict[str, Any]) -> Any:
     """A model that asks its user two questions in one call — again when the call was
     dismissed (the run paused on it) — and then says what it was answered."""
     results = [result_text(m["content"]) for m in body["messages"] if m.get("role") == "tool"]
-    if not results or "dismissed" in results[-1]:
+    asked_again = not results or '"answers":{}' in results[-1] or '"answers"' not in results[-1]
+    if asked_again:  # not answered: its question was cut short by the pause
         pick = [{"label": "pg", "description": "Postgres"}, {"label": "mysql", "description": ""}]
         clouds = [{"label": "aws", "description": ""}, {"label": "gcp", "description": ""}]
         questions = [
@@ -386,14 +387,17 @@ PLAN = "# Plan\n\nOption A: fast.\nOption B: safe.\n"
 
 def _plans(body: dict[str, Any]) -> Any:
     """A model in Kimi's plan mode: it writes the plan file Kimi names, presents the plan with
-    two approaches — again when its review was dismissed (the run paused on it) — and then
+    two approaches — again when its review was cut short (the run paused on it) — and then
     says what the review answered."""
     messages = body["messages"]
     results = [result_text(m["content"]) for m in messages if m.get("role") == "tool"]
     if not results:
         said = "\n".join(text_of(m.get("content")) for m in messages)
         return ("Write", {"path": _PLAN_FILE.findall(said)[-1], "content": PLAN})
-    if len(results) == 1 or "dismissed" in results[-1]:
+    reviewed = ("Exited plan mode", "User requested revisions", "Plan rejected")
+    if len(results) == 1 or not any(said in results[-1] for said in reviewed):
+        # not reviewed yet: the plan was only written, or its review was cut short by the
+        # pause (Kimi's result then says it was dismissed, or interrupted)
         approaches = [{"label": "Fast", "description": "A"}, {"label": "Safe", "description": "B"}]
         return ("ExitPlanMode", {"options": approaches})
     return "reviewed: " + results[-1]
