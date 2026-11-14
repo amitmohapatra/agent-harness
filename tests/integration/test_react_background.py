@@ -60,10 +60,12 @@ TOOLS: Final = (
 )
 
 
-async def chatted(agent: Agent, text: str, *, mode: Mode = Mode.QUEUE) -> Result:
+async def chatted(
+    agent: Agent, text: str, *, mode: Mode = Mode.QUEUE, user: str = USER, thread: str = THREAD
+) -> Result:
     """A chat turn as ``serve_chat`` starts one: a front end's run, which a person reads."""
     record = await agent._opened(
-        text, user=USER, thread=THREAD, tenant=None, mode=mode, app=Frontend()
+        text, user=user, thread=thread, tenant=None, mode=mode, app=Frontend()
     )
     return await pipeline.attempt(agent, record, text, mode=mode)
 

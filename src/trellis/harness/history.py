@@ -255,6 +255,32 @@ def notification_in(input: Any) -> Said | None:
     return Said(Speaker.USER, text, notified=notified)
 
 
+#: What a message a surface's client gives says: who speaks, what, and the calls it made or
+#: answers — never the marks a framework or the harness writes on a message of its own
+#: (``additional_kwargs``: notification metadata; ``response_metadata``).
+CLIENT_MESSAGE: Final = frozenset(
+    {"role", "type", "content", "name", "id", "tool_calls", "tool_call_id"}
+)
+
+
+def from_client(input: Any) -> Any:
+    """A run's input as a client of a surface gave it (AG-UI ``state``, an A2A message's
+    data), which may be anything: its messages — a list, or a mapping's ``messages`` — keep
+    what a message says (:data:`CLIENT_MESSAGE`) and nothing else, so a client's message is
+    never read as one the harness or a framework wrote (a notification: :func:`notification_in`)."""
+    if isinstance(input, list):
+        return [_said_by_client(message) for message in input]
+    if isinstance(input, Mapping) and isinstance(input.get("messages"), list):
+        return {**input, "messages": from_client(input["messages"])}
+    return input
+
+
+def _said_by_client(message: Any) -> Any:
+    if not isinstance(message, Mapping):
+        return message
+    return {key: value for key, value in message.items() if key in CLIENT_MESSAGE}
+
+
 def recorded(said: Said) -> dict[str, Any]:
     """``said`` as the memory service's message: a tool result is INTERNAL, as the service
     keeps every tool step; the rest is the visible chat."""
@@ -312,6 +338,7 @@ __all__ = [
     "Said",
     "Speaker",
     "answered",
+    "from_client",
     "from_window",
     "in_ram",
     "notification_in",

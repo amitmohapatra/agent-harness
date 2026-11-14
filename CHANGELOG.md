@@ -29,6 +29,19 @@ chat's own on its thread stream when it is idle; its questions asked through the
 - An `AsyncSubAgent`'s `webhook` is checked as an A2A push URL is (`outbound.validate_url`).
 - An empty task list is not carried.
 
+### Security: a background task belongs to the conversation that started it (SEC-R-1)
+
+- The task tools, the questions asked through a chat, each pull and each recorded
+  notification act on a task's run only when it is the conversation's: its tenant's and
+  user's, started by its agent in its chat thread, under the task's id
+  (`background.owned`; Deep Agents' tasks on a server: `bridges.async_tasks`). Any other is
+  answered as a task the conversation does not track.
+- A run's input names no task list: `async_tasks` in a mapping input is left out (the
+  conversation's list is the one the harness carries). A message a client of a chat surface
+  gives — AG-UI `state`, an A2A data part — keeps its role, content, name, id and tool calls;
+  `additional_kwargs` and `response_metadata` are dropped, so it is never read as a
+  notification (`history.from_client`).
+
 ### Changed: the `openai-agents` extra is `>=0.24,<0.25` (was `>=0.22.3,<0.23`)
 
 Tested with openai-agents 0.24.0 (`openai` 3.20.0 still satisfies it; `urllib3` moves to

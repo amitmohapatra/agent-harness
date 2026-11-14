@@ -56,6 +56,7 @@ from fastapi import FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from langgraph_sdk._async.runs import RunsClient
 
 from tests.contract.test_runs_wire import RunsService
@@ -442,6 +443,7 @@ async def test_h_a_started_task_is_a_child_run_of_its_turn_held_while_it_runs(
         "kind": "async_task",
         "name": "optimizer",
         "task_id": server.task_id,
+        "thread": THREAD,
         "url": server.url,
         "graph_id": "optimizer",
     }
@@ -657,6 +659,67 @@ async def test_a_another_users_thread_of_the_same_name_has_no_task(
     model.turns += [("list_async_tasks", {}), says_what_the_tool_said]
     mine = await say(agent, "which tasks are there?")
     assert f"task_id: {server.task_id}  agent: optimizer  status: running" in mine.answer
+
+
+def claimed(task_id: str, **more: Any) -> dict[str, Any]:
+    """A task as a run's input claims it for its own conversation: Deep Agents' record."""
+    at = "2026-11-14T00:00:00Z"
+    record = {"task_id": task_id, "agent_name": "optimizer", "thread_id": task_id, "run_id": "r"}
+    times = {"created_at": at, "last_checked_at": at, "last_updated_at": at}
+    return {**record, "status": "running", **times, **more}
+
+
+async def test_sec_r_1_an_input_names_no_task_list_for_its_run(
+    harness: Harness, server: StandIn
+) -> None:
+    """The task list is what the conversation carries, never what a run's input says: bob,
+    naming ada's task as his own in his run's input, is shown none — her server is asked
+    nothing for him, and her task's run goes on as it was."""
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    asked = len(server.calls)
+    model.turns += [("check_async_task", {"task_id": server.task_id}), says_what_the_tool_said]
+    given = {
+        "messages": [{"role": "user", "content": "how is that task?"}],
+        "async_tasks": {server.task_id: claimed(server.task_id)},
+    }
+    other = await agent.run(given, user="bob", thread=THREAD)
+    assert other.answer == f"No tracked task found for task_id: {server.task_id!r}"
+    assert len(server.calls) == asked
+    assert await harness.runs.get(task.run_id) == task
+
+
+@pytest.mark.parametrize(
+    "whose", [{"user": "bob"}, {"thread": "chat-2"}], ids=["another user", "another chat"]
+)
+async def test_sec_r_1_a_task_tools_word_ends_only_a_run_of_its_conversation(
+    harness: Harness, server: StandIn, whose: dict[str, str]
+) -> None:
+    """What one of Deep Agents' task tools says of a task ends the task's run only in the
+    conversation that started it (its user's, in its chat thread): said in a run of another,
+    ada's run goes on, held as it was."""
+    model = Model(turns=[START, reports_the_id])
+    agent = chat(harness, server, model)
+    server.hold()
+    await say(agent, "run the optimization")
+    [task] = await task_runs(harness)
+    theirs = SimpleNamespace(
+        **{"tenant": LOCAL_TENANT, "user": USER, "thread": THREAD, **whose},
+        agent_id="bg",
+        agent=agent,
+        helpers=None,
+    )
+    done = Command(
+        update={"async_tasks": {server.task_id: claimed(server.task_id, status="success")}}
+    )
+    check = SimpleNamespace(name="check_async_task")
+    said = json.dumps({"status": "success", "result": "TAKEN"})
+    await agent.adapter.tasks.said(theirs, check, args={}, done=done, told=said)
+    assert await harness.runs.get(task.run_id) == task
+    assert harness.holds.holds(task.run_id)
 
 
 async def test_a_within_one_turn_the_task_is_started_and_checked(

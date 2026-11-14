@@ -134,7 +134,7 @@ class BackgroundTasks(AgentMiddleware):
         messages = state.get("messages") or []
         noted = (notified(messages[-1]) if messages else None) or {}
         event = noted.get("data") if noted.get("source") == background.SOURCE else None
-        recorded = background.recorded(event, state.get("async_tasks") or {})
+        recorded = await background.recorded(run, event, state.get("async_tasks") or {})
         tasks = {**(state.get("async_tasks") or {}), **recorded}
         if run.attended:
             await self.offered.asked(run, tasks)
