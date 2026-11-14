@@ -14,6 +14,14 @@ call, and the catalog's risk decides whether the tool is offered: one that would
 is held back, since no approval can stand before a call the provider makes inside its step
 ([react.md](docs/frameworks/react.md#a-providers-own-tools-web-search-web-fetch-code-execution)).
 
+### Added: plan mode for `ReAct`
+
+`ReAct(middleware=[PlanMode()])` (`trellis.harness.plan_mode`), entered on request with
+`framework_options={"configurable": {"plan_mode": True}}` — never by default, as Claude's and
+Kimi's is not. The run reads only, presents its plan with LangChain's `write_todos`, a person
+approves it once (LangChain's `HumanInTheLoopMiddleware`), then it acts under the usual
+governance ([react.md](docs/frameworks/react.md#plan-mode)).
+
 ### Added: sub-agents in the background, with no server to host
 
 `ReAct`'s own sub-agents — wrapped agents and Deep Agents' `SubAgent`/`CompiledSubAgent` dicts

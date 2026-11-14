@@ -705,6 +705,38 @@ A `dict` a client would have to run (a function's schema, Anthropic's `bash`, `t
 route passes a provider's tool on is the route's: Anthropic's tools need an Anthropic chat
 model (a name routed to its API, or `ChatAnthropic`), OpenAI's the Responses API.
 
+### Plan mode
+
+Read-only exploration, then a plan a person approves, then the work — Claude Code's and Kimi's
+plan mode, from LangChain's pieces (`trellis.harness.plan_mode`):
+
+```python
+from trellis.harness.plan_mode import PlanMode
+
+agent = h.wrap(ReAct("You handle refunds.", "gpt-4o", tools=[order, refund],
+                     middleware=[PlanMode()]), id="refunds")
+await agent.run("refund o1", user="u", framework_options={"configurable": {"plan_mode": True}})
+```
+
+It is **entered on request, never by default**, as theirs is: the Claude Agent SDK's
+`permission_mode` is unset unless a caller sets `"plan"` (`ClaudeAgentOptions.permission_mode:
+PermissionMode | None = None`), and Kimi's plan mode is the user's to enter (from 2.4.0 the
+agent can no longer enter it itself; `default_plan_mode` is off). A run enters it through its
+`framework_options` — LangGraph's `configurable`, per run or for every run at `h.wrap` — where
+Claude's `permission_mode` and Kimi's `mode` go. A run that did not enter it is sent what it
+always was.
+
+* The plan is LangChain's `write_todos`, offered from the run's first call.
+* Its approval is LangChain's `HumanInTheLoopMiddleware` on `write_todos`, with its own `when`
+  predicate: one question (approve, edit the plan, or reject saying what to change — the model
+  then revises it and asks again), the harness's approval like any other.
+* Until it is approved, a call runs only if governance rates it a read (the catalog's risk,
+  else the tool's own). Any other — a write, a tool that says nothing, a hand-over to another
+  agent (`task`, a wrapped agent: its own calls are not this run's to bind) — is answered with
+  what to do instead, never run, and recorded as the run's rejected call.
+* Approved, the plan is in the graph's state (kept in the run: a resume in any worker keeps
+  it) and each call is governed as ever: a write still asks.
+
 ## Limits
 
 * `middleware=` adds: one named as the harness's is refused (its parameter sets it).
