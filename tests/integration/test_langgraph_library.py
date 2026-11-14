@@ -539,8 +539,12 @@ class Notes:
 async def test_a_graph_of_a_dataclass_state_answers_with_that_state(harness: Harness) -> None:
     """A dataclass state is the graph's output as LangGraph gives it (``version="v2"``: the
     state's own type), and that is the answer — on the stream, as JSON."""
+
+    def note(state: Notes) -> dict[str, Any]:
+        return {"note": f"on {state.topic}"}
+
     graph = StateGraph(Notes)
-    graph.add_node("note", lambda state: {"note": f"on {state.topic}"})
+    graph.add_node("note", note)
     graph.add_edge(START, "note")
     graph.add_edge("note", END)
     agent = harness.wrap(graph.compile(), id="notes")

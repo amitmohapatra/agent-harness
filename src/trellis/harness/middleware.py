@@ -1113,6 +1113,63 @@ def _told(done: Any) -> Any:
     return getattr(done, "content", done)
 
 
+#: LangChain's own ``AgentMiddleware.awrap_tool_call`` and ``awrap_model_call`` — what a
+#: middleware with only the sync hook does when the graph runs asynchronously: they raise
+#: ``NotImplementedError`` (:func:`sync_middleware`). Kept as they were: run outside a run.
+_ASYNC_DEFAULTS: Final[dict[str, Callable[..., Any]]] = {}
+
+
+async def _sync_tool_call(self: Any, request: Any, handler: Any) -> Any:
+    # the code of LangChain's default ``awrap_tool_call`` once :func:`sync_middleware` is in:
+    # it runs in LangChain's module, so it reaches the harness by importing it
+    from trellis.harness import middleware  # noqa: PLC0415, PLW0406 (run in LangChain's module)
+
+    return await middleware.sync_hook(self, "wrap_tool_call", request, handler)
+
+
+async def _sync_model_call(self: Any, request: Any, handler: Any) -> Any:
+    from trellis.harness import middleware  # noqa: PLC0415, PLW0406 (run in LangChain's module)
+
+    return await middleware.sync_hook(self, "wrap_model_call", request, handler)
+
+
+def sync_middleware() -> None:
+    """A middleware with only the sync ``wrap_tool_call`` or ``wrap_model_call``, inside a
+    harness run, run as LangChain runs it when the graph is run synchronously: the harness
+    runs every graph asynchronously, where LangChain's default async hook raises
+    ``NotImplementedError``. ``create_agent`` binds each middleware's async hook when the graph
+    is built, whenever that was, so the default's code itself is what changes; outside a run it
+    is LangChain's, as it was. Installed once per process (:func:`sync_hook`)."""
+    for name, made in (
+        ("awrap_tool_call", _sync_tool_call),
+        ("awrap_model_call", _sync_model_call),
+    ):
+        default = getattr(AgentMiddleware, name)
+        if name in _ASYNC_DEFAULTS:
+            continue
+        _ASYNC_DEFAULTS[name] = types.FunctionType(
+            default.__code__, default.__globals__, name, default.__defaults__
+        )
+        default.__code__ = made.__code__
+
+
+async def sync_hook(middleware: Any, hook: str, request: Any, handler: Any) -> Any:
+    """A middleware's sync ``hook`` (``wrap_tool_call``, ``wrap_model_call``) run for its async
+    one — in a thread, as a sync hook may block, given a ``handler`` that waits there for the
+    rest of the graph's (async) handlers on the run's loop: the hooks inside it, the model
+    call, the governed tool. Outside a run, or for a middleware without the sync hook either,
+    LangChain's own default (``NotImplementedError``, as the library has it)."""
+    own = getattr(type(middleware), hook) is not getattr(AgentMiddleware, hook)
+    if current() is None or not own:
+        return await _ASYNC_DEFAULTS[f"a{hook}"](middleware, request, handler)
+    loop = asyncio.get_running_loop()
+
+    def waited(given: Any) -> Any:
+        return asyncio.run_coroutine_threadsafe(handler(given), loop).result()
+
+    return await asyncio.to_thread(getattr(middleware, hook), request, waited)
+
+
 def govern_tool_nodes() -> None:
     """Every LangGraph tool node, inside a harness run, governed (:func:`governed_call`): a
     ``create_agent`` or Deep Agents graph's (its ``task`` sub-agents' graphs too), a hand-built

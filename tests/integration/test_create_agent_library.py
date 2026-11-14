@@ -38,7 +38,7 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import ToolRuntime
@@ -393,6 +393,42 @@ async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Har
     [read] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert read.content == "word " * 20_000
     assert model.requests[-1]["tools"] == ["big"]
+
+
+class SyncOnly(AgentMiddleware):
+    """A middleware written with LangChain's sync hooks alone, as for ``invoke``/``stream``."""
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        ran.append("model hook")
+        return handler(request.override(system_message=SystemMessage("Be brief.")))
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        done = handler(request)
+        ran.append(f"tool hook saw {done.content}")
+        return done
+
+
+async def test_a_middleware_with_only_sync_hooks_runs_as_the_library_runs_it(
+    harness: Harness,
+) -> None:
+    """LangChain runs a middleware's sync ``wrap_model_call`` and ``wrap_tool_call`` when the
+    graph is run synchronously; the harness runs graphs asynchronously, and runs them all the
+    same: each wraps its call, the tool still governed and recorded under it."""
+    model = ScriptedChatModel(turns=[("stock", {"sku": "a"}), "7"])
+    graph = create_agent(model, tools=[stock], middleware=[SyncOnly()])
+    events = [e async for e in harness.wrap(graph, id="sync").stream("a?", user="u")]
+    assert events[-1].data["result"] == "7" and results(events) == [("stock", "ok")]
+    assert ran == ["model hook", "stock a", "tool hook saw a: 7", "model hook"]
+    assert text_of(model.seen[0][0]).startswith("Be brief.")
+
+
+async def test_outside_a_run_a_sync_only_middleware_is_the_librarys_error(harness: Harness) -> None:
+    """Run asynchronously outside the harness, the graph meets LangChain's own error for a
+    middleware without async hooks, as ever."""
+    harness.wrap(create_agent(ScriptedChatModel(turns=[]), tools=[]), id="installs")
+    graph = create_agent(ScriptedChatModel(turns=["x"]), tools=[], middleware=[SyncOnly()])
+    with pytest.raises(NotImplementedError, match="awrap_model_call is not available"):
+        await graph.ainvoke({"messages": [{"role": "user", "content": "hi"}]})
 
 
 # ---------------------------------------------------------------------- the calls' limits

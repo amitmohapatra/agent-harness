@@ -165,9 +165,11 @@ class LangGraphAdapter:
         from trellis.harness import accounting  # noqa: F401
 
         # and every tool node's calls governed, the harness's middleware or not
-        from trellis.harness.middleware import declare_files, govern_tool_nodes
+        from trellis.harness.middleware import declare_files, govern_tool_nodes, sync_middleware
 
         govern_tool_nodes()
+        # and a middleware with only sync hooks run as LangChain runs it synchronously
+        sync_middleware()
         # a Deep Agent's file tools on a disk, a store or a sandbox change real files: governed
         declare_files(target)
 
