@@ -101,7 +101,6 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from langgraph._internal._constants import CONFIG_KEY_CALL
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
     BaseCheckpointSaver,
@@ -117,7 +116,6 @@ from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.prebuilt.tool_node import ToolCallRequest, ToolNode
-from langgraph.pregel._retry import _should_retry_on
 from langgraph.types import Command
 
 from trellis.contracts import (
@@ -132,6 +130,7 @@ from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
     accounting,  # every model call accounted, and a reply cut at the output limit noted
     budget,
+    compat,
     snapshots,
     task_tools,
 )
@@ -802,9 +801,6 @@ class _Calling:
 
 #: The tool node's call under way (:func:`govern_tool_nodes`), where its tries meet.
 _CALLING: ContextVar[_Calling | None] = ContextVar("trellis_calling", default=None)
-#: The calls under way of each model step's tool calls (:func:`_step_key`), however LangGraph
-#: runs them: a ``ToolNode`` gathering them, or ``create_agent`` sending each to its own task.
-_BESIDE: Final[dict[Hashable, set[_Calling]]] = {}
 
 
 def _step_key(state: Any, call_id: str) -> Hashable:
@@ -1275,13 +1271,14 @@ def govern_tool_nodes() -> None:
     run_one = ToolNode._arun_one
 
     async def called(self: ToolNode, call: Any, input_type: Any, tool_runtime: Any) -> Any:
-        if current() is None:
+        runtime = current()
+        if runtime is None:
             return await run_one(self, call, input_type, tool_runtime)
         calling = _Calling()
         token = _CALLING.set(calling)
         # the calls of one model step, gathered by one tool node or each a task of its own
         step = _step_key(tool_runtime.state, str(call["id"]))
-        beside = _BESIDE.setdefault(step, set())
+        beside = runtime.beside.setdefault(step, set())
         beside.add(calling)
         try:
             while True:
@@ -1305,7 +1302,7 @@ def govern_tool_nodes() -> None:
             calling.ended.set()
             beside.discard(calling)
             if not beside:
-                _BESIDE.pop(step, None)
+                runtime.beside.pop(step, None)
 
     setattr(governed, _INSTALLED, True)
     ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
@@ -1349,16 +1346,45 @@ async def _again(calling: _Calling, error: Exception | None, config: RunnableCon
     return True
 
 
+#: The prefix of the keys LangGraph gives the config of a node it runs.
+PREGEL_KEYS: Final = "__pregel"
+
+
 def _node_retries(config: RunnableConfig, error: Exception) -> bool:
     """Whether the graph runs the node again on ``error``: a retry policy of its task's (else
     the graph's) that retries it, as LangGraph reads them (its task, from the call it hands the
-    node's config: ``CONFIG_KEY_CALL``)."""
-    call = (config.get("configurable") or {}).get(CONFIG_KEY_CALL)
+    node's config: ``CONFIG_KEY_CALL``). These are LangGraph's internals: where they are not
+    as the harness reads them (:func:`_internals_moved`) it says so — taken for "no policy",
+    the harness would try the call again on top of the graph's own tries. A tool node no
+    graph runs (its config has none of LangGraph's keys) has no node policy."""
+    try:
+        from langgraph._internal._constants import CONFIG_KEY_CALL  # noqa: PLC0415
+        from langgraph.pregel._retry import _should_retry_on  # noqa: PLC0415
+    except ImportError as exc:
+        raise _internals_moved(str(exc)) from exc
+    configurable: Mapping[str, Any] = config.get("configurable") or {}
+    call = configurable.get(CONFIG_KEY_CALL)
+    if call is None and not any(key.startswith(PREGEL_KEYS) for key in configurable):
+        return False
     referred = next(iter(getattr(call, "args", ())), None)  # a weak reference to the task
     task = referred() if isinstance(referred, weakref.ref) else None
-    graphs = getattr(call, "keywords", None) or {}
-    policies = getattr(task, "retry_policy", None) or graphs.get("retry_policy") or ()
+    graphs = getattr(call, "keywords", None)
+    if task is None or not hasattr(task, "retry_policy") or not isinstance(graphs, Mapping):
+        raise _internals_moved(f"the call a node's config holds is {type(call).__name__}")
+    policies = task.retry_policy or graphs.get("retry_policy") or ()
     return any(_should_retry_on(policy, error) for policy in policies)
+
+
+def _internals_moved(found: str) -> ConfigurationError:
+    """The error of a LangGraph whose internals are not where the harness reads whether the
+    graph retries a node itself: named, with the releases the harness is tested with."""
+    low, high = compat.TESTED["langgraph"]
+    return ConfigurationError(
+        "this langgraph does not hand a tool node its task as the harness reads it "
+        f"({found}), so whether the graph tries a failed call again itself cannot be told and "
+        "the harness will not try it again on top: use a langgraph release trellis-harness is "
+        f"tested with (>={low},<{high}: docs/versioning.md)"
+    )
 
 
 #: The mark of the tool node's execution :func:`govern_tool_nodes` installed.
