@@ -18,6 +18,7 @@ import pytest
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
+    AutoModeMiddleware,
     ExtendedModelResponse,
     FilesystemFileSearchMiddleware,
     HostExecutionPolicy,
@@ -38,6 +39,7 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain_core.decisions import BaseDecisionModel, ClassifierResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -393,6 +395,41 @@ async def test_a_large_result_reaches_a_graph_of_its_own_loop_whole(harness: Har
     [read] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
     assert read.content == "word " * 20_000
     assert model.requests[-1]["tools"] == ["big"]
+
+
+# ------------------------------------------------------------------ a decision model's verdict
+class Risky(BaseDecisionModel):
+    """A decision model that finds every call risky, and reports what its request used."""
+
+    model: str = "risk-1"
+
+    @property
+    def _provider(self) -> str:
+        return "scripted"
+
+    def _classify(self, state: Any, questions: Any) -> ClassifierResponse:
+        answers = {key: {"type": "noul", "noul": 0.99} for key in questions}
+        usage = {"input_tokens": 40, "output_tokens": 2, "total_tokens": 42}
+        return ClassifierResponse.model_validate(
+            {"model": self.model, "answers": answers, "usage": usage}
+        )
+
+
+async def test_a_call_auto_mode_blocks_is_recorded_and_its_classifier_is_paid_from_the_budget(
+    harness: Harness,
+) -> None:
+    """``AutoModeMiddleware`` asks a decision model about a call and answers a risky one in
+    the tool's place. The tool does not run; the blocked call is on the run's events as the
+    failed call the model reads, and what the decision model used is the run's spending."""
+    model = ScriptedChatModel(turns=[("order", {"sku": "a"}), "not ordered"])
+    guard = AutoModeMiddleware(tools=["order"], classifier=Risky())
+    graph = create_agent(model, tools=[order], middleware=[guard])
+    events = [e async for e in harness.wrap(graph, id="auto").stream("order a", user="u")]
+    assert events[-1].data["result"] == "not ordered" and ran == []
+    assert results(events) == [("order", "error")]
+    [blocked] = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
+    assert blocked.status == "error"
+    assert events[-1].data["spent"]["tokens"] == 42
 
 
 # ---------------------------------------------------------------------- the calls' limits

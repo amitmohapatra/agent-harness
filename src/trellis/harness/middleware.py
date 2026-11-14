@@ -55,6 +55,7 @@ import functools
 import itertools
 import logging
 import re
+import time
 import types
 import weakref
 from collections.abc import (
@@ -125,6 +126,7 @@ from trellis.contracts import (
     ToolError,
     ToolOutcome,
     ToolSpec,
+    ToolStatus,
 )
 from trellis.contracts.errors import is_pause_signal
 from trellis.harness import (
@@ -138,6 +140,7 @@ from trellis.harness.adapters.base import FIT_SHARE
 from trellis.harness.adapters.langgraph import (
     ASKED,
     CONTEXT_MESSAGE_ID,
+    HITL,
     TASK_TOOL,
     carried_plain,
     notified,
@@ -1295,6 +1298,7 @@ def govern_tool_nodes() -> None:
                     await calling.ended_try()
                     if error is not None:
                         raise error
+                    await _refused_by_graph(runtime, self, call, calling, done)
                     return done
                 calling.tried += 1
         finally:
@@ -1307,6 +1311,33 @@ def govern_tool_nodes() -> None:
     setattr(governed, _INSTALLED, True)
     ToolNode._execute_tool_async = governed  # type: ignore[method-assign]
     ToolNode._arun_one = called  # type: ignore[method-assign]
+
+
+async def _refused_by_graph(
+    runtime: Runtime, node: ToolNode, call: Mapping[str, Any], calling: _Calling, done: Any
+) -> None:
+    """A call of the graph's own tool that a wrapper of the graph refused in the tool's place
+    — LangChain's ``AutoModeMiddleware`` blocking a call its decision model finds risky, a
+    per-call approval rejected: the tool never ran and the call never reached the harness
+    (``_Calling.entries``), so it would be on no record of the run. It is recorded as the
+    failed call the model reads: on the run's stream, traced and in the memory service
+    (``bridge.observed``; nothing is run, journaled or counted against the budget). A call
+    the wrapper answered well (a cache, an emulator) is the wrapper's answer, not a refusal;
+    the harness's own tools are the bridge's. In a run where a person answered the library's
+    own approval gate (:data:`HITL`), a refusal may be that person's rejection — recorded as
+    their decision, never as a call — so none is recorded as one there."""
+    name = str(call["name"])
+    tool = node.tools_by_name.get(name)
+    refused = isinstance(done, ToolMessage) and done.status == "error" and not calling.entries
+    if not refused or tool is None or converted.made(tool) or name in runtime.toolbox:
+        return
+    if runtime.replay.journal.answers.get(HITL):
+        return
+    outcome = ToolOutcome(tool=name, status=ToolStatus.ERROR, output=text_of(done.content))
+    spec = runtime.native.get(name) or spec_of(tool)
+    await bridge.observed(
+        runtime, spec, dict(call["args"]), outcome, ref=str(call["id"]), started=time.time()
+    )
 
 
 async def _tried(calling: _Calling, beside: Collection[_Calling], running: Awaitable[Any]) -> Any:

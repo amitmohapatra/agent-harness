@@ -39,6 +39,9 @@ A library's feature works as the library does it; the harness governs, records a
 - A `ReAct` sub-agent's `interrupt_on` is Deep Agents' own approval gate again, with its
   `when`, `allowed_decisions` and `description` (it was flattened into an `irreversible`
   catalog risk for the tools it named); still one question a call.
+- What a decision model used (`langchain_core.decisions`: the classifier of
+  `AutoModeMiddleware` and `ModelRouterMiddleware`) is counted in the run's budget, and a
+  call `AutoModeMiddleware` blocks is on the run's events and records as a failed call.
 - A graph's stream passes its stream transformers (`astream_events(version="v3")`):
   `PIIMiddleware(apply_to_output=True)` redacts the streamed answer; content-block text streams.
 - A graph's own tool call ends with the message its tool made: artifacts and content blocks
