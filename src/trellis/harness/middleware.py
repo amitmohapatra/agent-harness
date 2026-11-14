@@ -141,7 +141,7 @@ from trellis.harness.conversation import question_id
 from trellis.harness.gateways import Capability, route_now, routed
 from trellis.harness.history import ASKED_WITH
 from trellis.harness.hooks import running
-from trellis.harness.journal import OUTCOME, content_key
+from trellis.harness.journal import content_key
 from trellis.harness.prompts import ResolvedPrompt, Stored, message_text
 from trellis.harness.removed import removed
 from trellis.harness.runtime import DEFERRED, ModelTimeout, Runtime, current
@@ -551,7 +551,7 @@ async def _kept_update(
     writes; an update that cannot be (a value its serializer does not take) is left out, said
     in the log — the call's replay is then its message."""
     recorded = runtime.replay.journal.calls.get(content_key("call", call["name"], call["args"]))
-    if not recorded or recorded[-1] != outcome.output:
+    if not recorded or bridge.journal_outcome(call["name"], recorded[-1]).output != outcome.output:
         return  # not journaled as this call's (the paused call made again in other words)
     try:
         kind, data = _SERDE.dumps_typed(made)
@@ -565,8 +565,7 @@ async def _kept_update(
         )
         return
     kept = [kind, base64.b64encode(data).decode(), str(call["id"])]
-    record = outcome.model_dump(mode="json", include={"status", "output"})
-    recorded[-1] = {OUTCOME: {**record, "metadata": {UPDATE: kept}}}
+    recorded[-1] = bridge.journal_record(outcome.model_copy(update={"metadata": {UPDATE: kept}}))
     await runtime.progress(now=True)  # saved with the call it is the result of
 
 

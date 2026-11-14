@@ -186,6 +186,18 @@ in `tests/integration/test_scenario_fixes.py`:
   showed it twice. A replayed call emits nothing: the attempt that ran it announced it. The
   AG-UI activity line counts a run's calls across its attempts on the replica that served them.
 
+### Fixed: a tool result shaped like the journal's record of a call is its result
+
+A run's journal kept a call's output bare and an outcome that was none (a timeout, an unknown
+effect) under the key `trellis_outcome`; a tool that returned a dict of that shape — third-party
+JSON passed on — was replayed as the harness's record after a pause: every resume of the run
+failed, or the tool's author chose the replayed status and metadata (security review, SEC-R-5).
+Every call's record is now kept in an envelope (`trellis_record`: status, output, metadata) and
+read back from those three fields only, so an output is never read as a record. A journal
+written before this release is still read (a run paused before the upgrade); a server of the
+release before does not read the new shape: resume a run where it paused, or upgrade every
+server before resuming.
+
 ### Fixed: two failures a busy machine showed
 
 - **A wide table can be queried.** Typing a saved result asks every column whether a cell

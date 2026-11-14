@@ -74,7 +74,7 @@ from trellis.harness.conversation import allowed, result_id
 from trellis.harness.events import DECISION, NOTICE
 from trellis.harness.governance.decision import Decision, choices, reach
 from trellis.harness.hooks import Ask, Deny, denied, noted, read
-from trellis.harness.journal import OUTCOME, Made, content_key
+from trellis.harness.journal import OUTCOME, RECORD, Made, content_key
 from trellis.harness.runtime import Paused, Runtime, current, reason_of
 from trellis.harness.telemetry import metrics, tool_span
 from trellis.harness.telemetry import output as span_output
@@ -235,7 +235,7 @@ async def permitted(
     with runtime.replay.calling(key, ident=call_id):
         replayed, output = runtime.replay.call(key)  # it ran for the run (:func:`observed`)
         if replayed:
-            said = _replayed(spec.name, output).output
+            said = journal_outcome(spec.name, output).output
             return ToolOutcome(
                 tool=spec.name,
                 status=ToolStatus.REJECTED,
@@ -333,7 +333,7 @@ async def observed(
     runtime.used.add(spec.name)
     if outcome.ok:  # made again (its framework begins that work again), it is not run twice
         key = content_key("call", spec.name, args)
-        runtime.replay.record_call(key, _journaled(outcome), scope=key)
+        runtime.replay.record_call(key, journal_record(outcome), scope=key)
     _events(runtime, ref, call, outcome)
     metrics.tool_called(spec.name, outcome.status.value)
     await runtime.agent.record_tool(runtime, call, outcome)
@@ -362,7 +362,7 @@ async def _called(
     ref = call_id or idempotency_key
     replayed, output = runtime.replay.call(key)
     if replayed:  # on the stream already: the attempt that ran it said it, in the run's log
-        return _replayed(tool.name, output)
+        return journal_outcome(tool.name, output)
     # a try again of a framework's own tool (``Tool.deferring``): an attempt of the call that
     # began with its first — refused, counted, started and announced then, not again
     again = tool.deferring is not None and tool.deferring.tried > 0
@@ -627,7 +627,7 @@ async def _record(
     """A call that ran (and ended on the stream): journaled (or, failed, run again by a later
     attempt), saved, counted and recorded."""
     if outcome.status in (ToolStatus.OK, ToolStatus.TIMEOUT):
-        runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
+        runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     elif decision.risk != "read":
         runtime.replay.unstart(key)  # it failed: a later attempt runs it again
     runtime.replay.record_step(call, outcome)
@@ -892,7 +892,7 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
         error_class=OUTCOME_UNKNOWN,
         metadata={UNKNOWN: True},
     )
-    runtime.replay.record_call(key, _journaled(outcome), tool=call.tool, stepped=True)
+    runtime.replay.record_call(key, journal_record(outcome), tool=call.tool, stepped=True)
     runtime.replay.record_step(call, outcome)
     await runtime.progress(now=True)
     _events(runtime, ref, call, outcome)
@@ -900,18 +900,49 @@ async def _interrupted(runtime: Runtime, ref: str, call: ToolCall, key: str) -> 
     return outcome
 
 
-def _journaled(outcome: ToolOutcome) -> Any:
-    """What the journal keeps of a call: its output, or — a timeout, an unknown effect — the
-    outcome itself, so a re-run tells the model the same."""
-    if outcome.ok:
-        return outcome.output
-    return {OUTCOME: outcome.model_dump(mode="json", include={"status", "output", "metadata"})}
+#: What the journal keeps of a call, and all a replay reads of it.
+_KEPT: Final = frozenset({"status", "output", "metadata"})
+_STATUSES: Final = frozenset(status.value for status in ToolStatus)
 
 
-def _replayed(tool: str, recorded: Any) -> ToolOutcome:
-    if isinstance(recorded, dict) and set(recorded) == {OUTCOME}:
-        return ToolOutcome(tool=tool, cached=True, **recorded[OUTCOME])
-    return ToolOutcome(tool=tool, output=recorded, cached=True)
+def journal_record(outcome: ToolOutcome) -> dict[str, Any]:
+    """What the journal keeps of a call: its status, its output and — when it has any — its
+    metadata, always in the envelope :data:`RECORD`, so a re-run tells the model the same and
+    an output is never read as a record, whatever a tool shapes it like
+    (:func:`journal_outcome`)."""
+    kept = outcome.model_dump(mode="json", include={"metadata"}, exclude_defaults=True)
+    return {RECORD: {"status": outcome.status.value, "output": outcome.output, **kept}}
+
+
+def journal_outcome(tool: str, recorded: Any) -> ToolOutcome:
+    """The outcome of ``tool``'s call the journal kept (:func:`journal_record`), from its three
+    fields and no other. A journal the release before wrote kept an output bare and an
+    outcome that was none under :data:`OUTCOME`: both are read. What is filed under either
+    key and is no record — a status that is none of a call's, another field — was an output
+    (a tool's, shaped like one) and is replayed as that."""
+    kept = _filed(recorded, RECORD) or _filed(recorded, OUTCOME)
+    if kept is None:
+        return ToolOutcome(tool=tool, output=recorded, cached=True)
+    return ToolOutcome(
+        tool=tool,
+        status=ToolStatus(kept["status"]),
+        output=kept.get("output"),
+        metadata=kept.get("metadata", {}),
+        cached=True,
+    )
+
+
+def _filed(recorded: Any, key: str) -> dict[str, Any] | None:
+    """The record filed under ``key`` in ``recorded``; ``None`` when it holds none."""
+    kept = recorded.get(key) if isinstance(recorded, dict) and set(recorded) == {key} else None
+    if (
+        isinstance(kept, dict)
+        and set(kept) <= _KEPT
+        and kept.get("status") in _STATUSES
+        and isinstance(kept.get("metadata", {}), dict)
+    ):
+        return kept
+    return None
 
 
 def _events(runtime: Runtime, ref: str, call: ToolCall, outcome: ToolOutcome) -> None:
