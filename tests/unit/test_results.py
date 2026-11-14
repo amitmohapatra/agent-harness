@@ -134,6 +134,15 @@ def test_a_kept_text_is_named_by_its_content_and_read_on_from_where_a_cut_starts
     assert path is not None and read_file(path, offset=2, limit=1).startswith("3  row 3")
 
 
+def test_a_table_of_5_rows_read_whole_is_kept_and_one_of_4_is_not(journal: Journal) -> None:
+    """docs/tools.md: a table of 5 rows or more that is read whole is kept as well - the
+    shortest such table too."""
+    five = "k,v\na,1\nb,2\nc,3\nd,4\ne,5"  # the fewest characters 5 rows take
+    assert results.tabled(five) != five and len(journal.results) == 1
+    four = "k,v\na,1\nb,2\nc,3\nd,4"
+    assert results.tabled(four) == four and len(journal.results) == 1
+
+
 def test_outside_a_run_nothing_is_kept_and_no_code_runs() -> None:
     assert results.keep("x") is None and results.coding_tool() is None
 
