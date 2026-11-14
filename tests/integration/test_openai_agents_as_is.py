@@ -684,3 +684,37 @@ async def test_the_runs_handoff_history_setting_is_the_sdks(harness: Harness) ->
     )
     assert result.answer == "billed"
     assert "<CONVERSATION HISTORY>" in json.dumps(model.inputs[-1], default=str)
+
+
+@pytest.mark.parametrize("where", ["handoff", "run_config"])
+async def test_the_sdks_handoff_filter_decides_what_the_next_agent_reads(
+    harness: Harness, where: str
+) -> None:
+    """The SDK's ``handoff_filters.remove_all_tools`` — on a ``Handoff`` object, or as the
+    run's ``RunConfig.handoff_input_filter`` — runs under the harness as without it: the agent
+    handed off to reads the conversation without the first agent's tool call and its result,
+    while that call was governed and ran."""
+    from agents import handoff
+    from agents.extensions.handoff_filters import remove_all_tools
+
+    ran: list[str] = []
+
+    @function_tool
+    def find(order: str) -> str:
+        """Find an order."""
+        ran.append(order)
+        return f"found {order}"
+
+    model = ScriptedModel([("find", {"order": "o1"}), ("transfer_to_billing", {}), "billed"])
+    billing = Agent(name="billing", model=model)
+    on_handoff = where == "handoff"
+    to_billing = handoff(billing, input_filter=remove_all_tools) if on_handoff else billing
+    triage = Agent(name="triage", model=model, tools=[find], handoffs=[to_billing])
+    config = RunConfig() if on_handoff else RunConfig(handoff_input_filter=remove_all_tools)
+    agent = declaring(harness, find="read").wrap(
+        triage, id=f"filter-{where}", framework_options={"run_config": config}
+    )
+    result = await agent.run("bill o1", user="u")
+    assert result.answer == "billed" and ran == ["o1"]
+    assert "found o1" in json.dumps(model.inputs[1], default=str)  # triage read its result
+    assert "found o1" not in json.dumps(model.inputs[2], default=str)  # billing does not
