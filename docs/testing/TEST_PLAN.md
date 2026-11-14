@@ -296,3 +296,49 @@ real; cost/usage accuracy vs provider bills.
   with the user's sign-off.
 * Matrix, suite, scenarios, features, live: 0 unexplained differences vs base.
 * Limitations table reviewed and accepted by the user.
+
+---
+
+## 9. Scenario suite: execution status and findings (job: scenarios)
+
+Branch `claude/cool-maxwell-w5avo8-scenarios` (from `claude/cool-maxwell-w5avo8-final` d2bf754).
+Suite: `tests/scenarios/` (marker `scenario`, `make test-scenarios`); invariants:
+`tests/support/invariants.py` (INV-1..INV-10, an autouse fixture: every scenario test is checked
+at teardown). Environment E3: a private stack (`scripts/scenarios/stack.sh`): real PostgreSQL,
+the real memory API with its job worker, the real agent-runs API and ticker, harness server and
+worker processes of the test's own (`tests/scenarios/serve.py`), real AG-UI/A2A HTTP, every model
+scripted (`tests/scenarios/brains.py`: a "brain" that answers from the request it is sent), the
+real `kimi` binary, the scripted Claude CLI. No paid model call.
+
+### How to run
+
+```bash
+SCEN_PG_PORT=<cluster port> SCEN_HOME=/var/tmp/scen scripts/scenarios/stack.sh reset   # databases, keys, services
+scripts/scenarios/stack.sh test                       # every scenario (or: make test-scenarios)
+scripts/scenarios/stack.sh test -k "s04 and react"    # a part
+python scripts/scenarios/plan_report.py <junit.xml>   # results per plan id
+scripts/scenarios/stack.sh drop                       # processes, databases, folders gone
+```
+
+Without `MEMORY_URL`/`RUNS_URL`/`TRELLIS_API_KEY` every scenario is skipped, never failed.
+
+### Findings
+
+| ID | Pri | Plan | What | Root cause | Status |
+|---|---|---|---|---|---|
+| SCN-1 | P1 | CONV-02 | A burst to one chat is not answered in the order sent (every adapter, bursts of 2, 5, 20) | the turn is taken (`pipeline.py:248` `Turns.taken`) only after `Agent._opened` (`agent.py:1490`, the run store's start) and the hold (`pipeline.py:203`): awaits that end in any order | failing test `tests/integration/test_scenario_findings.py::test_scn1…` (xfail strict); owner: chat-order |
+| SCN-2 | P2 | WF-02/03, INV-10 | A checkpointed graph resumed on another worker gives its new calls the ids of calls before the pause | `tools/bridge.py:359` `ref = call_id or f"{run_id}:{step}"`, `step` from `Runtime.next_step()` (`runtime.py:480`) restarting at 0 each attempt (`runtime.py:296`) | failing test `tests/scenarios/test_s15_findings.py::test_scn2…`; proposed: name such a call by its content key and occurrence (as the idempotency key at `bridge.py:355`) |
+| SCN-3 | P2 | WF-02, INV-10 | A graph run again from its input after a resume announces its replayed calls again (TOOL_CALL_START… a second time) | `tools/bridge.py:360-363`: a replayed outcome emits the call's events | failing test `test_s15_findings.py::test_scn3…`; proposed: emit nothing for a replay (or a result consumers dedupe) |
+| SCN-4 | P1 | CONV-01/02/07, MEM-01 | The next turn misses the previous turn when memory takes > 5 s to keep it (seen 21× under load: a chat's third turn without its second) | `agent.py:1296-1306` `recorded_run`: the transcript write waits `TURN_WRITE_SECONDS` (5 s, `agent.py:158`) then is queued and the run returns | failing test `test_scenario_findings.py::test_scn4…`; proposed: keep a queued turn in process and merge it into the next turn's history until delivered, or have the next turn wait (bounded) for it |
+| SCN-5 | P3 | APR | docs/api.md says the run's user is "its approvals' default assignee"; approvals have no assignee (anyone's, `runtime.py:737`), so `h.inbox("user:<user>")` lists none | docs drift | reported |
+| SCN-6 | P1 | MEM-10, INV-2 | Writes (transcripts, tool records, outcomes) are "failed and is lost" once the memory client's circuit opens (seen 27× in one file under 504s) | `writes.py:66/217`: 3 attempts, 0.5 s backoff (~3.5 s), no spool in a container (`settings.default_spool`) | failing test `test_scenario_findings.py::test_scn6…`; proposed: while the circuit is open keep writes queued and retry after its cool-down |
+| SCN-7 | P2 | MEM-01, INV-7 | A message over 4,000 characters: memory context refused (422) and tool records lost | the whole message sent as `ContextRequest.query` / `HintsRequest.task` / `ToolInvocationIn.task` (`maxLength` 4000) | **fixed** (`clients.memory.fitted`), test `tests/integration/test_long_questions_to_memory.py` |
+| SCN-8 | P1 | CONV-13 | Cancelling a message that waits its turn in process: the store says CANCELLED, but the run still runs when its turn comes and its finish fails (409) — `agent.run` raises `ConflictError` | `agent.py:601` cancels only runs in `self.running`; a run waiting in `Turns.taken` (`pipeline.py:248`) is not there, and nothing re-checks its record after it takes the turn | failing test `test_scenario_findings.py::test_scn8…` (and `test_s11_corners.py::test_cancel_a_message_waiting_its_turn…`); proposed: after taking the turn, end a run the store cancelled (or keep waiting runs where `cancel` finds them) |
+| SCN-9 | P1 | CONV-11 | AG-UI: the same `runId` posted twice at once started the run twice | `agui/__init__.py` checked the id before its awaits and marked it after | **fixed**, test `tests/integration/test_agui_retries.py` |
+| SCN-10 | P2 | SURF | AG-UI: a message with empty text and no `state` started a run that failed (`EmptyInputError`) instead of a 422 | `agui/__init__.py`: `latest_user_text() or state` fell back to `None` | **fixed**, same test file |
+| C-1 | P3 | INV-7 | memory OpenAPI lists no 504 on any of its 73 operations; its deadline middleware answers 504 (seen on /v1/context and /v1/verify under load) | `memory_service/api/deadline.py:107` vs `api/openapi.py` `_document_responses` | reported (agent-memory-service); a known drift in the invariants |
+| C-2 | P3 | INV-7 | the harness files a run's outcome with `source: "system"`; agent-contracts' `FeedbackSource` has no `system` (the memory service accepts it) | `agent.py:1332` vs `agent-contracts feedback.py:47` | reported; a known drift in the invariants |
+
+Memory-service resident memory was sampled every 30 s for the whole run: 3.44-3.52 GB from
+start to end (its models), no growth. It was OOM-killed several times by the shared cgroup
+(other jobs' processes), never by its own growth.

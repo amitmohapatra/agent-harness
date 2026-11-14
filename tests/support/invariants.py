@@ -416,7 +416,7 @@ class Invariants:
             records = await self._settled(client, runs_url, runs) if runs_url else {}
             events = {r: await self._events(client, runs_url, r, runs[r]) for r in records}
             out += self._inv1(records)
-            out += self._inv2_tools(events)
+            out += self._inv2_tools(events, records)
             out += await self._inv2_turns(client, memory_url, records)
             out += self._inv3_inv4(records, events)
             out += self._inv5()
@@ -454,7 +454,13 @@ class Invariants:
                 )
         return out
 
-    def _inv2_tools(self, events: dict[str, list[dict[str, Any]]]) -> list[str]:
+    def _inv2_tools(
+        self, events: dict[str, list[dict[str, Any]]], records: dict[str, dict[str, Any]]
+    ) -> list[str]:
+        """Each call that ran has its tool record, and each record a call that ran — within a
+        run's family (the run and its child runs: a helper's or a sub-agent's call is recorded
+        on the run that made it, while its parent's stream may show it)."""
+        family = {r: _root(r, records) for r in {*events, *records}}
         recorded: dict[str, Counter[str]] = defaultdict(Counter)
         for e in self.traffic.exchanges:
             if (
@@ -464,10 +470,10 @@ class Invariants:
             ):
                 run = (e.request.get("scope") or {}).get("agent_run_id")
                 if run:
-                    recorded[run][_call_key(e.request.get("tool"), e.request.get("args"))] += 1
-        out = []
+                    key = _call_key(e.request.get("tool"), e.request.get("args"))
+                    recorded[family.get(run, run)][key] += 1
+        ran: dict[str, Counter[str]] = defaultdict(Counter)
         for run_id, evs in events.items():
-            ran: Counter[str] = Counter()
             args: dict[str, Any] = {}
             for p in evs:
                 ev = p.get("event", p)
@@ -475,19 +481,19 @@ class Invariants:
                     args[ev.get("tool_call_id")] = (ev.get("data") or {}).get("args")
                 if ev.get("type") == "TOOL_CALL_RESULT" and _executed(ev):
                     tool = (ev.get("data") or {}).get("tool")
-                    ran[_call_key(tool, args.get(ev.get("tool_call_id")))] += 1
-            if run_id not in recorded and not any(
-                e.service == "memory" for e in self.traffic.exchanges
-            ):
-                continue  # memory off: nothing to record into
-            got = recorded.get(run_id, Counter())
-            missing = [k for k in ran if k not in got and not k.startswith("memory_")]
-            ghost = [k for k in got if k not in ran]
+                    ran[family[run_id]][_call_key(tool, args.get(ev.get("tool_call_id")))] += 1
+        if not any(e.service == "memory" for e in self.traffic.exchanges):
+            return []  # memory off: nothing to record into
+        out = []
+        for root in {*ran, *recorded}:
+            got, made = recorded.get(root, Counter()), ran.get(root, Counter())
+            missing = [k for k in made if k not in got and not k.startswith("memory_")]
+            ghost = [k for k in got if k not in made]
             if missing:
-                out.append(f"INV-2 run {run_id}: calls that ran have no tool record: {missing[:3]}")
+                out.append(f"INV-2 run {root}: calls that ran have no tool record: {missing[:3]}")
             if ghost:
                 out.append(
-                    f"INV-2 run {run_id}: tool records of calls its events never show: {ghost[:3]}"
+                    f"INV-2 run {root}: tool records of calls its events never show: {ghost[:3]}"
                 )
         return out
 
@@ -719,10 +725,21 @@ class Invariants:
                         starts[str(ev.get("tool_call_id"))] += 1
                     if ev.get("type") == "TOOL_CALL_END":
                         ends[str(ev.get("tool_call_id"))] += 1
-            twice = [c for c, n in starts.items() if n > 1]
+            # a call begun again after an attempt that never finished it (a crash, a lapsed
+            # lease) is the same logical call begun again: only a finished one may not be
+            twice = [c for c, n in starts.items() if n > 1 and ends[c] > 1]
             if twice:
                 out.append(f"INV-10 run {run_id}: tool calls started more than once: {twice[:3]}")
         return out
+
+
+def _root(run_id: str, records: dict[str, dict[str, Any]]) -> str:
+    """The run at the top of ``run_id``'s family (following ``parent_run_id``)."""
+    seen = {run_id}
+    while (parent := (records.get(run_id) or {}).get("parent_run_id")) and parent not in seen:
+        seen.add(parent)
+        run_id = parent
+    return run_id
 
 
 def _call_key(tool: Any, args: Any) -> str:

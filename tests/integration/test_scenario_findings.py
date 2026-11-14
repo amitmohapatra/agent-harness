@@ -138,3 +138,33 @@ async def test_scn6_a_turn_is_kept_once_memory_comes_back(monkeypatch: pytest.Mo
         await h.writes.drain()
         kept = [c for c in service.named("messages") if "4242" in str(c.body)]
         assert kept, "the turn made while the memory service was down is lost"
+
+
+@pytest.mark.xfail(
+    strict=True, reason="SCN-8: a message cancelled while it waits its turn still runs"
+)
+async def test_scn8_a_message_cancelled_while_it_waits_its_turn_ends_cancelled(
+    harness: Harness,
+) -> None:
+    """The second message of a busy conversation waits for the first (in process); cancelled
+    while it waits, it ends ``CANCELLED`` and never runs. Today ``agent.cancel`` cancels it in the
+    run store only (it is not in ``Agent.running`` until it has the turn), and it runs when the
+    turn comes: its finish is refused (the store has it ``CANCELLED``) and ``agent.run`` raises."""
+    ran: list[str] = []
+
+    async def slow(input: Any, agent: Runtime) -> str:
+        ran.append(str(input))
+        await asyncio.sleep(0.3)
+        return str(input)
+
+    agent = harness.wrap(slow, id="scn8")
+    first = asyncio.create_task(agent.run("first", user="ada", thread="t1"))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(agent.run("second", user="ada", thread="t1"))
+    await asyncio.sleep(0.05)
+    waiting = [r async for r in harness.runs.iterate(agent_id="scn8")]
+    [queued] = [r for r in waiting if r.run_id not in agent.running]
+    await agent.cancel(queued.run_id, reason="never mind")
+    await first
+    done = await second
+    assert done.status.value == "CANCELLED" and ran == ["first"], (done.status, ran)

@@ -90,10 +90,13 @@ def _worker(adapter: str, agent_id: str, **more: Any) -> dict[str, Any]:
 
 
 async def _starts(agent: Any, run_id: str) -> list[str]:
+    """The tools of the calls that ran (a result that is not a refusal, nor a replay)."""
     return [
         e.data.get("tool")
         for e in [x async for x in agent.events(run_id)]
-        if e.type is RunEventType.TOOL_CALL_START
+        if e.type is RunEventType.TOOL_CALL_RESULT
+        and e.data.get("status") not in ("rejected", "denied")
+        and not e.data.get("cached")
     ]
 
 
@@ -171,6 +174,10 @@ async def test_langgraphs_own_interrupt_mid_graph(
     asked = await agent.run(
         _message(adapter, tok, confirm=True), user=f"ada-{uid}", thread=f"t-{uid}"
     )
+    if adapter == "wf_graph":  # documented: interrupt() needs a checkpointer (langgraph.md)
+        assert asked.status is RunStatus.ERROR and asked.error is not None, asked
+        assert "checkpointer" in asked.error.message and "ask" in asked.error.message
+        return
     assert asked.status is RunStatus.PAUSED and asked.interrupt is not None, asked.error
     went = await agent.resume(asked_id(asked), "answer", answer="yes", reviewer=f"ada-{uid}")
     assert went.status is RunStatus.PAUSED and went.interrupt is not None, (
@@ -245,8 +252,8 @@ async def test_cancel_mid_workflow(
                 return any(x.startswith("note:step1") for x in _book(tok, book))
 
             assert await eventually(in_its_slow_step, within=180), one.log.read_text()[-3000:]
-            cancelled = await agent.cancel(handle.id, reason="stop the workflow")
-            assert cancelled.status is RunStatus.CANCELLED
+            # running on a worker elsewhere: that worker stops it at its next heartbeat
+            await agent.cancel(handle.id, reason="stop the workflow")
 
             async def stopped() -> bool:
                 return (await record(h, handle.id)).status is RunStatus.CANCELLED
